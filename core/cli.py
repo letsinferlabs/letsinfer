@@ -105,6 +105,7 @@ from .runtime_packs import (
     write_selection,
 )
 from . import ui
+from .platform import macos as macos_services
 from .site.state import (
     SiteError,
     SiteStore,
@@ -203,6 +204,13 @@ GATEWAY_SERVICE_NAME = "letsinfer-gateway.service"
 SITE_SERVICE_NAME = "letsinfer-site.service"
 RECOVERY_SERVICE_NAME = "letsinfer-recovery.service"
 RECOVERY_TIMER_NAME = "letsinfer-recovery.timer"
+
+
+def _macos_service_label(name: str) -> str | None:
+    return {
+        SITE_SERVICE_NAME: macos_services.SITE_LABEL,
+        GATEWAY_SERVICE_NAME: macos_services.GATEWAY_LABEL,
+    }.get(name)
 CONTROL_PLANE_MEMORY_HIGH_BYTES = 24 * 1024 * 1024
 CONTROL_PLANE_MEMORY_LIMIT_BYTES = 30 * 1024 * 1024
 SITE_AGENT_MEMORY_HIGH_BYTES = 64 * 1024 * 1024
@@ -5525,6 +5533,42 @@ def install_core_gateway_service(
     }
     ensure_private_directory(config_path.parent)
     ensure_private_directory(default_gateway_telemetry_path().parent)
+    if platform.system() == "Darwin":
+        config_snapshot = _snapshot_user_file(config_path)
+        executable = root / "bin/letsinfer"
+        agent = macos_services.LaunchAgent(
+            label=macos_services.GATEWAY_LABEL,
+            arguments=(
+                str(executable),
+                "gateway",
+                "--listen",
+                config["gateway_listen"],
+                "--port",
+                str(config["gateway_port"]),
+                "--telemetry-file",
+                config["gateway_telemetry_file"],
+                "--queue-timeout",
+                str(config["gateway_queue_timeout_seconds"]),
+                "--max-connections",
+                str(config["gateway_max_connections"]),
+            ),
+            environment={"PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        try:
+            atomic_json(config_path, config)
+            config_path.chmod(0o600)
+            macos_services.install_launch_agent(agent)
+        except (macos_services.MacOSServiceError, OSError) as failure:
+            try:
+                _restore_user_file(config_path, config_snapshot)
+            except (LetsInferError, OSError) as rollback:
+                raise LetsInferError(
+                    f"macOS gateway activation failed and rollback was incomplete: {rollback}"
+                ) from failure
+            raise LetsInferError(
+                f"macOS gateway activation failed; previous state restored: {failure}"
+            ) from failure
+        return config
     unit_root = pathlib.Path.home() / ".config/systemd/user"
     unit_root.mkdir(parents=True, exist_ok=True)
     unit = unit_root / GATEWAY_SERVICE_NAME
@@ -5638,6 +5682,10 @@ def install_site_service_only(
     executable_root: pathlib.Path | None = None,
 ) -> None:
     if not user_lingering_enabled():
+        if platform.system() == "Darwin":
+            raise LetsInferError(
+                "the macOS launchd user domain is unavailable; log into the target user session"
+            )
         raise LetsInferError(
             "user-systemd lingering is required before installing the site service"
         )
@@ -5645,6 +5693,28 @@ def install_site_service_only(
     executable = root / "bin/letsinfer"
     if not executable.is_file() or executable.is_symlink():
         raise LetsInferError(f"site service executable is unavailable: {executable}")
+    if platform.system() == "Darwin":
+        if unit_dir is not None:
+            raise LetsInferError("a custom systemd unit directory is not valid on macOS")
+        try:
+            macos_services.install_launch_agent(
+                macos_services.LaunchAgent(
+                    label=macos_services.SITE_LABEL,
+                    arguments=(
+                        str(executable),
+                        "site-agent",
+                        "--listen",
+                        "0.0.0.0",
+                        "--port",
+                        str(SITE_CONTROL_PORT),
+                    ),
+                    environment={"PYTHONDONTWRITEBYTECODE": "1"},
+                ),
+                no_start=no_start,
+            )
+        except macos_services.MacOSServiceError as error:
+            raise LetsInferError(f"cannot install macOS site service: {error}") from error
+        return
     unit_root = unit_dir or pathlib.Path.home() / ".config/systemd/user"
     unit_root.mkdir(parents=True, exist_ok=True)
     path = unit_root / SITE_SERVICE_NAME
@@ -6143,6 +6213,14 @@ def install_user_service(
 
 
 def _service_state(name: str = SERVICE_NAME) -> tuple[str, str, int | None]:
+    if platform.system() == "Darwin":
+        label = _macos_service_label(name)
+        if label is None:
+            return "not-found", "inactive", None
+        try:
+            return macos_services.service_state(label)
+        except macos_services.MacOSServiceError as error:
+            raise LetsInferError(f"cannot inspect macOS service: {error}") from error
     enabled = run(["systemctl", "--user", "is-enabled", name], check=False)
     active = run(["systemctl", "--user", "is-active", name], check=False)
     memory = run(
@@ -7847,7 +7925,88 @@ def status(arguments: argparse.Namespace) -> int:
         raise LetsInferError(f"no installed runtime serves model {model!r}")
     name = arguments.name or (config["name"] if config else None)
     if name is None:
-        raise LetsInferError("no service configuration exists; specify --name")
+        if not site_identity_path().exists():
+            raise LetsInferError("no service configuration exists; specify --name")
+        identity = read_site_identity()
+        site_enabled, site_active, site_memory_bytes = _service_state(
+            SITE_SERVICE_NAME
+        )
+        gateway_enabled, gateway_active, gateway_memory_bytes = _service_state(
+            GATEWAY_SERVICE_NAME
+        )
+        coordinator = identity.role == "coordinator"
+        gateway_health = False
+        gateway_auth_required = False
+        gateway_authenticated = False
+        endpoint = None
+        if coordinator:
+            gateway_config_path = site_config_root() / "gateway.json"
+            gateway_port = 8000
+            if gateway_config_path.is_file():
+                gateway_config = read_json(gateway_config_path)
+                value = gateway_config.get("gateway_port")
+                if isinstance(value, int) and not isinstance(value, bool):
+                    gateway_port = value
+            gateway_health = api_status(gateway_port, "/health", None) == 200
+            gateway_auth_required = (
+                api_status(gateway_port, "/v1/models", None) == 401
+            )
+            gateway_authenticated = (
+                api_status(
+                    gateway_port,
+                    "/v1/models",
+                    None,
+                    default_api_key_path(),
+                )
+                == 200
+            )
+            endpoint = local_inference_endpoint(gateway_port)
+        payload = {
+            "identity": identity_json(identity),
+            "endpoint": endpoint,
+            "services": {
+                "site_enabled": site_enabled,
+                "site_active": site_active,
+                "site_memory_current_bytes": site_memory_bytes,
+                "gateway_enabled": gateway_enabled,
+                "gateway_active": gateway_active,
+                "gateway_memory_current_bytes": gateway_memory_bytes,
+                "gateway_health": gateway_health,
+                "gateway_auth_required": gateway_auth_required,
+                "gateway_authenticated": gateway_authenticated,
+            },
+            "runtime": None,
+        }
+        if arguments.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        elif ui.Terminal(sys.stdout).interactive:
+            ui.site_status(payload)
+        else:
+            print(
+                f"site={site_active} enabled={site_enabled} "
+                f"role={identity.role} member={identity.member_id}"
+            )
+            if coordinator:
+                print(
+                    f"gateway={gateway_active} health={str(gateway_health).lower()} "
+                    f"auth={str(gateway_auth_required and gateway_authenticated).lower()}"
+                )
+                print(f"endpoint={endpoint}")
+            print("runtime=not-installed")
+        return (
+            0
+            if site_active == "active"
+            and (
+                not coordinator
+                or (
+                    gateway_active == "active"
+                    and gateway_health
+                    and gateway_auth_required
+                    and gateway_authenticated
+                )
+            )
+            else 1
+        )
 
     enabled, active, memory_bytes = _service_state()
     inspection = container_inspect(name)
@@ -8121,12 +8280,17 @@ def recover_service(arguments: argparse.Namespace) -> int:
 
 
 def _unit_enabled_active(name: str) -> tuple[str, str]:
+    if platform.system() == "Darwin":
+        enabled, active, _memory = _service_state(name)
+        return enabled, active
     enabled = run(["systemctl", "--user", "is-enabled", name], check=False)
     active = run(["systemctl", "--user", "is-active", name], check=False)
     return enabled.stdout.strip() or "not-found", active.stdout.strip() or "inactive"
 
 
 def user_lingering_enabled() -> bool:
+    if platform.system() == "Darwin":
+        return macos_services.user_domain_available()
     linger = run(
         ["loginctl", "show-user", getpass.getuser(), "--property", "Linger", "--value"],
         check=False,
@@ -9561,9 +9725,14 @@ def ensure_core_watchdog_tls() -> None:
 
 def setup_command(arguments: argparse.Namespace) -> int:
     if not arguments.no_service:
-        if platform.system().lower() != "linux":
-            raise LetsInferError("persistent Let's Infer setup requires Linux user systemd")
+        system = platform.system().lower()
+        if system not in {"linux", "darwin"}:
+            raise LetsInferError("persistent Let's Infer setup requires Linux or macOS")
         if not user_lingering_enabled():
+            if system == "darwin":
+                raise LetsInferError(
+                    "persistent Let's Infer setup requires an active macOS login session"
+                )
             raise LetsInferError(
                 "user-systemd lingering is required before creating a persistent site"
             )
@@ -9572,7 +9741,7 @@ def setup_command(arguments: argparse.Namespace) -> int:
     except SiteError as error:
         raise LetsInferError(str(error)) from error
     if identity.role == "member":
-        if not arguments.no_service:
+        if not arguments.no_service and platform.system() == "Linux":
             ensure_core_watchdog_tls()
         facts_error: LetsInferError | None = None
         try:
@@ -9581,7 +9750,8 @@ def setup_command(arguments: argparse.Namespace) -> int:
             facts_error = error
         if not arguments.no_service:
             install_site_service_only()
-            install_core_watchdog_service(identity)
+            if platform.system() == "Linux":
+                install_core_watchdog_service(identity)
         value = identity_json(identity)
         if arguments.json:
             print(json.dumps(value, sort_keys=True))
@@ -9598,11 +9768,12 @@ def setup_command(arguments: argparse.Namespace) -> int:
             )
         return 0
     ensure_tls_material(default_tls_cert_path(), default_tls_key_path())
-    ensure_core_watchdog_tls()
-    ensure_controller_authorization(
-        identity,
-        default_watchdog_local_controller_cert_path(),
-    )
+    if platform.system() == "Linux":
+        ensure_core_watchdog_tls()
+        ensure_controller_authorization(
+            identity,
+            default_watchdog_local_controller_cert_path(),
+        )
     local_key_path = default_api_key_path()
     try:
         if local_key_path.is_symlink():
@@ -9642,7 +9813,8 @@ def setup_command(arguments: argparse.Namespace) -> int:
             raise
     if not arguments.no_service:
         install_site_service_only()
-        install_core_watchdog_service(identity)
+        if platform.system() == "Linux":
+            install_core_watchdog_service(identity)
         install_core_gateway_service()
     value = identity_json(identity)
     value["api_key_file"] = str(local_key_path)

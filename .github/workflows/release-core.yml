@@ -66,10 +66,37 @@ jobs:
               "$RUNNER_TEMP/public-source/letsinfer" --json
           done
 
+  validate-macos:
+    name: Validate macOS core
+    runs-on: macos-14
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate portable installer and source archive
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          git diff --check
+          python3 -m unittest \
+            tests.cli.test_bootstrap_install \
+            tests.cli.test_core_install \
+            tests.cli.test_source_archive \
+            tests.cli.test_sshsig
+          python3 -m tools.source_archive build \
+            --source . --output "$RUNNER_TEMP/source-a.tar.gz"
+          python3 -m tools.source_archive build \
+            --source . --output "$RUNNER_TEMP/source-b.tar.gz"
+          cmp "$RUNNER_TEMP/source-a.tar.gz" "$RUNNER_TEMP/source-b.tar.gz"
+          python3 -m tools.source_archive verify "$RUNNER_TEMP/source-a.tar.gz"
+
   publish:
     name: Publish core release
     if: github.event_name == 'push'
-    needs: validate-linux
+    needs:
+      - validate-linux
+      - validate-macos
     runs-on: ubuntu-24.04
     environment: production-release
     permissions:
@@ -112,24 +139,40 @@ jobs:
           python3 -m tools.source_archive build --source . --output "$RUNNER_TEMP/source-a.tar.gz"
           python3 -m tools.source_archive build --source . --output "$RUNNER_TEMP/source-b.tar.gz"
           cmp "$RUNNER_TEMP/source-a.tar.gz" "$RUNNER_TEMP/source-b.tar.gz"
-          cp "$RUNNER_TEMP/source-a.tar.gz" dist/letsinfer.tar.gz
-          (cd dist && sha256sum letsinfer.tar.gz > SHA256SUMS)
+          for platform in \
+            linux-x86_64 linux-arm64 macos-x86_64 macos-arm64; do
+            cp "$RUNNER_TEMP/source-a.tar.gz" "dist/letsinfer-$platform.tar.gz"
+          done
+          (cd dist && sha256sum letsinfer-*.tar.gz > SHA256SUMS)
           key_path="$RUNNER_TEMP/release-signing-key.pem"
           trap 'rm -f "$key_path"' EXIT
           printf '%s' "$LETSINFER_RELEASE_SIGNING_KEY_B64" | base64 --decode > "$key_path"
           chmod 600 "$key_path"
           openssl pkey -in "$key_path" -pubout > "$RUNNER_TEMP/release-public-key.pem"
           cmp "$RUNNER_TEMP/release-public-key.pem" core/trust/release-public-key.pem
+          python3 -m tools.sshsig prepare \
+            --message dist/SHA256SUMS --output "$RUNNER_TEMP/sshsig-payload"
           openssl pkeyutl -sign -inkey "$key_path" -rawin \
-            -in dist/SHA256SUMS -out dist/SHA256SUMS.sig
+            -in "$RUNNER_TEMP/sshsig-payload" -out "$RUNNER_TEMP/raw-signature"
+          python3 -m tools.sshsig wrap \
+            --public-key core/trust/release-public-key.pem \
+            --signature "$RUNNER_TEMP/raw-signature" \
+            --output dist/SHA256SUMS.sig
+          python3 -m tools.sshsig allowed-signers \
+            --public-key core/trust/release-public-key.pem \
+            --output "$RUNNER_TEMP/release-allowed-signers"
+          cmp "$RUNNER_TEMP/release-allowed-signers" \
+            core/trust/release-allowed-signers
           cp install.sh dist/install.sh
           chmod 755 dist/install.sh
-          openssl pkeyutl -verify -pubin -inkey core/trust/release-public-key.pem -rawin \
-            -in dist/SHA256SUMS -sigfile dist/SHA256SUMS.sig
+          ssh-keygen -Y verify -f core/trust/release-allowed-signers \
+            -I letsinfer-release -n letsinfer-release \
+            -s dist/SHA256SUMS.sig < dist/SHA256SUMS
           prefix="$RUNNER_TEMP/bootstrap-prefix"
           LETSINFER_ALLOW_INSECURE_RELEASE_URL=1 \
-          LETSINFER_RELEASE_PUBLIC_KEY_PATH="$PWD/core/trust/release-public-key.pem" \
-            sh dist/install.sh --base-url "file://$PWD/dist" --prefix "$prefix"
+          LETSINFER_RELEASE_ALLOWED_SIGNERS_PATH="$PWD/core/trust/release-allowed-signers" \
+            sh dist/install.sh --base-url "file://$PWD/dist" \
+              --prefix "$prefix" --no-setup
           "$prefix/bin/letsinfer" --help >/dev/null
           rm -f "$key_path"
           trap - EXIT
@@ -137,7 +180,10 @@ jobs:
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
         with:
           subject-path: |
-            dist/letsinfer.tar.gz
+            dist/letsinfer-linux-x86_64.tar.gz
+            dist/letsinfer-linux-arm64.tar.gz
+            dist/letsinfer-macos-x86_64.tar.gz
+            dist/letsinfer-macos-arm64.tar.gz
             dist/SHA256SUMS
             dist/SHA256SUMS.sig
             dist/install.sh
@@ -147,7 +193,7 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
           PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
-          args=("$TAG" dist/letsinfer.tar.gz dist/SHA256SUMS dist/SHA256SUMS.sig dist/install.sh \
+          args=("$TAG" dist/letsinfer-*.tar.gz dist/SHA256SUMS dist/SHA256SUMS.sig dist/install.sh \
             --target "$GITHUB_SHA" --title "Let's Infer $TAG" --generate-notes)
           if [[ "$PRERELEASE" == true ]]; then args+=(--prerelease); else args+=(--latest); fi
           gh release create "${args[@]}"
@@ -159,17 +205,25 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/published"
           gh release download "$TAG" --dir "$RUNNER_TEMP/published" \
-            --pattern 'letsinfer.tar.gz' --pattern 'SHA256SUMS' \
+            --pattern 'letsinfer-*.tar.gz' --pattern 'SHA256SUMS' \
             --pattern 'SHA256SUMS.sig' --pattern 'install.sh'
-          for asset in letsinfer.tar.gz SHA256SUMS SHA256SUMS.sig install.sh; do
+          for asset in \
+            letsinfer-linux-x86_64.tar.gz letsinfer-linux-arm64.tar.gz \
+            letsinfer-macos-x86_64.tar.gz letsinfer-macos-arm64.tar.gz \
+            SHA256SUMS SHA256SUMS.sig install.sh; do
             cmp "dist/$asset" "$RUNNER_TEMP/published/$asset"
           done
-          openssl pkeyutl -verify -pubin -inkey core/trust/release-public-key.pem -rawin \
-            -in "$RUNNER_TEMP/published/SHA256SUMS" \
-            -sigfile "$RUNNER_TEMP/published/SHA256SUMS.sig"
-          for asset in letsinfer.tar.gz SHA256SUMS SHA256SUMS.sig install.sh; do
+          ssh-keygen -Y verify -f core/trust/release-allowed-signers \
+            -I letsinfer-release -n letsinfer-release \
+            -s "$RUNNER_TEMP/published/SHA256SUMS.sig" \
+            < "$RUNNER_TEMP/published/SHA256SUMS"
+          for asset in \
+            letsinfer-linux-x86_64.tar.gz letsinfer-linux-arm64.tar.gz \
+            letsinfer-macos-x86_64.tar.gz letsinfer-macos-arm64.tar.gz \
+            SHA256SUMS SHA256SUMS.sig install.sh; do
             gh attestation verify "$RUNNER_TEMP/published/$asset" --repo "$GITHUB_REPOSITORY"
           done
           prefix="$RUNNER_TEMP/published-prefix"
-          sh "$RUNNER_TEMP/published/install.sh" --version "$VERSION" --prefix "$prefix"
+          sh "$RUNNER_TEMP/published/install.sh" --version "$VERSION" \
+            --prefix "$prefix" --no-setup
           "$prefix/bin/letsinfer" --help >/dev/null
