@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import pathlib
 import subprocess
 import tempfile
@@ -11,50 +13,31 @@ import unittest
 from tools.sshsig import allowed_signers, envelope, signed_payload
 
 
+MESSAGE = b"signed release checksums\n"
+PUBLIC_KEY = b"""-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAF+yDlF/byhKEB7MKqs5WzMvDC3PsPZbu6jWFu2/yH8A=
+-----END PUBLIC KEY-----
+"""
+RAW_SIGNATURE = base64.b64decode(
+    b"NPfggC/vduLSJmjmQ/7ilvRF3M7wrDHt6JW8jdKs16EtLIGYOIJ9D4E4qZzR7xJc"
+    b"3Qlra9CG/QCVm1SIXnaMDA==",
+    validate=True,
+)
+
+
 class SSHSignatureTests(unittest.TestCase):
-    def test_openssl_ed25519_signature_verifies_as_sshsig(self) -> None:
+    def test_public_ed25519_vector_verifies_as_sshsig(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
-            private_key = root / "key.pem"
             public_key = root / "key.pub.pem"
-            message = b"signed release checksums\n"
-            subprocess.run(
-                ["openssl", "genpkey", "-algorithm", "ED25519", "-out", private_key],
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                [
-                    "openssl",
-                    "pkey",
-                    "-in",
-                    private_key,
-                    "-pubout",
-                    "-out",
-                    public_key,
-                ],
-                check=True,
-                capture_output=True,
-            )
-            payload = root / "payload"
-            payload.write_bytes(signed_payload(message))
-            completed = subprocess.run(
-                [
-                    "openssl",
-                    "pkeyutl",
-                    "-sign",
-                    "-inkey",
-                    private_key,
-                    "-rawin",
-                    "-in",
-                    payload,
-                ],
-                check=True,
-                capture_output=True,
+            public_key.write_bytes(PUBLIC_KEY)
+            self.assertEqual(
+                hashlib.sha256(signed_payload(MESSAGE)).hexdigest(),
+                "82e653e1a43f2018ed2b88074658753d1da65451ac68cc6255ad77a0a064122c",
             )
             signature = root / "message.sig"
             signers = root / "allowed_signers"
-            signature.write_bytes(envelope(public_key, completed.stdout))
+            signature.write_bytes(envelope(public_key, RAW_SIGNATURE))
             signers.write_bytes(allowed_signers(public_key))
             verified = subprocess.run(
                 [
@@ -70,7 +53,7 @@ class SSHSignatureTests(unittest.TestCase):
                     "-s",
                     signature,
                 ],
-                input=message,
+                input=MESSAGE,
                 check=False,
                 capture_output=True,
             )
@@ -79,37 +62,11 @@ class SSHSignatureTests(unittest.TestCase):
     def test_wrong_message_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
-            private_key = root / "key.pem"
             public_key = root / "key.pub.pem"
-            subprocess.run(
-                ["openssl", "genpkey", "-algorithm", "ED25519", "-out", private_key],
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["openssl", "pkey", "-in", private_key, "-pubout", "-out", public_key],
-                check=True,
-                capture_output=True,
-            )
-            payload = root / "payload"
-            payload.write_bytes(signed_payload(b"expected\n"))
-            raw = subprocess.run(
-                [
-                    "openssl",
-                    "pkeyutl",
-                    "-sign",
-                    "-inkey",
-                    private_key,
-                    "-rawin",
-                    "-in",
-                    payload,
-                ],
-                check=True,
-                capture_output=True,
-            ).stdout
+            public_key.write_bytes(PUBLIC_KEY)
             signature = root / "message.sig"
             signers = root / "allowed_signers"
-            signature.write_bytes(envelope(public_key, raw))
+            signature.write_bytes(envelope(public_key, RAW_SIGNATURE))
             signers.write_bytes(allowed_signers(public_key))
             verified = subprocess.run(
                 [
