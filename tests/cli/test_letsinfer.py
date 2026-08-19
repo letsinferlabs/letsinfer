@@ -68,6 +68,15 @@ class ManifestTests(unittest.TestCase):
         with materialized_release_sources(self.manifest) as root:
             letsinfer.verify_release_sources(self.manifest, root)
 
+    def test_watchdog_stream_capacity_is_bounded_by_core(self) -> None:
+        old_runtime = copy.deepcopy(self.manifest)
+        old_runtime["watchdog"]["max_controllers"] = 2
+        letsinfer.validate_manifest(old_runtime)
+        too_many = copy.deepcopy(self.manifest)
+        too_many["watchdog"]["max_controllers"] = 17
+        with self.assertRaisesRegex(letsinfer.LetsInferError, "cannot exceed 16"):
+            letsinfer.validate_manifest(too_many)
+
     def test_every_registered_manifest_and_pinned_source_verifies(self) -> None:
         observed = []
         for path, manifest in letsinfer.manifests(TEST_MANIFESTS):
@@ -164,14 +173,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.15")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.16")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.15"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.16"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -1126,6 +1135,117 @@ class CommandTests(unittest.TestCase):
             evidence_dir="/tmp/letsinfer-qualification",
         )
 
+    def test_qualification_serve_inherits_the_installed_internal_engine_port(self) -> None:
+        parsed = letsinfer.parser().parse_args(
+            [
+                "serve",
+                "fixture-model",
+                "--qualification-mode",
+                "--evidence-dir",
+                "/tmp/evidence",
+            ]
+        )
+        self.assertIsNone(parsed.port)
+
+    def test_qualification_handoff_quiesces_and_can_restore_resident_units(self) -> None:
+        states = {
+            letsinfer.RECOVERY_TIMER_NAME: ("enabled", "active"),
+            letsinfer.ENGINE_SERVICE_NAME: ("static", "active"),
+        }
+        commands: list[list[str]] = []
+
+        def unit_state(name: str) -> tuple[str, str]:
+            return states[name]
+
+        def command(value: list[str]) -> None:
+            commands.append(list(value))
+            name = value[-1]
+            states[name] = (
+                states[name][0],
+                "inactive" if "stop" in value else "active",
+            )
+
+        with (
+            mock.patch.object(letsinfer, "_unit_enabled_active", side_effect=unit_state),
+            mock.patch.object(letsinfer, "run_passthrough", side_effect=command),
+            mock.patch.object(letsinfer, "_restore_resident_watchdog_projection"),
+        ):
+            previous = letsinfer._quiesce_resident_runtime_for_qualification()
+            letsinfer._restore_resident_runtime_after_qualification(previous)
+
+        self.assertEqual(
+            commands,
+            [
+                ["systemctl", "--user", "stop", letsinfer.RECOVERY_TIMER_NAME],
+                ["systemctl", "--user", "stop", letsinfer.ENGINE_SERVICE_NAME],
+                [
+                    "systemctl",
+                    "--user",
+                    "start",
+                    "--no-block",
+                    letsinfer.ENGINE_SERVICE_NAME,
+                ],
+                ["systemctl", "--user", "start", letsinfer.RECOVERY_TIMER_NAME],
+            ],
+        )
+
+    def test_qualification_handoff_resets_stale_resident_unit_failures(self) -> None:
+        states = {
+            letsinfer.RECOVERY_TIMER_NAME: ("enabled", "inactive"),
+            letsinfer.ENGINE_SERVICE_NAME: ("static", "failed"),
+        }
+        with (
+            mock.patch.object(
+                letsinfer, "_unit_enabled_active", side_effect=lambda name: states[name]
+            ),
+            mock.patch.object(letsinfer, "run_passthrough"),
+            mock.patch.object(letsinfer, "run") as run,
+        ):
+            letsinfer._quiesce_resident_runtime_for_qualification()
+        run.assert_called_once_with(
+            ["systemctl", "--user", "reset-failed", letsinfer.ENGINE_SERVICE_NAME]
+        )
+
+    def test_retiring_failed_candidate_archives_and_clears_only_its_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state_path = root / "qualification.json"
+            state_path.write_text("{}\n", encoding="utf-8")
+            protection_root = root / "protection"
+            protection_root.mkdir()
+            trip = protection_root / letsinfer.PROTECTION_TRIP_NAME
+            trip.write_text('{"reason":"candidate-failed"}\n', encoding="utf-8")
+            trip.chmod(0o600)
+            evidence = root / "evidence"
+            config = {
+                "qualification_mode": True,
+                "qualification_evidence_dir": str(evidence),
+                "protection_root": str(protection_root),
+                "name": "letsinfer-sglang",
+                "engine_api_key_file": str(root / "key"),
+            }
+            with (
+                mock.patch.object(
+                    letsinfer, "qualification_service_config_path", return_value=state_path
+                ),
+                mock.patch.object(letsinfer, "read_service_config", return_value=config),
+                mock.patch.object(
+                    letsinfer, "configured_release", return_value=(root, {"model": {}})
+                ),
+                mock.patch.object(letsinfer, "update_service_placement"),
+                mock.patch.object(letsinfer, "disarm_protection"),
+                mock.patch.object(letsinfer, "container_inspect", return_value=None),
+                mock.patch.object(letsinfer, "_restore_resident_watchdog_projection"),
+            ):
+                letsinfer._retire_qualification_candidate(remove_container=True)
+
+            self.assertFalse(state_path.exists())
+            self.assertFalse(trip.exists())
+            self.assertEqual(
+                (evidence / "retired-protection-trip.json").read_text(encoding="utf-8"),
+                '{"reason":"candidate-failed"}\n',
+            )
+
     def test_qualification_activation_atomically_replaces_the_single_slot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "qualification.json"
@@ -1887,7 +2007,7 @@ class InstallTests(unittest.TestCase):
         self.assertNotIn(f"Wants={letsinfer.ENGINE_SERVICE_NAME}", service)
         self.assertNotIn(f"Wants={letsinfer.GATEWAY_SERVICE_NAME}", service)
         self.assertIn('--controller-ca "/secrets/controller-ca.crt"', service)
-        self.assertIn("--max-controllers 2", service)
+        self.assertIn("--max-controllers 16", service)
         self.assertIn('--gateway-metrics "/data/watchdog/gateway.state"', service)
         self.assertIn("--protect-root", service)
         self.assertIn("/data/watchdog/protected-engines", service)

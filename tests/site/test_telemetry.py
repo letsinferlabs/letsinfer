@@ -3,17 +3,27 @@ from __future__ import annotations
 
 import os
 import pathlib
+import json
 import struct
 import tempfile
+import threading
+import time
 import unittest
 import zlib
+from types import SimpleNamespace
+from unittest import mock
 
+from core import cli as letsinfer
 from core.site.telemetry import (
     COUNTER_FIELDS,
     RAW_RING_CAPACITY,
     RECORD_BYTES,
     TelemetryAggregator,
     TelemetryError,
+    TelemetryPublisher,
+    _protobuf_message,
+    _protobuf_uint,
+    decode_watchdog_protocol_sample,
     decode_watchdog_record,
     read_latest_watchdog_sample,
 )
@@ -39,7 +49,131 @@ def record(*, sequence: int = 7, unix_ms: int = 1_700_000_000_000, counters: int
     return bytes(value)
 
 
+def protocol_payload(
+    *, sequence: int = 7, unix_ms: int = 1_700_000_000_000,
+    active: int = 1, output_tokens: int = 10,
+) -> bytes:
+    def sint(value: int) -> int:
+        return (value << 1) ^ (value >> 31)
+
+    gpu = b"".join((
+        _protobuf_uint(1, 60),
+        _protobuf_uint(2, 70),
+        _protobuf_message(3, b"\x3c\x32\x00\x00\x00\x00"),
+        _protobuf_uint(4, sint(550)),
+        _protobuf_uint(5, 700),
+        _protobuf_uint(6, 1200),
+        _protobuf_uint(7, 1600),
+    ))
+    values = [
+        (1, sequence), (2, unix_ms), (3, sequence * 1000), (4, (1 << 1) | (1 << 3)),
+        (5, 50), (7, 70), (8, 80), (10, sint(400)), (11, sint(-32768)),
+        (12, 125), (13, 100), (14, 200), (15, 300), (16, 400),
+        (17, 10), (18, 20), (19, 30), (20, 40), (21, 9), (22, 1),
+        (23, 3200), (24, 4266), (25, active), (26, 0),
+    ]
+    payload = b"".join(_protobuf_uint(field, value) for field, value in values)
+    payload += _protobuf_message(6, b"\x28\x3c") + _protobuf_message(9, gpu)
+    counters = [1, 1, 0, 0, 0, 0, 40, output_tokens, 0, 0, 0, 0, 0, 0, 0, 0]
+    payload += b"".join(
+        _protobuf_uint(field, value)
+        for field, value in zip(range(27, 43), counters)
+    )
+    return payload
+
+
 class TelemetryTests(unittest.TestCase):
+    def test_cli_reads_active_request_and_live_rate_from_site_aggregate(self) -> None:
+        samples = [
+            decode_watchdog_protocol_sample(
+                protocol_payload(sequence=7, active=1, output_tokens=1), member_id=MEMBER
+            ),
+            decode_watchdog_protocol_sample(
+                protocol_payload(
+                    sequence=8,
+                    unix_ms=1_700_000_001_000,
+                    active=1,
+                    output_tokens=12,
+                ),
+                member_id=MEMBER,
+            ),
+        ]
+        clock = [samples[0]["unix_ms"] / 1000]
+        site = TelemetryAggregator(clock=lambda: clock[0])
+        site.update(samples[0])
+        clock[0] = samples[1]["unix_ms"] / 1000
+        expected = site.update(samples[1])["aggregate"]
+
+        class Response:
+            status = 200
+
+            def read(self, _: int) -> bytes:
+                return json.dumps({"telemetry": {"aggregate": expected}}).encode()
+
+        connection = mock.Mock()
+        connection.getresponse.return_value = Response()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            paths = [root / name for name in ("server.crt", "client.crt", "client.key")]
+            for path in paths:
+                path.write_text("fixture", encoding="ascii")
+            context = mock.Mock()
+            with (
+                mock.patch.object(letsinfer.ssl, "create_default_context", return_value=context),
+                mock.patch.object(letsinfer.http.client, "HTTPSConnection", return_value=connection),
+            ):
+                aggregate = letsinfer._local_controller_telemetry({
+                    "watchdog_cert_file": str(paths[0]),
+                    "watchdog_local_controller_cert_file": str(paths[1]),
+                    "watchdog_local_controller_key_file": str(paths[2]),
+                })
+        self.assertEqual(aggregate["active_requests"], 1)
+        self.assertEqual(aggregate["rates"]["output_tokens_per_second"], 11.0)
+
+    def test_native_live_sample_decodes_before_durable_ring_flush(self) -> None:
+        sample = decode_watchdog_protocol_sample(
+            protocol_payload(active=1, output_tokens=12), member_id=MEMBER
+        )
+        self.assertEqual(sample["inference"]["active_requests"], 1)
+        self.assertEqual(sample["inference"]["output_tokens"], 12)
+        self.assertEqual(sample["system"]["nvme_temp_deci_c"], -1)
+
+    def test_publisher_forwards_live_samples_without_reading_the_ring(self) -> None:
+        samples = [
+            decode_watchdog_protocol_sample(
+                protocol_payload(sequence=7, active=1, output_tokens=1), member_id=MEMBER
+            ),
+            decode_watchdog_protocol_sample(
+                protocol_payload(sequence=8, active=0, output_tokens=8), member_id=MEMBER
+            ),
+        ]
+        accepted: list[dict[str, object]] = []
+        identity = SimpleNamespace(member_id=MEMBER)
+
+        def live(**_: object):
+            yield from samples
+
+        with (
+            mock.patch("core.site.telemetry.watchdog_live_samples", side_effect=live),
+            mock.patch("core.site.telemetry.signed_sample", side_effect=lambda value: value),
+        ):
+            publisher = TelemetryPublisher(
+                identity,
+                watchdog_port=9768,
+                watchdog_ca_file=pathlib.Path("ca"),
+                watchdog_controller_cert_file=pathlib.Path("cert"),
+                watchdog_controller_key_file=pathlib.Path("key"),
+                local_accept=lambda document, _: accepted.append(dict(document)),
+            )
+            publisher.start()
+            deadline = time.monotonic() + 1
+            while len(accepted) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            publisher.close()
+        self.assertEqual(
+            [row["inference"]["active_requests"] for row in accepted], [1, 0]
+        )
+
     def test_watchdog_record_decodes_exact_counters_and_unknowns(self) -> None:
         sample = decode_watchdog_record(record(), member_id=MEMBER)
         self.assertEqual(sample["system"]["cpu_core_percent"], [40, 60])

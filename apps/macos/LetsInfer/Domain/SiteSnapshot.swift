@@ -588,6 +588,11 @@ extension SiteSnapshot {
             letsinfer: letsinfer
         )
     }
+
+    func enrichedIfFresh(with telemetry: SiteTelemetrySnapshot) -> SiteSnapshot {
+        guard telemetry.isAtLeastAsFresh(as: sampledAt) else { return self }
+        return enriched(with: telemetry.aggregate)
+    }
 }
 
 private struct PlacementRuntimeIdentity {

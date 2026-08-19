@@ -94,6 +94,35 @@ class ControllerStateTests(unittest.TestCase):
         with self.assertRaisesRegex(ControllerError, "identity"):
             controller.authorize(malformed, der)
 
+    def test_registered_local_certificate_may_omit_controller_uri(self) -> None:
+        identity = setup_site()
+        der = b"node-local-controller"
+        local_id = hashlib.sha256(
+            f"letsinfer-local-controller-v1:{identity.installation_id}".encode("ascii")
+        ).hexdigest()[:32]
+        with SiteStore(identity=identity) as store:
+            store.upsert_controller(
+                controller_id=local_id,
+                name="Let's Infer local controller",
+                role="administrator",
+                certificate_sha256=hashlib.sha256(der).hexdigest(),
+                certificate_pem=CERTIFICATE,
+            )
+        controller = ControllerState(
+            identity, TelemetryAggregator(), site_provider=lambda: {}
+        )
+        certificate = {"subjectAltName": (("DNS", "localhost"),)}
+        principal = controller.authorize(certificate, der)
+        self.assertEqual(principal.controller_id, local_id)
+        self.assertEqual(principal.role, "administrator")
+        with self.assertRaisesRegex(ControllerError, "not authorized"):
+            controller.authorize(certificate, b"different-local-certificate")
+        malformed = {
+            "subjectAltName": (("URI", "urn:letsinfer:controller:bad"),)
+        }
+        with self.assertRaisesRegex(ControllerError, "identity"):
+            controller.authorize(malformed, der)
+
     def test_telemetry_history_is_bounded(self) -> None:
         identity = setup_site()
         controller = ControllerState(

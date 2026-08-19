@@ -6,15 +6,81 @@ from __future__ import annotations
 import argparse
 import io
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from unittest import mock
+from types import SimpleNamespace
 
 from core import cli as letsinfer
 
 
 class CoreUpdateTests(unittest.TestCase):
+    def test_interactive_update_preflights_sudo_then_owns_three_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            installer = root / "install.sh"
+            installer.write_text("#!/bin/sh\n", encoding="utf-8")
+            launcher = root / "letsinfer"
+            launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+            events: list[object] = []
+
+            class Progress:
+                def __init__(self, *_: object, **__: object) -> None:
+                    pass
+
+                def __enter__(self) -> "Progress":
+                    events.append("progress:start")
+                    return self
+
+                def advance(self) -> None:
+                    events.append("progress:advance")
+
+                def __exit__(self, *args: object) -> None:
+                    events.append("progress:end")
+
+            terminal = SimpleNamespace(
+                interactive=True,
+                success=lambda message: events.append(("success", message)),
+            )
+
+            def captured(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                events.append(("run", command))
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch.object(letsinfer.benchmark_jobs, "active_state", return_value=None),
+                mock.patch.object(
+                    letsinfer,
+                    "_installed_core_layout",
+                    return_value=(pathlib.Path("/opt/letsinfer"), installer, launcher),
+                ),
+                mock.patch.object(
+                    letsinfer, "run_passthrough",
+                    side_effect=lambda command: events.append(("passthrough", command)),
+                ),
+                mock.patch.object(letsinfer, "run", side_effect=captured),
+                mock.patch.object(letsinfer.ui, "Terminal", return_value=terminal),
+                mock.patch.object(letsinfer.ui, "StepProgress", Progress),
+            ):
+                self.assertEqual(
+                    letsinfer.update_core(argparse.Namespace(version="0.11.0-rc.16")), 0
+                )
+        self.assertEqual(events[0], ("passthrough", ["sudo", "-v"]))
+        self.assertEqual(events[1], "progress:start")
+        self.assertEqual(
+            events[2],
+            ("run", [
+                "/bin/sh", str(installer), "--no-setup", "--no-progress",
+                "--version", "0.11.0-rc.16",
+            ]),
+        )
+        self.assertEqual(events.count("progress:advance"), 3)
+        self.assertIn(("run", [str(launcher), "core-rebind"]), events)
+        self.assertIn(("run", [str(launcher), "--help"]), events)
+        self.assertEqual(events[-1], ("success", "Core updated"))
+
     def _installed_tree(self, root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
         source = root / "prefix/lib/letsinfer/1.2.3/abc123"
         source.mkdir(parents=True)
@@ -44,6 +110,7 @@ class CoreUpdateTests(unittest.TestCase):
                         "/bin/sh",
                         str(source / "install.sh"),
                         "--no-setup",
+                        "--no-progress",
                         "--prefix",
                         str(source.parents[3]),
                         "--version",
@@ -202,6 +269,58 @@ class CoreUpdateTests(unittest.TestCase):
         )
         install_watchdog.assert_called_once_with(
             identity, replace_active=True, runtime_manifest=None
+        )
+
+    def test_core_plane_handoff_uses_the_active_candidate_not_stale_resident(self) -> None:
+        identity = mock.Mock(role="coordinator")
+        candidate_manifest = {
+            "watchdog": {"protection": {"warning_available_bytes": 4 << 30}}
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            resident = root / "service.json"
+            candidate = root / "qualification.json"
+            resident.write_text("{}\n", encoding="utf-8")
+            candidate.write_text("{}\n", encoding="utf-8")
+
+            def configured(config: object) -> tuple[pathlib.Path, dict[str, object]]:
+                self.assertEqual(config, {"qualification_mode": True})
+                return candidate, candidate_manifest
+
+            with (
+                mock.patch.object(letsinfer.platform, "system", return_value="Linux"),
+                mock.patch.object(
+                    letsinfer, "default_service_config_path", return_value=resident
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "qualification_service_config_path",
+                    return_value=candidate,
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "read_service_config",
+                    return_value={"qualification_mode": True},
+                ),
+                mock.patch.object(letsinfer, "configured_release", side_effect=configured),
+                mock.patch.object(
+                    letsinfer,
+                    "_unit_enabled_active",
+                    return_value=("enabled", "inactive"),
+                ),
+                mock.patch.object(letsinfer, "install_site_service_only"),
+                mock.patch.object(
+                    letsinfer, "install_core_watchdog_service"
+                ) as install_watchdog,
+                mock.patch.object(letsinfer, "install_core_gateway_service"),
+            ):
+                state = letsinfer.install_core_plane_services(
+                    identity, include_gateway=True
+                )
+
+        self.assertTrue(state["qualification_active"])
+        install_watchdog.assert_called_once_with(
+            identity, replace_active=True, runtime_manifest=candidate_manifest
         )
 
     def test_parser_exposes_only_the_public_update_command(self) -> None:

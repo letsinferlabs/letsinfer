@@ -70,6 +70,12 @@ def controller_id_from_certificate(certificate: Mapping[str, Any]) -> str:
     return identities[0]
 
 
+def _local_controller_id(installation_id: str) -> str:
+    return hashlib.sha256(
+        f"letsinfer-local-controller-v1:{installation_id}".encode("ascii")
+    ).hexdigest()[:32]
+
+
 class ControllerState:
     def __init__(
         self,
@@ -215,8 +221,20 @@ class ControllerState:
         *,
         minimum_role: str = "viewer",
     ) -> ControllerPrincipal:
-        controller_id = controller_id_from_certificate(certificate)
         fingerprint = hashlib.sha256(certificate_der).hexdigest()
+        controller_uris = [
+            value
+            for kind, value in certificate.get("subjectAltName", ())
+            if kind == "URI" and value.startswith("urn:letsinfer:controller:")
+        ]
+        if controller_uris:
+            controller_id = controller_id_from_certificate(certificate)
+        else:
+            # The node-local certificate predates controller URI identities.
+            # It may authenticate only as the deterministic local controller,
+            # and only when its exact fingerprint is the active registry row.
+            # Remote certificates still require their URI SAN.
+            controller_id = _local_controller_id(self.identity.installation_id)
         try:
             with SiteStore(identity=self.identity) as store:
                 row = next(

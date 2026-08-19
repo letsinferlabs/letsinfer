@@ -130,6 +130,55 @@ class TerminalTests(unittest.TestCase):
         self.assertIsNotNone(spinner._thread)
         self.assertFalse(spinner._thread.is_alive())
 
+    def test_step_progress_marks_completed_current_and_upcoming_rows(self) -> None:
+        stream = FakeStream(tty=True)
+        terminal = ui.Terminal(
+            stream, environ={"TERM": "xterm-256color", "NO_COLOR": "1"}
+        )
+        with ui.StepProgress(
+            terminal,
+            ("Install core", "Rebind runtime", "Verify update"),
+            section="update",
+            interval=1,
+        ) as progress:
+            progress.advance()
+            progress.advance()
+            progress.advance()
+        rendered = stream.getvalue()
+        self.assertIn("LET'S INFER  /  UPDATE", rendered)
+        self.assertIn("✓  Install core", rendered)
+        self.assertIn("✓  Rebind runtime", rendered)
+        self.assertIn("✓  Verify update", rendered)
+        self.assertIn("○  Verify update", rendered)
+
+    def test_step_progress_failure_marks_only_the_active_row(self) -> None:
+        stream = FakeStream(tty=True)
+        terminal = ui.Terminal(
+            stream, environ={"TERM": "xterm-256color", "NO_COLOR": "1"}
+        )
+        with self.assertRaisesRegex(RuntimeError, "broken"):
+            with ui.StepProgress(
+                terminal,
+                ("Install core", "Rebind runtime", "Verify update"),
+                section="update",
+                interval=1,
+            ) as progress:
+                progress.advance()
+                raise RuntimeError("broken")
+        rendered = stream.getvalue()
+        self.assertIn("✗  Rebind runtime  Failed", rendered)
+        self.assertIn("○  Verify update", rendered)
+
+    def test_step_progress_is_silent_for_non_tty_output(self) -> None:
+        stream = FakeStream(tty=False)
+        terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
+        with ui.StepProgress(
+            terminal, ("Install", "Verify"), section="update"
+        ) as progress:
+            progress.advance()
+            progress.advance()
+        self.assertEqual(stream.getvalue(), "")
+
     def test_runtime_status_is_a_compact_branded_health_card(self) -> None:
         stream = FakeStream(tty=True)
         payload = {
@@ -680,6 +729,36 @@ class MainOutputTests(unittest.TestCase):
         self.assertIn("LET'S INFER  /  INSTALL", stderr.getvalue())
         self.assertIn("Runtime installed", stderr.getvalue())
         self.assertIn(ui.CLEAR_LINE, stderr.getvalue())
+
+    def test_update_leaves_the_installer_as_the_only_interactive_progress_owner(self) -> None:
+        arguments = argparse.Namespace(
+            command="update",
+            action=lambda _arguments: 0,
+            action_id="update",
+            json=False,
+            port=1,
+            engine_port=None,
+            tail=0,
+        )
+        parser = mock.Mock()
+        parser.parse_args.return_value = arguments
+        progress = mock.Mock(return_value=contextlib.nullcontext())
+        with (
+            mock.patch.object(letsinfer, "parser", return_value=parser),
+            mock.patch.object(
+                letsinfer,
+                "_authorize_command",
+                return_value=(self._metadata("update"), None),
+            ),
+            mock.patch.object(ui, "progress", progress),
+            mock.patch.object(
+                ui, "protect_stdout", return_value=contextlib.nullcontext()
+            ),
+        ):
+            self.assertEqual(letsinfer.main(["update"]), 0)
+        progress.assert_called_once_with(
+            "Updating Let's Infer core", done="Core updated", enabled=False
+        )
 
     def test_non_tty_error_contract_is_unchanged(self) -> None:
         arguments = argparse.Namespace(
