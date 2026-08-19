@@ -30,8 +30,16 @@ class OpenAIMatrixTests(unittest.TestCase):
             "model": {
                 "id": "example/model",
                 "alias": "example",
-                "revision": "a" * 40,
+                "artifact": "model",
             },
+            "artifacts": [
+                {
+                    "name": "model",
+                    "format": "huggingface-snapshot",
+                    "repository": "example/model",
+                    "revision": "a" * 40,
+                }
+            ],
             "image": {"immutable_id": "sha256:" + "b" * 64},
             "serving": {
                 "qualified": False,

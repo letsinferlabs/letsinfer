@@ -12,6 +12,7 @@ engine-argument surface.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -36,6 +37,7 @@ import openai_matrix as common  # pylint: disable=wrong-import-position
 import benchmark_record  # pylint: disable=wrong-import-position
 import prompt_generator  # pylint: disable=wrong-import-position
 import watchdog_client  # pylint: disable=wrong-import-position
+from core import ui  # pylint: disable=wrong-import-position
 from core.token_count import (  # pylint: disable=wrong-import-position
     TokenCountError,
     parse_token_count_response,
@@ -50,10 +52,88 @@ from core.runtime_packs import (  # pylint: disable=wrong-import-position
 CONCURRENCIES = (1, 2, 4, 8, 16)
 CONTEXTS = ("32k", "64k", "128k", "256k")
 SAFE_CELL = re.compile(r"(?:32k|64k|128k|256k)-c(?:1|2|4|8|16)")
+_PROGRESS_FILE: pathlib.Path | None = None
+_PROGRESS_STARTED_UNIX_NS: int | None = None
+_EXPECTED_MINUTES: tuple[int, int] | None = None
 
 
 class RuntimeMatrixError(common.QualificationError):
     """The runtime matrix contract was invalid or failed."""
+
+
+def _write_benchmark_progress(phase: str, message: str, state: str) -> None:
+    if _PROGRESS_FILE is None:
+        return
+    common.write_json_atomic(
+        _PROGRESS_FILE,
+        {
+            "schema_version": 1,
+            "state": state,
+            "phase": phase,
+            "message": message,
+            "started_unix_ns": _PROGRESS_STARTED_UNIX_NS,
+            "updated_unix_ns": time.time_ns(),
+            "expected_minutes": (
+                list(_EXPECTED_MINUTES) if _EXPECTED_MINUTES is not None else None
+            ),
+        },
+    )
+
+
+@contextlib.contextmanager
+def benchmark_activity(message: str, *, done: str, phase: str) -> Any:
+    """Keep long benchmark phases visible without changing result stdout."""
+    _write_benchmark_progress(phase, message, "running")
+    terminal = ui.Terminal(sys.stderr)
+    started = time.monotonic()
+    if terminal.interactive:
+        with ui.progress(message, done=done, stream=sys.stderr):
+            yield
+        return
+    print(f"BENCHMARK {message}", file=sys.stderr, flush=True)
+    try:
+        yield
+    except BaseException:
+        _write_benchmark_progress(phase, message, "failed")
+        elapsed = time.monotonic() - started
+        print(
+            f"BENCHMARK FAILED {message} elapsed={elapsed:.1f}s",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
+    _write_benchmark_progress(phase, done, "running")
+    elapsed = time.monotonic() - started
+    print(
+        f"BENCHMARK {done} elapsed={elapsed:.1f}s",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def benchmark_state(message: str, *, phase: str) -> None:
+    """Write one compact, colored benchmark state to the activity stream."""
+    _write_benchmark_progress(phase, message, "running")
+    ui.Terminal(sys.stderr).status(message)
+
+
+def expected_duration_range(
+    selected: list[dict[str, Any]], *, includes_materializer: bool
+) -> tuple[int, int]:
+    """Return a deliberately broad first-run estimate in whole minutes."""
+    launches = len(selected) + (1 if includes_materializer else 0)
+    prompt_tokens = sum(
+        value
+        for cell in selected
+        for fixture in cell["fixtures"]
+        for value in (fixture.get("expected_prompt_tokens", 0),)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    )
+    lower_seconds = launches * 150 + prompt_tokens / 1500
+    upper_seconds = launches * 240 + prompt_tokens / 500
+    lower_minutes = max(1, int((lower_seconds + 59) // 60))
+    upper_minutes = max(lower_minutes, int((upper_seconds + 59) // 60))
+    return lower_minutes, upper_minutes
 
 
 def capture_container_logs(container: str, output: pathlib.Path) -> None:
@@ -143,6 +223,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--installation-id", help=argparse.SUPPRESS)
     parser.add_argument("--benchmark-timestamp-unix-ns", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--benchmark-contract-sha256", help=argparse.SUPPRESS)
+    parser.add_argument("--progress-file", type=pathlib.Path, help=argparse.SUPPRESS)
     parser.add_argument("--watchdog-port", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--watchdog-ca-file", type=pathlib.Path, help=argparse.SUPPRESS)
     parser.add_argument(
@@ -464,7 +545,7 @@ def load_prompt_plan(
         raise RuntimeMatrixError("runtime matrix schema_version must be 1")
     expected_identity = {
         "model_id": common._manifest_value(manifest, "model.id"),
-        "model_revision": common._manifest_value(manifest, "model.revision"),
+        "model_revision": common.model_revision(manifest),
     }
     for key, value in expected_identity.items():
         if plan.get(key) != value:
@@ -1104,6 +1185,26 @@ def run_isolated_matrix(
     stores_root.mkdir(parents=True, exist_ok=True)
     launches_root.mkdir(parents=True, exist_ok=True)
 
+    model = manifest.get("model")
+    model_name = (
+        model.get("alias")
+        if isinstance(model, dict) and isinstance(model.get("alias"), str)
+        else runtime_selector
+    )
+    expected_low, expected_high = expected_duration_range(
+        selected, includes_materializer=benchmark_contract is not None
+    )
+    global _EXPECTED_MINUTES
+    _EXPECTED_MINUTES = (expected_low, expected_high)
+    benchmark_state(
+        f"Benchmarking {model_name} · {len(selected)} workload(s)",
+        phase="starting",
+    )
+    benchmark_state(
+        f"Expected {expected_low}–{expected_high} min · elapsed time follows live",
+        phase="starting",
+    )
+
     if benchmark_contract is not None:
         if plan_path is not None:
             raise RuntimeMatrixError(
@@ -1126,15 +1227,20 @@ def run_isolated_matrix(
         calibration_error: BaseException | None = None
         try:
             calibration_started = True
-            launch_output = _command_output(
-                _serve_command(
-                    arguments,
-                    runtime_selector,
-                    calibration_store,
-                    calibration_launch,
-                ),
-                "launching benchmark prompt materializer",
-            )
+            with benchmark_activity(
+                "Preparing prompts · loading tokenizer runtime",
+                done="Tokenizer runtime ready",
+                phase="preparing-prompts",
+            ):
+                launch_output = _command_output(
+                    _serve_command(
+                        arguments,
+                        runtime_selector,
+                        calibration_store,
+                        calibration_launch,
+                    ),
+                    "launching benchmark prompt materializer",
+                )
             if launch_output.strip():
                 print(launch_output.strip(), flush=True)
             token_count_api_key = common.read_private_file(
@@ -1158,14 +1264,19 @@ def run_isolated_matrix(
                 model_id=manifest["model"]["id"],
                 timeout=arguments.timeout,
             )
-            plan_path = prompt_generator.materialize(
-                benchmark_contract,
-                output / "inputs",
-                counter,
-                model_id=manifest["model"]["id"],
-                model_revision=manifest["model"]["revision"],
-                selected_cells=(cell["name"] for cell in selected),
-            )
+            with benchmark_activity(
+                "Preparing prompts · matching exact token counts",
+                done="Exact prompts ready",
+                phase="materializing-prompts",
+            ):
+                plan_path = prompt_generator.materialize(
+                    benchmark_contract,
+                    output / "inputs",
+                    counter,
+                    model_id=manifest["model"]["id"],
+                model_revision=common.model_revision(manifest),
+                    selected_cells=(cell["name"] for cell in selected),
+                )
         except BaseException as error:
             calibration_error = error
         stop_error: BaseException | None = None
@@ -1203,7 +1314,7 @@ def run_isolated_matrix(
 
     rows: list[dict[str, Any]] = []
     container_ids: set[str] = set()
-    for cell in selected:
+    for cell_index, cell in enumerate(selected, start=1):
         name = cell["name"]
         cell_output = results_root / name
         cell_store = stores_root / name
@@ -1218,27 +1329,41 @@ def run_isolated_matrix(
                     f"refusing existing {label} path for {name}: {path}"
                 )
 
-        print(f"ISOLATED START {name}", flush=True)
+        benchmark_state(
+            f"Workload {cell_index}/{len(selected)} · {name} · "
+            f"{len(selected) - cell_index} remaining",
+            phase=f"workload:{name}:starting",
+        )
         launch_attempted = False
         cell_error: BaseException | None = None
         try:
             launch_attempted = True
-            launch_output = _command_output(
-                _serve_command(
-                    arguments,
-                    runtime_selector,
-                    cell_store,
-                    cell_launch,
-                ),
-                f"launching {name}",
-            )
+            with benchmark_activity(
+                f"Loading runtime for {name}",
+                done=f"Runtime ready for {name}",
+                phase=f"workload:{name}:loading",
+            ):
+                launch_output = _command_output(
+                    _serve_command(
+                        arguments,
+                        runtime_selector,
+                        cell_store,
+                        cell_launch,
+                    ),
+                    f"launching {name}",
+                )
             if launch_output.strip():
                 print(launch_output.strip(), flush=True)
-            worker = common.run_command(
-                _worker_command(
-                    arguments, manifest_path, plan_path, cell, cell_output
+            with benchmark_activity(
+                f"Measuring {name}",
+                done=f"Measurement complete for {name}",
+                phase=f"workload:{name}:measuring",
+            ):
+                worker = common.run_command(
+                    _worker_command(
+                        arguments, manifest_path, plan_path, cell, cell_output
+                    )
                 )
-            )
             if worker.stdout.strip():
                 print(worker.stdout.strip(), flush=True)
             if worker.returncode != 0:
@@ -1427,11 +1552,17 @@ def run_isolated_matrix(
         f"evidence={output}",
         flush=True,
     )
+    _write_benchmark_progress(
+        "completed", f"Completed {len(rows)}/{len(selected)} workloads", "completed"
+    )
     return 0
 
 
 def main() -> int:
+    global _PROGRESS_FILE, _PROGRESS_STARTED_UNIX_NS
     arguments = parse_arguments()
+    _PROGRESS_FILE = arguments.progress_file
+    _PROGRESS_STARTED_UNIX_NS = time.time_ns()
     if arguments.timeout <= 0:
         raise RuntimeMatrixError("--timeout must be positive")
     manifest_path, runtime_selector = resolve_runtime(
@@ -1659,7 +1790,7 @@ def main() -> int:
         "runtime_manifest_sha256": common.sha256_file(manifest_path),
         "engine": engine,
         "model_id": model_id,
-        "model_revision": common._manifest_value(manifest, "model.revision"),
+        "model_revision": common.model_revision(manifest),
         "target": common._manifest_value(manifest, "target.id"),
         "serving": manifest["serving"],
         "capacity": capacity,

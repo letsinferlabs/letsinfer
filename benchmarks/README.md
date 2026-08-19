@@ -44,6 +44,13 @@ pack's declared standard matrix without exposing engine flags:
 letsinfer benchmark MODEL --c1 --c2 --c4 --c8
 ```
 
+The CLI starts one durable benchmark worker per node and attaches to its live
+phase, workload, elapsed time, and expected duration. Ctrl-C only detaches;
+`letsinfer benchmark` reconnects to status and `letsinfer benchmark stop`
+explicitly cancels the worker. The worker retains exclusive ownership of its
+temporary container and service restoration, including after the launching
+terminal exits.
+
 With no selectors, the current standard contract runs the complete
 32K/64K/128K/256K by C1/C2/C4/C8/C16 cross-product. Before measurement, Let's Infer
 starts the exact runtime in qualification mode and asks its registered adapter
@@ -56,7 +63,7 @@ prefix store. The runner rejects cache reuse, identity drift, tokenizer/model/
 image mismatch, approximate prompt counts, unsafe post-load headroom, and any
 mismatch between a CLI sampling override and the declared contract.
 
-On a service host, the command temporarily stops the recovery timer and active
+On a service host, the worker temporarily stops the recovery timer and active
 engine unit before inference. The resident Watchdog stays active. Let's Infer
 restores the exact prior engine and timer state after success or failure, so
 operators do not manually stop or restart production around a benchmark.

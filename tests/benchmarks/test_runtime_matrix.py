@@ -167,7 +167,13 @@ class RuntimeMatrixTests(unittest.TestCase):
 
     def test_generated_partial_plan_validates_only_materialized_cells(self) -> None:
         manifest = {
-            "model": {"id": "fixture-model", "revision": "a" * 40}
+            "model": {"id": "fixture-model", "artifact": "model"},
+            "artifacts": [
+                {
+                    "name": "model",
+                    "revision": "a" * 40,
+                }
+            ],
         }
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -430,6 +436,19 @@ class RuntimeMatrixTests(unittest.TestCase):
         self.assertEqual(
             cells["32k-c1"]["fixtures"][0]["expected_prompt_tokens"], 32768
         )
+
+    def test_expected_duration_scales_with_selected_prompt_volume(self) -> None:
+        short = [{"fixtures": [{"expected_prompt_tokens": 32_768}]}]
+        long = [{"fixtures": [{"expected_prompt_tokens": 262_144}]}]
+        short_range = runtime_matrix.expected_duration_range(
+            short, includes_materializer=True
+        )
+        long_range = runtime_matrix.expected_duration_range(
+            long, includes_materializer=True
+        )
+        self.assertLess(short_range[0], long_range[0])
+        self.assertLess(short_range[1], long_range[1])
+        self.assertLessEqual(short_range[0], short_range[1])
 
     def test_installed_runtime_name_resolves_to_exact_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

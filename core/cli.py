@@ -19,6 +19,7 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import socket
 import ssl
 import stat
@@ -55,6 +56,7 @@ from .engines import (
     ADAPTERS,
     EngineManifestError,
     adapter_for,
+    artifact_cache_repository,
     cache_provider_for,
     evidence_contract_for,
     launch_for,
@@ -113,7 +115,7 @@ from .runtime_packs import (
     verify_descriptor,
     write_selection,
 )
-from . import ui
+from . import benchmark_jobs, ui
 from .platform import macos as macos_services
 from .site.state import (
     SiteError,
@@ -245,6 +247,7 @@ MIN_API_KEY_BYTES = 32
 # result (including one-time secrets) remains byte-for-byte on stdout.
 ACTION_PROGRESS: Mapping[str, tuple[str, str]] = {
     "setup": ("Creating the site", "Site ready"),
+    "update": ("Updating Let's Infer core", "Core updated"),
     "site.move": ("Preparing the site move", "Site move ready"),
     "topology.probe": ("Probing the member link", "Member link verified"),
     "topology.plan": ("Planning model placement", "Placement plan ready"),
@@ -264,7 +267,6 @@ ACTION_PROGRESS: Mapping[str, tuple[str, str]] = {
     "rollback": ("Restoring the previous runtime", "Runtime restored"),
     "verify": ("Verifying the runtime", "Runtime verified"),
     "acquire": ("Acquiring the model", "Model acquired"),
-    "benchmark": ("Running the benchmark", "Benchmark complete"),
     "install": ("Installing the runtime", "Runtime installed"),
     "serve": ("Starting inference", "Inference ready"),
     "start": ("Starting inference", "Inference ready"),
@@ -601,6 +603,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
             "target",
             "engine",
             "model",
+            "artifacts",
             "image",
             "source_artifacts",
             "runtime_plugins",
@@ -621,10 +624,8 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     target = target_contract(manifest)
 
     model = _require(manifest, "model", dict, "manifest")
-    for key in ("alias", "id", "revision", "cache_repository"):
+    for key in ("alias", "id", "artifact"):
         _require(model, key, str, "manifest.model")
-    if not re.fullmatch(r"[0-9a-f]{40}", model["revision"]):
-        raise LetsInferError("manifest.model.revision must be an exact 40-hex revision")
     acquisition_image = _require(
         model, "acquisition_image", str, "manifest.model"
     )
@@ -3723,31 +3724,11 @@ def image_id(manifest: dict[str, Any]) -> str:
 
 
 def model_artifacts(manifest: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-    """Return the exact independently acquired artifacts for one served model."""
-    model = manifest["model"]
-    base = {
-        "role": "model",
-        "repository": model.get("repository", model["id"]),
-        "revision": model["revision"],
-        "cache_repository": model["cache_repository"],
-    }
-    for key in ("filename", "sha256", "bytes"):
-        if key in model:
-            base[key] = model[key]
-    artifacts = [base]
-    if "drafter" in model:
-        drafter = model["drafter"]
-        artifact = {
-            "role": "drafter",
-            "repository": drafter["repository"],
-            "revision": drafter["revision"],
-            "cache_repository": drafter["cache_repository"],
-        }
-        for key in ("filename", "sha256", "bytes"):
-            if key in drafter:
-                artifact[key] = drafter[key]
-        artifacts.append(artifact)
-    return tuple(artifacts)
+    """Return all exact dependencies with their deterministic shared-store paths."""
+    return tuple(
+        {**artifact, "cache_repository": artifact_cache_repository(artifact)}
+        for artifact in manifest["artifacts"]
+    )
 
 
 def artifact_snapshot_path(
@@ -3827,13 +3808,13 @@ def _verify_gguf_artifact(
             resolved.relative_to((model_cache / "hub").resolve(strict=True))
         except (OSError, ValueError) as error:
             raise LetsInferError(
-                f"{artifact['role']} GGUF object link escapes the model cache: {model_file}"
+                f"{artifact['name']} GGUF object link escapes the model cache: {model_file}"
             ) from error
     elif not model_file.is_file():
-        raise LetsInferError(f"exact {artifact['role']} GGUF file is missing: {model_file}")
+        raise LetsInferError(f"exact {artifact['name']} GGUF file is missing: {model_file}")
     if "bytes" in artifact and model_file.stat().st_size != artifact["bytes"]:
         raise LetsInferError(
-            f"{artifact['role']} GGUF size mismatch "
+            f"{artifact['name']} GGUF size mismatch "
             f"(expected {artifact['bytes']}, got {model_file.stat().st_size})"
         )
     expected = artifact["sha256"]
@@ -3846,7 +3827,7 @@ def verify_model_snapshot(manifest: dict[str, Any], model_cache: pathlib.Path) -
         snapshot = artifact_snapshot_path(artifact, model_cache)
         if not snapshot.is_dir():
             raise LetsInferError(
-                f"exact {artifact['role']} snapshot is missing: {snapshot}"
+                f"exact {artifact['name']} snapshot is missing: {snapshot}"
             )
         broken = [
             path for path in snapshot.rglob("*")
@@ -3854,7 +3835,7 @@ def verify_model_snapshot(manifest: dict[str, Any], model_cache: pathlib.Path) -
         ]
         if broken:
             raise LetsInferError(
-                f"{artifact['role']} snapshot contains a broken object link: {broken[0]}"
+                f"{artifact['name']} snapshot contains a broken object link: {broken[0]}"
             )
         if "filename" in artifact:
             _verify_gguf_artifact(artifact, snapshot, model_cache)
@@ -3863,7 +3844,16 @@ def verify_model_snapshot(manifest: dict[str, Any], model_cache: pathlib.Path) -
 
 def acquire_model_snapshot(manifest: dict[str, Any], model_cache: pathlib.Path) -> pathlib.Path:
     ensure_private_directory(model_cache)
+    acquired: set[tuple[str, str, str | None]] = set()
     for artifact in model_artifacts(manifest):
+        identity = (
+            artifact["repository"],
+            artifact["revision"],
+            artifact.get("filename"),
+        )
+        if identity in acquired:
+            continue
+        acquired.add(identity)
         download_arguments = (
             f"repo_id={artifact['repository']!r}, revision={artifact['revision']!r}"
         )
@@ -5551,6 +5541,7 @@ WantedBy=default.target
 def install_core_gateway_service(
     *,
     executable_root: pathlib.Path | None = None,
+    replace_active: bool = False,
 ) -> dict[str, Any]:
     """Install the stable site gateway before any placement is active."""
     root = executable_root or source_root()
@@ -5607,7 +5598,7 @@ def install_core_gateway_service(
     unit = unit_root / GATEWAY_SERVICE_NAME
     expected = render_gateway_service(config_path, config, root)
     previous = _unit_enabled_active(GATEWAY_SERVICE_NAME)
-    if previous[1] == "active":
+    if previous[1] == "active" and not replace_active:
         try:
             if unit.is_symlink() or config_path.is_symlink():
                 raise LetsInferError(
@@ -5630,6 +5621,8 @@ def install_core_gateway_service(
     snapshot = _snapshot_user_file(unit)
     loaded = False
     try:
+        if previous[1] == "active":
+            run_passthrough(["systemctl", "--user", "stop", GATEWAY_SERVICE_NAME])
         atomic_json(config_path, config)
         config_path.chmod(0o600)
         write_text(unit, expected)
@@ -5855,7 +5848,9 @@ WantedBy=default.target
 """
 
 
-def install_core_watchdog_service(identity: Any) -> dict[str, Any]:
+def install_core_watchdog_service(
+    identity: Any, *, replace_active: bool = False
+) -> dict[str, Any]:
     """Install the one core-owned resident protector for this physical member."""
     config, manifest = core_watchdog_service_config(identity)
     unit_root = pathlib.Path.home() / ".config/systemd/user"
@@ -5863,7 +5858,7 @@ def install_core_watchdog_service(identity: Any) -> dict[str, Any]:
     unit = unit_root / SERVICE_NAME
     expected = render_user_service(config, manifest)
     previous = _unit_enabled_active(SERVICE_NAME)
-    if previous[1] == "active":
+    if previous[1] == "active" and not replace_active:
         try:
             if unit.read_text(encoding="utf-8") != expected:
                 raise LetsInferError(
@@ -5882,6 +5877,8 @@ def install_core_watchdog_service(identity: Any) -> dict[str, Any]:
     snapshot = _snapshot_user_file(unit)
     loaded = False
     try:
+        if previous[1] == "active":
+            run_passthrough(["systemctl", "--user", "stop", SERVICE_NAME])
         write_text(unit, expected)
         unit.chmod(0o644)
         run(["systemctl", "--user", "daemon-reload"])
@@ -9120,7 +9117,7 @@ def derive_runtime(arguments: argparse.Namespace) -> int:
             "target": target_id,
             "status": "candidate",
             "release_manifest": "release.json",
-            "core_compatibility": {"api": 1},
+            "core_compatibility": {"api": 2},
             "parent": {
                 "release": parent["release"],
                 "manifest_sha256": sha256_file(manifest_path),
@@ -9486,8 +9483,237 @@ def acquire(arguments: argparse.Namespace) -> int:
     return 0
 
 
+class _BenchmarkCancelled(Exception):
+    """An explicit benchmark stop requested graceful worker cleanup."""
+
+
+def _duration(seconds: float) -> str:
+    value = max(0, int(seconds))
+    hours, remainder = divmod(value, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+    if minutes:
+        return f"{minutes}m {seconds:02d}s"
+    return f"{seconds}s"
+
+
+def _benchmark_job_snapshot(*, machine: bool = False) -> int:
+    try:
+        state = benchmark_jobs.read_state()
+        progress = benchmark_jobs.read_progress()
+    except benchmark_jobs.BenchmarkJobError as error:
+        raise LetsInferError(str(error)) from error
+    if state is None:
+        if machine:
+            print(compact_json({"active": False, "state": "none"}))
+        else:
+            ui.Terminal(sys.stdout).status("No benchmark has been started")
+        return 0
+    active = state.get("state") in benchmark_jobs.ACTIVE_STATES and benchmark_jobs.is_alive(
+        state
+    )
+    if state.get("state") in benchmark_jobs.ACTIVE_STATES and not active:
+        try:
+            state = benchmark_jobs.mark(
+                state["job_id"],
+                "failed",
+                error="benchmark worker exited without recording a terminal state",
+            )
+        except benchmark_jobs.BenchmarkJobError as error:
+            raise LetsInferError(str(error)) from error
+    elapsed = (
+        time.time_ns() - state.get("started_unix_ns", time.time_ns())
+    ) / 1_000_000_000
+    payload = {
+        "active": active,
+        "job": state,
+        "progress": progress,
+        "elapsed_seconds": elapsed,
+    }
+    if machine:
+        print(compact_json(payload))
+        return 0
+
+    terminal = ui.Terminal(sys.stdout)
+    status = str(state.get("state") or "unknown").upper()
+    color = ui.CYAN if active else (ui.GREEN if status == "COMPLETED" else ui.RED)
+    mark = "●" if terminal.unicode else "*"
+    brand = terminal.paint("LET'S INFER", ui.BOLD)
+    terminal.stream.write(
+        f"{terminal.paint(terminal.mark, ui.BOLD, ui.YELLOW)}  "
+        f"{brand}  /  BENCHMARK\n\n"
+        f"{terminal.paint(mark, ui.BOLD, color)} "
+        f"{terminal.paint(status, ui.BOLD, color)}  "
+        f"{terminal.paint(str(state.get('runtime') or 'unknown runtime'), ui.BOLD)}\n"
+    )
+    message = (
+        progress.get("message")
+        if isinstance(progress, dict) and isinstance(progress.get("message"), str)
+        else "Waiting for benchmark worker"
+    )
+    phase = (
+        progress.get("phase")
+        if isinstance(progress, dict) and isinstance(progress.get("phase"), str)
+        else "starting"
+    )
+    terminal.stream.write(f"  {terminal.paint(message, ui.BOLD)}\n")
+    terminal.stream.write(f"  {terminal.paint(f'phase {phase}', ui.DIM)}\n\n")
+    terminal.stream.write(f"  ELAPSED   {_duration(elapsed)}\n")
+    expected = progress.get("expected_minutes") if isinstance(progress, dict) else None
+    if (
+        isinstance(expected, list)
+        and len(expected) == 2
+        and all(isinstance(value, int) and not isinstance(value, bool) for value in expected)
+    ):
+        terminal.stream.write(f"  EXPECTED  {expected[0]}–{expected[1]} min\n")
+    terminal.stream.write(
+        f"  EVIDENCE  {state.get('output_directory') or 'pending'}\n"
+    )
+    if active:
+        terminal.stream.write("\n  Ctrl-C detaches; `letsinfer benchmark stop` cancels.\n")
+    elif state.get("error"):
+        terminal.stream.write(
+            f"\n  {terminal.paint(str(state['error']), ui.RED)}\n"
+        )
+    terminal.stream.flush()
+    return 0
+
+
+def _follow_benchmark_job(job_id: str) -> None:
+    terminal = ui.Terminal(sys.stderr)
+    if not terminal.interactive:
+        _benchmark_job_snapshot()
+        return
+    frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+    frame_index = 0
+    try:
+        while True:
+            state = benchmark_jobs.read_state()
+            progress = benchmark_jobs.read_progress()
+            if state is None or state.get("job_id") != job_id:
+                raise LetsInferError("benchmark job identity changed while attached")
+            if state.get("state") in benchmark_jobs.TERMINAL_STATES:
+                terminal.stream.write(ui.CLEAR_LINE)
+                terminal.stream.flush()
+                _benchmark_job_snapshot()
+                return
+            elapsed = (
+                time.time_ns() - state.get("started_unix_ns", time.time_ns())
+            ) / 1_000_000_000
+            message = (
+                progress.get("message")
+                if isinstance(progress, dict) and isinstance(progress.get("message"), str)
+                else "Starting benchmark worker"
+            )
+            expected = progress.get("expected_minutes") if isinstance(progress, dict) else None
+            expectation = ""
+            if (
+                isinstance(expected, list)
+                and len(expected) == 2
+                and all(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    for value in expected
+                )
+            ):
+                expectation = f" · expected {expected[0]}–{expected[1]} min"
+            frame = frames[frame_index % len(frames)] if terminal.unicode else "*"
+            available = max(10, terminal.width - len(_duration(elapsed)) - len(expectation) - 7)
+            message = terminal.clip(message, available)
+            terminal.stream.write(
+                f"{ui.CLEAR_LINE}{terminal.paint(frame, ui.CYAN)} "
+                f"{message} · elapsed {_duration(elapsed)}{expectation}"
+            )
+            terminal.stream.flush()
+            frame_index += 1
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        terminal.stream.write(ui.CLEAR_LINE)
+        terminal.stream.flush()
+        terminal.warning(
+            "Detached; benchmark continues. Run `letsinfer benchmark` to check it."
+        )
+
+
+def _benchmark_stop() -> int:
+    try:
+        state = benchmark_jobs.request_stop()
+    except benchmark_jobs.BenchmarkJobError as error:
+        raise LetsInferError(str(error)) from error
+    terminal = ui.Terminal(sys.stderr)
+    with ui.progress("Stopping the benchmark", stream=sys.stderr):
+        stopped = benchmark_jobs.wait_for_exit(state["pid"], timeout_seconds=30)
+    if not stopped:
+        raise LetsInferError(
+            "benchmark did not stop within 30 seconds; its worker remains isolated"
+        )
+    terminal.success("Benchmark stopped")
+    return 0
+
+
+def _benchmark_self_command(
+    arguments: argparse.Namespace,
+    executable: pathlib.Path,
+    output: pathlib.Path,
+) -> list[str]:
+    command = [str(executable), "benchmark", arguments.runtime]
+    values = (
+        ("--base-url", arguments.base_url),
+        ("--output-directory", output),
+        ("--api-key-file", arguments.api_key_file),
+        ("--ca-cert-file", arguments.ca_cert_file),
+        ("--container", arguments.container),
+        ("--store-root", arguments.store_root),
+        ("--launch-directory", arguments.launch_directory),
+        ("--measured-commit", arguments.measured_commit),
+        ("--source-attestation", arguments.source_attestation),
+        ("--watchdog-trip-file", arguments.watchdog_trip_file),
+        ("--timeout", arguments.timeout),
+    )
+    for flag, value in values:
+        if value is not None:
+            command.extend([flag, str(value)])
+    for selector in ("c1", "c2", "c4", "c8", "c16"):
+        if getattr(arguments, selector):
+            command.append(f"--{selector}")
+    for context in ("32k", "64k", "128k", "256k"):
+        if getattr(arguments, f"context_{context}"):
+            command.append(f"--{context}")
+    return command
+
+
+def _mark_benchmark_job(
+    job_id: str, state_name: str, *, error: str | None = None
+) -> dict[str, Any]:
+    try:
+        return benchmark_jobs.mark(job_id, state_name, error=error)
+    except benchmark_jobs.BenchmarkJobError as failure:
+        raise LetsInferError(str(failure)) from failure
+
+
 def benchmark_runtime(arguments: argparse.Namespace) -> int:
     """Run the generic sealed matrix for one installed runtime."""
+    selectors = any(
+        getattr(arguments, name)
+        for name in ("c1", "c2", "c4", "c8", "c16")
+    ) or any(
+        getattr(arguments, f"context_{context}")
+        for context in ("32k", "64k", "128k", "256k")
+    )
+    if arguments.runtime is None:
+        if selectors or arguments.list or arguments.detach or arguments.job_worker:
+            raise LetsInferError(
+                "benchmark workload options require a runtime name"
+            )
+        return _benchmark_job_snapshot(machine=arguments.json)
+    if arguments.runtime == "stop":
+        if selectors or arguments.list or arguments.detach or arguments.json:
+            raise LetsInferError("benchmark stop does not accept workload options")
+        return _benchmark_stop()
+    if arguments.json:
+        raise LetsInferError("--json is available only for benchmark status")
+    if arguments.list and arguments.detach:
+        raise LetsInferError("--detach cannot be combined with --list")
     manifest_path, manifest = resolve_model(arguments.runtime, None)
     root = manifest_source_root(manifest_path)
     verify_release_sources(manifest, root)
@@ -9623,21 +9849,73 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                 config["watchdog_local_controller_key_file"],
             ]
         )
-    if not arguments.list and arguments.output_directory is None:
+    output: pathlib.Path | None = arguments.output_directory
+    if not arguments.list and output is None:
         runtime_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", arguments.runtime).strip("-")
         if not runtime_name:
             runtime_name = "runtime"
         stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         output = pathlib.Path.home() / ".cache/letsinfer/benchmarks" / f"{runtime_name}-{stamp}"
         command.extend(["--output-directory", str(output)])
+    if arguments.job_worker:
+        command.extend(["--progress-file", str(benchmark_jobs.progress_path())])
 
     if arguments.list:
         run_passthrough(command)
+    elif arguments.job_worker:
+        if not isinstance(arguments.job_id, str) or not arguments.job_id:
+            raise LetsInferError("benchmark worker has no job identity")
+        _mark_benchmark_job(arguments.job_id, "running")
+        previous_term = signal.getsignal(signal.SIGTERM)
+        previous_int = signal.getsignal(signal.SIGINT)
+
+        def cancel_benchmark(_signal: int, _frame: Any) -> None:
+            raise _BenchmarkCancelled("benchmark cancellation requested")
+
+        signal.signal(signal.SIGTERM, cancel_benchmark)
+        signal.signal(signal.SIGINT, cancel_benchmark)
+        try:
+            _run_benchmark_with_service_isolation(
+                command,
+                protection_config=config,
+                cleanup_command=[
+                    str(letsinfer_bin),
+                    "stop",
+                    "--name",
+                    arguments.container or "letsinfer-benchmark",
+                ],
+            )
+        except _BenchmarkCancelled:
+            _mark_benchmark_job(arguments.job_id, "cancelled")
+            return 0
+        except BaseException as error:
+            _mark_benchmark_job(
+                arguments.job_id,
+                "failed",
+                error=f"{type(error).__name__}: {error}",
+            )
+            raise
+        else:
+            _mark_benchmark_job(arguments.job_id, "completed")
+        finally:
+            signal.signal(signal.SIGTERM, previous_term)
+            signal.signal(signal.SIGINT, previous_int)
     else:
-        _run_benchmark_with_service_isolation(
-            command,
-            protection_config=config,
+        assert output is not None
+        worker_command = _benchmark_self_command(arguments, letsinfer_bin, output)
+        try:
+            state = benchmark_jobs.start(
+                worker_command,
+                runtime=arguments.runtime,
+                output_directory=str(output),
+            )
+        except benchmark_jobs.BenchmarkJobError as error:
+            raise LetsInferError(str(error)) from error
+        ui.Terminal(sys.stderr).status(
+            f"Benchmark started · job {state['job_id'][:8]}"
         )
+        if not arguments.detach:
+            _follow_benchmark_job(state["job_id"])
     return 0
 
 
@@ -9645,6 +9923,7 @@ def _run_benchmark_with_service_isolation(
     command: Sequence[str],
     *,
     protection_config: dict[str, Any] | None = None,
+    cleanup_command: Sequence[str] | None = None,
 ) -> None:
     """Suspend an active engine while a benchmark owns the inference host."""
     if protection_config is not None and protection_trip_latched(protection_config):
@@ -9688,6 +9967,14 @@ def _run_benchmark_with_service_isolation(
             protection_config is not None
             and protection_trip_latched(protection_config)
         )
+        if cleanup_command is not None:
+            cleanup = run(cleanup_command, check=False)
+            if cleanup.returncode != 0:
+                detail = (cleanup.stderr or cleanup.stdout).strip()
+                restore_errors.append(
+                    "remove temporary benchmark container: "
+                    + (detail or "unknown cleanup error")
+                )
         if engine_stopped and not benchmark_trip_latched:
             try:
                 run_passthrough(
@@ -9753,6 +10040,118 @@ def list_engines(_: argparse.Namespace) -> int:
             f"api=openai-v1\tcache={adapter.cache_provider}\t"
             f"persistent_cache={str(adapter.persistent_cache).lower()}"
         )
+    return 0
+
+
+def _installed_core_layout() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    """Return (prefix, installer, public launcher) for an immutable install."""
+    try:
+        root = source_root().resolve(strict=True)
+    except OSError as error:
+        raise LetsInferError(f"cannot resolve the installed core: {error}") from error
+    version_root = root.parent
+    product_root = version_root.parent
+    library_root = product_root.parent
+    if product_root.name != "letsinfer" or library_root.name != "lib":
+        raise LetsInferError(
+            "core update must be run from an installed Let's Infer command"
+        )
+    prefix = library_root.parent
+    installer = root / "install.sh"
+    if installer.is_symlink() or not installer.is_file():
+        raise LetsInferError("the installed core has no trusted release installer")
+    launcher = (
+        pathlib.Path("/usr/local/bin/letsinfer")
+        if prefix == pathlib.Path("/opt/letsinfer")
+        else prefix / "bin/letsinfer"
+    )
+    return prefix, installer, launcher
+
+
+def update_core(arguments: argparse.Namespace) -> int:
+    """Install a signed core release without changing any runtime selection."""
+    try:
+        active_benchmark = benchmark_jobs.active_state()
+    except benchmark_jobs.BenchmarkJobError as error:
+        raise LetsInferError(str(error)) from error
+    if active_benchmark is not None:
+        raise LetsInferError(
+            "core update is unavailable while a benchmark is active; "
+            "run `letsinfer benchmark stop` first"
+        )
+    prefix, installer, launcher = _installed_core_layout()
+    command = ["/bin/sh", str(installer), "--no-setup"]
+    if prefix != pathlib.Path("/opt/letsinfer"):
+        command.extend(["--prefix", str(prefix)])
+    if arguments.version is not None:
+        command.extend(["--version", arguments.version])
+    run_passthrough(command)
+    if launcher.is_symlink():
+        try:
+            launcher.resolve(strict=True)
+        except OSError as error:
+            raise LetsInferError(
+                f"updated core launcher is unavailable: {error}"
+            ) from error
+    elif not launcher.is_file():
+        raise LetsInferError(f"updated core launcher is unavailable: {launcher}")
+    run_passthrough([str(launcher), "core-rebind"])
+    return 0
+
+
+def rebind_core_services(_: argparse.Namespace) -> int:
+    """Bind existing node services to this core without selecting a runtime."""
+    if not site_identity_path().is_file():
+        print(f"CORE {PRODUCT_VERSION} services=none runtimes=unchanged")
+        return 0
+    config_path = default_service_config_path()
+    if config_path.is_file():
+        if platform.system() != "Linux":
+            raise LetsInferError(
+                "resident inference service rebinding is currently supported on Linux"
+            )
+        previous = read_service_config(config_path)
+        _, manifest = configured_release(previous)
+        bound = bind_config_to_control_bundle(previous)
+        was_active = _unit_enabled_active(SERVICE_NAME)[1] == "active"
+        install_user_service(
+            config_path,
+            bound,
+            manifest,
+            no_start=not was_active,
+        )
+        print(
+            f"CORE {PRODUCT_VERSION} services=rebound "
+            f"runtime={bound['model']} runtimes=unchanged"
+        )
+        return 0
+
+    identity = read_site_identity()
+    site_state = _unit_enabled_active(SITE_SERVICE_NAME)
+    gateway_state = _unit_enabled_active(GATEWAY_SERVICE_NAME)
+    watchdog_state = _unit_enabled_active(SERVICE_NAME)
+    if all(
+        enabled == "not-found" and active == "inactive"
+        for enabled, active in (site_state, gateway_state, watchdog_state)
+    ):
+        print(f"CORE {PRODUCT_VERSION} services=none runtimes=unchanged")
+        return 0
+    if site_state[0] != "not-found" or site_state[1] == "active":
+        install_site_service_only(
+            no_start=site_state[1] != "active",
+            executable_root=source_root(),
+        )
+    if platform.system() == "Linux" and (
+        watchdog_state[0] != "not-found" or watchdog_state[1] == "active"
+    ):
+        install_core_watchdog_service(identity, replace_active=True)
+    if identity.role == "coordinator" and (
+        gateway_state[0] != "not-found" or gateway_state[1] == "active"
+    ):
+        install_core_gateway_service(
+            executable_root=source_root(), replace_active=True
+        )
+    print(f"CORE {PRODUCT_VERSION} services=rebound runtimes=unchanged")
     return 0
 
 
@@ -12246,6 +12645,14 @@ def parser() -> argparse.ArgumentParser:
     hardware_probe.add_argument("--catalog")
     hardware_probe.set_defaults(action=hardware, action_id="hardware")
 
+    updating = subcommands.add_parser(
+        "update", help="update Let's Infer core without changing runtimes"
+    )
+    updating.add_argument(
+        "--version", help="install this exact stable or release-candidate version"
+    )
+    updating.set_defaults(action=update_core, action_id="update")
+
     runtime_listing = subcommands.add_parser(
         "runtimes", help="list installed immutable runtime packs"
     )
@@ -12324,9 +12731,13 @@ def parser() -> argparse.ArgumentParser:
     acquiring.set_defaults(action=acquire, action_id="acquire")
 
     benchmarking = subcommands.add_parser(
-        "benchmark", help="run a runtime's sealed isolated benchmark matrix"
+        "benchmark", help="start, inspect, or stop a durable runtime benchmark"
     )
-    benchmarking.add_argument("runtime")
+    benchmarking.add_argument(
+        "runtime",
+        nargs="?",
+        help="installed runtime, or `stop` to cancel the active benchmark",
+    )
     benchmarking.add_argument("--base-url")
     benchmarking.add_argument("--output-directory", type=pathlib.Path)
     benchmarking.add_argument("--api-key-file", type=pathlib.Path)
@@ -12347,6 +12758,16 @@ def parser() -> argparse.ArgumentParser:
     benchmarking.add_argument(
         "--list", action="store_true", help="validate and print cells without inference"
     )
+    benchmarking.add_argument(
+        "--detach",
+        action="store_true",
+        help="start the benchmark without attaching to its live progress",
+    )
+    benchmarking.add_argument(
+        "--json", action="store_true", help="emit machine-readable benchmark status"
+    )
+    benchmarking.add_argument("--job-worker", action="store_true", help=argparse.SUPPRESS)
+    benchmarking.add_argument("--job-id", help=argparse.SUPPRESS)
     benchmarking.set_defaults(action=benchmark_runtime, action_id="benchmark")
 
     installing = subcommands.add_parser(
@@ -12665,7 +13086,15 @@ def parser() -> argparse.ArgumentParser:
     site_agent.add_argument("--listen", default="0.0.0.0")
     site_agent.add_argument("--port", type=int, default=SITE_CONTROL_PORT)
     site_agent.set_defaults(action=site_agent_command, action_id="site-agent")
-    internal_commands = {"service-start", "service-stop", "gateway", "site-agent"}
+    core_rebind = subcommands.add_parser("core-rebind", help=argparse.SUPPRESS)
+    core_rebind.set_defaults(action=rebind_core_services, action_id="core-rebind")
+    internal_commands = {
+        "service-start",
+        "service-stop",
+        "gateway",
+        "site-agent",
+        "core-rebind",
+    }
     subcommands._choices_actions[:] = [
         choice
         for choice in subcommands._choices_actions

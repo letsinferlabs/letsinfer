@@ -24,15 +24,29 @@ class RuntimePackTests(unittest.TestCase):
     def test_benchmark_model_identity_binds_exact_file_or_snapshot(self) -> None:
         self.assertEqual(
             runtime_packs.benchmark_model_sha256(
-                {"model": {"sha256": "a" * 64}}
+                {
+                    "model": {"artifact": "model"},
+                    "artifacts": [
+                        {
+                            "name": "model",
+                            "repository": "owner/model",
+                            "revision": "b" * 40,
+                            "sha256": "a" * 64,
+                        }
+                    ],
+                }
             ),
             "a" * 64,
         )
         snapshot = {
-            "model": {
-                "repository": "owner/model",
-                "revision": "b" * 40,
-            }
+            "model": {"artifact": "model"},
+            "artifacts": [
+                {
+                    "name": "model",
+                    "repository": "owner/model",
+                    "revision": "b" * 40,
+                }
+            ],
         }
         expected = hashlib.sha256(
             runtime_packs.canonical_bytes(
@@ -131,7 +145,7 @@ class RuntimePackTests(unittest.TestCase):
             "target": "fixture-unified",
             "status": "stable",
             "release_manifest": "release.json",
-            "core_compatibility": {"api": 1},
+            "core_compatibility": {"api": 2},
         }
         (source / "runtime.json").write_text(
             json.dumps(config), encoding="utf-8"
@@ -186,6 +200,13 @@ class RuntimePackTests(unittest.TestCase):
             config_path.write_text(json.dumps(config), encoding="utf-8")
             with self.assertRaisesRegex(
                 runtime_packs.RuntimePackError, "core_compatibility.api"
+            ):
+                runtime_packs.describe_source(source)
+
+            config["core_compatibility"]["api"] = 1
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "must be 2"
             ):
                 runtime_packs.describe_source(source)
 

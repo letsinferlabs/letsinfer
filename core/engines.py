@@ -50,6 +50,8 @@ class EngineLaunch:
 
 
 ENVIRONMENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+ARTIFACT_NAME_RE = re.compile(r"[a-z][a-z0-9._-]{0,62}")
+ARTIFACT_REFERENCE_RE = re.compile(r"\$\{artifact:([a-z][a-z0-9._-]{0,62})\}")
 PROTECTED_ENVIRONMENT_NAMES = {
     "HF_HOME",
     "HF_HUB_OFFLINE",
@@ -57,7 +59,6 @@ PROTECTED_ENVIRONMENT_NAMES = {
     "PIP_NO_CACHE_DIR",
     "PYTHONPATH",
     "VLLM_API_KEY",
-    "DS4_DSPARK_MODEL",
     "DS4_LETSINFER_CACHE",
     "DS4_LETSINFER_CACHE_DIR",
     "DS4_LETSINFER_CACHE_LIB",
@@ -104,7 +105,7 @@ ADAPTERS = {
     ),
     "dwarfstar": EngineAdapter(
         name="dwarfstar",
-        model_format="dwarfstar-gguf-pair",
+        model_format="gguf-file",
         cache_provider="dwarfstar-letsinfer-prefix-v1",
         requires_runtime_plugins=True,
         persistent_cache=True,
@@ -202,11 +203,92 @@ def _huggingface_artifact(model: dict[str, Any], where: str) -> None:
         repository,
     ):
         raise EngineManifestError(f"{where}.repository must be one exact owner/name")
-    cache_repository = _require(model, "cache_repository", str, where)
-    expected_cache = f"models--{repository.replace('/', '--')}"
-    if cache_repository != expected_cache:
+
+
+def artifact_cache_repository(artifact: dict[str, Any]) -> str:
+    """Return Hugging Face's deterministic cache directory for an artifact."""
+    return f"models--{artifact['repository'].replace('/', '--')}"
+
+
+def artifacts_for(manifest: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Return declared artifacts in their validated deterministic order."""
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise EngineManifestError("manifest.artifacts must be an array")
+    return tuple(artifacts)
+
+
+def artifact_for(manifest: dict[str, Any], name: str) -> dict[str, Any]:
+    matches = [
+        artifact
+        for artifact in artifacts_for(manifest)
+        if artifact.get("name") == name
+    ]
+    if len(matches) != 1:
+        raise EngineManifestError(f"manifest references unknown artifact {name!r}")
+    return matches[0]
+
+
+def _validate_artifacts(manifest: dict[str, Any], adapter: EngineAdapter) -> None:
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise EngineManifestError("manifest.artifacts must be a non-empty array")
+
+    names: list[str] = []
+    for index, artifact in enumerate(artifacts):
+        where = f"manifest.artifacts[{index}]"
+        if not isinstance(artifact, dict):
+            raise EngineManifestError(f"{where} must be an object")
+        name = _require(artifact, "name", str, where)
+        if ARTIFACT_NAME_RE.fullmatch(name) is None:
+            raise EngineManifestError(
+                f"{where}.name must be a lowercase portable artifact name"
+            )
+        if name in names:
+            raise EngineManifestError(
+                f"manifest.artifacts contains duplicate name {name!r}"
+            )
+        names.append(name)
+
+        artifact_format = _require(artifact, "format", str, where)
+        common_fields = {"name", "format", "repository", "revision"}
+        if artifact_format == "huggingface-snapshot":
+            expected_fields = common_fields
+        elif artifact_format == "gguf-file":
+            expected_fields = common_fields | {"filename", "sha256"}
+            if "bytes" in artifact:
+                expected_fields.add("bytes")
+        else:
+            raise EngineManifestError(
+                f"{where}.format must be huggingface-snapshot or gguf-file"
+            )
+        if set(artifact) != expected_fields:
+            raise EngineManifestError(
+                f"{where} must contain exactly "
+                + ", ".join(sorted(expected_fields))
+            )
+        _huggingface_artifact(artifact, where)
+        revision = _require(artifact, "revision", str, where)
+        if len(revision) != 40 or any(
+            character not in "0123456789abcdef" for character in revision
+        ):
+            raise EngineManifestError(
+                f"{where}.revision must be an exact 40-hex revision"
+            )
+        if artifact_format == "gguf-file":
+            _gguf_artifact(artifact, where)
+            if "bytes" in artifact:
+                _positive_int(artifact, "bytes", where)
+
+    primary = manifest["model"]["artifact"]
+    if names[0] != primary or names[1:] != sorted(names[1:]):
         raise EngineManifestError(
-            f"{where}.cache_repository must be {expected_cache!r}"
+            "manifest.artifacts must put manifest.model.artifact first and sort "
+            "remaining artifacts by name"
+        )
+    if artifact_for(manifest, primary)["format"] != adapter.model_format:
+        raise EngineManifestError(
+            "manifest.model.artifact format must match manifest.engine.model_format"
         )
 
 
@@ -284,77 +366,23 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
             raise EngineManifestError(str(error)) from error
 
     model = manifest["model"]
-    model_fields = {
-        "alias",
-        "id",
-        "revision",
-        "cache_repository",
-        "acquisition_image",
-    }
-    if adapter.model_format == "huggingface-snapshot":
-        model_fields.add("drafter")
-    elif adapter.model_format == "gguf-file":
-        model_fields.update({"filename", "sha256"})
-    elif adapter.model_format == "dwarfstar-gguf-pair":
-        model_fields.update({"repository", "filename", "sha256", "bytes", "drafter"})
+    model_fields = {"alias", "id", "artifact", "acquisition_image"}
     unknown_model_fields = set(model) - model_fields
     if unknown_model_fields:
         raise EngineManifestError(
             "manifest.model has unsupported fields: "
             + ", ".join(sorted(unknown_model_fields))
         )
-    if adapter.model_format in {"gguf-file", "dwarfstar-gguf-pair"}:
-        _gguf_artifact(model, "manifest.model")
-    if adapter.model_format == "huggingface-snapshot" and "drafter" in model:
-        drafter = _require(model, "drafter", dict, "manifest.model")
-        expected_drafter_fields = {
-            "repository",
-            "cache_repository",
-            "revision",
-        }
-        if set(drafter) != expected_drafter_fields:
-            raise EngineManifestError(
-                "manifest.model.drafter must contain exactly "
-                + ", ".join(sorted(expected_drafter_fields))
-            )
-        _huggingface_artifact(drafter, "manifest.model.drafter")
-        revision = _require(
-            drafter, "revision", str, "manifest.model.drafter"
+    _require(model, "alias", str, "manifest.model")
+    _require(model, "id", str, "manifest.model")
+    primary = _require(model, "artifact", str, "manifest.model")
+    if ARTIFACT_NAME_RE.fullmatch(primary) is None:
+        raise EngineManifestError(
+            "manifest.model.artifact must be a lowercase portable artifact name"
         )
-        if len(revision) != 40 or any(
-            character not in "0123456789abcdef" for character in revision
-        ):
-            raise EngineManifestError(
-                "manifest.model.drafter.revision must be an exact 40-hex revision"
-            )
-    if adapter.model_format == "dwarfstar-gguf-pair":
-        _huggingface_artifact(model, "manifest.model")
-        _positive_int(model, "bytes", "manifest.model")
-        drafter = _require(model, "drafter", dict, "manifest.model")
-        expected_drafter_fields = {
-            "repository",
-            "cache_repository",
-            "revision",
-            "filename",
-            "sha256",
-            "bytes",
-        }
-        if set(drafter) != expected_drafter_fields:
-            raise EngineManifestError(
-                "manifest.model.drafter must contain exactly "
-                + ", ".join(sorted(expected_drafter_fields))
-            )
-        _huggingface_artifact(drafter, "manifest.model.drafter")
-        _require(drafter, "revision", str, "manifest.model.drafter")
-        if len(drafter["revision"]) != 40 or any(
-            character not in "0123456789abcdef"
-            for character in drafter["revision"]
-        ):
-            raise EngineManifestError(
-                "manifest.model.drafter.revision must be an exact 40-hex revision"
-            )
-        _gguf_artifact(drafter, "manifest.model.drafter")
-        _positive_int(drafter, "bytes", "manifest.model.drafter")
+    _validate_artifacts(manifest, adapter)
+    if arguments is not None:
+        expand_artifact_references(manifest, arguments)
 
     _require(manifest, "serving", dict, "manifest")
     cache = _require(manifest, "cache", dict, "manifest")
@@ -494,31 +522,40 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
     return adapter
 
 
-def _artifact_container_path(model: dict[str, Any]) -> str:
+def _artifact_container_path(artifact: dict[str, Any]) -> str:
     snapshot = (
-        f"/root/.cache/huggingface/hub/{model['cache_repository']}"
-        f"/snapshots/{model['revision']}"
+        f"/root/.cache/huggingface/hub/{artifact_cache_repository(artifact)}"
+        f"/snapshots/{artifact['revision']}"
     )
-    if "filename" in model:
-        return f"{snapshot}/{model['filename']}"
+    if artifact["format"] == "gguf-file":
+        return f"{snapshot}/{artifact['filename']}"
     return snapshot
 
 
+def artifact_container_path(manifest: dict[str, Any], name: str) -> str:
+    return _artifact_container_path(artifact_for(manifest, name))
+
+
 def model_container_path(manifest: dict[str, Any]) -> str:
-    return _artifact_container_path(manifest["model"])
+    return artifact_container_path(manifest, manifest["model"]["artifact"])
 
 
-def drafter_container_path(manifest: dict[str, Any]) -> str:
-    drafter = manifest["model"].get("drafter")
-    if not isinstance(drafter, dict):
-        raise EngineManifestError("manifest does not declare a drafter artifact")
-    return _artifact_container_path(drafter)
-
-
-def dwarfstar_drafter_container_path(manifest: dict[str, Any]) -> str:
-    if adapter_for(manifest).name != "dwarfstar":
-        raise EngineManifestError("DwarfStar drafter path requested for another engine")
-    return drafter_container_path(manifest)
+def expand_artifact_references(
+    manifest: dict[str, Any], tokens: tuple[str, ...] | list[str]
+) -> tuple[str, ...]:
+    """Resolve whole-token artifact references to read-only container paths."""
+    resolved: list[str] = []
+    for token in tokens:
+        match = ARTIFACT_REFERENCE_RE.fullmatch(token)
+        if match is not None:
+            resolved.append(artifact_container_path(manifest, match.group(1)))
+        elif "${artifact:" in token:
+            raise EngineManifestError(
+                "artifact references must occupy one complete engine argument token"
+            )
+        else:
+            resolved.append(token)
+    return tuple(resolved)
 
 
 def _compact_json(value: Any) -> str:
@@ -626,10 +663,6 @@ def _sglang_launch(manifest: dict[str, Any], serving: dict[str, Any], port: int)
         "/tmp/letsinfer-sglang.yaml",
         "--enable-cache-report",
     ]
-    if "drafter" in model:
-        command.extend(
-            ["--speculative-draft-model-path", drafter_container_path(manifest)]
-        )
     if provider != "sglang-radix-v1":
         command.extend(
             [
@@ -710,7 +743,6 @@ def _sglang_launch(manifest: dict[str, Any], serving: dict[str, Any], port: int)
                 "--hicache-storage-prefetch-policy",
                 "--hicache-storage-backend-extra-config",
                 "--enable-cache-report",
-                "--speculative-draft-model-path",
             }
         ),
     )
@@ -798,8 +830,6 @@ def _dwarfstar_launch(
         "/opt/dwarfstar/ds4-server",
         "--model",
         model_container_path(manifest),
-        "--dspark",
-        dwarfstar_drafter_container_path(manifest),
         "--host",
         "127.0.0.1",
         "--port",
@@ -813,7 +843,6 @@ def _dwarfstar_launch(
     environment = (
         ("HF_HOME", "/root/.cache/huggingface"),
         ("HF_HUB_OFFLINE", "1"),
-        ("DS4_DSPARK_MODEL", dwarfstar_drafter_container_path(manifest)),
         ("DS4_LETSINFER_CACHE", "1"),
         ("DS4_LETSINFER_CACHE_DIR", "/root/.cache/letsinfer-prefix-store/dwarfstar"),
         ("DS4_LETSINFER_CACHE_LIB", "/plugins/libletsinfer_prefix_capi.so"),
@@ -836,7 +865,6 @@ def _dwarfstar_launch(
         protected_arguments=frozenset(
             {
                 "--model",
-                "--dspark",
                 "--host",
                 "--port",
                 "--mem-floor-gb",
@@ -872,6 +900,7 @@ def _apply_runtime_arguments(
     if tokens is None:
         return launch
     try:
+        tokens = expand_artifact_references(manifest, tokens)
         parent = overlay_clauses(
             launch.command[launch.engine_argument_offset :]
         )

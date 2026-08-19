@@ -47,6 +47,15 @@ the host. Exact identities provide cross-runtime deduplication; missing
 dependencies download by default and `--no-download` makes their absence an
 error.
 
+Use the closed named-artifact contract: `model.artifact` selects the primary
+served model, while top-level `artifacts` lists the primary first and every
+additional exact dependency in deterministic name order. Give each dependency
+a runtime-defined portable name and immutable Hugging Face revision; GGUF
+entries also pin the contained filename and SHA-256. Bind non-primary artifacts
+to native engine options only with whole-token `${artifact:name}` values in
+`engine.arguments`. Do not add semantic fields such as `drafter` to `model` or
+teach core what an artifact role means.
+
 Scrub nested Git metadata, credentials, private prompts, machine paths, generated evidence, weights, caches, and unrelated upstream documentation. Preserve all source and licenses necessary to modify and rebuild the customized engine.
 
 ## Define one production recipe

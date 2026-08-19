@@ -29,10 +29,12 @@
   },
   "engine": {
     "name": "dwarfstar",
-    "model_format": "dwarfstar-gguf-pair",
+    "model_format": "gguf-file",
     "api_protocol": "openai-v1",
     "cache_provider": "dwarfstar-letsinfer-prefix-v1",
     "arguments": [
+      "--dspark",
+      "${artifact:drafter}",
       "--cuda",
       "--no-mtp",
       "--ctx",
@@ -80,22 +82,29 @@
   "model": {
     "alias": "fixture-paired-model",
     "id": "example/paired-model",
-    "repository": "example/base-model",
-    "revision": "3333333333333333333333333333333333333333",
-    "cache_repository": "models--example--base-model",
-    "filename": "base.gguf",
-    "bytes": 1024,
-    "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
-    "drafter": {
+    "artifact": "model",
+    "acquisition_image": "registry.example/acquirer@sha256:7777777777777777777777777777777777777777777777777777777777777777"
+  },
+  "artifacts": [
+    {
+      "name": "model",
+      "format": "gguf-file",
+      "repository": "example/base-model",
+      "revision": "3333333333333333333333333333333333333333",
+      "filename": "base.gguf",
+      "bytes": 1024,
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
+      "name": "drafter",
+      "format": "gguf-file",
       "repository": "example/drafter-model",
       "revision": "4444444444444444444444444444444444444444",
-      "cache_repository": "models--example--drafter-model",
       "filename": "drafter.gguf",
       "bytes": 512,
       "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
-    },
-    "acquisition_image": "registry.example/acquirer@sha256:7777777777777777777777777777777777777777777777777777777777777777"
-  },
+    }
+  ],
   "image": {
     "distribution": "local-image-id",
     "reference": "sha256:9999999999999999999999999999999999999999999999999999999999999999",

@@ -146,8 +146,10 @@ verification happens before parsing any target or runtime choice.
 An explicitly selected unsigned local file is a development trust boundary,
 not a remotely trusted catalog. The ordinary user chooses only the model;
 `--engine` remains available to power users.
-Existing installations remain locked to immutable content until the user runs
-`letsinfer upgrade`.
+Existing runtime installations remain locked to immutable content until the
+user runs `letsinfer upgrade`. Core updates are independent:
+`letsinfer update` installs a signed core release and rebinds services without
+changing runtime selections, models, caches, or evidence.
 
 Let's Infer maps targets by capabilities, not hostnames. `letsinfer hardware` probes
 platform, NVIDIA compute capability, GPU count and partitioning, memory
@@ -218,6 +220,10 @@ configuration surface for context, parallelism, batching, attention,
 speculation, kernels, and target tuning. `serving` is deliberately limited to
 the qualified connection, active-request, and context admission envelope;
 parallel structured engine settings are rejected.
+The release names one primary model artifact and may declare any number of
+additional exact dependencies. Runtime arguments bind those dependencies to
+upstream flags with whole-token `${artifact:name}` references; core only
+acquires, verifies, deduplicates, mounts, and resolves their paths.
 
 - vLLM consumes exact Hugging Face snapshots and can use Let's Infer's durable
   prefix store and verified connector.
@@ -226,9 +232,10 @@ parallel structured engine settings are rejected.
   gateway admission and generic benchmarks.
 - llama.cpp consumes an off-the-shelf GGUF from an exact repository revision
   and verifies the GGUF SHA-256 before launch.
-- DwarfStar consumes an exact base/drafter GGUF pair, runs its native server
-  only on container loopback, and uses a small manifest-pinned gateway for
-  Let's Infer TLS, API-key enforcement, health, and bounded request admission.
+- DwarfStar selects exact named GGUF artifacts through its runtime recipe,
+  runs its native server only on container loopback, and uses a small
+  manifest-pinned gateway for Let's Infer TLS, API-key enforcement, health,
+  and bounded request admission.
 
 Serving configurations and evidence are engine-specific. A checkpoint and
 recipe qualified for one engine are not considered qualified for another, and
@@ -559,6 +566,9 @@ letsinfer upgrade <runtime> [--dry-run]
 letsinfer rollback <runtime> [--dry-run]
 letsinfer acquire <model> [--engine vllm|sglang|llama.cpp|dwarfstar]
 letsinfer benchmark <runtime> [--c1|--c2|--c4|--c8|--c16] [--32k|--64k|--128k|--256k]
+letsinfer benchmark [--json]
+letsinfer benchmark stop
+letsinfer update [--version <version>]
 letsinfer engines
 letsinfer releases
 letsinfer verify <model> [--engine vllm|sglang|llama.cpp|dwarfstar]

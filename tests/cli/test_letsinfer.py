@@ -757,18 +757,26 @@ class CommandTests(unittest.TestCase):
             "sglang-anthropic-count-tokens-v1",
         )
 
-    def test_sglang_drafter_is_exactly_acquired_and_injected(self) -> None:
+    def test_named_artifact_reference_is_exactly_acquired_and_expanded(self) -> None:
         manifest = self.engine_manifest("sglang")
-        manifest["model"]["drafter"] = {
+        manifest["artifacts"].append({
+            "name": "draft",
+            "format": "huggingface-snapshot",
             "repository": "example/dflash-drafter",
             "revision": "c" * 40,
-            "cache_repository": "models--example--dflash-drafter",
-        }
+        })
+        manifest["engine"]["arguments"].extend(
+            ["--speculative-draft-model-path", "${artifact:draft}"]
+        )
         letsinfer.validate_manifest(manifest)
 
         artifacts = letsinfer.model_artifacts(manifest)
-        self.assertEqual([artifact["role"] for artifact in artifacts], ["model", "drafter"])
+        self.assertEqual([artifact["name"] for artifact in artifacts], ["model", "draft"])
         self.assertEqual(artifacts[1]["repository"], "example/dflash-drafter")
+        self.assertEqual(
+            artifacts[1]["cache_repository"],
+            "models--example--dflash-drafter",
+        )
 
         launch = letsinfer.launch_for(manifest, manifest["serving"], 8000)
         command = list(launch.command)
@@ -778,17 +786,94 @@ class CommandTests(unittest.TestCase):
             "/root/.cache/huggingface/hub/models--example--dflash-drafter/"
             f"snapshots/{'c' * 40}",
         )
-        self.assertIn("--speculative-draft-model-path", launch.protected_arguments)
+        self.assertNotIn("--speculative-draft-model-path", launch.protected_arguments)
 
         changed = copy.deepcopy(manifest)
-        changed["model"]["drafter"]["revision"] = "main"
+        changed["artifacts"][1]["revision"] = "main"
         with self.assertRaisesRegex(letsinfer.LetsInferError, "exact 40-hex"):
             letsinfer.validate_manifest(changed)
 
         changed = copy.deepcopy(manifest)
-        changed["model"]["drafter"]["cache_repository"] = "models--wrong"
-        with self.assertRaisesRegex(letsinfer.LetsInferError, "cache_repository"):
+        changed["engine"]["arguments"][-1] = "${artifact:missing}"
+        with self.assertRaisesRegex(letsinfer.LetsInferError, "unknown artifact"):
             letsinfer.validate_manifest(changed)
+
+    def test_named_artifact_contract_fails_closed(self) -> None:
+        manifest = self.engine_manifest("sglang")
+        draft = {
+            "name": "draft",
+            "format": "huggingface-snapshot",
+            "repository": "example/draft",
+            "revision": "c" * 40,
+        }
+
+        cases = []
+        changed = copy.deepcopy(manifest)
+        changed["artifacts"] = []
+        cases.append((changed, "non-empty"))
+        changed = copy.deepcopy(manifest)
+        changed["model"]["artifact"] = "missing"
+        cases.append((changed, "put manifest.model.artifact first"))
+        changed = copy.deepcopy(manifest)
+        changed["artifacts"].append(copy.deepcopy(changed["artifacts"][0]))
+        cases.append((changed, "duplicate name"))
+        changed = copy.deepcopy(manifest)
+        changed["artifacts"][0]["name"] = "Bad/Name"
+        changed["model"]["artifact"] = "Bad/Name"
+        cases.append((changed, "portable artifact name"))
+        changed = copy.deepcopy(manifest)
+        changed["artifacts"].extend(
+            [
+                {**draft, "name": "z-draft"},
+                {**draft, "name": "a-draft"},
+            ]
+        )
+        cases.append((changed, "sort remaining artifacts"))
+        changed = copy.deepcopy(manifest)
+        changed["artifacts"].append(draft)
+        changed["engine"]["arguments"].extend(
+            ["--future-path", "prefix-${artifact:draft}"]
+        )
+        cases.append((changed, "complete engine argument token"))
+
+        for changed, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                letsinfer.LetsInferError, message
+            ):
+                letsinfer.validate_manifest(changed)
+
+        changed = self.engine_manifest("llama.cpp")
+        changed["artifacts"][0]["filename"] = "../model.gguf"
+        with self.assertRaisesRegex(letsinfer.LetsInferError, "contained .gguf"):
+            letsinfer.validate_manifest(changed)
+
+        changed = copy.deepcopy(manifest)
+        changed["model"]["drafter"] = draft
+        with self.assertRaisesRegex(letsinfer.LetsInferError, "unsupported fields"):
+            letsinfer.validate_manifest(changed)
+
+        changed = copy.deepcopy(manifest)
+        changed["artifacts"][0]["mount_path"] = "machine-token"
+        with self.assertRaisesRegex(letsinfer.LetsInferError, "contain exactly"):
+            letsinfer.validate_manifest(changed)
+
+    def test_equal_named_artifact_sources_share_one_acquisition(self) -> None:
+        manifest = self.engine_manifest("sglang")
+        manifest["artifacts"].append(
+            {**manifest["artifacts"][0], "name": "replica"}
+        )
+        letsinfer.validate_manifest(manifest)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(letsinfer, "run_passthrough") as run,
+            mock.patch.object(
+                letsinfer,
+                "verify_model_snapshot",
+                return_value=pathlib.Path(directory) / "snapshot",
+            ),
+        ):
+            letsinfer.acquire_model_snapshot(manifest, pathlib.Path(directory))
+        self.assertEqual(run.call_count, 1)
 
     def test_sglang_letsinfer_cache_is_core_owned_and_exactly_configured(self) -> None:
         manifest = self.engine_manifest("sglang")
@@ -911,8 +996,8 @@ class CommandTests(unittest.TestCase):
 
     def test_dwarfstar_drafter_identity_fails_closed(self) -> None:
         manifest = self.engine_manifest("dwarfstar")
-        manifest["model"]["drafter"]["revision"] = "latest"
-        with self.assertRaisesRegex(letsinfer.LetsInferError, "drafter.revision"):
+        manifest["artifacts"][1]["revision"] = "latest"
+        with self.assertRaisesRegex(letsinfer.LetsInferError, "artifacts\[1\].revision"):
             letsinfer.validate_manifest(manifest)
 
     def test_dwarfstar_runtime_tuning_is_opaque_to_core(self) -> None:
@@ -3259,6 +3344,9 @@ class RuntimeCommandTests(unittest.TestCase):
                     "--64k",
                     "--output-directory",
                     "/tmp/evidence",
+                    "--job-worker",
+                    "--job-id",
+                    "fixture-job",
                 ]
             )
             with (
@@ -3299,6 +3387,7 @@ class RuntimeCommandTests(unittest.TestCase):
                 mock.patch.object(
                     letsinfer, "_run_benchmark_with_service_isolation"
                 ) as run,
+                mock.patch.object(letsinfer.benchmark_jobs, "mark"),
                 mock.patch.object(
                     letsinfer, "default_service_config_path", return_value=service_config
                 ),
@@ -3695,7 +3784,7 @@ class RuntimeCommandTests(unittest.TestCase):
                 "target": "fixture-unified",
                 "status": "candidate",
                 "release_manifest": "release.json",
-                "core_compatibility": {"api": 1},
+                "core_compatibility": {"api": 2},
             }
             (source / "runtime.json").write_text(json.dumps(runtime), encoding="utf-8")
             (source / "release.json").write_text(json.dumps(release), encoding="utf-8")
@@ -3765,7 +3854,7 @@ class RuntimeCommandTests(unittest.TestCase):
                 "target": "fixture-unified",
                 "status": "candidate",
                 "release_manifest": "release.json",
-                "core_compatibility": {"api": 1},
+                "core_compatibility": {"api": 2},
             }
             (source / "runtime.json").write_text(json.dumps(runtime), encoding="utf-8")
             (source / "release.json").write_text(json.dumps(release), encoding="utf-8")
@@ -3844,7 +3933,7 @@ class RuntimeCommandTests(unittest.TestCase):
     def test_runtime_manifest_cannot_override_letsinfer_environment(self) -> None:
         release_path = DWARFSTAR_MANIFEST_PATH
         release = json.loads(release_path.read_text(encoding="utf-8"))
-        for name in ("LETSINFER_API_KEY", "DS4_DSPARK_MODEL", "DS4_LETSINFER_CACHE_DIR"):
+        for name in ("LETSINFER_API_KEY", "DS4_LETSINFER_CACHE_DIR"):
             changed = copy.deepcopy(release)
             changed["engine"]["environment"] = {name: "unsafe"}
             with self.subTest(name=name), self.assertRaisesRegex(
@@ -3946,9 +4035,7 @@ class RuntimeCommandTests(unittest.TestCase):
                 manifest = letsinfer.read_json(pathlib.Path(receipt["manifest_path"]))
             self.assertEqual(manifest["image"], parent["image"])
             self.assertEqual(manifest["model"]["id"], parent["model"]["id"])
-            self.assertEqual(
-                manifest["model"]["drafter"], parent["model"]["drafter"]
-            )
+            self.assertEqual(manifest["artifacts"], parent["artifacts"])
             command = list(
                 letsinfer.launch_for(manifest, manifest["serving"], 8000).command
             )

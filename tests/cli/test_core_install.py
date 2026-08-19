@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -81,7 +82,7 @@ class CoreInstallTests(unittest.TestCase):
                         "target": "target",
                         "status": "candidate",
                         "release_manifest": "release.json",
-                        "core_compatibility": {"api": 1},
+                        "core_compatibility": {"api": 2},
                     }
                 ),
                 encoding="utf-8",
@@ -95,6 +96,11 @@ class CoreInstallTests(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
+                env={
+                    **os.environ,
+                    "LETSINFER_CONFIG_HOME": str(root / "config"),
+                    "LETSINFER_DATA_HOME": str(root / "data"),
+                },
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)

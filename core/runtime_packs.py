@@ -31,6 +31,7 @@ from core.orchestration import OrchestrationError, validate_orchestration_contra
 RUNTIME_CONFIG = "runtime.json"
 RUNTIME_DESCRIPTOR = "letsinfer-runtime.json"
 RUNTIME_SCHEMA_VERSION = 2
+CORE_COMPATIBILITY_API = 2
 ARTIFACT_SCHEMA_VERSION = 2
 CATALOG_SCHEMA_VERSION = 3
 DEFAULT_CATALOG_URL = (
@@ -305,11 +306,23 @@ def benchmark_model_sha256(manifest: dict[str, Any]) -> str:
     model = manifest.get("model")
     if not isinstance(model, dict):
         raise RuntimePackError("release model identity is missing")
-    file_sha = model.get("sha256")
+    artifact_name = model.get("artifact")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifact_name, str) or not isinstance(artifacts, list):
+        raise RuntimePackError("release model artifact identity is missing")
+    matches = [
+        artifact
+        for artifact in artifacts
+        if isinstance(artifact, dict) and artifact.get("name") == artifact_name
+    ]
+    if len(matches) != 1:
+        raise RuntimePackError("release model artifact identity is ambiguous")
+    artifact = matches[0]
+    file_sha = artifact.get("sha256")
     if isinstance(file_sha, str) and SHA256_RE.fullmatch(file_sha):
         return file_sha
-    repository = model.get("repository") or model.get("id")
-    revision = model.get("revision")
+    repository = artifact.get("repository")
+    revision = artifact.get("revision")
     if not isinstance(repository, str) or not repository or not isinstance(revision, str):
         raise RuntimePackError("release model snapshot identity is incomplete")
     return hashlib.sha256(
@@ -525,9 +538,11 @@ def _metadata(value: dict[str, Any], *, descriptor: bool) -> dict[str, Any]:
     if (
         set(compatibility) != {"api"}
         or type(compatibility.get("api")) is not int
-        or compatibility.get("api") != 1
+        or compatibility.get("api") != CORE_COMPATIBILITY_API
     ):
-        raise RuntimePackError("runtime.core_compatibility.api must be 1")
+        raise RuntimePackError(
+            f"runtime.core_compatibility.api must be {CORE_COMPATIBILITY_API}"
+        )
     if "benchmark" in value:
         validate_benchmark_contract(value["benchmark"])
     if "orchestration" in value:

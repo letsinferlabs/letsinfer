@@ -1031,7 +1031,7 @@ def main() -> int:
     release, engine_name, model_id = common.validate_release_manifest(manifest)
     source_root = pathlib.Path(__file__).resolve().parents[1]
     common.verify_letsinfer_release_sources(manifest, source_root)
-    model_revision = common._manifest_value(manifest, "model.revision")
+    model_revision = common.model_revision(manifest)
     plan, fixture_path, cells, tokenizer = load_plan(
         arguments.plan,
         fixture_path=arguments.fixture_manifest,
