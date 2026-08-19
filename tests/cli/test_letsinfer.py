@@ -163,14 +163,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.7")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.8")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.7"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.8"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -2093,6 +2093,7 @@ class InstallTests(unittest.TestCase):
             self.assertTrue(payload["container"]["model_identity"])
             self.assertTrue(payload["service"]["gateway_health"])
             self.assertTrue(payload["service"]["gateway_authenticated"])
+            self.assertEqual(payload["lifecycle"]["state"], "ready")
 
     def test_model_identity_uses_the_public_alias_not_upstream_repository(self) -> None:
         manifest = {

@@ -183,6 +183,15 @@ letsinfer uninstall
 starting the protected runtime. The same distinction applies to one-member,
 replicated, and distributed placements.
 
+`status --json` includes one derived `lifecycle` object. Its state is one of
+`starting`, `ready`, `stopping`, `stopped`, `blocked`, `degraded`, or `failed`,
+with a stable machine reason and the observed ready-service count. Transitional
+states are successful status observations, not health failures. The interactive
+card renders startup as `STARTING`: the gateway waits for model identity, the
+engine runs health checks, protection arms after readiness, and the remaining
+unit is described as activating. A protection trip always takes precedence and
+renders `BLOCKED`; terminal engine or Docker health failures render `FAILED`.
+
 `releases` lists installed runtime manifests, not test fixtures or a bundled
 model catalog.
 

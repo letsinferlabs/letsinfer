@@ -146,6 +146,7 @@ def runtime_status(
     service = _mapping(payload.get("service"))
     container = _mapping(payload.get("container"))
     protection = _mapping(payload.get("protection"))
+    lifecycle = _mapping(payload.get("lifecycle"))
     capacity = _mapping(container.get("capacity"))
 
     engine_ready = (
@@ -190,9 +191,26 @@ def runtime_status(
     target.write(
         f"{terminal.paint(terminal.mark, BOLD, YELLOW)}  {header}\n\n"
     )
-    state_color = GREEN if ready else YELLOW
+    lifecycle_state = str(lifecycle.get("state") or ("ready" if ready else "degraded"))
+    state_color = {
+        "ready": GREEN,
+        "starting": CYAN,
+        "stopping": CYAN,
+        "stopped": YELLOW,
+        "blocked": RED,
+        "failed": RED,
+        "degraded": YELLOW,
+    }.get(lifecycle_state, YELLOW)
     state_mark = "●" if terminal.unicode else "*"
-    state = "ONLINE" if ready else "ATTENTION"
+    state = {
+        "ready": "ONLINE",
+        "starting": "STARTING",
+        "stopping": "STOPPING",
+        "stopped": "STOPPED",
+        "blocked": "BLOCKED",
+        "failed": "FAILED",
+        "degraded": "ATTENTION",
+    }.get(lifecycle_state, "ATTENTION")
     state_prefix_width = len(state_mark) + 1 + len(state) + 2
     model = terminal.clip(model, terminal.width - state_prefix_width)
     target.write(
@@ -208,8 +226,15 @@ def runtime_status(
         f"  {terminal.paint(runtime_identity, DIM)}\n\n"
     )
 
-    def row(label: str, ok: bool, state_text: str, detail: str) -> None:
-        color = GREEN if ok else RED
+    def row(
+        label: str,
+        ok: bool,
+        state_text: str,
+        detail: str,
+        *,
+        pending: bool = False,
+    ) -> None:
+        color = CYAN if pending else GREEN if ok else RED
         label_text = terminal.clip(label.upper(), 10).ljust(10)
         state_value = terminal.clip(state_text, 12).ljust(12)
         detail = terminal.clip(detail, terminal.width - 24)
@@ -220,31 +245,63 @@ def runtime_status(
         )
 
     endpoint = str(service.get("gateway_endpoint") or "LAN HTTP · API key")
-    row("API", api_ready, "Ready" if api_ready else "Unavailable", endpoint)
+    starting = lifecycle_state == "starting"
+    row(
+        "API",
+        api_ready,
+        "Ready" if api_ready else "Waiting" if starting else "Unavailable",
+        (
+            f"model route pending · {endpoint}"
+            if starting and service.get("gateway_health") is True
+            else endpoint
+        ),
+        pending=starting and not api_ready,
+    )
     context = _context(capacity.get("max_context_tokens"))
     active = capacity.get("max_active_requests")
     active_detail = f" · {active} active" if isinstance(active, int) else ""
+    engine_state = (
+        "Healthy"
+        if engine_ready
+        else "Starting"
+        if starting
+        else str(container.get("state") or "Unknown").title()
+    )
+    engine_detail = (
+        f"health checks running · Docker {container.get('docker_health') or 'unknown'}"
+        if starting
+        else f"{context}{active_detail}"
+    )
     row(
         "Engine",
         engine_ready,
-        "Healthy" if engine_ready else str(container.get("state") or "Unknown").title(),
-        f"{context}{active_detail}",
+        engine_state,
+        engine_detail,
+        pending=starting and not engine_ready,
     )
     row(
         "Safety",
         safety_ready,
-        "Armed" if safety_ready else "Blocked",
-        "no trip · recovery ready"
-        if safety_ready
-        else "protection needs attention",
+        "Armed" if safety_ready else "Arming" if starting else "Blocked",
+        (
+            "no trip · recovery ready"
+            if safety_ready
+            else "protection will arm when startup completes"
+            if starting
+            else "protection needs attention"
+        ),
+        pending=starting and not safety_ready,
     )
     row(
         "Services",
         services_ready == 5,
-        f"{services_ready}/5",
+        "Starting" if starting else f"{services_ready}/5",
         "all five units active"
         if services_ready == 5
+        else f"engine unit {service.get('engine_active')} · {services_ready}/5 ready"
+        if starting
         else f"{5 - services_ready} unit(s) need attention",
+        pending=starting and services_ready != 5,
     )
     memory = _mib(service.get("memory_current_bytes"))
     memory_limit = _mib(service.get("memory_limit_bytes"))
