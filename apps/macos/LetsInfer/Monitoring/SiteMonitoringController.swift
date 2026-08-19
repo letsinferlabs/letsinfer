@@ -431,6 +431,9 @@ final class SiteMonitoringController: ObservableObject {
         if let placement = currentPlacement(for: snapshot.siteID) {
             enriched = enriched.enriched(with: placement)
         }
+        if let telemetry = telemetryViews[snapshot.siteID]?.telemetry {
+            enriched = enriched.enrichedIfFresh(with: telemetry)
+        }
         if snapshots[enriched.siteID].map({ $0.sampledAt <= enriched.sampledAt }) ?? true {
             snapshots[enriched.siteID] = enriched
         }
@@ -464,7 +467,7 @@ final class SiteMonitoringController: ObservableObject {
     ) {
         telemetryViews[siteID] = envelope
         guard let snapshot = snapshots[siteID] else { return }
-        let enriched = snapshot.enriched(with: envelope.telemetry.aggregate)
+        let enriched = snapshot.enrichedIfFresh(with: envelope.telemetry)
         snapshots[siteID] = enriched
         record(enriched)
     }

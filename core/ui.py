@@ -622,6 +622,117 @@ class Spinner:
                 return
 
 
+class StepProgress:
+    """One bounded TTY owner for truthful multi-stage operations."""
+
+    _UNICODE_FRAMES = Spinner._UNICODE_FRAMES
+    _ASCII_FRAMES = Spinner._ASCII_FRAMES
+
+    def __init__(
+        self,
+        terminal: Terminal,
+        steps: Iterable[str],
+        *,
+        section: str,
+        interval: float = 0.08,
+    ) -> None:
+        self.terminal = terminal
+        self.steps = tuple(steps)
+        if not self.steps:
+            raise ValueError("step progress requires at least one step")
+        self.section = section
+        self.interval = max(0.01, interval)
+        self.current = 0
+        self.failed = False
+        self._frame = 0
+        self._rendered = False
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.terminal.interactive
+
+    def __enter__(self) -> StepProgress:
+        if not self.enabled:
+            return self
+        self.terminal.stream.write(f"{self.terminal.logo(self.section)}\n\n")
+        with self._lock:
+            self._render()
+        self._thread = threading.Thread(
+            target=self._animate,
+            name="letsinfer-cli-steps",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def _row(self, index: int, frame: str) -> str:
+        label = self.terminal.clip(self.steps[index], max(1, self.terminal.width - 5))
+        if index < self.current:
+            mark = "✓" if self.terminal.unicode else "+"
+            return f"{self.terminal.paint(mark, BOLD, GREEN)}  {label}"
+        if index == self.current and self.failed:
+            mark = "✗" if self.terminal.unicode else "x"
+            return (
+                f"{self.terminal.paint(mark, BOLD, RED)}  {label}  "
+                f"{self.terminal.paint('Failed', BOLD, RED)}"
+            )
+        if index == self.current and self.current < len(self.steps):
+            return f"{self.terminal.paint(frame, GREEN)}  {self.terminal.paint(label, BOLD)}"
+        mark = "○" if self.terminal.unicode else "o"
+        return f"{self.terminal.paint(mark, DIM)}  {self.terminal.paint(label, DIM)}"
+
+    def _render(self) -> None:
+        frames = self._UNICODE_FRAMES if self.terminal.unicode else self._ASCII_FRAMES
+        frame = frames[self._frame % len(frames)]
+        if self._rendered:
+            self.terminal.stream.write(f"\033[{len(self.steps)}A")
+        for index in range(len(self.steps)):
+            self.terminal.stream.write(f"{CLEAR_LINE}{self._row(index, frame)}\n")
+        self.terminal.stream.flush()
+        self._rendered = True
+
+    def _animate(self) -> None:
+        while not self._stop.wait(self.interval):
+            with self._lock:
+                if self.failed or self.current >= len(self.steps):
+                    return
+                self._frame += 1
+                try:
+                    self._render()
+                except (BrokenPipeError, OSError, ValueError):
+                    return
+
+    def advance(self) -> None:
+        if self.current >= len(self.steps):
+            raise RuntimeError("step progress is already complete")
+        self.current += 1
+        if self.enabled:
+            with self._lock:
+                self._frame = 0
+                self._render()
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.interval * 4))
+        if self.enabled:
+            with self._lock:
+                if exc_type is not None:
+                    self.failed = True
+                self._render()
+            self.terminal.stream.write("\n")
+            self.terminal.stream.flush()
+        return False
+
+
 class _GuardedWriter:
     def __init__(self, stream: TextIO, spinner: Spinner) -> None:
         self._stream = stream

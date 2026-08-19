@@ -156,7 +156,10 @@ user runs `letsinfer upgrade`. Core updates are independent:
 `letsinfer update` installs a signed core release, safely drains and restores
 active inference around the core-service handoff, and does not rebind the
 runtime's immutable control bundle or change runtime selections, models,
-caches, or evidence. A compatible runtime's exact Watchdog policy is preserved
+caches, or evidence. On an interactive terminal, one three-stage display owns
+download/install, service rebinding, and verification; sudo authentication is
+completed before animation begins. Redirected output retains the plain command
+contract. A compatible runtime's exact Watchdog safety policy is preserved
 when the resident core service is replaced. If the selected runtime is not
 compatible with the new core API, the update succeeds but leaves inference and
 automatic recovery stopped and reports `runtime_state=incompatible-stopped`;
@@ -292,6 +295,13 @@ engine observations remain `null`. The Mac app
 decodes the complete native and aggregate contracts rather than estimating
 tokens from streamed text.
 
+The resident site agent owns one authenticated live Watchdog subscription and
+publishes each one-second sample to the logical-site aggregate immediately;
+the ten-second durable ring flush is not a visibility boundary. The local CLI
+reads that fresh aggregate through the private controller API, so `status`
+does not consume another Watchdog stream. Newer direct Mac samples cannot be
+overwritten by an older controller aggregate.
+
 Clients use a small length-framed protobuf protocol over mutual TLS. They can
 query capabilities, latest state, bounded history, live subscriptions, and
 typed Let's Infer runtime/protection status. The durable status descriptor is
@@ -303,6 +313,11 @@ after 30 seconds without a complete valid request, including when a peer sends
 only a partial frame.
 Connections, frames, query scans, and pending samples are all bounded; slow
 subscribers receive an explicit gap instead of growing an unbounded queue.
+Core reserves 16 concurrent Watchdog telemetry/control streams even when an
+older runtime manifest requests fewer. This bounded control-plane capacity is
+separate from a runtime's inference connection limit (for example, 128 API
+connections) and occupies about 2.1 MiB of fixed frame storage at the C hard
+limit, inside Watchdog's 30 MiB budget.
 The protocol is engine-neutral, so the same watchdog observes vLLM, SGLang,
 llama.cpp, DwarfStar, or a Spark with no running model engine.
 
@@ -656,7 +671,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.15`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.16`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its

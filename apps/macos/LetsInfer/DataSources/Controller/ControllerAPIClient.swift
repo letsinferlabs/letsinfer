@@ -627,6 +627,15 @@ struct SiteTelemetrySnapshot: Decodable, Equatable, Sendable {
     }
 }
 
+extension SiteTelemetrySnapshot {
+    func isAtLeastAsFresh(as date: Date) -> Bool {
+        guard let newest = members.map(\.sample.unixMilliseconds).max() else {
+            return false
+        }
+        return newest >= UInt64(max(0, date.timeIntervalSince1970 * 1_000))
+    }
+}
+
 struct ControllerTelemetryEnvelope: Decodable, Equatable, Sendable {
     let protocolName: String
     let controller: ControllerPrincipal

@@ -1,4 +1,10 @@
 #include "test.h"
+#include "watchdog/server.h"
+
+_Static_assert(WATCHDOG_DEFAULT_MAX_CONTROLLERS == 16u,
+               "Watchdog must reserve the core telemetry stream floor");
+_Static_assert(WATCHDOG_HARD_MAX_CONTROLLERS == 16u,
+               "Watchdog telemetry stream storage must remain bounded");
 
 int watchdog_test_failures = 0;
 

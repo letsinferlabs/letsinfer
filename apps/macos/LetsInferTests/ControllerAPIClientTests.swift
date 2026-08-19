@@ -386,6 +386,19 @@ struct ControllerAPIClientTests {
         #expect(telemetry.telemetry.members.first?.sample.inference.counters.outputTokens == 1024)
         #expect(telemetry.telemetry.members.first?.sample.workload.throttled == false)
         #expect(telemetry.telemetry.members.first?.rates.outputTokensPerSecond == 200)
+        #expect(telemetry.telemetry.isAtLeastAsFresh(
+            as: Date(timeIntervalSince1970: 1_700_000_000)
+        ))
+        #expect(!telemetry.telemetry.isAtLeastAsFresh(
+            as: Date(timeIntervalSince1970: 1_700_000_001)
+        ))
+        let newerDirectSnapshot = activeRuntimeSnapshot.enriched(
+            with: telemetry.telemetry.aggregate
+        )
+        let preservedLiveSnapshot = newerDirectSnapshot.enrichedIfFresh(
+            with: telemetry.telemetry
+        )
+        #expect(preservedLiveSnapshot.metrics.llm.first?.runningRequests == 2)
         let liveSnapshot = activeRuntimeSnapshot.enriched(
             with: telemetry.telemetry.aggregate
         )

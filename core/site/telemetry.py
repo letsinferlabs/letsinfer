@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import re
+import socket
 import ssl
 import stat
 import struct
@@ -18,7 +19,7 @@ import threading
 import time
 import urllib.parse
 import zlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
 from .state import (
@@ -42,6 +43,8 @@ MAX_MEMBERS = 64
 HISTORY_SECONDS = 300
 REQUEST_TIMEOUT_SECONDS = 5
 MAX_RESPONSE_BYTES = 4096
+MAX_WATCHDOG_FRAME_BYTES = 65_536
+WATCHDOG_REQUEST_ID = 1
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -85,6 +88,222 @@ RATE_FIELDS = (
 
 class TelemetryError(RuntimeError):
     """A local sample, signed update, or aggregate is unsafe or invalid."""
+
+
+def _protobuf_varint(value: int) -> bytes:
+    if value < 0:
+        raise TelemetryError("cannot encode a negative protobuf varint")
+    output = bytearray()
+    while value >= 0x80:
+        output.append((value & 0x7f) | 0x80)
+        value >>= 7
+    output.append(value)
+    return bytes(output)
+
+
+def _protobuf_uint(field: int, value: int) -> bytes:
+    return _protobuf_varint(field << 3) + _protobuf_varint(value)
+
+
+def _protobuf_message(field: int, value: bytes) -> bytes:
+    return (
+        _protobuf_varint((field << 3) | 2)
+        + _protobuf_varint(len(value))
+        + value
+    )
+
+
+def _read_protobuf_varint(data: bytes, offset: int) -> tuple[int, int]:
+    value = 0
+    for shift in range(0, 64, 7):
+        if offset >= len(data):
+            raise TelemetryError("Watchdog protobuf varint is truncated")
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 0x7f) << shift
+        if byte & 0x80 == 0:
+            return value, offset
+    raise TelemetryError("Watchdog protobuf varint is oversized")
+
+
+def _protobuf_fields(data: bytes) -> Iterator[tuple[int, int | bytes]]:
+    offset = 0
+    while offset < len(data):
+        key, offset = _read_protobuf_varint(data, offset)
+        field, wire = key >> 3, key & 7
+        if field == 0:
+            raise TelemetryError("Watchdog protobuf field zero is invalid")
+        if wire == 0:
+            value, offset = _read_protobuf_varint(data, offset)
+            yield field, value
+        elif wire == 2:
+            length, offset = _read_protobuf_varint(data, offset)
+            end = offset + length
+            if end > len(data):
+                raise TelemetryError("Watchdog protobuf message is truncated")
+            yield field, data[offset:end]
+            offset = end
+        else:
+            raise TelemetryError(f"Watchdog protobuf wire type {wire} is unsupported")
+
+
+def _protobuf_sint32(value: int) -> int:
+    decoded = (value >> 1) ^ -(value & 1)
+    if not -(2**31) <= decoded < 2**31:
+        raise TelemetryError("Watchdog signed metric is out of range")
+    return decoded
+
+
+def decode_watchdog_protocol_sample(payload: bytes, *, member_id: str) -> dict[str, Any]:
+    """Decode the bounded native Watchdog sample used by latest/live streams."""
+
+    values: dict[int, int | bytes] = dict(_protobuf_fields(payload))
+    gpu_raw = values.get(9)
+    if not isinstance(gpu_raw, bytes):
+        raise TelemetryError("Watchdog sample has no GPU metrics")
+    gpu: dict[int, int | bytes] = dict(_protobuf_fields(gpu_raw))
+
+    def uint(source: Mapping[int, int | bytes], field: int) -> int:
+        value = source.get(field)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TelemetryError(f"Watchdog sample field {field} is missing")
+        return value
+
+    def packed(source: Mapping[int, int | bytes], field: int) -> list[int]:
+        value = source.get(field)
+        if not isinstance(value, bytes):
+            return []
+        return _decode_packed_varints(value)
+
+    flags = uint(values, 4)
+    counters = {
+        name: uint(values, field)
+        for name, field in zip(COUNTER_FIELDS, range(27, 43))
+    }
+    return validate_sample({
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "member_id": member_id,
+        "sequence": uint(values, 1),
+        "unix_ms": uint(values, 2),
+        "monotonic_ms": uint(values, 3),
+        "system": {
+            "cpu_core_percent": [_unknown_percent(value) for value in packed(values, 6)],
+            "cpu_percent": _unknown_percent(uint(values, 5)),
+            "gpu_percent": _unknown_percent(uint(gpu, 1)),
+            "memory_percent": _unknown_percent(uint(values, 7)),
+            "disk_percent": _unknown_percent(uint(values, 8)),
+            "gpu_memory_percent": _unknown_percent(uint(gpu, 2)),
+            "gpu_engine_percent": [_unknown_percent(value) for value in packed(gpu, 3)],
+            "system_temp_deci_c": _unknown_temperature(_protobuf_sint32(uint(values, 10))),
+            "gpu_temp_deci_c": _unknown_temperature(_protobuf_sint32(uint(gpu, 4))),
+            "nvme_temp_deci_c": _unknown_temperature(_protobuf_sint32(uint(values, 11))),
+            "power_deci_w": uint(gpu, 5),
+            "load1_centi": uint(values, 12),
+            "memory_used_mib": uint(values, 13),
+            "memory_total_mib": uint(values, 14),
+            "disk_used_mib": uint(values, 15),
+            "disk_total_mib": uint(values, 16),
+            "network_rx_kib_s": uint(values, 17),
+            "network_tx_kib_s": uint(values, 18),
+            "disk_read_kib_s": uint(values, 19),
+            "disk_write_kib_s": uint(values, 20),
+            "cpu_clock_mhz": _unknown_clock(uint(values, 23)),
+            "gpu_clock_mhz": _unknown_clock(uint(gpu, 6)),
+            "vram_clock_mhz": _unknown_clock(uint(gpu, 7)),
+            "system_ram_clock_mhz": _unknown_clock(uint(values, 24)),
+        },
+        "inference": {
+            "gateway_available": bool(flags & (1 << 3)),
+            "active_requests": uint(values, 25),
+            "queued_requests": uint(values, 26),
+            **counters,
+        },
+        "workload": {
+            "type": uint(values, 22),
+            "id": uint(values, 21),
+            "gpu_available": bool(flags & (1 << 1)),
+            "throttled": bool(flags & (1 << 2)),
+        },
+    })
+
+
+def _decode_packed_varints(data: bytes) -> list[int]:
+    values: list[int] = []
+    offset = 0
+    while offset < len(data):
+        value, offset = _read_protobuf_varint(data, offset)
+        values.append(value)
+    return values
+
+
+def _read_watchdog_exact(
+    stream: ssl.SSLSocket, length: int, stop_event: threading.Event
+) -> bytes:
+    output = bytearray()
+    while len(output) < length and not stop_event.is_set():
+        try:
+            chunk = stream.recv(length - len(output))
+        except TimeoutError:
+            continue
+        if not chunk:
+            raise TelemetryError("Watchdog closed the live telemetry connection")
+        output.extend(chunk)
+    if len(output) != length:
+        raise TelemetryError("Watchdog telemetry subscription stopped")
+    return bytes(output)
+
+
+def watchdog_live_samples(
+    *,
+    member_id: str,
+    port: int,
+    ca_file: pathlib.Path,
+    controller_cert_file: pathlib.Path,
+    controller_key_file: pathlib.Path,
+    stop_event: threading.Event,
+) -> Iterator[dict[str, Any]]:
+    """Yield current and future samples from Watchdog's authenticated live feed."""
+
+    if not 1 <= port <= 65_535:
+        raise TelemetryError("Watchdog telemetry port is invalid")
+    for path, label in (
+        (ca_file, "server certificate"),
+        (controller_cert_file, "controller certificate"),
+        (controller_key_file, "controller key"),
+    ):
+        if path.is_symlink() or not path.is_file():
+            raise TelemetryError(f"Watchdog {label} is not a regular file")
+    request = _protobuf_uint(1, WATCHDOG_REQUEST_ID) + _protobuf_message(
+        11, _protobuf_uint(1, 0)
+    )
+    frame = len(request).to_bytes(4, "big") + request
+    context = ssl.create_default_context(cafile=str(ca_file))
+    context.load_cert_chain(str(controller_cert_file), str(controller_key_file))
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as raw:
+            with context.wrap_socket(raw, server_hostname="localhost") as stream:
+                stream.settimeout(1)
+                stream.sendall(frame)
+                while not stop_event.is_set():
+                    length = int.from_bytes(
+                        _read_watchdog_exact(stream, 4, stop_event), "big"
+                    )
+                    if not 1 <= length <= MAX_WATCHDOG_FRAME_BYTES:
+                        raise TelemetryError("Watchdog telemetry frame is invalid")
+                    envelope = list(_protobuf_fields(
+                        _read_watchdog_exact(stream, length, stop_event)
+                    ))
+                    request_ids = [value for field, value in envelope if field == 1]
+                    bodies = [(field, value) for field, value in envelope if field != 1]
+                    if request_ids != [WATCHDOG_REQUEST_ID] or len(bodies) != 1:
+                        raise TelemetryError("Watchdog telemetry envelope is invalid")
+                    field, body = bodies[0]
+                    if field in {10, 13} and isinstance(body, bytes):
+                        yield decode_watchdog_protocol_sample(body, member_id=member_id)
+                    elif field == 16 and isinstance(body, bytes):
+                        raise TelemetryError("Watchdog rejected the telemetry subscription")
+    except (OSError, ssl.SSLError) as error:
+        raise TelemetryError(f"Watchdog live telemetry failed: {error}") from error
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -628,15 +847,21 @@ class TelemetryPublisher:
     def __init__(
         self,
         identity: SiteIdentity,
-        ring_path: pathlib.Path,
         *,
+        watchdog_port: int,
+        watchdog_ca_file: pathlib.Path,
+        watchdog_controller_cert_file: pathlib.Path,
+        watchdog_controller_key_file: pathlib.Path,
         local_accept: Callable[[Mapping[str, Any], str], None] | None = None,
         endpoint: str | None = None,
     ) -> None:
         if (local_accept is None) == (endpoint is None):
             raise TelemetryError("telemetry publisher requires exactly one destination")
         self.identity = identity
-        self.ring_path = ring_path
+        self.watchdog_port = watchdog_port
+        self.watchdog_ca_file = watchdog_ca_file
+        self.watchdog_controller_cert_file = watchdog_controller_cert_file
+        self.watchdog_controller_key_file = watchdog_controller_key_file
         self.local_accept = local_accept
         self.endpoint = endpoint
         self.stop_event = threading.Event()
@@ -651,12 +876,17 @@ class TelemetryPublisher:
 
     def _run(self) -> None:
         while not self.stop_event.is_set():
-            started = time.monotonic()
             try:
-                sample = read_latest_watchdog_sample(
-                    self.ring_path, member_id=self.identity.member_id
-                )
-                if sample["sequence"] != self.last_sequence:
+                for sample in watchdog_live_samples(
+                    member_id=self.identity.member_id,
+                    port=self.watchdog_port,
+                    ca_file=self.watchdog_ca_file,
+                    controller_cert_file=self.watchdog_controller_cert_file,
+                    controller_key_file=self.watchdog_controller_key_file,
+                    stop_event=self.stop_event,
+                ):
+                    if sample["sequence"] == self.last_sequence:
+                        continue
                     document = signed_sample(sample)
                     if self.local_accept is not None:
                         self.local_accept(document, self.identity.member_id)
@@ -665,11 +895,14 @@ class TelemetryPublisher:
                             str(self.endpoint), identity=self.identity, document=document
                         )
                     self.last_sequence = sample["sequence"]
-                self.last_error = None
+                    self.last_error = None
+                if not self.stop_event.is_set():
+                    self.stop_event.wait(1.0)
             except TelemetryError as error:
+                if self.stop_event.is_set():
+                    break
                 self.last_error = str(error)[:256]
-            remaining = max(0.05, 1.0 - (time.monotonic() - started))
-            self.stop_event.wait(remaining)
+            self.stop_event.wait(1.0)
 
     def close(self) -> None:
         self.stop_event.set()

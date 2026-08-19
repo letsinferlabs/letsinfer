@@ -10,6 +10,7 @@ launcher_dir="/usr/local/bin"
 user_install=0
 run_setup=1
 progress_active=0
+progress_enabled=1
 
 clear_progress() {
     if [ "$progress_active" -eq 1 ]; then
@@ -36,7 +37,7 @@ finish_progress() {
 
 usage() {
     cat <<'EOF'
-Usage: install.sh [--version VERSION] [--prefix PATH] [--user] [--no-setup]
+Usage: install.sh [--version VERSION] [--prefix PATH] [--user] [--no-setup] [--no-progress]
 
 Install and initialize the latest stable Let's Infer core release. The default
 is a system command in /usr/local/bin backed by immutable files in
@@ -73,6 +74,10 @@ while [ "$#" -gt 0 ]; do
             run_setup=0
             shift
             ;;
+        --no-progress)
+            progress_enabled=0
+            shift
+            ;;
         --base-url)
             [ "$#" -ge 2 ] || fail "--base-url requires a value"
             base_url=$2
@@ -96,7 +101,7 @@ current_path=$(printenv PATH 2>/dev/null || true)
 case "${TERM:-}" in
     ""|dumb) ;;
     *)
-        if [ -t 2 ]; then
+        if [ "$progress_enabled" -eq 1 ] && [ -t 2 ]; then
             progress_active=1
         fi
         ;;

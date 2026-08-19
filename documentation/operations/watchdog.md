@@ -40,6 +40,15 @@ budget. Telemetry uses bounded CRC-protected rings and a bounded mutual-TLS
 protobuf endpoint; slow controllers receive an explicit gap rather than unbounded
 buffering.
 
+Core owns a floor and hard limit of 16 concurrent Watchdog telemetry/control
+streams. An older runtime declaration such as `max_controllers: 2` therefore
+renders as 16 without changing the runtime pack. Each client has two fixed
+approximately 65 KiB frames, so the 16-slot table adds about 2.1 MiB plus TLS
+state. Against the current 19–22 MiB resident baseline, that bounded table and
+16 TLS sessions retain headroom below the strict 30 MiB gate. These are
+control-plane streams, not the 128 (or other) inference API connections
+declared by a runtime.
+
 Protocol v3 exposes capabilities, latest state, bounded history, live
 subscriptions, and typed Let's Infer status over that same authenticated endpoint.
 The typed status includes the manifest-bound release, model, engine, runtime,
@@ -68,6 +77,12 @@ exists. The Mac decodes all native fields and the full coordinator aggregate;
 the controller's current placement overrides any stale core/site baseline
 identity, and historical placements stay collapsed to the newest record per
 model. It never estimates token counts from response text.
+
+The site agent feeds the coordinator from one authenticated native Watchdog
+live subscription, so the ten-second durable-ring flush remains a crash/history
+boundary rather than a live-visibility gate. The local CLI reads the site
+agent's private aggregate instead of consuming another Watchdog stream. The
+Mac keeps a newer direct sample when a delayed controller aggregate arrives.
 
 Each installation has a random 256-bit installation ID and an owner-only
 controller registry. Watchdog accepts a certificate only when both normal CA

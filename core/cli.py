@@ -167,7 +167,11 @@ from .site.topology import (
     TopologyGraph,
     validate_member_facts,
 )
-from .site.telemetry import TelemetryAggregator, TelemetryError, TelemetryPublisher
+from .site.telemetry import (
+    TelemetryAggregator,
+    TelemetryError,
+    TelemetryPublisher,
+)
 from .site.controller import (
     DEFAULT_PORT as CONTROLLER_CONTROL_PORT,
     ControllerError,
@@ -189,6 +193,8 @@ IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 MANIFEST_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 REGISTRY_DIGEST_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 WATCHDOG_PROTOCOL_VERSION = 3
+WATCHDOG_CONTROLLER_STREAM_FLOOR = 16
+WATCHDOG_CONTROLLER_STREAM_LIMIT = 16
 MANAGED_LABEL = "io.letsinfer.managed"
 MANIFEST_SHA_LABEL = "io.letsinfer.manifest-sha256"
 RUNTIME_DIGEST_LABEL = "io.letsinfer.runtime-digest"
@@ -236,6 +242,7 @@ PROTECTION_ROOT_NAME = "protected-engines"
 WATCHDOG_PUBLIC_STATE_DIRECTORY = "service-state"
 CONTROLLER_PAIRING_PROTOCOL = "letsinfer-controller-pair-v1"
 CONTROLLER_PAIRING_PORT = 9769
+WATCHDOG_TELEMETRY_PORT = 9768
 CONTROLLER_PAIRING_TIMEOUT_SECONDS = 180
 CONTROLLER_PAIRING_MIN_TIMEOUT_SECONDS = 30
 CONTROLLER_CERTIFICATE_DAYS = 36500
@@ -948,8 +955,11 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         )
     if watchdog["port"] not in range(1, 65536):
         raise LetsInferError("manifest.watchdog.port must be between 1 and 65535")
-    if watchdog["max_controllers"] > 4:
-        raise LetsInferError("manifest.watchdog.max_controllers cannot exceed 4")
+    if watchdog["max_controllers"] > WATCHDOG_CONTROLLER_STREAM_LIMIT:
+        raise LetsInferError(
+            "manifest.watchdog.max_controllers cannot exceed "
+            f"{WATCHDOG_CONTROLLER_STREAM_LIMIT}"
+        )
     if watchdog["memory_high_bytes"] > watchdog["memory_max_bytes"]:
         raise LetsInferError("manifest.watchdog memory high cannot exceed memory max")
     if watchdog["memory_max_bytes"] != CONTROL_PLANE_MEMORY_LIMIT_BYTES:
@@ -2593,7 +2603,7 @@ def core_watchdog_contract() -> dict[str, Any]:
         "memory_max_bytes": CONTROL_PLANE_MEMORY_LIMIT_BYTES,
         "sample_interval_ms": 1000,
         "flush_interval_ms": 10000,
-        "max_controllers": 4,
+        "max_controllers": WATCHDOG_CONTROLLER_STREAM_FLOOR,
         "protection": {
             "warning_available_bytes": 16 << 30,
             "graceful_available_bytes": 12 << 30,
@@ -4845,7 +4855,20 @@ def serve(
     name = arguments.name or f"letsinfer-{adapter_for(manifest).name.replace('.', '-')}"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
         raise LetsInferError("container name contains unsupported characters")
-    port = arguments.port
+    requested_port = getattr(arguments, "port", None)
+    if requested_port is None:
+        if qualification_mode:
+            resident_path = default_service_config_path()
+            if not resident_path.is_file():
+                raise LetsInferError(
+                    "qualification requires an installed Let's Infer service for "
+                    "its internal engine port"
+                )
+            port = read_service_config(resident_path)["engine_port"]
+        else:
+            port = 8000
+    else:
+        port = requested_port
     model_cache = expanded_path(arguments.model_cache or manifest["container"]["model_cache"])
     plugin_root = (
         expanded_path(arguments.plugin_root)
@@ -4948,9 +4971,16 @@ def serve(
         arguments.evidence_dir or default_evidence_dir(manifest)
     )
     qualification_config: dict[str, Any] | None = None
+    qualification_existing = False
+    resident_handoff: dict[str, tuple[str, str]] | None = None
     if qualification_mode:
         if evidence.exists():
             raise LetsInferError(f"refusing existing evidence directory: {evidence}")
+        # Retire the previous candidate before refreshing topology. Its exact
+        # protection slot may contain a candidate-only trip; retaining that
+        # orphan in the node-wide inventory would incorrectly make otherwise
+        # compatible hardware unavailable for the replacement.
+        _retire_qualification_candidate(remove_container=True)
         qualification_config = _qualification_config(
             manifest_path=manifest_path,
             manifest=manifest,
@@ -4969,18 +4999,20 @@ def serve(
             runtime_receipt=runtime_receipt,
         )
         protection_config = qualification_config
-        _, engine_state = _unit_enabled_active(ENGINE_SERVICE_NAME)
-        if engine_state not in {"inactive", "failed", "not-found"}:
-            raise LetsInferError(
-                "qualification requires the resident engine service to be stopped"
-            )
-        _retire_qualification_candidate(remove_container=True)
     else:
         protection_config = protection_config_for_serve(
             getattr(arguments, "protection_config", None), name=name
         )
     protection_generation = secrets.token_hex(16) if protection_config else None
     inspection = container_inspect(name)
+    if inspection is not None and qualification_config is not None:
+        labels = inspection.get("Config", {}).get("Labels") or {}
+        if labels.get(MANAGED_LABEL) != "true":
+            raise LetsInferError(
+                f"container {name} is not managed by Let's Infer; refusing to replace it"
+            )
+        qualification_existing = True
+        inspection = None
     if inspection is not None:
         if not arguments.existing_ok:
             raise LetsInferError(f"container already exists: {name}")
@@ -5047,7 +5079,14 @@ def serve(
     ensure_private_directory(store_root)
     ensure_runtime_home(runtime_cache_root)
     if qualification_config is not None:
-        _activate_qualification_candidate(qualification_config, manifest)
+        resident_handoff = _quiesce_resident_runtime_for_qualification()
+        try:
+            if qualification_existing:
+                _stop_managed_container(name, api_key_file)
+            _activate_qualification_candidate(qualification_config, manifest)
+        except BaseException:
+            _restore_resident_runtime_after_qualification(resident_handoff)
+            raise
     launch = {
         "status": "admitted",
         "timestamp": dt.datetime.now().astimezone().isoformat(),
@@ -5143,6 +5182,12 @@ def serve(
                 run(["docker", "update", "--restart", "no", name], check=False)
                 run(["docker", "stop", "--time", "30", name], check=False)
                 run(["docker", "rm", name], check=False)
+        if qualification_config is not None:
+            try:
+                _retire_qualification_candidate(remove_container=True)
+            finally:
+                if resident_handoff is not None:
+                    _restore_resident_runtime_after_qualification(resident_handoff)
         raise
 
     print(f"HEALTHY {name} evidence={evidence}")
@@ -5536,6 +5581,47 @@ def _quiesce_resident_placement() -> None:
     update_service_placement(resident, manifest, "stopped")
 
 
+def _quiesce_resident_runtime_for_qualification() -> dict[str, tuple[str, str]]:
+    """Stop boot-owned inference while preserving its exact prior unit state."""
+    units = (RECOVERY_TIMER_NAME, ENGINE_SERVICE_NAME)
+    previous = {name: _unit_enabled_active(name) for name in units}
+    safe_states = {"active", "inactive", "failed", "not-found"}
+    for name, (_enabled, active) in previous.items():
+        if active not in safe_states:
+            raise LetsInferError(
+                f"refusing qualification while {name} state is {active!r}"
+            )
+    if previous[RECOVERY_TIMER_NAME][1] == "active":
+        run_passthrough(["systemctl", "--user", "stop", RECOVERY_TIMER_NAME])
+    if previous[ENGINE_SERVICE_NAME][1] == "active":
+        run_passthrough(["systemctl", "--user", "stop", ENGINE_SERVICE_NAME])
+    for name, (_enabled, active) in previous.items():
+        if active == "failed":
+            run(["systemctl", "--user", "reset-failed", name])
+    return previous
+
+
+def _restore_resident_runtime_after_qualification(
+    previous: Mapping[str, tuple[str, str]],
+) -> None:
+    """Roll back a failed candidate handoff to the prior boot-owned runtime."""
+    _restore_resident_watchdog_projection()
+    if previous.get(ENGINE_SERVICE_NAME, ("", ""))[1] == "active":
+        if _unit_enabled_active(ENGINE_SERVICE_NAME)[1] != "active":
+            run_passthrough(
+                [
+                    "systemctl",
+                    "--user",
+                    "start",
+                    "--no-block",
+                    ENGINE_SERVICE_NAME,
+                ]
+            )
+    if previous.get(RECOVERY_TIMER_NAME, ("", ""))[1] == "active":
+        if _unit_enabled_active(RECOVERY_TIMER_NAME)[1] != "active":
+            run_passthrough(["systemctl", "--user", "start", RECOVERY_TIMER_NAME])
+
+
 def _retire_qualification_candidate(*, remove_container: bool) -> None:
     """Retire the one candidate slot before replacement or resident recovery."""
     state_path = qualification_service_config_path()
@@ -5551,6 +5637,17 @@ def _retire_qualification_candidate(*, remove_container: bool) -> None:
         _stop_managed_container(
             config["name"], expanded_path(config["engine_api_key_file"])
         )
+    if protection_trip_latched(config):
+        # Retirement is the explicit acknowledgement boundary for this
+        # candidate only. Preserve its trip beside the launch evidence before
+        # removing the latch so it cannot poison future hardware placement.
+        evidence = expanded_path(config["qualification_evidence_dir"])
+        ensure_private_directory(evidence)
+        _, _, trip_path = protection_paths(config)
+        archived_trip = evidence / "retired-protection-trip.json"
+        write_text(archived_trip, trip_path.read_text(encoding="utf-8"))
+        archived_trip.chmod(0o600)
+        clear_protection_trip(config)
     state_path.unlink()
     _fsync_path(state_path.parent)
     _restore_resident_watchdog_projection()
@@ -6061,6 +6158,9 @@ def render_user_service(
     config: dict[str, Any], manifest: dict[str, Any]
 ) -> str:
     watchdog = manifest["watchdog"]
+    max_controllers = max(
+        WATCHDOG_CONTROLLER_STREAM_FLOOR, watchdog["max_controllers"]
+    )
     protection = watchdog["protection"]
     executable = pathlib.Path(config["watchdog_binary_path"])
     protection_root = pathlib.Path(config["watchdog_data_root"]) / PROTECTION_ROOT_NAME
@@ -6096,7 +6196,7 @@ MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
-ExecStart={_systemd_quote(executable)} --listen {_systemd_quote(config['watchdog_listen'])} --port {config['watchdog_port']} --data-dir {_systemd_quote(pathlib.Path(config['watchdog_data_root']))} --cert {_systemd_quote(pathlib.Path(config['watchdog_cert_file']))} --key {_systemd_quote(pathlib.Path(config['watchdog_key_file']))} --controller-ca {_systemd_quote(pathlib.Path(config['watchdog_controller_ca_file']))} --controllers {_systemd_quote(pathlib.Path(config['watchdog_controller_allowlist_file']))} --site-state {_systemd_quote(pathlib.Path(config['watchdog_public_state_file']))} --gateway-metrics {_systemd_quote(pathlib.Path(config['gateway_telemetry_file']))} --sample-ms {watchdog['sample_interval_ms']} --flush-ms {watchdog['flush_interval_ms']} --max-controllers {watchdog['max_controllers']} --protect-root {_systemd_quote(protection_root)} --warning-bytes {protection['warning_available_bytes']} --stop-bytes {protection['graceful_available_bytes']} --kill-bytes {protection['emergency_available_bytes']} --swap-stop-bytes {protection['swap_stop_bytes']} --psi-some-us {protection['psi_some_us']} --psi-full-us {protection['psi_full_us']} --state-failures {protection['state_failures']} --containment-grace-ms {protection['containment_grace_ms']}
+ExecStart={_systemd_quote(executable)} --listen {_systemd_quote(config['watchdog_listen'])} --port {config['watchdog_port']} --data-dir {_systemd_quote(pathlib.Path(config['watchdog_data_root']))} --cert {_systemd_quote(pathlib.Path(config['watchdog_cert_file']))} --key {_systemd_quote(pathlib.Path(config['watchdog_key_file']))} --controller-ca {_systemd_quote(pathlib.Path(config['watchdog_controller_ca_file']))} --controllers {_systemd_quote(pathlib.Path(config['watchdog_controller_allowlist_file']))} --site-state {_systemd_quote(pathlib.Path(config['watchdog_public_state_file']))} --gateway-metrics {_systemd_quote(pathlib.Path(config['gateway_telemetry_file']))} --sample-ms {watchdog['sample_interval_ms']} --flush-ms {watchdog['flush_interval_ms']} --max-controllers {max_controllers} --protect-root {_systemd_quote(protection_root)} --warning-bytes {protection['warning_available_bytes']} --stop-bytes {protection['graceful_available_bytes']} --kill-bytes {protection['emergency_available_bytes']} --swap-stop-bytes {protection['swap_stop_bytes']} --psi-some-us {protection['psi_some_us']} --psi-full-us {protection['psi_full_us']} --state-failures {protection['state_failures']} --containment-grace-ms {protection['containment_grace_ms']}
 TimeoutStopSec=30
 
 [Install]
@@ -6203,8 +6303,11 @@ def install_core_plane_services(
     identity: Any, *, include_gateway: bool
 ) -> dict[str, Any]:
     """Replace core-owned services while preserving the selected runtime."""
-    config_path = default_service_config_path()
+    resident_path = default_service_config_path()
+    candidate_path = qualification_service_config_path()
+    config_path = candidate_path if candidate_path.is_file() else resident_path
     runtime_configured = config_path.is_file()
+    qualification_active = config_path == candidate_path and runtime_configured
     runtime_manifest: dict[str, Any] | None = None
     runtime_error: str | None = None
     if runtime_configured:
@@ -6217,6 +6320,7 @@ def install_core_plane_services(
         "configured": runtime_configured,
         "compatible": not runtime_configured or runtime_manifest is not None,
         "error": runtime_error,
+        "qualification_active": qualification_active,
     }
     if platform.system() != "Linux":
         install_site_service_only()
@@ -8401,12 +8505,26 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {**details, "state": "degraded", "reason": "component-not-ready"}
 
 
-def _local_controller_telemetry() -> dict[str, Any] | None:
-    """Read the normalized local site aggregate without weakening controller mTLS."""
+def _local_controller_telemetry(
+    config: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Read the site agent's live aggregate without consuming a Watchdog slot."""
 
-    server_certificate = default_watchdog_cert_path()
-    client_certificate = default_watchdog_local_controller_cert_path()
-    client_key = default_watchdog_local_controller_key_path()
+    server_certificate = expanded_path(
+        str(config.get("watchdog_cert_file"))
+        if config and config.get("watchdog_cert_file")
+        else default_watchdog_cert_path()
+    )
+    client_certificate = expanded_path(
+        str(config.get("watchdog_local_controller_cert_file"))
+        if config and config.get("watchdog_local_controller_cert_file")
+        else default_watchdog_local_controller_cert_path()
+    )
+    client_key = expanded_path(
+        str(config.get("watchdog_local_controller_key_file"))
+        if config and config.get("watchdog_local_controller_key_file")
+        else default_watchdog_local_controller_key_path()
+    )
     if not all(path.is_file() for path in (
         server_certificate, client_certificate, client_key
     )):
@@ -8721,7 +8839,7 @@ def status(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     elif ui.Terminal(sys.stdout).interactive:
-        payload["telemetry"] = _local_controller_telemetry()
+        payload["telemetry"] = _local_controller_telemetry(config)
         ui.runtime_status(payload)
     else:
         memory = "none" if memory_bytes is None else str(memory_bytes)
@@ -10675,22 +10793,56 @@ def update_core(arguments: argparse.Namespace) -> int:
             "run `letsinfer benchmark stop` first"
         )
     prefix, installer, launcher = _installed_core_layout()
-    command = ["/bin/sh", str(installer), "--no-setup"]
+    command = ["/bin/sh", str(installer), "--no-setup", "--no-progress"]
     if prefix != pathlib.Path("/opt/letsinfer"):
         command.extend(["--prefix", str(prefix)])
     if arguments.version is not None:
         command.extend(["--version", arguments.version])
-    run_passthrough(command)
-    if launcher.is_symlink():
-        try:
-            launcher.resolve(strict=True)
-        except OSError as error:
-            raise LetsInferError(
-                f"updated core launcher is unavailable: {error}"
-            ) from error
-    elif not launcher.is_file():
-        raise LetsInferError(f"updated core launcher is unavailable: {launcher}")
-    run_passthrough([str(launcher), "core-rebind"])
+    terminal = ui.Terminal(sys.stderr)
+    if not terminal.interactive:
+        run_passthrough(command)
+        if launcher.is_symlink():
+            try:
+                launcher.resolve(strict=True)
+            except OSError as error:
+                raise LetsInferError(
+                    f"updated core launcher is unavailable: {error}"
+                ) from error
+        elif not launcher.is_file():
+            raise LetsInferError(f"updated core launcher is unavailable: {launcher}")
+        run_passthrough([str(launcher), "core-rebind"])
+        return 0
+
+    # Authenticate before the progress owner starts. This keeps sudo's prompt
+    # completely separate from animated output and avoids leaking spinner
+    # frames into sudo's controlling terminal.
+    if prefix == pathlib.Path("/opt/letsinfer"):
+        run_passthrough(["sudo", "-v"])
+    with ui.StepProgress(
+        terminal,
+        (
+            "Resolve and install core",
+            "Rebind services and runtime",
+            "Verify update",
+        ),
+        section="update",
+    ) as progress:
+        run(command)
+        progress.advance()
+        if launcher.is_symlink():
+            try:
+                launcher.resolve(strict=True)
+            except OSError as error:
+                raise LetsInferError(
+                    f"updated core launcher is unavailable: {error}"
+                ) from error
+        elif not launcher.is_file():
+            raise LetsInferError(f"updated core launcher is unavailable: {launcher}")
+        run([str(launcher), "core-rebind"])
+        progress.advance()
+        run([str(launcher), "--help"])
+        progress.advance()
+    terminal.success("Core updated")
     return 0
 
 
@@ -10700,7 +10852,9 @@ def rebind_core_services(_: argparse.Namespace) -> int:
         print(f"CORE {PRODUCT_VERSION} services=none runtimes=unchanged")
         return 0
     identity = read_site_identity()
-    config_path = default_service_config_path()
+    resident_path = default_service_config_path()
+    candidate_path = qualification_service_config_path()
+    config_path = candidate_path if candidate_path.is_file() else resident_path
     model = None
     if config_path.is_file():
         previous = read_service_config(config_path)
@@ -12172,7 +12326,10 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
     try:
         telemetry_publisher = TelemetryPublisher(
             identity,
-            default_watchdog_data_root() / "raw.ring",
+            watchdog_port=WATCHDOG_TELEMETRY_PORT,
+            watchdog_ca_file=default_watchdog_cert_path(),
+            watchdog_controller_cert_file=default_watchdog_local_controller_cert_path(),
+            watchdog_controller_key_file=default_watchdog_local_controller_key_path(),
             local_accept=(
                 lambda document, member_id: _accept_local_telemetry(
                     state, document, member_id
@@ -13393,7 +13550,12 @@ def parser() -> argparse.ArgumentParser:
     serving.add_argument("model")
     serving.add_argument("--engine", choices=sorted(ADAPTERS))
     serving.add_argument("--target")
-    serving.add_argument("--port", type=int, default=8000)
+    serving.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="internal engine port (defaults to the installed engine port)",
+    )
     serving.add_argument("--name")
     serving.add_argument("--model-cache")
     serving.add_argument("--plugin-root")
@@ -13697,12 +13859,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         audit_sequence = _audit_marker(metadata, identity)
         if arguments.command == "derive":
             arguments.engine_arguments = engine_arguments
-        if getattr(arguments, "port", 1) not in range(1, 65536):
+        port = getattr(arguments, "port", 1)
+        if port is not None and port not in range(1, 65536):
             raise LetsInferError("port must be between 1 and 65535")
         engine_port = getattr(arguments, "engine_port", None)
         if engine_port is not None and engine_port not in range(1, 65536):
             raise LetsInferError("engine port must be between 1 and 65535")
-        if engine_port is not None and engine_port == arguments.port:
+        if engine_port is not None and port is not None and engine_port == port:
             raise LetsInferError("gateway and engine ports must be distinct")
         max_connections = getattr(arguments, "gateway_max_connections", None)
         if max_connections is not None and max_connections not in range(1, 257):
@@ -13728,7 +13891,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             activity = ui.progress(
                 progress_message[0],
                 done=progress_message[1],
-                enabled=not machine_output and not lightweight,
+                # The signed installer owns its one progress line and may prompt
+                # for sudo. A second animated writer can leak a spinner frame into
+                # that interactive stdin stream (observed as `-: command not found`).
+                enabled=(
+                    not machine_output
+                    and not lightweight
+                    and metadata.name != "update"
+                ),
             )
             with activity, ui.protect_stdout(activity):
                 result = arguments.action(arguments)
