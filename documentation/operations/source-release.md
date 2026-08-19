@@ -48,8 +48,8 @@ merge to `release` repeats those gates and then:
 
 1. reads `PRODUCT_VERSION` and refuses an existing `vVERSION` tag;
 2. builds the public archive twice and requires byte equality;
-3. signs the archive's canonical `SHA256SUMS` with the protected Ed25519
-   release key;
+3. signs the four platform archives' canonical `SHA256SUMS` as an SSHSIG with
+   the protected Ed25519 release key;
 4. verifies the signing key against `core/trust/release-public-key.pem`;
 5. installs the signed local assets into a temporary prefix;
 6. creates provenance attestations and an immutable GitHub Release; and
@@ -66,25 +66,34 @@ Versions containing `-rc.` become GitHub prereleases. Other versions become
 the latest stable release. Every release contains exactly:
 
 ```text
-letsinfer.tar.gz
+letsinfer-linux-x86_64.tar.gz
+letsinfer-linux-arm64.tar.gz
+letsinfer-macos-x86_64.tar.gz
+letsinfer-macos-arm64.tar.gz
 SHA256SUMS
 SHA256SUMS.sig
 install.sh
 ```
 
-Stable users install from the GitHub `latest` route:
+Stable users install through the website's reviewed bootstrap, which then
+fetches signed immutable GitHub Release assets:
 
 ```bash
-curl -fsSL https://github.com/letsinferlabs/letsinfer/releases/latest/download/install.sh | sh
+curl -fsSL https://letsinfer.ai/install.sh | sh
 ```
 
 An RC or historical release uses its explicit version:
 
 ```bash
-curl -fsSL \
-  https://github.com/letsinferlabs/letsinfer/releases/download/v0.11.0-rc.4/install.sh \
-  | sh -s -- --version 0.11.0-rc.4
+curl -fsSL https://letsinfer.ai/install.sh \
+  | sh -s -- --version 0.11.0-rc.5
 ```
+
+`install.sh` supports Linux and macOS on x86_64 and arm64. The default system
+layout is `/opt/letsinfer` plus `/usr/local/bin` launchers and it runs
+`letsinfer setup`; `--user`, `--prefix`, and `--no-setup` provide explicit
+alternatives. The website build emits the reviewed core installer byte for
+byte rather than maintaining another implementation.
 
 The macOS application has separate version/build metadata, a protected
 `macos-release` branch, namespaced tags, signing, notarization, and release

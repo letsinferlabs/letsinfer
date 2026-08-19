@@ -9,7 +9,7 @@ rejected before the command handler or any side effect. Site mutations are
 coordinator-only and audited.
 
 Interactive terminals use the full Let's Infer mark and type treatment only for
-root help, command help, and the runtime status card. Running `letsinfer`
+root help, command help, and site/runtime status cards. Running `letsinfer`
 without a command shows root help. Mutating commands use only a compact progress
 and success line on standard error; read and list results stay unadorned on
 standard output. Errors use one concise standard-error label and never repeat
@@ -55,7 +55,11 @@ letsinfer unexpose [--json]
 
 `setup` is the only site mutation permitted before a site exists. The first
 machine becomes coordinator and provisions the private site services and
-default local inference key. A fresh direct-ConnectX machine is normally added
+default local inference key. Linux installs persistent systemd services and
+the native Watchdog; macOS installs per-user launchd agents for the site and
+unified gateway without claiming Linux/NVIDIA protection or local runtime
+placement. `letsinfer status` reports a healthy control plane even before a
+model runtime is installed. A fresh direct-ConnectX machine is normally added
 through the Mac app. For direct CLI enrollment, a ConnectX invite requires
 `--candidate-endpoint`, `--candidate-fingerprint`, and `--interface`; the
 coordinator verifies the exact direct route and emits its address on that same

@@ -258,6 +258,74 @@ def runtime_status(
     target.flush()
 
 
+def site_status(
+    payload: Mapping[str, Any],
+    *,
+    stream: TextIO | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Render a fresh site's control-plane health before a runtime is installed."""
+    target = sys.stdout if stream is None else stream
+    terminal = Terminal(target, environ=environ)
+    identity = _mapping(payload.get("identity"))
+    services = _mapping(payload.get("services"))
+    role = str(identity.get("role") or "site")
+    site_ready = services.get("site_active") == "active"
+    gateway_expected = role == "coordinator"
+    gateway_ready = (
+        services.get("gateway_active") == "active"
+        and services.get("gateway_health") is True
+        and services.get("gateway_auth_required") is True
+        and services.get("gateway_authenticated") is True
+    )
+    ready = site_ready and (gateway_ready if gateway_expected else True)
+
+    header = terminal.paint("LET'S INFER", BOLD)
+    target.write(
+        f"{terminal.paint(terminal.mark, BOLD, YELLOW)}  "
+        f"{header}\n\n"
+    )
+    state_color = GREEN if ready else YELLOW
+    state_mark = "●" if terminal.unicode else "*"
+    state = "ONLINE" if ready else "ATTENTION"
+    display_name = terminal.clip(
+        str(identity.get("display_name") or "Let's Infer site"),
+        max(1, terminal.width - len(state) - 5),
+    )
+    target.write(
+        f"{terminal.paint(state_mark, BOLD, state_color)} "
+        f"{terminal.paint(state, BOLD, state_color)}  "
+        f"{terminal.paint(display_name, BOLD)}\n"
+    )
+    detail = terminal.clip(
+        f"{role} · {identity.get('member_id') or 'local member'}",
+        max(1, terminal.width - 2),
+    )
+    target.write(f"  {terminal.paint(detail, DIM)}\n\n")
+
+    def row(label: str, ok: bool, state_text: str, detail_text: str) -> None:
+        color = GREEN if ok else RED
+        label_text = terminal.clip(label.upper(), 10).ljust(10)
+        state_value = terminal.clip(state_text, 14).ljust(14)
+        detail_value = terminal.clip(detail_text, terminal.width - 26)
+        target.write(
+            f"  {terminal.paint(label_text, DIM)}"
+            f"{terminal.paint(state_value, BOLD, color)}"
+            f"{terminal.paint(detail_value, DIM)}\n"
+        )
+
+    row("Site", site_ready, "Active" if site_ready else "Unavailable", role)
+    if gateway_expected:
+        row(
+            "API",
+            gateway_ready,
+            "Ready" if gateway_ready else "Unavailable",
+            str(payload.get("endpoint") or "LAN HTTP · API key"),
+        )
+    row("Runtime", True, "Not installed", "use `letsinfer install <model>`")
+    target.flush()
+
+
 class Spinner:
     """A delayed TTY spinner which always restores a clean terminal line."""
 
