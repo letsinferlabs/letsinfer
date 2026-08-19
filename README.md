@@ -35,7 +35,10 @@ immutable core under `/opt/letsinfer`, exposes `letsinfer` in
 `/usr/local/bin`, and runs `letsinfer setup`. An interactive install renders
 one bounded percentage line; native Watchdog configure/build/test output is
 captured and shown only if that step fails. Use `--user` for `~/.local` or
-`--no-setup` when preparing files without creating a site.
+`--no-setup` when preparing files without creating a site. A system install
+repoints older Let's Infer-managed `~/.local/bin` launchers to `/usr/local/bin`
+so they cannot silently shadow the selected core; arbitrary user files and
+links are never replaced.
 
 The bootstrap verifies a signed checksum and the archive's complete source
 manifest before installing the immutable core.
@@ -642,7 +645,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.10`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.11`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its
