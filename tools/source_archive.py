@@ -24,7 +24,6 @@ MANIFEST_NAME = "SOURCE-MANIFEST.json"
 PUBLIC_ROOT_FILES = (".gitignore", "LICENSE", "NOTICE", "README.md", "install.sh")
 PUBLIC_DIRECTORIES = (
     "adapters",
-    "apps",
     "benchmarks",
     "bin",
     "cache",
@@ -36,6 +35,7 @@ PUBLIC_DIRECTORIES = (
     "tools",
     "watchdog",
 )
+PUBLIC_PRODUCT_DIRECTORIES = frozenset({"apps"})
 LOCAL_ONLY_PATHS = frozenset(
     {"AGENTS.md", "CLAUDE.md", "letsinfer.md", "context", "scratchpad"}
 )
@@ -176,6 +176,10 @@ def public_files(root: pathlib.Path) -> list[dict[str, Any]]:
         raise SourceArchiveError("public source file list contains duplicate paths")
     if LOCAL_ONLY_PATHS.intersection(pathlib.PurePosixPath(path).parts[0] for path in paths):
         raise SourceArchiveError("local-only development material entered public source inputs")
+    if PUBLIC_PRODUCT_DIRECTORIES.intersection(
+        pathlib.PurePosixPath(path).parts[0] for path in paths
+    ):
+        raise SourceArchiveError("separately released product material entered core source inputs")
     if len(records) > MAX_PUBLIC_FILES:
         raise SourceArchiveError("public source exceeds the file-count limit")
     if sum(int(record["bytes"]) for record in records) > MAX_PUBLIC_BYTES:

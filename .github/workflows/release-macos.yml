@@ -1,0 +1,185 @@
+name: macOS release
+
+on:
+  pull_request:
+    branches:
+      - main
+      - macos-release
+    paths:
+      - "apps/macos/**"
+      - "core/site/**"
+      - "watchdog/proto/**"
+      - "watchdog/include/watchdog/protobuf.h"
+      - ".github/workflows/release-macos.yml"
+      - "documentation/operations/macos-release.md"
+  push:
+    branches:
+      - macos-release
+
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate macOS release
+    runs-on: macos-15
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate app-owned release contract
+        run: |
+          git diff --check
+          python3 apps/macos/release_metadata.py
+          python3 -m unittest discover -s apps/macos/tests -p 'test_*.py'
+      - name: Test application
+        working-directory: apps/macos
+        run: |
+          xcodebuild -project LetsInfer.xcodeproj -scheme LetsInfer \
+            -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test
+
+  publish:
+    name: Publish macOS release
+    if: github.event_name == 'push'
+    needs: validate
+    runs-on: macos-15
+    environment: production-macos-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve and validate app version
+        id: version
+        run: |
+          python3 apps/macos/release_metadata.py --github-output "$GITHUB_OUTPUT"
+          tag=$(python3 apps/macos/release_metadata.py | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag"])')
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "tag already exists: $tag" >&2
+            exit 1
+          fi
+      - name: Build, sign, and notarize application
+        env:
+          ARTIFACT: ${{ steps.version.outputs.artifact }}
+          BUILD: ${{ steps.version.outputs.build }}
+          VERSION: ${{ steps.version.outputs.version }}
+          LETSINFER_APPLE_APP_PASSWORD: ${{ secrets.LETSINFER_APPLE_APP_PASSWORD }}
+          LETSINFER_APPLE_ID: ${{ secrets.LETSINFER_APPLE_ID }}
+          LETSINFER_APPLE_TEAM_ID: ${{ secrets.LETSINFER_APPLE_TEAM_ID }}
+          LETSINFER_MACOS_CERTIFICATE_P12_B64: ${{ secrets.LETSINFER_MACOS_CERTIFICATE_P12_B64 }}
+          LETSINFER_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.LETSINFER_MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in LETSINFER_APPLE_APP_PASSWORD LETSINFER_APPLE_ID \
+            LETSINFER_APPLE_TEAM_ID LETSINFER_MACOS_CERTIFICATE_P12_B64 \
+            LETSINFER_MACOS_CERTIFICATE_PASSWORD; do
+            test -n "${!name}"
+          done
+
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          keychain="$RUNNER_TEMP/letsinfer-release.keychain-db"
+          keychain_password=$(openssl rand -hex 24)
+          cleanup() {
+            rm -f "$certificate"
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          python3 -c 'import base64,os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"], "developer-id.p12").write_bytes(base64.b64decode(os.environ["LETSINFER_MACOS_CERTIFICATE_P12_B64"], validate=True))'
+          chmod 600 "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" \
+            -P "$LETSINFER_MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain"
+          identity=$(security find-identity -v -p codesigning "$keychain" \
+            | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p')
+          test -n "$identity"
+          test "$(printf '%s\n' "$identity" | wc -l | tr -d ' ')" = 1
+
+          archive="$RUNNER_TEMP/LetsInfer.xcarchive"
+          xcodebuild archive -project apps/macos/LetsInfer.xcodeproj \
+            -scheme LetsInfer -configuration Release \
+            -destination 'generic/platform=macOS' -archivePath "$archive" \
+            ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="$LETSINFER_APPLE_TEAM_ID" \
+            CODE_SIGN_IDENTITY="$identity" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $keychain"
+          app="$archive/Products/Applications/LetsInfer.app"
+          test -d "$app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$VERSION"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")" = "$BUILD"
+          architectures=$(lipo -archs "$app/Contents/MacOS/LetsInfer")
+          [[ " $architectures " == *" arm64 "* ]]
+          [[ " $architectures " == *" x86_64 "* ]]
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          submission="$RUNNER_TEMP/LetsInfer-notarization.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$submission"
+          xcrun notarytool submit "$submission" --wait \
+            --apple-id "$LETSINFER_APPLE_ID" \
+            --password "$LETSINFER_APPLE_APP_PASSWORD" \
+            --team-id "$LETSINFER_APPLE_TEAM_ID"
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          mkdir dist
+          ditto -c -k --sequesterRsrc --keepParent "$app" "dist/$ARTIFACT"
+          (cd dist && shasum -a 256 "$ARTIFACT" > SHA256SUMS)
+          rm -f "$certificate"
+          security delete-keychain "$keychain"
+          trap - EXIT
+      - name: Attest macOS release assets
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: |
+            dist/${{ steps.version.outputs.artifact }}
+            dist/SHA256SUMS
+      - name: Create namespaced GitHub release
+        env:
+          ARTIFACT: ${{ steps.version.outputs.artifact }}
+          BUILD: ${{ steps.version.outputs.build }}
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          args=("$TAG" "dist/$ARTIFACT" dist/SHA256SUMS \
+            --target "$GITHUB_SHA" --title "Let's Infer for macOS $VERSION ($BUILD)" \
+            --generate-notes --latest=false)
+          if [[ "$PRERELEASE" == true ]]; then args+=(--prerelease); fi
+          gh release create "${args[@]}"
+      - name: Verify published macOS release
+        env:
+          ARTIFACT: ${{ steps.version.outputs.artifact }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          mkdir "$RUNNER_TEMP/published" "$RUNNER_TEMP/unpacked"
+          gh release download "$TAG" --dir "$RUNNER_TEMP/published" \
+            --pattern "$ARTIFACT" --pattern SHA256SUMS
+          cmp "dist/$ARTIFACT" "$RUNNER_TEMP/published/$ARTIFACT"
+          cmp dist/SHA256SUMS "$RUNNER_TEMP/published/SHA256SUMS"
+          (cd "$RUNNER_TEMP/published" && shasum -a 256 -c SHA256SUMS)
+          gh attestation verify "$RUNNER_TEMP/published/$ARTIFACT" \
+            --repo "$GITHUB_REPOSITORY"
+          gh attestation verify "$RUNNER_TEMP/published/SHA256SUMS" \
+            --repo "$GITHUB_REPOSITORY"
+          ditto -x -k "$RUNNER_TEMP/published/$ARTIFACT" "$RUNNER_TEMP/unpacked"
+          app="$RUNNER_TEMP/unpacked/LetsInfer.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=2 "$app"

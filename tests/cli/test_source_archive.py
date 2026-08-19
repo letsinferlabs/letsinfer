@@ -96,6 +96,9 @@ class SourceArchiveTests(unittest.TestCase):
                 else:
                     path.mkdir()
                     (path / "private.txt").write_text("private\n", encoding="utf-8")
+            app = root / "apps" / "macos"
+            app.mkdir(parents=True)
+            (app / "source.swift").write_text("app\n", encoding="utf-8")
             first = root / "first.tar.gz"
             second = root / "second.tar.gz"
             result = build_archive(root, first)
@@ -105,6 +108,9 @@ class SourceArchiveTests(unittest.TestCase):
                 names = {member.name for member in archive.getmembers()}
             for name in LOCAL_ONLY_PATHS:
                 self.assertFalse(any(item == f"letsinfer/{name}" or item.startswith(f"letsinfer/{name}/") for item in names))
+            self.assertFalse(
+                any(item == "letsinfer/apps" or item.startswith("letsinfer/apps/") for item in names)
+            )
 
     def test_symlink_in_public_source_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
