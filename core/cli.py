@@ -2486,7 +2486,7 @@ def install_watchdog_runtime(
     staging.chmod(0o700)
     build = staging / "build"
     try:
-        run_passthrough(
+        run(
             [
                 "cmake",
                 "-S",
@@ -2497,7 +2497,7 @@ def install_watchdog_runtime(
                 "-DWATCHDOG_BUILD_TESTS=ON",
             ]
         )
-        run_passthrough(
+        run(
             [
                 "cmake",
                 "--build",
@@ -2508,7 +2508,7 @@ def install_watchdog_runtime(
                 "watchdog_tests",
             ]
         )
-        run_passthrough(
+        run(
             ["ctest", "--test-dir", str(build), "--output-on-failure"]
         )
         built = build / manifest["watchdog"]["build"]["output"]
@@ -5938,6 +5938,78 @@ def verify_active_core_watchdog() -> tuple[pathlib.Path, str]:
     if str(binary) not in text or "--protect-root" not in text:
         raise LetsInferError("the active Watchdog does not match this core build")
     return binary, digest
+
+
+def install_core_plane_services(identity: Any, *, include_gateway: bool) -> None:
+    """Replace core-owned services while preserving the selected runtime."""
+    if platform.system() != "Linux":
+        install_site_service_only()
+        if include_gateway:
+            install_core_gateway_service(replace_active=True)
+        return
+
+    preserved_units = (
+        RECOVERY_TIMER_NAME,
+        GATEWAY_SERVICE_NAME,
+        ENGINE_SERVICE_NAME,
+    )
+    previous = {name: _unit_enabled_active(name) for name in preserved_units}
+    safe_active_states = {"active", "inactive", "failed"}
+    for name, (_enabled, active) in previous.items():
+        if active not in safe_active_states:
+            raise LetsInferError(
+                f"refusing core-service upgrade while {name} state is {active!r}"
+            )
+
+    def stop_if_active(name: str) -> None:
+        if previous[name][1] == "active":
+            run_passthrough(["systemctl", "--user", "stop", name])
+
+    def restore_if_needed(name: str, errors: list[str]) -> None:
+        if previous[name][1] != "active":
+            return
+        if _unit_enabled_active(name)[1] == "active":
+            return
+        result = run(["systemctl", "--user", "start", name], check=False)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip() or "unknown systemctl error"
+            errors.append(f"restore {name}: {detail}")
+
+    try:
+        # Recovery must be quiesced before inference. The existing Watchdog stays
+        # active until the engine has stopped, so there is never an unprotected
+        # live engine during the immutable core handoff.
+        stop_if_active(RECOVERY_TIMER_NAME)
+        stop_if_active(ENGINE_SERVICE_NAME)
+        install_site_service_only()
+        install_core_watchdog_service(identity, replace_active=True)
+        if include_gateway:
+            install_core_gateway_service(replace_active=True)
+        if previous[ENGINE_SERVICE_NAME][1] == "active":
+            run_passthrough(["systemctl", "--user", "start", ENGINE_SERVICE_NAME])
+        if previous[RECOVERY_TIMER_NAME][1] == "active":
+            run_passthrough(["systemctl", "--user", "start", RECOVERY_TIMER_NAME])
+    except BaseException as failure:
+        restore_errors: list[str] = []
+        # Individual installers restore their own files. Restore only the
+        # runtime-facing active states that this transaction intentionally
+        # quiesced or that systemd stopped through unit dependencies.
+        restore_if_needed(GATEWAY_SERVICE_NAME, restore_errors)
+        if _unit_enabled_active(SERVICE_NAME)[1] == "active":
+            restore_if_needed(ENGINE_SERVICE_NAME, restore_errors)
+            restore_if_needed(RECOVERY_TIMER_NAME, restore_errors)
+        elif previous[ENGINE_SERVICE_NAME][1] == "active":
+            restore_errors.append(
+                f"restore {ENGINE_SERVICE_NAME}: resident Watchdog is not active"
+            )
+        if restore_errors:
+            raise LetsInferError(
+                "core-service upgrade failed and runtime restoration was incomplete: "
+                + "; ".join(restore_errors)
+            ) from failure
+        raise LetsInferError(
+            f"core-service upgrade failed; previous runtime state restored: {failure}"
+        ) from failure
 
 
 def render_recovery_service(
@@ -10188,29 +10260,12 @@ def rebind_core_services(_: argparse.Namespace) -> int:
     if not site_identity_path().is_file():
         print(f"CORE {PRODUCT_VERSION} services=none runtimes=unchanged")
         return 0
-    config_path = default_service_config_path()
-    if config_path.is_file():
-        if platform.system() != "Linux":
-            raise LetsInferError(
-                "resident inference service rebinding is currently supported on Linux"
-            )
-        previous = read_service_config(config_path)
-        _, manifest = configured_release(previous)
-        bound = bind_config_to_control_bundle(previous)
-        was_active = _unit_enabled_active(SERVICE_NAME)[1] == "active"
-        install_user_service(
-            config_path,
-            bound,
-            manifest,
-            no_start=not was_active,
-        )
-        print(
-            f"CORE {PRODUCT_VERSION} services=rebound "
-            f"runtime={bound['model']} runtimes=unchanged"
-        )
-        return 0
-
     identity = read_site_identity()
+    config_path = default_service_config_path()
+    model = None
+    if config_path.is_file():
+        previous = read_service_config(config_path)
+        model = previous.get("model")
     site_state = _unit_enabled_active(SITE_SERVICE_NAME)
     gateway_state = _unit_enabled_active(GATEWAY_SERVICE_NAME)
     watchdog_state = _unit_enabled_active(SERVICE_NAME)
@@ -10220,22 +10275,13 @@ def rebind_core_services(_: argparse.Namespace) -> int:
     ):
         print(f"CORE {PRODUCT_VERSION} services=none runtimes=unchanged")
         return 0
-    if site_state[0] != "not-found" or site_state[1] == "active":
-        install_site_service_only(
-            no_start=site_state[1] != "active",
-            executable_root=source_root(),
-        )
-    if platform.system() == "Linux" and (
-        watchdog_state[0] != "not-found" or watchdog_state[1] == "active"
-    ):
-        install_core_watchdog_service(identity, replace_active=True)
-    if identity.role == "coordinator" and (
-        gateway_state[0] != "not-found" or gateway_state[1] == "active"
-    ):
-        install_core_gateway_service(
-            executable_root=source_root(), replace_active=True
-        )
-    print(f"CORE {PRODUCT_VERSION} services=rebound runtimes=unchanged")
+    install_core_plane_services(
+        identity, include_gateway=identity.role == "coordinator"
+    )
+    runtime = f" runtime={model}" if isinstance(model, str) else ""
+    print(
+        f"CORE {PRODUCT_VERSION} services=rebound{runtime} runtimes=unchanged"
+    )
     return 0
 
 
@@ -10276,9 +10322,7 @@ def setup_command(arguments: argparse.Namespace) -> int:
         except LetsInferError as error:
             facts_error = error
         if not arguments.no_service:
-            install_site_service_only()
-            if platform.system() == "Linux":
-                install_core_watchdog_service(identity)
+            install_core_plane_services(identity, include_gateway=False)
         value = identity_json(identity)
         if arguments.json:
             print(json.dumps(value, sort_keys=True))
@@ -10339,10 +10383,7 @@ def setup_command(arguments: argparse.Namespace) -> int:
         if not arguments.no_service:
             raise
     if not arguments.no_service:
-        install_site_service_only()
-        if platform.system() == "Linux":
-            install_core_watchdog_service(identity)
-        install_core_gateway_service()
+        install_core_plane_services(identity, include_gateway=True)
     value = identity_json(identity)
     value["api_key_file"] = str(local_key_path)
     value["inference_endpoint"] = local_inference_endpoint()

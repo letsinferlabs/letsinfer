@@ -81,18 +81,14 @@ class CoreServiceTests(unittest.TestCase):
             mock.patch.object(cli, "setup_site", return_value=identity),
             mock.patch.object(cli, "ensure_core_watchdog_tls") as tls,
             mock.patch.object(cli, "refresh_local_member_facts"),
-            mock.patch.object(cli, "install_site_service_only") as site,
-            mock.patch.object(cli, "install_core_watchdog_service") as watchdog,
-            mock.patch.object(cli, "install_core_gateway_service") as gateway,
+            mock.patch.object(cli, "install_core_plane_services") as install_services,
             mock.patch.object(cli, "SiteStore") as site_store,
             contextlib.redirect_stdout(output),
         ):
             self.assertEqual(cli.setup_command(arguments), 0)
 
         tls.assert_called_once_with()
-        site.assert_called_once_with()
-        watchdog.assert_called_once_with(identity)
-        gateway.assert_not_called()
+        install_services.assert_called_once_with(identity, include_gateway=False)
         site_store.assert_not_called()
         self.assertNotIn("api_key_file", output.getvalue())
 

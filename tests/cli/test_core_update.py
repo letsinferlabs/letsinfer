@@ -67,7 +67,7 @@ class CoreUpdateTests(unittest.TestCase):
         ), self.assertRaisesRegex(letsinfer.LetsInferError, "installed"):
             letsinfer.update_core(argparse.Namespace(version=None))
 
-    def test_rebind_preserves_the_selected_runtime_and_inactive_state(self) -> None:
+    def test_rebind_preserves_the_selected_runtime_without_rebinding_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             identity = root / "site.json"
@@ -75,26 +75,54 @@ class CoreUpdateTests(unittest.TestCase):
             config_path = root / "service.json"
             config_path.write_text("{}\n", encoding="utf-8")
             previous = {"model": "qwen3.8-27b"}
-            bound = {"model": "qwen3.8-27b", "source_root": "/new"}
-            manifest = {"release": "qwen-release"}
+            site = mock.Mock(role="coordinator")
             output = io.StringIO()
             with (
                 mock.patch.object(letsinfer, "site_identity_path", return_value=identity),
+                mock.patch.object(letsinfer, "read_site_identity", return_value=site),
                 mock.patch.object(letsinfer, "default_service_config_path", return_value=config_path),
                 mock.patch.object(letsinfer, "read_service_config", return_value=previous),
-                mock.patch.object(letsinfer, "configured_release", return_value=(root / "release.json", manifest)),
-                mock.patch.object(letsinfer, "bind_config_to_control_bundle", return_value=bound),
                 mock.patch.object(letsinfer, "_unit_enabled_active", return_value=("enabled", "inactive")),
-                mock.patch.object(letsinfer, "install_user_service") as install_service,
-                mock.patch.object(letsinfer.platform, "system", return_value="Linux"),
+                mock.patch.object(letsinfer, "install_core_plane_services") as install_services,
                 redirect_stdout(output),
             ):
                 result = letsinfer.rebind_core_services(argparse.Namespace())
             self.assertEqual(result, 0)
-            install_service.assert_called_once_with(
-                config_path, bound, manifest, no_start=True
+            install_services.assert_called_once_with(
+                site, include_gateway=True
             )
             self.assertIn("runtime=qwen3.8-27b runtimes=unchanged", output.getvalue())
+
+    def test_core_plane_handoff_quiesces_and_restores_runtime_services(self) -> None:
+        commands: list[list[str]] = []
+        identity = mock.Mock(role="coordinator")
+        with (
+            mock.patch.object(letsinfer.platform, "system", return_value="Linux"),
+            mock.patch.object(
+                letsinfer, "_unit_enabled_active", return_value=("enabled", "active")
+            ),
+            mock.patch.object(
+                letsinfer,
+                "run_passthrough",
+                side_effect=lambda value: commands.append(list(value)),
+            ),
+            mock.patch.object(letsinfer, "install_site_service_only") as install_site,
+            mock.patch.object(letsinfer, "install_core_watchdog_service") as install_watchdog,
+            mock.patch.object(letsinfer, "install_core_gateway_service") as install_gateway,
+        ):
+            letsinfer.install_core_plane_services(identity, include_gateway=True)
+        self.assertEqual(
+            commands,
+            [
+                ["systemctl", "--user", "stop", letsinfer.RECOVERY_TIMER_NAME],
+                ["systemctl", "--user", "stop", letsinfer.ENGINE_SERVICE_NAME],
+                ["systemctl", "--user", "start", letsinfer.ENGINE_SERVICE_NAME],
+                ["systemctl", "--user", "start", letsinfer.RECOVERY_TIMER_NAME],
+            ],
+        )
+        install_site.assert_called_once_with()
+        install_watchdog.assert_called_once_with(identity, replace_active=True)
+        install_gateway.assert_called_once_with(replace_active=True)
 
     def test_parser_exposes_only_the_public_update_command(self) -> None:
         parsed = letsinfer.parser().parse_args(["update", "--version", "1.2.3"])

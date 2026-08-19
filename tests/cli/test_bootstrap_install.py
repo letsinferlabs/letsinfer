@@ -56,6 +56,18 @@ class BootstrapInstallTests(unittest.TestCase):
         self.assertIn('sudo chmod 0755 "$managed_directory"', script)
         self.assertIn('for setup_command in docker cmake ctest cc openssl', script)
         self.assertIn('launchctl print "gui/$(id -u)"', script)
+        self.assertIn('progress 5 "Resolving release"', script)
+        self.assertIn('progress 80 "Initializing services"', script)
+        self.assertIn('finish_progress', script)
+        self.assertIn('"$command_path" setup >"$setup_log" 2>&1', script)
+
+    def test_watchdog_build_is_quiet_unless_a_command_fails(self) -> None:
+        source = (REPOSITORY_ROOT / "core/cli.py").read_text(encoding="utf-8")
+        start = source.index("def install_watchdog_runtime(")
+        end = source.index("\ndef core_watchdog_source_identity", start)
+        installer = source[start:end]
+        self.assertNotIn("run_passthrough(", installer)
+        self.assertEqual(installer.count("        run(\n"), 3)
 
     def test_release_workflow_uses_protected_environment_and_pinned_actions(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
