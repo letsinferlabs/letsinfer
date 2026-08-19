@@ -12,7 +12,7 @@ import unittest
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
 INSTALLER = REPOSITORY_ROOT / "install.sh"
 RELEASE_PUBLIC_KEY = REPOSITORY_ROOT / "core/trust/release-public-key.pem"
-WORKFLOW = REPOSITORY_ROOT / ".github/workflows/release.yml"
+WORKFLOW = REPOSITORY_ROOT / ".github/workflows/release-core.yml"
 
 
 class BootstrapInstallTests(unittest.TestCase):
@@ -55,8 +55,9 @@ class BootstrapInstallTests(unittest.TestCase):
         self.assertIn("LETSINFER_RELEASE_SIGNING_KEY_B64", workflow)
         self.assertIn("cmp \"$RUNNER_TEMP/source-a.tar.gz\"", workflow)
         self.assertIn("gh attestation verify", workflow)
+        self.assertNotIn("Validate macOS", workflow)
         action_refs = re.findall(r"uses:\s*([^\s]+)", workflow)
-        self.assertGreaterEqual(len(action_refs), 4)
+        self.assertGreaterEqual(len(action_refs), 3)
         for action in action_refs:
             revision = action.rsplit("@", 1)[-1]
             self.assertRegex(revision, r"^[0-9a-f]{40}$")

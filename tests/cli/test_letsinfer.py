@@ -124,66 +124,45 @@ class ManifestTests(unittest.TestCase):
             set(letsinfer.ADAPTERS), {"vllm", "sglang", "llama.cpp", "dwarfstar"}
         )
 
-    def test_watchdog_protocol_identity_is_shared_across_core_native_and_mac(self) -> None:
+    def test_watchdog_protocol_identity_is_shared_across_core_and_native(self) -> None:
         self.assertEqual(letsinfer.WATCHDOG_PROTOCOL_VERSION, 3)
         header = (
             REPOSITORY_ROOT / "watchdog/include/watchdog/protobuf.h"
-        ).read_text(encoding="utf-8")
-        mac_client = (
-            REPOSITORY_ROOT
-            / "apps/macos/LetsInfer/DataSources/Watchdog/WatchdogTLSClient.swift"
-        ).read_text(encoding="utf-8")
-        mac_protocol = (
-            REPOSITORY_ROOT
-            / "apps/macos/LetsInfer/DataSources/Watchdog/WatchdogProtocol.swift"
         ).read_text(encoding="utf-8")
         proto = (REPOSITORY_ROOT / "watchdog/proto/watchdog.proto").read_text(
             encoding="utf-8"
         )
         self.assertIn("#define WATCHDOG_PROTOCOL_VERSION 3u", header)
-        self.assertIn("static let supportedProtocolVersion: UInt32 = 3", mac_client)
         inference_fields = {
-            25: ("active_requests", "activeRequests"),
-            26: ("queued_requests", "queuedRequests"),
-            27: ("requests_received", "requestsReceived"),
-            28: ("requests_admitted", "requestsAdmitted"),
-            29: ("requests_completed", "requestsCompleted"),
-            30: ("requests_failed", "requestsFailed"),
-            31: ("requests_cancelled", "requestsCancelled"),
-            32: ("requests_retried", "requestsRetried"),
-            33: ("input_tokens", "inputTokens"),
-            34: ("output_tokens", "outputTokens"),
-            35: ("cached_tokens", "cachedTokens"),
-            36: ("queue_milliseconds", "queueMilliseconds"),
-            37: ("ttft_milliseconds", "ttftMilliseconds"),
-            38: ("decode_milliseconds", "decodeMilliseconds"),
-            39: ("exact_token_requests", "exactTokenRequests"),
-            40: ("prefix_cache_hits", "prefixCacheHits"),
-            41: ("usage_records_dropped", "usageRecordsDropped"),
-            42: ("usage_write_errors", "usageWriteErrors"),
+            25: "active_requests",
+            26: "queued_requests",
+            27: "requests_received",
+            28: "requests_admitted",
+            29: "requests_completed",
+            30: "requests_failed",
+            31: "requests_cancelled",
+            32: "requests_retried",
+            33: "input_tokens",
+            34: "output_tokens",
+            35: "cached_tokens",
+            36: "queue_milliseconds",
+            37: "ttft_milliseconds",
+            38: "decode_milliseconds",
+            39: "exact_token_requests",
+            40: "prefix_cache_hits",
+            41: "usage_records_dropped",
+            42: "usage_write_errors",
         }
-        for field_number, (proto_name, swift_name) in inference_fields.items():
+        for field_number, proto_name in inference_fields.items():
             self.assertRegex(
                 proto,
                 rf"(?:uint32|uint64) {proto_name} = {field_number};",
             )
-            self.assertIn(
-                f"case ({field_number}, 0): sample.{swift_name} =",
-                mac_protocol,
-            )
         for _, manifest in letsinfer.manifests(TEST_MANIFESTS):
             self.assertEqual(manifest["watchdog"]["protocol_version"], 3)
 
-    def test_mac_controller_private_key_is_nonextractable_and_device_bound(self) -> None:
-        source = (
-            REPOSITORY_ROOT
-            / "apps/macos/LetsInfer/Pairing/ControllerPairing.swift"
-        ).read_text(encoding="utf-8")
-        self.assertIn("kSecAttrTokenIDSecureEnclave", source)
-        self.assertIn("kSecAttrIsExtractable as String: false", source)
-        self.assertIn("kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly", source)
 
-    def test_release_identity_is_shared_by_core_watchdog_and_mac(self) -> None:
+    def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
         self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.3")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
@@ -191,31 +170,8 @@ class ManifestTests(unittest.TestCase):
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        mac_project = (
-            REPOSITORY_ROOT / "apps/macos/project.yml"
-        ).read_text(encoding="utf-8")
-        generated_project = (
-            REPOSITORY_ROOT / "apps/macos/LetsInfer.xcodeproj/project.pbxproj"
-        ).read_text(encoding="utf-8")
-        mac_info = (
-            REPOSITORY_ROOT / "apps/macos/LetsInfer/Info.plist"
-        ).read_text(encoding="utf-8")
-        mac_discovery = (
-            REPOSITORY_ROOT / "apps/macos/LetsInfer/Discovery/BonjourDiscovery.swift"
-        ).read_text(encoding="utf-8")
         self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.3"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
-        self.assertIn('MARKETING_VERSION: "0.11.0"', mac_project)
-        self.assertEqual(generated_project.count("MARKETING_VERSION = 0.11.0;"), 2)
-        self.assertIn("<string>0.11.0-rc.3</string>", mac_info)
-        self.assertIn("<string>_letsinfer._tcp</string>", mac_info)
-        self.assertNotIn("<string>_watchdog._tcp</string>", mac_info)
-        self.assertNotIn("<string>_ssh._tcp</string>", mac_info)
-        self.assertIn(
-            'private static let siteControlProtocol = "letsinfer-site-control-v1"',
-            mac_discovery,
-        )
-        self.assertIn('text["control"] == Self.siteControlProtocol', mac_discovery)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
         self.assertNotIn("runtime", self.manifest)

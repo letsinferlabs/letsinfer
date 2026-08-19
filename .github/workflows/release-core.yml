@@ -3,7 +3,12 @@ name: Core release
 on:
   pull_request:
     branches:
+      - main
       - release
+    paths-ignore:
+      - "apps/macos/**"
+      - ".github/workflows/release-macos.yml"
+      - "documentation/operations/macos-release.md"
   push:
     branches:
       - release
@@ -61,26 +66,10 @@ jobs:
               "$RUNNER_TEMP/public-source/letsinfer" --json
           done
 
-  validate-macos:
-    name: Validate macOS app
-    runs-on: macos-15
-    steps:
-      - name: Check out exact revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Test application
-        working-directory: apps/macos
-        run: |
-          xcodebuild -project LetsInfer.xcodeproj -scheme LetsInfer \
-            -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test
-
   publish:
     name: Publish core release
     if: github.event_name == 'push'
-    needs:
-      - validate-linux
-      - validate-macos
+    needs: validate-linux
     runs-on: ubuntu-24.04
     environment: production-release
     permissions:
