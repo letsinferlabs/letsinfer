@@ -136,9 +136,9 @@ class LiveGatewayTests(unittest.TestCase):
                 "client", models=[MODEL], context_limit=128
             )
             store.set_alias("fixture", MODEL)
-            for index, backend in enumerate(self.backends):
+            for index, _backend in enumerate(self.backends):
                 insert_member(store, f"{index + 1:032x}")
-                store.set_placement(self._placement(index, backend))
+            store.set_placement(self._placement(self.backends))
 
         self.gateway = server.GatewayServer(
             ("127.0.0.1", 0),
@@ -162,20 +162,13 @@ class LiveGatewayTests(unittest.TestCase):
         self.environment.stop()
         self.temporary.cleanup()
 
-    def _placement(self, index: int, backend: _Backend) -> dict:
-        member_id = f"{index + 1:032x}"
-        return {
-            "placement_id": f"{index + 1:032x}",
-            "model": MODEL,
-            "runtime": f"{MODEL}/fixture/target@1.0.{index}",
-            "target": "fixture-target",
-            "strategy": "single",
-            "state": "running",
-            "topology_sha256": f"{index + 1:064x}",
-            "members": [member_id],
-            "endpoints": [
+    def _placement(self, backends: list[_Backend]) -> dict:
+        members = [f"{index + 1:032x}" for index in range(len(backends))]
+        endpoints = []
+        for index, backend in enumerate(backends):
+            endpoints.append(
                 {
-                    "member_id": member_id,
+                    "member_id": members[index],
                     "url": f"http://127.0.0.1:{backend.server_port}",
                     "credential_file": str(self.backend_token),
                     "ca_file": None,
@@ -188,8 +181,21 @@ class LiveGatewayTests(unittest.TestCase):
                     "temperature_c": 40.0 + index,
                     "prefix_keys": ["shared"] if index else [],
                 }
-            ],
-            "capacity": {"max_active_requests": 1, "max_context_tokens": 256},
+            )
+        return {
+            "placement_id": f"{1:032x}",
+            "model": MODEL,
+            "runtime": f"{MODEL}/fixture/target@1.0.0",
+            "target": "fixture-target",
+            "strategy": "replicated",
+            "state": "running",
+            "topology_sha256": f"{1:064x}",
+            "members": members,
+            "endpoints": endpoints,
+            "capacity": {
+                "max_active_requests": len(backends),
+                "max_context_tokens": 256,
+            },
         }
 
     def _request(

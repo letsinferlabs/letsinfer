@@ -1,0 +1,186 @@
+name: Core release
+
+on:
+  pull_request:
+    branches:
+      - release
+  push:
+    branches:
+      - release
+
+concurrency:
+  group: core-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate-linux:
+    name: Validate Linux release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Audit repository boundary
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          git diff --check
+          for encoded in Ym9uZmlyZQ== c3Bhcmtk c2VydmVyLWFwcA== Z3VhcmRkb2c=; do
+            term=$(printf '%s' "$encoded" | base64 --decode)
+            python3 -m tools.release_audit --forbid "$term" . --json
+          done
+      - name: Run Python tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          for suite in cli benchmarks gateway orchestration site; do
+            python3 -m unittest discover -s "tests/$suite" -p 'test_*.py'
+          done
+      - name: Build and test Watchdog
+        run: |
+          cmake -S watchdog -B "$RUNNER_TEMP/watchdog-build" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/watchdog-build" --parallel 2
+          ctest --test-dir "$RUNNER_TEMP/watchdog-build" --output-on-failure
+      - name: Verify deterministic public archive
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 -m tools.source_archive build --source . --output "$RUNNER_TEMP/source-a.tar.gz"
+          python3 -m tools.source_archive build --source . --output "$RUNNER_TEMP/source-b.tar.gz"
+          cmp "$RUNNER_TEMP/source-a.tar.gz" "$RUNNER_TEMP/source-b.tar.gz"
+          python3 -m tools.source_archive verify "$RUNNER_TEMP/source-a.tar.gz"
+          mkdir "$RUNNER_TEMP/public-source"
+          tar -xzf "$RUNNER_TEMP/source-a.tar.gz" -C "$RUNNER_TEMP/public-source"
+          for encoded in Ym9uZmlyZQ== c3Bhcmtk c2VydmVyLWFwcA== Z3VhcmRkb2c=; do
+            term=$(printf '%s' "$encoded" | base64 --decode)
+            python3 -m tools.release_audit --forbid "$term" \
+              "$RUNNER_TEMP/public-source/letsinfer" --json
+          done
+
+  validate-macos:
+    name: Validate macOS app
+    runs-on: macos-15
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test application
+        working-directory: apps/macos
+        run: |
+          xcodebuild -project LetsInfer.xcodeproj -scheme LetsInfer \
+            -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test
+
+  publish:
+    name: Publish core release
+    if: github.event_name == 'push'
+    needs:
+      - validate-linux
+      - validate-macos
+    runs-on: ubuntu-24.04
+    environment: production-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve and validate version
+        id: version
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          version=$(python3 -c 'from core import PRODUCT_VERSION; print(PRODUCT_VERSION)')
+          python3 - "$version" <<'PY'
+          import re
+          import sys
+          if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?", sys.argv[1]) is None:
+              raise SystemExit("PRODUCT_VERSION must be a release or release candidate")
+          PY
+          tag="v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "tag already exists: $tag" >&2
+            exit 1
+          fi
+          if [[ "$version" == *-rc.* ]]; then prerelease=true; else prerelease=false; fi
+          printf 'version=%s\ntag=%s\nprerelease=%s\n' "$version" "$tag" "$prerelease" >> "$GITHUB_OUTPUT"
+      - name: Build exact release assets
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          LETSINFER_RELEASE_SIGNING_KEY_B64: ${{ secrets.LETSINFER_RELEASE_SIGNING_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$LETSINFER_RELEASE_SIGNING_KEY_B64"
+          mkdir dist
+          python3 -m tools.source_archive build --source . --output "$RUNNER_TEMP/source-a.tar.gz"
+          python3 -m tools.source_archive build --source . --output "$RUNNER_TEMP/source-b.tar.gz"
+          cmp "$RUNNER_TEMP/source-a.tar.gz" "$RUNNER_TEMP/source-b.tar.gz"
+          cp "$RUNNER_TEMP/source-a.tar.gz" dist/letsinfer.tar.gz
+          (cd dist && sha256sum letsinfer.tar.gz > SHA256SUMS)
+          key_path="$RUNNER_TEMP/release-signing-key.pem"
+          trap 'rm -f "$key_path"' EXIT
+          printf '%s' "$LETSINFER_RELEASE_SIGNING_KEY_B64" | base64 --decode > "$key_path"
+          chmod 600 "$key_path"
+          openssl pkey -in "$key_path" -pubout > "$RUNNER_TEMP/release-public-key.pem"
+          cmp "$RUNNER_TEMP/release-public-key.pem" core/trust/release-public-key.pem
+          openssl pkeyutl -sign -inkey "$key_path" -rawin \
+            -in dist/SHA256SUMS -out dist/SHA256SUMS.sig
+          cp install.sh dist/install.sh
+          chmod 755 dist/install.sh
+          openssl pkeyutl -verify -pubin -inkey core/trust/release-public-key.pem -rawin \
+            -in dist/SHA256SUMS -sigfile dist/SHA256SUMS.sig
+          prefix="$RUNNER_TEMP/bootstrap-prefix"
+          LETSINFER_ALLOW_INSECURE_RELEASE_URL=1 \
+          LETSINFER_RELEASE_PUBLIC_KEY_PATH="$PWD/core/trust/release-public-key.pem" \
+            sh dist/install.sh --base-url "file://$PWD/dist" --prefix "$prefix"
+          "$prefix/bin/letsinfer" --help >/dev/null
+          rm -f "$key_path"
+          trap - EXIT
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: |
+            dist/letsinfer.tar.gz
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
+            dist/install.sh
+      - name: Create immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          args=("$TAG" dist/letsinfer.tar.gz dist/SHA256SUMS dist/SHA256SUMS.sig dist/install.sh \
+            --target "$GITHUB_SHA" --title "Let's Infer $TAG" --generate-notes)
+          if [[ "$PRERELEASE" == true ]]; then args+=(--prerelease); else args+=(--latest); fi
+          gh release create "${args[@]}"
+      - name: Verify published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          mkdir "$RUNNER_TEMP/published"
+          gh release download "$TAG" --dir "$RUNNER_TEMP/published" \
+            --pattern 'letsinfer.tar.gz' --pattern 'SHA256SUMS' \
+            --pattern 'SHA256SUMS.sig' --pattern 'install.sh'
+          for asset in letsinfer.tar.gz SHA256SUMS SHA256SUMS.sig install.sh; do
+            cmp "dist/$asset" "$RUNNER_TEMP/published/$asset"
+          done
+          openssl pkeyutl -verify -pubin -inkey core/trust/release-public-key.pem -rawin \
+            -in "$RUNNER_TEMP/published/SHA256SUMS" \
+            -sigfile "$RUNNER_TEMP/published/SHA256SUMS.sig"
+          for asset in letsinfer.tar.gz SHA256SUMS SHA256SUMS.sig install.sh; do
+            gh attestation verify "$RUNNER_TEMP/published/$asset" --repo "$GITHUB_REPOSITORY"
+          done
+          prefix="$RUNNER_TEMP/published-prefix"
+          sh "$RUNNER_TEMP/published/install.sh" --version "$VERSION" --prefix "$prefix"
+          "$prefix/bin/letsinfer" --help >/dev/null

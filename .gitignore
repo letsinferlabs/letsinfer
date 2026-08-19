@@ -26,6 +26,8 @@ target/
 .env.*
 !.env.example
 *.pem
+!core/trust/catalog-public-key.pem
+!core/trust/release-public-key.pem
 *.key
 *.crt
 *.token

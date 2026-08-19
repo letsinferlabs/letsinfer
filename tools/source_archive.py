@@ -21,7 +21,7 @@ from typing import Any
 
 ARCHIVE_ROOT = "letsinfer"
 MANIFEST_NAME = "SOURCE-MANIFEST.json"
-PUBLIC_ROOT_FILES = (".gitignore", "LICENSE", "NOTICE", "README.md")
+PUBLIC_ROOT_FILES = (".gitignore", "LICENSE", "NOTICE", "README.md", "install.sh")
 PUBLIC_DIRECTORIES = (
     "adapters",
     "apps",
@@ -56,7 +56,12 @@ GENERATED_DIRECTORY_NAMES = frozenset(
 GENERATED_FILE_SUFFIXES = (".pyc", ".pyo", ".swp", ".swo", "~")
 SENSITIVE_FILE_NAMES = frozenset({".env", "service.json"})
 SENSITIVE_FILE_SUFFIXES = (".crt", ".key", ".pem", ".token")
-PUBLIC_TRUST_FILES = frozenset({"core/trust/catalog-public-key.pem"})
+PUBLIC_TRUST_FILES = frozenset(
+    {
+        "core/trust/catalog-public-key.pem",
+        "core/trust/release-public-key.pem",
+    }
+)
 PRIVATE_KEY_MARKERS = (
     b"-----BEGIN " + b"PRIVATE KEY-----",
     b"-----BEGIN " + b"EC PRIVATE KEY-----",

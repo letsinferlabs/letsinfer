@@ -10,10 +10,17 @@ persistence requires user lingering:
 sudo loginctl enable-linger "$USER"
 ```
 
-Install the CLI from an unpacked, verified source release. The installer copies
-the exact public source closure into a read-only version-and-hash directory and
+Install the latest stable CLI from its signed GitHub release:
+
+```bash
+curl -fsSL https://github.com/letsinferlabs/letsinfer/releases/latest/download/install.sh | sh
+```
+
+The bootstrap verifies the Ed25519-signed checksum, archive SHA-256, and
+embedded source manifest before running any repository code. It copies the
+exact public source closure into a read-only version-and-hash directory and
 atomically creates `~/.local/bin/letsinfer`; it does not create, restart, or
-modify a site:
+modify a site. To install from an unpacked verified source tree instead:
 
 ```bash
 bin/letsinfer-install

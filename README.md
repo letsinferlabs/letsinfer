@@ -24,6 +24,15 @@ Its unit of delivery is the complete, tested combination of model, engine,
 configuration, cache compatibility, and evidence required to serve a model
 reliably on a compatible target.
 
+Install the latest stable core release with:
+
+```bash
+curl -fsSL https://github.com/letsinferlabs/letsinfer/releases/latest/download/install.sh | sh
+```
+
+The bootstrap verifies a signed checksum and the archive's complete source
+manifest before installing the immutable user-local CLI.
+
 ## Why Let's Infer
 
 General-purpose model runners optimize for broad model coverage and quick
