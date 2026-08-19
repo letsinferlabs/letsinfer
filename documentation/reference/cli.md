@@ -157,7 +157,11 @@ model load. Engine launch state remains visible through `status`. The runtime's 
 bundle is not rebound. `update` never resolves, downloads, upgrades, rolls
 back, or changes a runtime. Installed runtime
 receipts, model snapshots, caches, evidence, API keys, and service placement
-remain unchanged. An active benchmark must be stopped before updating core.
+remain unchanged. The replacement resident Watchdog keeps the compatible
+selected runtime's exact protection thresholds. An incompatible selected
+runtime is stopped, its recovery timer remains stopped, and the result reports
+`runtime_state=incompatible-stopped` instead of retrying an unverifiable
+runtime. An active benchmark must be stopped before updating core.
 
 ## Model and service lifecycle
 
@@ -196,6 +200,10 @@ card renders startup as `STARTING`: the gateway waits for model identity, the
 engine runs health checks, protection arms after readiness, and the remaining
 unit is described as activating. A protection trip always takes precedence and
 renders `BLOCKED`; terminal engine or Docker health failures render `FAILED`.
+API reachability and authentication come from live gateway probes even when
+immutable runtime metadata is incompatible. In that case the API can be shown
+as `Ready` while a separate `RUNTIME Incompatible` row explains why the
+overall lifecycle remains `degraded`.
 
 `releases` lists installed runtime manifests, not test fixtures or a bundled
 model catalog.
