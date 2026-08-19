@@ -24,14 +24,19 @@ Its unit of delivery is the complete, tested combination of model, engine,
 configuration, cache compatibility, and evidence required to serve a model
 reliably on a compatible target.
 
-Install the latest stable core release with:
+Install and initialize the latest stable core release on Linux or macOS with:
 
 ```bash
-curl -fsSL https://github.com/letsinferlabs/letsinfer/releases/latest/download/install.sh | sh
+curl -fsSL https://letsinfer.ai/install.sh | sh
 ```
 
+The signed bootstrap selects Linux or macOS and x86_64 or arm64, installs the
+immutable core under `/opt/letsinfer`, exposes `letsinfer` in
+`/usr/local/bin`, and runs `letsinfer setup`. Use `--user` for `~/.local` or
+`--no-setup` when preparing files without creating a site.
+
 The bootstrap verifies a signed checksum and the archive's complete source
-manifest before installing the immutable user-local CLI.
+manifest before installing the immutable core.
 
 ## Why Let's Infer
 
@@ -621,7 +626,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.4`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.5`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its

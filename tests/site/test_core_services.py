@@ -108,6 +108,7 @@ class CoreServiceTests(unittest.TestCase):
             config_path.chmod(0o600)
             result = types.SimpleNamespace(returncode=0, stdout="", stderr="")
             with (
+                mock.patch.object(cli.platform, "system", return_value="Linux"),
                 mock.patch.object(cli.pathlib.Path, "home", return_value=home),
                 mock.patch.object(cli, "site_config_root", return_value=config_root),
                 mock.patch.object(cli, "default_gateway_telemetry_path", return_value=telemetry),

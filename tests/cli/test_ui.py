@@ -213,6 +213,36 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("Blocked", rendered)
         self.assertNotIn("\033[", rendered)
 
+    def test_site_status_is_branded_without_claiming_a_runtime(self) -> None:
+        stream = FakeStream(tty=True)
+        ui.site_status(
+            {
+                "identity": {
+                    "display_name": "Home",
+                    "role": "coordinator",
+                    "member_id": "homeai",
+                },
+                "endpoint": "http://homeai.local:8000/v1",
+                "services": {
+                    "site_active": "active",
+                    "gateway_active": "active",
+                    "gateway_health": True,
+                    "gateway_auth_required": True,
+                    "gateway_authenticated": True,
+                },
+                "runtime": None,
+            },
+            stream=stream,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
+        )
+        rendered = stream.getvalue()
+        self.assertIn("LET'S INFER", rendered)
+        self.assertIn("ONLINE", rendered)
+        self.assertIn("Home", rendered)
+        self.assertIn("Not installed", rendered)
+        self.assertIn("http://homeai.local:8000/v1", rendered)
+        self.assertNotIn("\033[", rendered)
+
     def test_runtime_status_fits_an_eighty_column_terminal(self) -> None:
         stream = FakeStream(tty=True)
         ui.runtime_status(

@@ -2,36 +2,49 @@
 
 [Back to documentation](../README.md)
 
-NVIDIA DGX Spark is the first implemented qualification target. It requires Docker, user
-systemd, CMake, a C17 compiler, and OpenSSL 3 development headers. Boot
-persistence requires user lingering:
+Install and initialize the latest stable Let's Infer core on Linux or macOS:
 
 ```bash
-sudo loginctl enable-linger "$USER"
-```
-
-Install the latest stable CLI from its signed GitHub release:
-
-```bash
-curl -fsSL https://github.com/letsinferlabs/letsinfer/releases/latest/download/install.sh | sh
+curl -fsSL https://letsinfer.ai/install.sh | sh
 ```
 
 The bootstrap verifies the Ed25519-signed checksum, archive SHA-256, and
-embedded source manifest before running any repository code. It copies the
-exact public source closure into a read-only version-and-hash directory and
-atomically creates `~/.local/bin/letsinfer`; it does not create, restart, or
-modify a site. To install from an unpacked verified source tree instead:
+embedded source manifest before running repository code. It selects the exact
+Linux/macOS and x86_64/arm64 release asset, installs immutable files under
+`/opt/letsinfer`, creates `/usr/local/bin/letsinfer`, and then runs
+`letsinfer setup` as the invoking user. Administrator access is used only for
+the system paths and, on Linux when needed, enabling user-service lingering.
+
+NVIDIA DGX Spark is the first implemented inference qualification target. Its
+Linux setup requires Docker, systemd-logind, CMake, CTest, a C17 compiler, and
+OpenSSL 3 development headers. The installer checks the command-line
+prerequisites before installing files. macOS setup uses per-user launchd
+agents for the site and unified gateway; the native Linux/NVIDIA Watchdog and
+local inference placement are not claimed on macOS.
+
+For an unprivileged install under `~/.local`, or to install files without
+creating a site:
+
+```bash
+curl -fsSL https://letsinfer.ai/install.sh | sh -s -- --user
+curl -fsSL https://letsinfer.ai/install.sh | sh -s -- --no-setup
+```
+
+To install from an unpacked verified source tree instead:
 
 ```bash
 bin/letsinfer-install
 ~/.local/bin/letsinfer --help
 ```
 
-Add `~/.local/bin` to `PATH` if it is not already present. Re-running the
+Add `~/.local/bin` to `PATH` after `--user` if it is not already present. A
+child process cannot edit its parent shell, so the default system installation
+uses the already conventional `/usr/local/bin` instead. Re-running the
 installer verifies and reuses the same immutable source identity. It refuses
 to replace a user-created regular file at either launcher path.
 
-Create the first logical site before installing a runtime:
+The default installer already creates the first logical site. To do that
+manually after `--no-setup`:
 
 ```bash
 letsinfer setup --name Home

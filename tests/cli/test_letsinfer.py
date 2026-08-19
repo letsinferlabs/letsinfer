@@ -163,14 +163,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.4")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.5")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.4"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.5"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -1920,6 +1920,54 @@ class InstallTests(unittest.TestCase):
             self.assertTrue(payload["container"]["model_identity"])
             self.assertTrue(payload["service"]["gateway_health"])
             self.assertTrue(payload["service"]["gateway_authenticated"])
+
+    def test_status_reports_a_ready_site_before_runtime_installation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            identity_path = root / "site.json"
+            identity_path.write_text("{}\n", encoding="utf-8")
+            identity = types.SimpleNamespace(
+                role="coordinator",
+                member_id="homeai",
+            )
+            arguments = argparse.Namespace(
+                model=None, name=None, config=None, json=True
+            )
+            with (
+                mock.patch.object(
+                    letsinfer, "site_identity_path", return_value=identity_path
+                ),
+                mock.patch.object(
+                    letsinfer, "default_service_config_path", return_value=root / "runtime.json"
+                ),
+                mock.patch.object(letsinfer, "read_site_identity", return_value=identity),
+                mock.patch.object(letsinfer, "_engine_group_status", return_value=[]),
+                mock.patch.object(
+                    letsinfer,
+                    "identity_json",
+                    return_value={
+                        "display_name": "Home",
+                        "role": "coordinator",
+                        "member_id": "homeai",
+                    },
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "_service_state",
+                    side_effect=[
+                        ("enabled", "active", 1),
+                        ("enabled", "active", 2),
+                    ],
+                ),
+                mock.patch.object(letsinfer, "site_config_root", return_value=root),
+                mock.patch.object(letsinfer, "api_status", side_effect=[200, 401, 200]),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(letsinfer.status(arguments), 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["runtime"], None)
+            self.assertEqual(payload["identity"]["role"], "coordinator")
+            self.assertTrue(payload["services"]["gateway_authenticated"])
 
     def test_service_configuration_resolves_exact_release(self) -> None:
         manifest = {
