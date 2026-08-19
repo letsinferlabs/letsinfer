@@ -22,7 +22,7 @@ adapter needed to expose native state through Let's Infer's cache ABI.
   "target": "dgx-spark",
   "status": "candidate",
   "release_manifest": "release.json",
-  "core_compatibility": {"api": 1}
+  "core_compatibility": {"api": 2}
 }
 ```
 
@@ -33,6 +33,8 @@ source object accepts only the fields shown above plus `benchmark`,
 `orchestration`, and the exact `parent` identity on a CLI-created derivation;
 unknown metadata is rejected. Engine provenance belongs in immutable packed
 files and the digest-pinned image, not in core-interpreted extension fields.
+Compatibility API 2 is the named multi-artifact release contract; API 1
+runtimes are rejected before their release manifest is installed or launched.
 
 `letsinfer pack` adds `letsinfer-runtime.json` using artifact schema 2. It records
 every packaged file's relative path, byte length, SHA-256, and normalized mode
@@ -84,7 +86,7 @@ evidence.
 
 The corresponding release manifest continues to pin:
 
-- the exact model revision and artifact hashes;
+- every exact model dependency and the primary served-model artifact;
 - engine, model format, API, and cache identities;
 - runtime-owned native engine arguments and environment where needed;
 - the digest-pinned runtime and acquisition images;
@@ -105,6 +107,64 @@ A persistent-cache release declares `cache.replay_output_policy` as either
 verifier whether cold, hot, and restored outputs must all match, or whether
 repeat restores alone are the exact comparison. It is declarative data, not an
 engine hook.
+
+## Named model artifacts
+
+Model dependencies use one engine-neutral, closed contract. `model.artifact`
+names the primary artifact that the adapter passes as its protected model path;
+`artifacts` may contain any number of additional runtime-defined roles:
+
+```json
+{
+  "model": {
+    "alias": "example-model",
+    "id": "owner/example-model",
+    "artifact": "model",
+    "acquisition_image": "registry.example/acquirer@sha256:..."
+  },
+  "artifacts": [
+    {
+      "name": "model",
+      "format": "huggingface-snapshot",
+      "repository": "owner/example-model",
+      "revision": "0123456789abcdef0123456789abcdef01234567"
+    },
+    {
+      "name": "draft",
+      "format": "huggingface-snapshot",
+      "repository": "owner/example-draft",
+      "revision": "89abcdef0123456789abcdef0123456789abcdef"
+    }
+  ]
+}
+```
+
+The primary artifact must be first. Remaining entries are sorted by name;
+names are unique lowercase portable identifiers. A `huggingface-snapshot`
+pins an owner/repository and exact 40-hex revision. A `gguf-file` additionally
+pins one contained `.gguf` filename and lowercase SHA-256, with an optional
+positive byte length. Cache directory names are derived rather than repeated
+in the manifest. Acquisition uses the digest-pinned helper image and the
+shared Hugging Face store, so equal repository objects deduplicate naturally.
+Every declared artifact is verified before launch, and the shared hub is
+mounted read-only.
+
+Runtime-owned engine arguments reference another artifact only as a complete
+token, `${artifact:name}`. Core resolves that token to the verified read-only
+container path. Unknown names, embedded or malformed references, unsafe
+filenames, mutable revisions, duplicate names, unknown fields, and
+non-deterministic ordering fail closed. Core assigns no semantics to names
+such as `draft`, `lora`, or `vision`; the runtime supplies the corresponding
+upstream engine option:
+
+```json
+"engine": {
+  "arguments": [
+    "--speculative-draft-model-path",
+    "${artifact:draft}"
+  ]
+}
+```
 
 `engine.arguments` is an optional flat array of native engine option tokens.
 Let's Infer overlays matching options onto its engine adapter command and

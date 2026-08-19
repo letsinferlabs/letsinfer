@@ -60,6 +60,7 @@ ACTIONS = {
         _action("releases", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE),
         _action("engines", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE, requires_site=False),
         _action("hardware", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE, requires_site=False),
+        _action("update", CommandScope.ALL, MutationClass.NODE, AuditPolicy.SUCCESS, requires_site=False),
         _action("topology.show", CommandScope.COORDINATOR, MutationClass.READ, AuditPolicy.SENSITIVE_READ),
         _action("topology.probe", CommandScope.COORDINATOR, MutationClass.SITE, AuditPolicy.ALWAYS),
         _action("topology.plan", CommandScope.COORDINATOR, MutationClass.SITE, AuditPolicy.ALWAYS),
@@ -114,6 +115,7 @@ ACTIONS = {
         _action("service-stop", CommandScope.ALL, MutationClass.INTERNAL, AuditPolicy.NONE),
         _action("gateway", CommandScope.COORDINATOR, MutationClass.INTERNAL, AuditPolicy.NONE),
         _action("site-agent", CommandScope.ALL, MutationClass.INTERNAL, AuditPolicy.NONE),
+        _action("core-rebind", CommandScope.ALL, MutationClass.INTERNAL, AuditPolicy.NONE, requires_site=False),
     )
 }
 

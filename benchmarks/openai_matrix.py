@@ -164,6 +164,29 @@ def _manifest_value(manifest: dict[str, Any], path: str) -> str:
     return value
 
 
+def model_artifact(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Return the exact artifact selected as the served model."""
+    model = manifest.get("model")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(model, dict) or not isinstance(artifacts, list):
+        raise QualificationError("release manifest has no model artifact contract")
+    name = require_string(model, "artifact", "release manifest.model")
+    matches = [
+        artifact
+        for artifact in artifacts
+        if isinstance(artifact, dict) and artifact.get("name") == name
+    ]
+    if len(matches) != 1:
+        raise QualificationError("release manifest model artifact is ambiguous")
+    return matches[0]
+
+
+def model_revision(manifest: dict[str, Any]) -> str:
+    return require_string(
+        model_artifact(manifest), "revision", "release manifest model artifact"
+    )
+
+
 def validate_release_manifest(manifest: dict[str, Any]) -> tuple[str, str, str]:
     if type(manifest.get("schema_version")) is not int or manifest.get("schema_version") != 1:
         raise QualificationError("release manifest schema_version must be 1")
@@ -181,9 +204,16 @@ def validate_release_manifest(manifest: dict[str, Any]) -> tuple[str, str, str]:
     engine_name = require_string(engine, "name", "release manifest.engine")
     model_id = require_string(model, "id", "release manifest.model")
     require_string(model, "alias", "release manifest.model")
-    require_string(model, "revision", "release manifest.model")
+    model_revision(manifest)
     require_string(image, "immutable_id", "release manifest.image")
     return release, engine_name, model_id
+
+
+def served_model_name(manifest: dict[str, Any]) -> str:
+    model = manifest.get("model")
+    if not isinstance(model, dict):
+        raise QualificationError("release manifest model must be an object")
+    return require_string(model, "alias", "release manifest.model")
 
 
 def contained_fixture(root: pathlib.Path, relative_text: str) -> pathlib.Path:
@@ -989,12 +1019,13 @@ def main() -> int:
     base_url = validate_base_url(arguments.base_url)
     manifest = read_json_object(arguments.release_manifest, "release manifest")
     release, engine_name, model_id = validate_release_manifest(manifest)
-    model_revision = _manifest_value(manifest, "model.revision")
+    served_model = served_model_name(manifest)
+    model_revision_value = model_revision(manifest)
     _, cells, tokenizer_identity = load_fixture_contract(
         arguments.fixture_manifest,
         engine_name=engine_name,
         model_id=model_id,
-        model_revision=model_revision,
+        model_revision=model_revision_value,
     )
     api_key = read_private_file(arguments.api_key_file, "API-key file")
     if arguments.ca_cert_file.is_symlink() or not arguments.ca_cert_file.is_file():
@@ -1018,7 +1049,7 @@ def main() -> int:
     before = validate_container(before_inspection, manifest)
     write_json_atomic(raw_directory / "container-before.json", before_inspection)
     preflight_result = preflight(
-        base_url, tls_context, min(arguments.timeout, 30), api_key, model_id
+        base_url, tls_context, min(arguments.timeout, 30), api_key, served_model
     )
     results: list[dict[str, Any]] = []
     pair_equality: dict[str, bool] = {}
@@ -1033,7 +1064,7 @@ def main() -> int:
                     base_url=base_url,
                     context=tls_context,
                     api_key=api_key,
-                    model_id=model_id,
+                    model_id=served_model,
                     timeout=arguments.timeout,
                     stream_directory=(
                         raw_directory / f"{cell['name']}-{phase}-streams"

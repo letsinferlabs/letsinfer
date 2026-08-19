@@ -97,6 +97,7 @@ letsinfer derive RUNTIME [--target TARGET] --name NAME [--without=--FLAG] -- [EN
 letsinfer inspect RUNTIME [--target TARGET] [--command] [--diff] [--json]
 letsinfer upgrade RUNTIME [--target TARGET] [--catalog LOCATION] [--to SOURCE] [--dry-run]
 letsinfer rollback RUNTIME [--target TARGET] [--dry-run]
+letsinfer update [--version VERSION]
 ```
 
 `pack` creates a deterministic `.letsinfer` artifact. `install` accepts local
@@ -147,6 +148,12 @@ repeated; short options use the same form, such as `--without=-fa`.
 `inspect --command` prints shell-quoted display text, but Let's Infer
 stores and launches the command as argv rather than evaluating that text.
 
+`update` installs the latest signed stable core release, or the exact release
+named by `--version`, and rebinds existing services to it. It never resolves,
+downloads, upgrades, rolls back, or changes a runtime. Installed runtime
+receipts, model snapshots, caches, evidence, API keys, and service placement
+remain unchanged. An active benchmark must be stopped before updating core.
+
 ## Model and service lifecycle
 
 ```text
@@ -154,6 +161,8 @@ letsinfer engines
 letsinfer releases
 letsinfer acquire MODEL [--engine ENGINE] [--target TARGET]
 letsinfer benchmark RUNTIME [--c1|--c2|--c4|--c8|--c16] [--32k|--64k|--128k|--256k]
+letsinfer benchmark [--json]
+letsinfer benchmark stop
 letsinfer verify MODEL [--engine ENGINE] [--target TARGET] [--source-only]
 letsinfer serve MODEL [--engine ENGINE] [--target TARGET] [--dry-run]
 letsinfer status [--json]
@@ -186,6 +195,16 @@ plan, identity hashes, and a validated `benchmark.json` into evidence. Every mea
 managed container and an empty prefix store. The output directory defaults to
 a timestamped path under `~/.cache/letsinfer/benchmarks/`. `--list` validates the
 declarative contract and prints selected cells without starting inference.
+
+The benchmark is one durable node job. The launch command attaches to live
+phase, workload, elapsed-time, and expected-duration progress by default;
+`--detach` returns immediately. Ctrl-C detaches the terminal and leaves the
+benchmark running. `letsinfer benchmark` shows the active or most recent job,
+its progress, evidence directory, and recent log output, while
+`letsinfer benchmark stop` is the explicit cancellation path. A second
+benchmark is rejected until the active worker finishes or is stopped. The
+worker owns temporary-container cleanup and restoration of the prior engine
+and recovery-timer state.
 
 The public JSON includes a cryptographic benchmark ID and per-workload
 aggregate/decode TPS, TTFT, prefix-cache state, maximum GPU/CPU temperature,

@@ -241,6 +241,19 @@ impl PyRecordWriter {
             .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))
     }
 
+    /// Commit before returning. Storage backends with write-through semantics
+    /// use this path so a successful engine write means the record is already
+    /// durable and visible to a following lookup.
+    fn commit_sync(&mut self) -> PyResult<()> {
+        let writer = self
+            .inner
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("writer is closed"))?;
+        writer
+            .commit()
+            .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))
+    }
+
     fn cancel(&mut self) {
         if let Some(writer) = self.inner.take() {
             writer.cancel();

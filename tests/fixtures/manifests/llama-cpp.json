@@ -51,12 +51,19 @@
   "model": {
     "alias": "fixture-gguf",
     "id": "example/fixture-gguf",
-    "revision": "2222222222222222222222222222222222222222",
-    "cache_repository": "models--example--fixture-gguf",
-    "filename": "fixture.gguf",
-    "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "artifact": "model",
     "acquisition_image": "registry.example/acquirer@sha256:7777777777777777777777777777777777777777777777777777777777777777"
   },
+  "artifacts": [
+    {
+      "name": "model",
+      "format": "gguf-file",
+      "repository": "example/fixture-gguf",
+      "revision": "2222222222222222222222222222222222222222",
+      "filename": "fixture.gguf",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
   "image": {
     "distribution": "local-image-id",
     "reference": "sha256:9999999999999999999999999999999999999999999999999999999999999999",

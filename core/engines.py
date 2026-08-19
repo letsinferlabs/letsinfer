@@ -50,6 +50,8 @@ class EngineLaunch:
 
 
 ENVIRONMENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+ARTIFACT_NAME_RE = re.compile(r"[a-z][a-z0-9._-]{0,62}")
+ARTIFACT_REFERENCE_RE = re.compile(r"\$\{artifact:([a-z][a-z0-9._-]{0,62})\}")
 PROTECTED_ENVIRONMENT_NAMES = {
     "HF_HOME",
     "HF_HUB_OFFLINE",
@@ -57,7 +59,6 @@ PROTECTED_ENVIRONMENT_NAMES = {
     "PIP_NO_CACHE_DIR",
     "PYTHONPATH",
     "VLLM_API_KEY",
-    "DS4_DSPARK_MODEL",
     "DS4_LETSINFER_CACHE",
     "DS4_LETSINFER_CACHE_DIR",
     "DS4_LETSINFER_CACHE_LIB",
@@ -104,7 +105,7 @@ ADAPTERS = {
     ),
     "dwarfstar": EngineAdapter(
         name="dwarfstar",
-        model_format="dwarfstar-gguf-pair",
+        model_format="gguf-file",
         cache_provider="dwarfstar-letsinfer-prefix-v1",
         requires_runtime_plugins=True,
         persistent_cache=True,
@@ -113,6 +114,12 @@ ADAPTERS = {
         token_count_path="/v1/token-count",
         token_count_protocol=LETSINFER_TOKEN_COUNT_PROTOCOL,
     ),
+}
+
+SGLANG_CACHE_PROVIDERS = {
+    "sglang-radix-v1": False,
+    "sglang-hicache-file-v1": True,
+    "sglang-letsinfer-prefix-v1": True,
 }
 
 
@@ -127,6 +134,32 @@ def adapter_for(manifest: dict[str, Any]) -> EngineAdapter:
             f"manifest.engine.name must be one of: {supported}"
         )
     return ADAPTERS[name]
+
+
+def cache_provider_for(manifest: dict[str, Any]) -> str:
+    cache = manifest.get("cache")
+    if not isinstance(cache, dict) or not isinstance(cache.get("provider"), str):
+        raise EngineManifestError("manifest.cache.provider must be a string")
+    return cache["provider"]
+
+
+def persistent_cache_for(manifest: dict[str, Any]) -> bool:
+    cache = manifest.get("cache")
+    if not isinstance(cache, dict) or not isinstance(cache.get("persistent"), bool):
+        raise EngineManifestError("manifest.cache.persistent must be boolean")
+    return cache["persistent"]
+
+
+def evidence_contract_for(manifest: dict[str, Any]) -> str:
+    adapter = adapter_for(manifest)
+    return cache_provider_for(manifest) if adapter.name == "sglang" else adapter.evidence_contract
+
+
+def requires_core_cache_plugin(manifest: dict[str, Any]) -> bool:
+    return (
+        adapter_for(manifest).name == "sglang"
+        and cache_provider_for(manifest) == "sglang-letsinfer-prefix-v1"
+    )
 
 
 def _require(mapping: dict[str, Any], key: str, expected: type, where: str) -> Any:
@@ -170,11 +203,92 @@ def _huggingface_artifact(model: dict[str, Any], where: str) -> None:
         repository,
     ):
         raise EngineManifestError(f"{where}.repository must be one exact owner/name")
-    cache_repository = _require(model, "cache_repository", str, where)
-    expected_cache = f"models--{repository.replace('/', '--')}"
-    if cache_repository != expected_cache:
+
+
+def artifact_cache_repository(artifact: dict[str, Any]) -> str:
+    """Return Hugging Face's deterministic cache directory for an artifact."""
+    return f"models--{artifact['repository'].replace('/', '--')}"
+
+
+def artifacts_for(manifest: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Return declared artifacts in their validated deterministic order."""
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise EngineManifestError("manifest.artifacts must be an array")
+    return tuple(artifacts)
+
+
+def artifact_for(manifest: dict[str, Any], name: str) -> dict[str, Any]:
+    matches = [
+        artifact
+        for artifact in artifacts_for(manifest)
+        if artifact.get("name") == name
+    ]
+    if len(matches) != 1:
+        raise EngineManifestError(f"manifest references unknown artifact {name!r}")
+    return matches[0]
+
+
+def _validate_artifacts(manifest: dict[str, Any], adapter: EngineAdapter) -> None:
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise EngineManifestError("manifest.artifacts must be a non-empty array")
+
+    names: list[str] = []
+    for index, artifact in enumerate(artifacts):
+        where = f"manifest.artifacts[{index}]"
+        if not isinstance(artifact, dict):
+            raise EngineManifestError(f"{where} must be an object")
+        name = _require(artifact, "name", str, where)
+        if ARTIFACT_NAME_RE.fullmatch(name) is None:
+            raise EngineManifestError(
+                f"{where}.name must be a lowercase portable artifact name"
+            )
+        if name in names:
+            raise EngineManifestError(
+                f"manifest.artifacts contains duplicate name {name!r}"
+            )
+        names.append(name)
+
+        artifact_format = _require(artifact, "format", str, where)
+        common_fields = {"name", "format", "repository", "revision"}
+        if artifact_format == "huggingface-snapshot":
+            expected_fields = common_fields
+        elif artifact_format == "gguf-file":
+            expected_fields = common_fields | {"filename", "sha256"}
+            if "bytes" in artifact:
+                expected_fields.add("bytes")
+        else:
+            raise EngineManifestError(
+                f"{where}.format must be huggingface-snapshot or gguf-file"
+            )
+        if set(artifact) != expected_fields:
+            raise EngineManifestError(
+                f"{where} must contain exactly "
+                + ", ".join(sorted(expected_fields))
+            )
+        _huggingface_artifact(artifact, where)
+        revision = _require(artifact, "revision", str, where)
+        if len(revision) != 40 or any(
+            character not in "0123456789abcdef" for character in revision
+        ):
+            raise EngineManifestError(
+                f"{where}.revision must be an exact 40-hex revision"
+            )
+        if artifact_format == "gguf-file":
+            _gguf_artifact(artifact, where)
+            if "bytes" in artifact:
+                _positive_int(artifact, "bytes", where)
+
+    primary = manifest["model"]["artifact"]
+    if names[0] != primary or names[1:] != sorted(names[1:]):
         raise EngineManifestError(
-            f"{where}.cache_repository must be {expected_cache!r}"
+            "manifest.artifacts must put manifest.model.artifact first and sort "
+            "remaining artifacts by name"
+        )
+    if artifact_for(manifest, primary)["format"] != adapter.model_format:
+        raise EngineManifestError(
+            "manifest.model.artifact format must match manifest.engine.model_format"
         )
 
 
@@ -203,8 +317,16 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
     expected = {
         "model_format": adapter.model_format,
         "api_protocol": "openai-v1",
-        "cache_provider": adapter.cache_provider,
     }
+    if adapter.name == "sglang":
+        provider = engine.get("cache_provider")
+        if provider not in SGLANG_CACHE_PROVIDERS:
+            raise EngineManifestError(
+                "manifest.engine.cache_provider must be one of: "
+                + ", ".join(sorted(SGLANG_CACHE_PROVIDERS))
+            )
+    else:
+        expected["cache_provider"] = adapter.cache_provider
     for key, value in expected.items():
         if engine.get(key) != value:
             raise EngineManifestError(
@@ -244,53 +366,23 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
             raise EngineManifestError(str(error)) from error
 
     model = manifest["model"]
-    model_fields = {
-        "alias",
-        "id",
-        "revision",
-        "cache_repository",
-        "acquisition_image",
-    }
-    if adapter.model_format == "gguf-file":
-        model_fields.update({"filename", "sha256"})
-    elif adapter.model_format == "dwarfstar-gguf-pair":
-        model_fields.update({"repository", "filename", "sha256", "bytes", "drafter"})
+    model_fields = {"alias", "id", "artifact", "acquisition_image"}
     unknown_model_fields = set(model) - model_fields
     if unknown_model_fields:
         raise EngineManifestError(
             "manifest.model has unsupported fields: "
             + ", ".join(sorted(unknown_model_fields))
         )
-    if adapter.model_format in {"gguf-file", "dwarfstar-gguf-pair"}:
-        _gguf_artifact(model, "manifest.model")
-    if adapter.model_format == "dwarfstar-gguf-pair":
-        _huggingface_artifact(model, "manifest.model")
-        _positive_int(model, "bytes", "manifest.model")
-        drafter = _require(model, "drafter", dict, "manifest.model")
-        expected_drafter_fields = {
-            "repository",
-            "cache_repository",
-            "revision",
-            "filename",
-            "sha256",
-            "bytes",
-        }
-        if set(drafter) != expected_drafter_fields:
-            raise EngineManifestError(
-                "manifest.model.drafter must contain exactly "
-                + ", ".join(sorted(expected_drafter_fields))
-            )
-        _huggingface_artifact(drafter, "manifest.model.drafter")
-        _require(drafter, "revision", str, "manifest.model.drafter")
-        if len(drafter["revision"]) != 40 or any(
-            character not in "0123456789abcdef"
-            for character in drafter["revision"]
-        ):
-            raise EngineManifestError(
-                "manifest.model.drafter.revision must be an exact 40-hex revision"
-            )
-        _gguf_artifact(drafter, "manifest.model.drafter")
-        _positive_int(drafter, "bytes", "manifest.model.drafter")
+    _require(model, "alias", str, "manifest.model")
+    _require(model, "id", str, "manifest.model")
+    primary = _require(model, "artifact", str, "manifest.model")
+    if ARTIFACT_NAME_RE.fullmatch(primary) is None:
+        raise EngineManifestError(
+            "manifest.model.artifact must be a lowercase portable artifact name"
+        )
+    _validate_artifacts(manifest, adapter)
+    if arguments is not None:
+        expand_artifact_references(manifest, arguments)
 
     _require(manifest, "serving", dict, "manifest")
     cache = _require(manifest, "cache", dict, "manifest")
@@ -306,13 +398,27 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
             "min_tokens",
             "exact_capsules_with_mtp",
         },
-        "sglang": {
-            "provider",
-            "persistent",
-            "prewarm",
-            "replay_output_policy",
-            "host_cache_gib",
-        },
+        "sglang": (
+            {"provider", "persistent", "prewarm"}
+            if engine["cache_provider"] == "sglang-radix-v1"
+            else {
+                "provider",
+                "persistent",
+                "prewarm",
+                "replay_output_policy",
+                "host_cache_gib",
+                "durable_capacity_bytes",
+            }
+            | (
+                {
+                    "resident_capacity_bytes",
+                    "ttl_seconds",
+                    "direct_reads",
+                }
+                if engine["cache_provider"] == "sglang-letsinfer-prefix-v1"
+                else set()
+            )
+        ),
         "llama.cpp": {"provider", "persistent", "prewarm"},
         "dwarfstar": {
             "provider",
@@ -334,15 +440,21 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
             "manifest.cache has unsupported fields: "
             + ", ".join(sorted(unknown_cache_fields))
         )
-    if cache.get("provider") != adapter.cache_provider:
+    expected_provider = engine["cache_provider"]
+    if cache.get("provider") != expected_provider:
         raise EngineManifestError(
-            f"manifest.cache.provider must be {adapter.cache_provider!r} for {adapter.name}"
+            f"manifest.cache.provider must be {expected_provider!r} for {adapter.name}"
         )
-    if cache.get("persistent") is not adapter.persistent_cache:
+    expected_persistent = (
+        SGLANG_CACHE_PROVIDERS[expected_provider]
+        if adapter.name == "sglang"
+        else adapter.persistent_cache
+    )
+    if cache.get("persistent") is not expected_persistent:
         raise EngineManifestError(
-            f"manifest.cache.persistent must be {adapter.persistent_cache!r} for {adapter.name}"
+            f"manifest.cache.persistent must be {expected_persistent!r} for {adapter.name}"
         )
-    if adapter.persistent_cache and cache.get("replay_output_policy") not in {
+    if expected_persistent and cache.get("replay_output_policy") not in {
         "all-phases-exact",
         "restored-repeat-exact",
     }:
@@ -366,9 +478,27 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
                 "manifest.cache.exact_capsules_with_mtp must be boolean"
             )
     elif adapter.name == "sglang":
-        if cache.get("prewarm") is not True:
-            raise EngineManifestError("SGLang HiCache must prewarm before readiness")
-        _positive_int(cache, "host_cache_gib", "manifest.cache")
+        if expected_provider == "sglang-radix-v1":
+            if cache.get("prewarm") is not False:
+                raise EngineManifestError("SGLang RadixAttention has no persistent prewarm")
+        else:
+            if cache.get("prewarm") is not True:
+                raise EngineManifestError("SGLang persistent cache must prewarm before readiness")
+            _positive_int(cache, "host_cache_gib", "manifest.cache")
+            _positive_int(cache, "durable_capacity_bytes", "manifest.cache")
+            if cache["durable_capacity_bytes"] % (1 << 20):
+                raise EngineManifestError(
+                    "manifest.cache.durable_capacity_bytes must be an exact number of MiB"
+                )
+            if expected_provider == "sglang-letsinfer-prefix-v1":
+                _nonnegative_int(cache, "resident_capacity_bytes", "manifest.cache")
+                _positive_int(cache, "ttl_seconds", "manifest.cache")
+                if cache["resident_capacity_bytes"] % (1 << 20):
+                    raise EngineManifestError(
+                        "manifest.cache.resident_capacity_bytes must be an exact number of MiB"
+                    )
+                if not isinstance(cache.get("direct_reads"), bool):
+                    raise EngineManifestError("manifest.cache.direct_reads must be boolean")
     elif adapter.name == "llama.cpp":
         if cache.get("prewarm") is not True:
             raise EngineManifestError("llama.cpp prompt cache must prewarm before readiness")
@@ -392,24 +522,40 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
     return adapter
 
 
-def _artifact_container_path(model: dict[str, Any]) -> str:
+def _artifact_container_path(artifact: dict[str, Any]) -> str:
     snapshot = (
-        f"/root/.cache/huggingface/hub/{model['cache_repository']}"
-        f"/snapshots/{model['revision']}"
+        f"/root/.cache/huggingface/hub/{artifact_cache_repository(artifact)}"
+        f"/snapshots/{artifact['revision']}"
     )
-    if "filename" in model:
-        return f"{snapshot}/{model['filename']}"
+    if artifact["format"] == "gguf-file":
+        return f"{snapshot}/{artifact['filename']}"
     return snapshot
 
 
+def artifact_container_path(manifest: dict[str, Any], name: str) -> str:
+    return _artifact_container_path(artifact_for(manifest, name))
+
+
 def model_container_path(manifest: dict[str, Any]) -> str:
-    return _artifact_container_path(manifest["model"])
+    return artifact_container_path(manifest, manifest["model"]["artifact"])
 
 
-def dwarfstar_drafter_container_path(manifest: dict[str, Any]) -> str:
-    if adapter_for(manifest).name != "dwarfstar":
-        raise EngineManifestError("DwarfStar drafter path requested for another engine")
-    return _artifact_container_path(manifest["model"]["drafter"])
+def expand_artifact_references(
+    manifest: dict[str, Any], tokens: tuple[str, ...] | list[str]
+) -> tuple[str, ...]:
+    """Resolve whole-token artifact references to read-only container paths."""
+    resolved: list[str] = []
+    for token in tokens:
+        match = ARTIFACT_REFERENCE_RE.fullmatch(token)
+        if match is not None:
+            resolved.append(artifact_container_path(manifest, match.group(1)))
+        elif "${artifact:" in token:
+            raise EngineManifestError(
+                "artifact references must occupy one complete engine argument token"
+            )
+        else:
+            resolved.append(token)
+    return tuple(resolved)
 
 
 def _compact_json(value: Any) -> str:
@@ -495,6 +641,8 @@ def _vllm_launch(manifest: dict[str, Any], serving: dict[str, Any], port: int) -
 
 def _sglang_launch(manifest: dict[str, Any], serving: dict[str, Any], port: int) -> EngineLaunch:
     model = manifest["model"]
+    cache = manifest["cache"]
+    provider = cache["provider"]
     command = [
         "python3",
         "-m",
@@ -513,33 +661,70 @@ def _sglang_launch(manifest: dict[str, Any], serving: dict[str, Any], port: int)
         "/run/secrets/letsinfer-tls.crt",
         "--config",
         "/tmp/letsinfer-sglang.yaml",
-        "--enable-hierarchical-cache",
-        "--hicache-size",
-        str(manifest["cache"]["host_cache_gib"]),
-        "--hicache-write-policy",
-        "write_through",
-        "--hicache-storage-backend",
-        "file",
-        "--hicache-storage-prefetch-policy",
-        "wait_complete",
         "--enable-cache-report",
     ]
+    if provider != "sglang-radix-v1":
+        command.extend(
+            [
+                "--enable-hierarchical-cache",
+                "--hicache-size",
+                str(cache["host_cache_gib"]),
+                "--hicache-write-policy",
+                "write_through",
+                "--hicache-storage-backend",
+                "dynamic" if provider == "sglang-letsinfer-prefix-v1" else "file",
+                "--hicache-storage-prefetch-policy",
+                "wait_complete",
+            ]
+        )
+        extra = (
+            {
+                "backend_name": "letsinfer",
+                "module_path": "letsinfer_sglang_cache.backend",
+                "class_name": "LetsInferHiCacheStorage",
+                "capacity_bytes": cache["durable_capacity_bytes"],
+                "resident_capacity_bytes": cache["resident_capacity_bytes"],
+                "ttl_seconds": cache["ttl_seconds"],
+                "direct_reads": cache["direct_reads"],
+            }
+            if provider == "sglang-letsinfer-prefix-v1"
+            else {"max_size": cache["durable_capacity_bytes"]}
+        )
+        command.extend(
+            ["--hicache-storage-backend-extra-config", _compact_json(extra)]
+        )
     setup = (
         "IFS= read -r LETSINFER_API_KEY < /run/secrets/letsinfer-api-key; "
         "printf 'api-key: %s\\nlog-level: warning\\n' \"$LETSINFER_API_KEY\" "
         "> /tmp/letsinfer-sglang.yaml; "
         "chmod 600 /tmp/letsinfer-sglang.yaml; unset LETSINFER_API_KEY; "
     )
+    if provider == "sglang-letsinfer-prefix-v1":
+        setup += (
+            "python3 -m pip install -q --no-index --no-deps "
+            "--target /tmp/letsinfer-python /plugins/*.whl; "
+            "export PYTHONPATH=/tmp/letsinfer-python:/plugins; "
+        )
+    environment = [("HF_HOME", "/root/.cache/huggingface"), ("HF_HUB_OFFLINE", "1")]
+    if provider == "sglang-hicache-file-v1":
+        environment.append(
+            ("SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR", "/root/.cache/letsinfer-prefix-store")
+        )
+    elif provider == "sglang-letsinfer-prefix-v1":
+        environment.extend(
+            [
+                ("LETSINFER_PREFIX_STORE_DIR", "/root/.cache/letsinfer-prefix-store"),
+                ("PYTHONPATH", "/plugins"),
+                ("PIP_DISABLE_PIP_VERSION_CHECK", "1"),
+                ("PIP_NO_CACHE_DIR", "1"),
+            ]
+        )
     return EngineLaunch(
         command=tuple(command),
         shell_setup=setup,
-        environment=(
-            ("HF_HOME", "/root/.cache/huggingface"),
-            ("HF_HUB_OFFLINE", "1"),
-            ("SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR", "/root/.cache/letsinfer-prefix-store"),
-        ),
-        mount_runtime_plugins=False,
-        mount_prefix_store=True,
+        environment=tuple(environment),
+        mount_runtime_plugins=provider == "sglang-letsinfer-prefix-v1",
+        mount_prefix_store=provider != "sglang-radix-v1",
         prewarm="openai",
         engine_argument_offset=3,
         protected_arguments=frozenset(
@@ -556,6 +741,7 @@ def _sglang_launch(manifest: dict[str, Any], serving: dict[str, Any], port: int)
                 "--hicache-write-policy",
                 "--hicache-storage-backend",
                 "--hicache-storage-prefetch-policy",
+                "--hicache-storage-backend-extra-config",
                 "--enable-cache-report",
             }
         ),
@@ -644,8 +830,6 @@ def _dwarfstar_launch(
         "/opt/dwarfstar/ds4-server",
         "--model",
         model_container_path(manifest),
-        "--dspark",
-        dwarfstar_drafter_container_path(manifest),
         "--host",
         "127.0.0.1",
         "--port",
@@ -659,7 +843,6 @@ def _dwarfstar_launch(
     environment = (
         ("HF_HOME", "/root/.cache/huggingface"),
         ("HF_HUB_OFFLINE", "1"),
-        ("DS4_DSPARK_MODEL", dwarfstar_drafter_container_path(manifest)),
         ("DS4_LETSINFER_CACHE", "1"),
         ("DS4_LETSINFER_CACHE_DIR", "/root/.cache/letsinfer-prefix-store/dwarfstar"),
         ("DS4_LETSINFER_CACHE_LIB", "/plugins/libletsinfer_prefix_capi.so"),
@@ -682,7 +865,6 @@ def _dwarfstar_launch(
         protected_arguments=frozenset(
             {
                 "--model",
-                "--dspark",
                 "--host",
                 "--port",
                 "--mem-floor-gb",
@@ -718,6 +900,7 @@ def _apply_runtime_arguments(
     if tokens is None:
         return launch
     try:
+        tokens = expand_artifact_references(manifest, tokens)
         parent = overlay_clauses(
             launch.command[launch.engine_argument_offset :]
         )
