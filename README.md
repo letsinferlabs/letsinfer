@@ -313,7 +313,9 @@ protection trip.
 launched through the separate `letsinfer-engine.service`, while
 `letsinfer-recovery.timer` periodically repairs an ordinary missing, exited, or
 unhealthy managed container. Docker auto-restart is disabled, leaving systemd
-as the single restart authority; OOM and safety-trip states stay stopped. The
+recovery as the single retry authority; OOM and safety-trip states stay stopped.
+The engine unit itself never retries, so a failed guarded launch cannot trap a
+foreground install or race the durable protection latch. The
 watchdog starts independently so it also records engine startup, failure, and
 periods when no model runtime is active. It runs as the service account with
 systemd hardening, a 24 MiB soft memory threshold, a strict 30 MiB cgroup
@@ -418,8 +420,8 @@ replace an active service. Hash-addressed bundles make source rollout part of
 the guarded install instead of a separate in-place deployment transaction.
 
 The engine unit performs guarded launch and cache prewarm. Docker restart is
-set to `no`; the systemd engine unit and recovery timer are the only restart
-authority. Ordinary crashes and unhealthy states recover, while an OOM flag or
+set to `no`; the systemd recovery timer is the only retry authority. Ordinary
+crashes and unhealthy states recover, while an OOM flag or
 durable protection trip requires explicit acknowledgement through
 `letsinfer recover`. Watchdog
 remains resident to capture Spark state independently of engine health. Enable
@@ -640,7 +642,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.9`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.10`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its
