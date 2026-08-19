@@ -55,6 +55,9 @@ SAFE_CELL = re.compile(r"(?:32k|64k|128k|256k)-c(?:1|2|4|8|16)")
 _PROGRESS_FILE: pathlib.Path | None = None
 _PROGRESS_STARTED_UNIX_NS: int | None = None
 _EXPECTED_MINUTES: tuple[int, int] | None = None
+_SELECTED_CELLS: tuple[str, ...] = ()
+_COMPLETED_CELLS: list[str] = []
+_CURRENT_CELL: str | None = None
 
 
 class RuntimeMatrixError(common.QualificationError):
@@ -76,6 +79,9 @@ def _write_benchmark_progress(phase: str, message: str, state: str) -> None:
             "expected_minutes": (
                 list(_EXPECTED_MINUTES) if _EXPECTED_MINUTES is not None else None
             ),
+            "selected_cells": list(_SELECTED_CELLS),
+            "completed_cells": list(_COMPLETED_CELLS),
+            "current_cell": _CURRENT_CELL,
         },
     )
 
@@ -1194,8 +1200,11 @@ def run_isolated_matrix(
     expected_low, expected_high = expected_duration_range(
         selected, includes_materializer=benchmark_contract is not None
     )
-    global _EXPECTED_MINUTES
+    global _COMPLETED_CELLS, _CURRENT_CELL, _EXPECTED_MINUTES, _SELECTED_CELLS
     _EXPECTED_MINUTES = (expected_low, expected_high)
+    _SELECTED_CELLS = tuple(cell["name"] for cell in selected)
+    _COMPLETED_CELLS = []
+    _CURRENT_CELL = None
     benchmark_state(
         f"Benchmarking {model_name} · {len(selected)} workload(s)",
         phase="starting",
@@ -1316,6 +1325,7 @@ def run_isolated_matrix(
     container_ids: set[str] = set()
     for cell_index, cell in enumerate(selected, start=1):
         name = cell["name"]
+        _CURRENT_CELL = name
         cell_output = results_root / name
         cell_store = stores_root / name
         cell_launch = launches_root / name
@@ -1466,6 +1476,11 @@ def run_isolated_matrix(
                 "watchdog_telemetry_sha256": common.sha256_file(watchdog_path),
             }
         )
+        _COMPLETED_CELLS.append(name)
+        benchmark_state(
+            f"Completed workload {cell_index}/{len(selected)} · {name}",
+            phase=f"workload:{name}:completed",
+        )
 
     cells_by_name = {cell["name"]: cell for cell in selected}
     public_results = [
@@ -1552,6 +1567,7 @@ def run_isolated_matrix(
         f"evidence={output}",
         flush=True,
     )
+    _CURRENT_CELL = None
     _write_benchmark_progress(
         "completed", f"Completed {len(rows)}/{len(selected)} workloads", "completed"
     )

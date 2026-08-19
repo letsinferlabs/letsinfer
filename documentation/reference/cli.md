@@ -218,12 +218,15 @@ managed container and an empty prefix store. The output directory defaults to
 a timestamped path under `~/.cache/letsinfer/benchmarks/`. `--list` validates the
 declarative contract and prints selected cells without starting inference.
 
-The benchmark is one durable node job. The launch command attaches to live
-phase, workload, elapsed-time, and expected-duration progress by default;
-`--detach` returns immediately. Ctrl-C detaches the terminal and leaves the
-benchmark running. `letsinfer benchmark` shows the active or most recent job,
-its progress, evidence directory, and recent log output, while
-`letsinfer benchmark stop` is the explicit cancellation path. A second
+The benchmark is one durable node job. The launch command attaches to a live
+dashboard with an animated current phase, workload completion bar, completed,
+current, and upcoming cells, elapsed time, expected duration, and evidence
+directory; `--detach` returns immediately. Ctrl-C detaches the terminal and
+leaves the benchmark running. Running `letsinfer benchmark` while a job is
+active attaches to that same dashboard instead of printing a one-time
+snapshot. `letsinfer benchmark --json` remains a one-shot machine-readable
+snapshot. Once no job is active, `letsinfer benchmark` shows the most recent
+terminal result. `letsinfer benchmark stop` is the explicit cancellation path. A second
 benchmark is rejected until the active worker finishes or is stopped. The
 worker owns temporary-container cleanup and restoration of the prior engine
 and recovery-timer state.

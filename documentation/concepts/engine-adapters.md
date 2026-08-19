@@ -149,8 +149,15 @@ For exact context admission and generated benchmarks, the adapter translates
 the supported OpenAI chat request into SGLang's authenticated, non-generating
 `/v1/messages/count_tokens` operation and accepts only its exact
 `input_tokens` response. System content, images, function tools, assistant tool
-calls, and tool results are translated without model-specific logic. A message
-shape that cannot be represented exactly is rejected before inference.
+calls, and tool results are translated without model-specific logic. When a
+valid OpenAI history cannot be represented losslessly in the Anthropic count
+schema—such as an assistant turn containing `reasoning_content`—the core
+adapter automatically uses SGLang's authenticated `/v1/tokenize` operation.
+That fallback applies SGLang's own OpenAI request model and the identical chat
+template used by inference. Core validates its token-ID response while
+streaming it in bounded memory. Invalid or inexact shapes still fail closed
+before inference. This behavior belongs to the core SGLang adapter, so runtimes
+do not carry counting patches or model-specific translations.
 
 ## llama.cpp
 

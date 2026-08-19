@@ -162,6 +162,63 @@ class GatewayPolicyTests(unittest.TestCase):
             [{"role": "user", "content": "hello"}],
         )
 
+    def test_sglang_reasoning_history_uses_exact_openai_tokenize_fallback(self) -> None:
+        backend = server.Backend(
+            placement_id="a" * 32,
+            member_id="b" * 32,
+            model="fixture-model",
+            url="http://127.0.0.1:18000",
+            credential_file="/api-key",
+            ca_file=None,
+            token_count_path="/v1/messages/count_tokens",
+            token_count_protocol="sglang-anthropic-count-tokens-v1",
+            max_active_requests=1,
+            max_context_tokens=1_000_000,
+            healthy=True,
+            memory_pressure=False,
+            temperature_c=40.0,
+            prefix_keys=set(),
+        )
+        response = mock.MagicMock(status=200)
+        response.read.side_effect = [
+            b'{"tokens":[11,12,13],"count":3,',
+            b'"max_model_len":1000000}',
+            b"",
+        ]
+        connection = mock.MagicMock()
+        connection.getresponse.return_value = response
+        handler = object.__new__(server.GatewayHandler)
+        request = json.dumps(
+            {
+                "model": "fixture-model",
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {
+                        "role": "assistant",
+                        "content": "hi",
+                        "reasoning_content": "thinking",
+                    },
+                    {"role": "user", "content": "again"},
+                ],
+                "max_tokens": 1,
+            }
+        ).encode()
+        with (
+            mock.patch.object(
+                handler,
+                "_connect",
+                return_value=(connection, "127.0.0.1:18000"),
+            ),
+            mock.patch.object(server, "_read_backend_token", return_value="secret"),
+        ):
+            self.assertEqual(handler._count_tokens(backend, request), 3)
+        call = connection.request.call_args
+        self.assertEqual(call.args[1], "/v1/tokenize")
+        self.assertEqual(
+            json.loads(call.kwargs["body"])["messages"][1]["reasoning_content"],
+            "thinking",
+        )
+
     def test_metrics_health_fails_closed_when_publication_is_stale(self) -> None:
         path = pathlib.Path(self.temporary.name) / "gateway.state"
         publisher = server.MetricsPublisher(path)
