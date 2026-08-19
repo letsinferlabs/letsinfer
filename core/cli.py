@@ -3735,19 +3735,18 @@ def model_artifacts(manifest: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         if key in model:
             base[key] = model[key]
     artifacts = [base]
-    if adapter_for(manifest).model_format == "dwarfstar-gguf-pair":
+    if "drafter" in model:
         drafter = model["drafter"]
-        artifacts.append(
-            {
-                "role": "drafter",
-                "repository": drafter["repository"],
-                "revision": drafter["revision"],
-                "cache_repository": drafter["cache_repository"],
-                "filename": drafter["filename"],
-                "sha256": drafter["sha256"],
-                "bytes": drafter["bytes"],
-            }
-        )
+        artifact = {
+            "role": "drafter",
+            "repository": drafter["repository"],
+            "revision": drafter["revision"],
+            "cache_repository": drafter["cache_repository"],
+        }
+        for key in ("filename", "sha256", "bytes"):
+            if key in drafter:
+                artifact[key] = drafter[key]
+        artifacts.append(artifact)
     return tuple(artifacts)
 
 

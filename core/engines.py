@@ -291,7 +291,9 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
         "cache_repository",
         "acquisition_image",
     }
-    if adapter.model_format == "gguf-file":
+    if adapter.model_format == "huggingface-snapshot":
+        model_fields.add("drafter")
+    elif adapter.model_format == "gguf-file":
         model_fields.update({"filename", "sha256"})
     elif adapter.model_format == "dwarfstar-gguf-pair":
         model_fields.update({"repository", "filename", "sha256", "bytes", "drafter"})
@@ -303,6 +305,28 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
         )
     if adapter.model_format in {"gguf-file", "dwarfstar-gguf-pair"}:
         _gguf_artifact(model, "manifest.model")
+    if adapter.model_format == "huggingface-snapshot" and "drafter" in model:
+        drafter = _require(model, "drafter", dict, "manifest.model")
+        expected_drafter_fields = {
+            "repository",
+            "cache_repository",
+            "revision",
+        }
+        if set(drafter) != expected_drafter_fields:
+            raise EngineManifestError(
+                "manifest.model.drafter must contain exactly "
+                + ", ".join(sorted(expected_drafter_fields))
+            )
+        _huggingface_artifact(drafter, "manifest.model.drafter")
+        revision = _require(
+            drafter, "revision", str, "manifest.model.drafter"
+        )
+        if len(revision) != 40 or any(
+            character not in "0123456789abcdef" for character in revision
+        ):
+            raise EngineManifestError(
+                "manifest.model.drafter.revision must be an exact 40-hex revision"
+            )
     if adapter.model_format == "dwarfstar-gguf-pair":
         _huggingface_artifact(model, "manifest.model")
         _positive_int(model, "bytes", "manifest.model")
@@ -484,10 +508,17 @@ def model_container_path(manifest: dict[str, Any]) -> str:
     return _artifact_container_path(manifest["model"])
 
 
+def drafter_container_path(manifest: dict[str, Any]) -> str:
+    drafter = manifest["model"].get("drafter")
+    if not isinstance(drafter, dict):
+        raise EngineManifestError("manifest does not declare a drafter artifact")
+    return _artifact_container_path(drafter)
+
+
 def dwarfstar_drafter_container_path(manifest: dict[str, Any]) -> str:
     if adapter_for(manifest).name != "dwarfstar":
         raise EngineManifestError("DwarfStar drafter path requested for another engine")
-    return _artifact_container_path(manifest["model"]["drafter"])
+    return drafter_container_path(manifest)
 
 
 def _compact_json(value: Any) -> str:
@@ -595,6 +626,10 @@ def _sglang_launch(manifest: dict[str, Any], serving: dict[str, Any], port: int)
         "/tmp/letsinfer-sglang.yaml",
         "--enable-cache-report",
     ]
+    if "drafter" in model:
+        command.extend(
+            ["--speculative-draft-model-path", drafter_container_path(manifest)]
+        )
     if provider != "sglang-radix-v1":
         command.extend(
             [
@@ -675,6 +710,7 @@ def _sglang_launch(manifest: dict[str, Any], serving: dict[str, Any], port: int)
                 "--hicache-storage-prefetch-policy",
                 "--hicache-storage-backend-extra-config",
                 "--enable-cache-report",
+                "--speculative-draft-model-path",
             }
         ),
     )

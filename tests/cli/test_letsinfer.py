@@ -757,6 +757,39 @@ class CommandTests(unittest.TestCase):
             "sglang-anthropic-count-tokens-v1",
         )
 
+    def test_sglang_drafter_is_exactly_acquired_and_injected(self) -> None:
+        manifest = self.engine_manifest("sglang")
+        manifest["model"]["drafter"] = {
+            "repository": "example/dflash-drafter",
+            "revision": "c" * 40,
+            "cache_repository": "models--example--dflash-drafter",
+        }
+        letsinfer.validate_manifest(manifest)
+
+        artifacts = letsinfer.model_artifacts(manifest)
+        self.assertEqual([artifact["role"] for artifact in artifacts], ["model", "drafter"])
+        self.assertEqual(artifacts[1]["repository"], "example/dflash-drafter")
+
+        launch = letsinfer.launch_for(manifest, manifest["serving"], 8000)
+        command = list(launch.command)
+        index = command.index("--speculative-draft-model-path")
+        self.assertEqual(
+            command[index + 1],
+            "/root/.cache/huggingface/hub/models--example--dflash-drafter/"
+            f"snapshots/{'c' * 40}",
+        )
+        self.assertIn("--speculative-draft-model-path", launch.protected_arguments)
+
+        changed = copy.deepcopy(manifest)
+        changed["model"]["drafter"]["revision"] = "main"
+        with self.assertRaisesRegex(letsinfer.LetsInferError, "exact 40-hex"):
+            letsinfer.validate_manifest(changed)
+
+        changed = copy.deepcopy(manifest)
+        changed["model"]["drafter"]["cache_repository"] = "models--wrong"
+        with self.assertRaisesRegex(letsinfer.LetsInferError, "cache_repository"):
+            letsinfer.validate_manifest(changed)
+
     def test_sglang_letsinfer_cache_is_core_owned_and_exactly_configured(self) -> None:
         manifest = self.engine_manifest("sglang")
         manifest["engine"]["cache_provider"] = "sglang-letsinfer-prefix-v1"
