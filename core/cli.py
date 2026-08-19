@@ -5409,6 +5409,23 @@ def bind_config_to_control_bundle(config: dict[str, Any]) -> dict[str, Any]:
     return bound
 
 
+def retained_control_bundle_for_rollback(config: dict[str, Any]) -> bool:
+    """Verify rollback bytes without accepting the old runtime schema."""
+    root = pathlib.Path(config["source_root"]).expanduser()
+    manifest = pathlib.Path(config["manifest_path"]).expanduser()
+    manifest_sha256 = config["manifest_sha256"]
+    try:
+        if root.is_symlink() or not root.is_dir() or manifest.is_symlink():
+            return False
+        _records, _core_manifest, core_identity = _core_release(root)
+        if root.name != _control_bundle_identity(core_identity, manifest_sha256):
+            return False
+        manifest.resolve(strict=True).relative_to(root.resolve(strict=True))
+        return sha256_file(manifest) == manifest_sha256
+    except (KeyError, OSError, ValueError, LetsInferError):
+        return False
+
+
 def serve_from_config(arguments: argparse.Namespace) -> int:
     config = read_service_config(pathlib.Path(arguments.config))
     configured_root = pathlib.Path(config["source_root"]).expanduser()
@@ -6168,24 +6185,7 @@ def install_user_service(
     snapshots = {path: _snapshot_user_file(path) for path in managed_paths}
     if snapshots[config_path] is not None:
         previous_config = read_service_config(config_path)
-        previous_root = pathlib.Path(previous_config["source_root"]).expanduser()
-        previous_manifest = pathlib.Path(
-            previous_config["manifest_path"]
-        ).expanduser()
-        already_retained = False
-        try:
-            already_retained = (
-                previous_root.name == previous_config["manifest_sha256"]
-                and previous_manifest.resolve(strict=True).is_relative_to(
-                    previous_root.resolve(strict=True)
-                )
-                and not previous_manifest.is_symlink()
-                and sha256_file(previous_manifest)
-                == previous_config["manifest_sha256"]
-            )
-        except OSError:
-            already_retained = False
-        if not already_retained:
+        if not retained_control_bundle_for_rollback(previous_config):
             bind_config_to_control_bundle(previous_config)
 
     state_names = (

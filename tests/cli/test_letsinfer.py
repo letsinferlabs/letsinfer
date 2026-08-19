@@ -163,14 +163,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.12")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.13")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.12"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.13"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -1622,6 +1622,31 @@ class InstallTests(unittest.TestCase):
         )
         self.assertEqual(rebound["source_root"], str(rebound_root))
         self.assertEqual(rebound["manifest_path"], str(rebound_manifest))
+
+    def test_rollback_retains_exact_old_bundle_without_accepting_its_schema(self) -> None:
+        manifest = json.loads(VLLM_MANIFEST_PATH.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            root, manifest_path = letsinfer.install_control_bundle(
+                VLLM_MANIFEST_PATH,
+                manifest,
+                control_parent=pathlib.Path(directory) / "control",
+                artifact_roots=(letsinfer.source_root(), RUNTIME_SOURCE_FIXTURE),
+            )
+            config = {
+                "source_root": str(root),
+                "manifest_path": str(manifest_path),
+                "manifest_sha256": letsinfer.sha256_file(manifest_path),
+            }
+            with mock.patch.object(
+                letsinfer,
+                "validate_manifest",
+                side_effect=letsinfer.LetsInferError("old runtime API"),
+            ):
+                self.assertTrue(
+                    letsinfer.retained_control_bundle_for_rollback(config)
+                )
+            config["manifest_sha256"] = "0" * 64
+            self.assertFalse(letsinfer.retained_control_bundle_for_rollback(config))
 
     def test_control_bundle_tampering_fails_closed(self) -> None:
         manifest_path = VLLM_MANIFEST_PATH
