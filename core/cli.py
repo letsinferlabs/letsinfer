@@ -38,6 +38,11 @@ from typing import Any, Iterable, Mapping, Sequence
 sys.dont_write_bytecode = True
 
 from . import PRODUCT_VERSION
+from .cache_plugins import (
+    CachePluginError,
+    install_sglang_plugin,
+    verify_sglang_plugin,
+)
 from .actions import (
     ACTIONS,
     AuditPolicy,
@@ -50,7 +55,11 @@ from .engines import (
     ADAPTERS,
     EngineManifestError,
     adapter_for,
+    cache_provider_for,
+    evidence_contract_for,
     launch_for,
+    persistent_cache_for,
+    requires_core_cache_plugin,
     shell_command,
     validate_engine_manifest,
 )
@@ -499,7 +508,7 @@ def _validate_stable_evidence(
     engine = _require(gate, "engine", dict, "manifest.serving.gate")
     expected_contracts = {
         "common": "letsinfer-openai-v1-common",
-        "engine": adapter.evidence_contract,
+        "engine": evidence_contract_for(manifest),
     }
     commits: set[str] = set()
     references: set[str] = set()
@@ -1149,7 +1158,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     if status == "stable":
         if distribution != "registry-digest":
             raise LetsInferError("stable releases require a pullable registry digest")
-        if not adapter.persistent_cache:
+        if not persistent_cache_for(manifest):
             raise LetsInferError(
                 f"stable {adapter.name} releases require a qualified persistent-cache adapter"
             )
@@ -1463,11 +1472,10 @@ def docker_command(
         + "exec "
         + shell_command(launch)
     )
-    health_command = (
-        "curl --fail --silent --show-error --max-time 3 "
-        f"--cacert /run/secrets/letsinfer-tls.crt "
-        f"https://127.0.0.1:{port}{launch.health_path} >/dev/null"
-    )
+    # Startup readiness is verified separately through the authenticated API.
+    # Docker health is liveness: long prefills may occupy an engine's HTTP loop,
+    # but its kernel listener must remain present for queued requests.
+    health_command = f"bash -c ': >/dev/tcp/127.0.0.1/{port}'"
     command = [
         "docker",
         "run",
@@ -1934,7 +1942,7 @@ def write_watchdog_public_state(
         "runtime_name": config.get("runtime_name", "-"),
         "runtime_version": config.get("runtime_version", "-"),
         "manifest_sha256": config["manifest_sha256"],
-        "cache_provider": adapter.cache_provider,
+        "cache_provider": cache_provider_for(manifest),
     }
     allowed = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,126}")
     for name, value in values.items():
@@ -1947,7 +1955,7 @@ def write_watchdog_public_state(
         path,
         "version=1\n"
         + "".join(f"{name}={value}\n" for name, value in values.items())
-        + f"cache_persistent={str(adapter.persistent_cache).lower()}\n"
+        + f"cache_persistent={str(persistent_cache_for(manifest)).lower()}\n"
         + f"inference_port={config['gateway_port']}\n"
         + f"max_connections={serving['max_connections']}\n"
         + f"max_active_requests={serving['max_active_requests']}\n"
@@ -3905,6 +3913,15 @@ def verify_installed_release(
     adapter = adapter_for(manifest)
     if adapter.requires_runtime_plugins:
         verify_artifacts(plugin_root, manifest["runtime_plugins"]["artifacts"])
+    elif requires_core_cache_plugin(manifest):
+        try:
+            verify_sglang_plugin(
+                plugin_root,
+                source_root=source_root(),
+                core_version=PRODUCT_VERSION,
+            )
+        except CachePluginError as error:
+            raise LetsInferError(str(error)) from error
     return image_id(manifest)
 
 
@@ -4323,6 +4340,19 @@ def install_runtime_plugins(
     wheel_source: pathlib.Path | None,
     artifact_root: pathlib.Path | None = None,
 ) -> None:
+    if requires_core_cache_plugin(manifest):
+        try:
+            install_sglang_plugin(
+                plugin_root,
+                source_root=source_root(),
+                core_version=PRODUCT_VERSION,
+                platform=target_contract(manifest)["platform"],
+                run=run_passthrough,
+                store=store_runtime_artifact,
+            )
+        except CachePluginError as error:
+            raise LetsInferError(str(error)) from error
+        return
     if not adapter_for(manifest).requires_runtime_plugins:
         return
     if plugin_root.is_symlink():
@@ -4587,7 +4617,9 @@ def model_identity_ready(
     data = payload.get("data")
     if not isinstance(data, list):
         return False
-    expected = manifest["model"]["id"]
+    # Engines expose the stable public alias.  ``model.id`` remains the exact
+    # upstream repository identity used for acquisition and verification.
+    expected = manifest["model"]["alias"]
     return any(isinstance(item, dict) and item.get("id") == expected for item in data)
 
 
@@ -4879,9 +4911,11 @@ def serve(
         build=qualification_mode,
         artifact_root=runtime_artifact_root,
     )
-    if adapter_for(manifest).requires_runtime_plugins:
+    if adapter_for(manifest).requires_runtime_plugins or requires_core_cache_plugin(manifest):
         try:
-            verify_artifacts(plugin_root, manifest["runtime_plugins"]["artifacts"])
+            verify_installed_release(
+                manifest, model_cache=model_cache, plugin_root=plugin_root
+            )
         except LetsInferError:
             install_runtime_plugins(
                 manifest,
@@ -8480,7 +8514,8 @@ def doctor(arguments: argparse.Namespace) -> int:
     record(
         "engine-adapter",
         config["engine"] == adapter.name,
-        f"engine={adapter.name} format={adapter.model_format} cache={adapter.cache_provider}",
+        f"engine={adapter.name} format={adapter.model_format} "
+        f"cache={cache_provider_for(manifest)}",
     )
 
     target = target_contract(manifest)
@@ -8778,7 +8813,7 @@ def doctor(arguments: argparse.Namespace) -> int:
     identity = model_identity_ready(
         manifest, config["gateway_port"], None, key_path
     )
-    record("model-identity", identity, manifest["model"]["id"])
+    record("model-identity", identity, manifest["model"]["alias"])
 
     with _site_store() as store:
         exposure = store.exposure()
@@ -8800,7 +8835,7 @@ def doctor(arguments: argparse.Namespace) -> int:
     publication_ready = (
         manifest["status"] == "stable"
         and manifest["image"]["distribution"] == "registry-digest"
-        and adapter.persistent_cache
+        and persistent_cache_for(manifest)
         and manifest["serving"]["qualified"]
     )
     record(
@@ -8882,6 +8917,16 @@ def uninstall(arguments: argparse.Namespace) -> int:
         _, manifest = configured_release(config)
         if adapter_for(manifest).requires_runtime_plugins:
             verify_artifacts(plugin_root, manifest["runtime_plugins"]["artifacts"])
+            shutil.rmtree(plugin_root)
+        elif requires_core_cache_plugin(manifest):
+            try:
+                verify_sglang_plugin(
+                    plugin_root,
+                    source_root=source_root(),
+                    core_version=PRODUCT_VERSION,
+                )
+            except CachePluginError as error:
+                raise LetsInferError(str(error)) from error
             shutil.rmtree(plugin_root)
     if arguments.purge_credentials:
         for key in (

@@ -163,14 +163,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.6")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.7")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.6"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.7"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -643,6 +643,10 @@ class CommandTests(unittest.TestCase):
         self.assertIn("--cap-drop", command)
         self.assertIn("no-new-privileges=true", command)
         self.assertIn("--health-cmd", command)
+        self.assertEqual(
+            command[command.index("--health-cmd") + 1],
+            "bash -c ': >/dev/tcp/127.0.0.1/8123'",
+        )
         self.assertIn("/models/hub:/root/.cache/huggingface/hub:ro", command)
         self.assertNotIn("VLLM_API_KEY=", " ".join(command))
 
@@ -739,6 +743,7 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("api_key: %s", text)
         self.assertNotIn("--api-key", text)
         self.assertIn("--hicache-storage-backend file", text)
+        self.assertIn('"max_size":68719476736', text)
         self.assertIn("--enable-cache-report", text)
         self.assertIn("--moe-runner-backend flashinfer_cutlass", text)
         self.assertNotIn("--kv-transfer-config", text)
@@ -751,6 +756,56 @@ class CommandTests(unittest.TestCase):
             adapter.token_count_protocol,
             "sglang-anthropic-count-tokens-v1",
         )
+
+    def test_sglang_letsinfer_cache_is_core_owned_and_exactly_configured(self) -> None:
+        manifest = self.engine_manifest("sglang")
+        manifest["engine"]["cache_provider"] = "sglang-letsinfer-prefix-v1"
+        manifest["cache"] = {
+            "provider": "sglang-letsinfer-prefix-v1",
+            "persistent": True,
+            "replay_output_policy": "restored-repeat-exact",
+            "prewarm": True,
+            "host_cache_gib": 4,
+            "durable_capacity_bytes": 68719476736,
+            "resident_capacity_bytes": 0,
+            "ttl_seconds": 604800,
+            "direct_reads": True,
+        }
+        letsinfer.validate_manifest(manifest)
+        command = self.docker_for(manifest)
+        text = command[-1]
+        self.assertIn("--hicache-storage-backend dynamic", text)
+        self.assertIn("LetsInferHiCacheStorage", text)
+        self.assertIn("python3 -m pip install -q --no-index --no-deps", text)
+        self.assertIn("/plugins:/plugins:ro", command)
+        self.assertIn("/store:/root/.cache/letsinfer-prefix-store", command)
+        self.assertTrue(letsinfer.requires_core_cache_plugin(manifest))
+        self.assertNotIn("runtime_plugins", manifest)
+
+    def test_sglang_radix_only_lane_has_no_persistent_mount(self) -> None:
+        manifest = self.engine_manifest("sglang")
+        manifest["engine"]["cache_provider"] = "sglang-radix-v1"
+        manifest["cache"] = {
+            "provider": "sglang-radix-v1",
+            "persistent": False,
+            "prewarm": False,
+        }
+        letsinfer.validate_manifest(manifest)
+        command = self.docker_for(manifest)
+        text = command[-1]
+        self.assertNotIn("--enable-hierarchical-cache", text)
+        self.assertNotIn("/plugins:ro", command)
+        self.assertNotIn("/store:/root/.cache/letsinfer-prefix-store", command)
+
+    def test_sglang_cache_provider_and_persistence_fail_closed(self) -> None:
+        manifest = self.engine_manifest("sglang")
+        manifest["engine"]["cache_provider"] = "sglang-letsinfer-prefix-v1"
+        with self.assertRaisesRegex(letsinfer.LetsInferError, "cache.provider"):
+            letsinfer.validate_manifest(manifest)
+        manifest = self.engine_manifest("sglang")
+        manifest["cache"]["persistent"] = False
+        with self.assertRaisesRegex(letsinfer.LetsInferError, "cache.persistent"):
+            letsinfer.validate_manifest(manifest)
 
     def test_llama_cpp_adapter_requires_exact_gguf_and_file_auth(self) -> None:
         manifest = self.engine_manifest("llama.cpp")
@@ -1920,6 +1975,27 @@ class InstallTests(unittest.TestCase):
             self.assertTrue(payload["container"]["model_identity"])
             self.assertTrue(payload["service"]["gateway_health"])
             self.assertTrue(payload["service"]["gateway_authenticated"])
+
+    def test_model_identity_uses_the_public_alias_not_upstream_repository(self) -> None:
+        manifest = {
+            "model": {
+                "alias": "qwen3.8-27b",
+                "id": "RadixArk/Qwen3.8-27B-NVFP4",
+            }
+        }
+        with mock.patch.object(
+            letsinfer,
+            "api_json",
+            return_value=(200, {"data": [{"id": "qwen3.8-27b"}]}),
+        ):
+            self.assertTrue(
+                letsinfer.model_identity_ready(
+                    manifest,
+                    18000,
+                    pathlib.Path("server.crt"),
+                    pathlib.Path("api-key"),
+                )
+            )
 
     def test_status_reports_a_ready_site_before_runtime_installation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -115,6 +115,12 @@ ADAPTERS = {
     ),
 }
 
+SGLANG_CACHE_PROVIDERS = {
+    "sglang-radix-v1": False,
+    "sglang-hicache-file-v1": True,
+    "sglang-letsinfer-prefix-v1": True,
+}
+
 
 def adapter_for(manifest: dict[str, Any]) -> EngineAdapter:
     engine = manifest.get("engine")
@@ -127,6 +133,32 @@ def adapter_for(manifest: dict[str, Any]) -> EngineAdapter:
             f"manifest.engine.name must be one of: {supported}"
         )
     return ADAPTERS[name]
+
+
+def cache_provider_for(manifest: dict[str, Any]) -> str:
+    cache = manifest.get("cache")
+    if not isinstance(cache, dict) or not isinstance(cache.get("provider"), str):
+        raise EngineManifestError("manifest.cache.provider must be a string")
+    return cache["provider"]
+
+
+def persistent_cache_for(manifest: dict[str, Any]) -> bool:
+    cache = manifest.get("cache")
+    if not isinstance(cache, dict) or not isinstance(cache.get("persistent"), bool):
+        raise EngineManifestError("manifest.cache.persistent must be boolean")
+    return cache["persistent"]
+
+
+def evidence_contract_for(manifest: dict[str, Any]) -> str:
+    adapter = adapter_for(manifest)
+    return cache_provider_for(manifest) if adapter.name == "sglang" else adapter.evidence_contract
+
+
+def requires_core_cache_plugin(manifest: dict[str, Any]) -> bool:
+    return (
+        adapter_for(manifest).name == "sglang"
+        and cache_provider_for(manifest) == "sglang-letsinfer-prefix-v1"
+    )
 
 
 def _require(mapping: dict[str, Any], key: str, expected: type, where: str) -> Any:
@@ -203,8 +235,16 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
     expected = {
         "model_format": adapter.model_format,
         "api_protocol": "openai-v1",
-        "cache_provider": adapter.cache_provider,
     }
+    if adapter.name == "sglang":
+        provider = engine.get("cache_provider")
+        if provider not in SGLANG_CACHE_PROVIDERS:
+            raise EngineManifestError(
+                "manifest.engine.cache_provider must be one of: "
+                + ", ".join(sorted(SGLANG_CACHE_PROVIDERS))
+            )
+    else:
+        expected["cache_provider"] = adapter.cache_provider
     for key, value in expected.items():
         if engine.get(key) != value:
             raise EngineManifestError(
@@ -306,13 +346,27 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
             "min_tokens",
             "exact_capsules_with_mtp",
         },
-        "sglang": {
-            "provider",
-            "persistent",
-            "prewarm",
-            "replay_output_policy",
-            "host_cache_gib",
-        },
+        "sglang": (
+            {"provider", "persistent", "prewarm"}
+            if engine["cache_provider"] == "sglang-radix-v1"
+            else {
+                "provider",
+                "persistent",
+                "prewarm",
+                "replay_output_policy",
+                "host_cache_gib",
+                "durable_capacity_bytes",
+            }
+            | (
+                {
+                    "resident_capacity_bytes",
+                    "ttl_seconds",
+                    "direct_reads",
+                }
+                if engine["cache_provider"] == "sglang-letsinfer-prefix-v1"
+                else set()
+            )
+        ),
         "llama.cpp": {"provider", "persistent", "prewarm"},
         "dwarfstar": {
             "provider",
@@ -334,15 +388,21 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
             "manifest.cache has unsupported fields: "
             + ", ".join(sorted(unknown_cache_fields))
         )
-    if cache.get("provider") != adapter.cache_provider:
+    expected_provider = engine["cache_provider"]
+    if cache.get("provider") != expected_provider:
         raise EngineManifestError(
-            f"manifest.cache.provider must be {adapter.cache_provider!r} for {adapter.name}"
+            f"manifest.cache.provider must be {expected_provider!r} for {adapter.name}"
         )
-    if cache.get("persistent") is not adapter.persistent_cache:
+    expected_persistent = (
+        SGLANG_CACHE_PROVIDERS[expected_provider]
+        if adapter.name == "sglang"
+        else adapter.persistent_cache
+    )
+    if cache.get("persistent") is not expected_persistent:
         raise EngineManifestError(
-            f"manifest.cache.persistent must be {adapter.persistent_cache!r} for {adapter.name}"
+            f"manifest.cache.persistent must be {expected_persistent!r} for {adapter.name}"
         )
-    if adapter.persistent_cache and cache.get("replay_output_policy") not in {
+    if expected_persistent and cache.get("replay_output_policy") not in {
         "all-phases-exact",
         "restored-repeat-exact",
     }:
@@ -366,9 +426,27 @@ def validate_engine_manifest(manifest: dict[str, Any]) -> EngineAdapter:
                 "manifest.cache.exact_capsules_with_mtp must be boolean"
             )
     elif adapter.name == "sglang":
-        if cache.get("prewarm") is not True:
-            raise EngineManifestError("SGLang HiCache must prewarm before readiness")
-        _positive_int(cache, "host_cache_gib", "manifest.cache")
+        if expected_provider == "sglang-radix-v1":
+            if cache.get("prewarm") is not False:
+                raise EngineManifestError("SGLang RadixAttention has no persistent prewarm")
+        else:
+            if cache.get("prewarm") is not True:
+                raise EngineManifestError("SGLang persistent cache must prewarm before readiness")
+            _positive_int(cache, "host_cache_gib", "manifest.cache")
+            _positive_int(cache, "durable_capacity_bytes", "manifest.cache")
+            if cache["durable_capacity_bytes"] % (1 << 20):
+                raise EngineManifestError(
+                    "manifest.cache.durable_capacity_bytes must be an exact number of MiB"
+                )
+            if expected_provider == "sglang-letsinfer-prefix-v1":
+                _nonnegative_int(cache, "resident_capacity_bytes", "manifest.cache")
+                _positive_int(cache, "ttl_seconds", "manifest.cache")
+                if cache["resident_capacity_bytes"] % (1 << 20):
+                    raise EngineManifestError(
+                        "manifest.cache.resident_capacity_bytes must be an exact number of MiB"
+                    )
+                if not isinstance(cache.get("direct_reads"), bool):
+                    raise EngineManifestError("manifest.cache.direct_reads must be boolean")
     elif adapter.name == "llama.cpp":
         if cache.get("prewarm") is not True:
             raise EngineManifestError("llama.cpp prompt cache must prewarm before readiness")
@@ -495,6 +573,8 @@ def _vllm_launch(manifest: dict[str, Any], serving: dict[str, Any], port: int) -
 
 def _sglang_launch(manifest: dict[str, Any], serving: dict[str, Any], port: int) -> EngineLaunch:
     model = manifest["model"]
+    cache = manifest["cache"]
+    provider = cache["provider"]
     command = [
         "python3",
         "-m",
@@ -513,33 +593,70 @@ def _sglang_launch(manifest: dict[str, Any], serving: dict[str, Any], port: int)
         "/run/secrets/letsinfer-tls.crt",
         "--config",
         "/tmp/letsinfer-sglang.yaml",
-        "--enable-hierarchical-cache",
-        "--hicache-size",
-        str(manifest["cache"]["host_cache_gib"]),
-        "--hicache-write-policy",
-        "write_through",
-        "--hicache-storage-backend",
-        "file",
-        "--hicache-storage-prefetch-policy",
-        "wait_complete",
         "--enable-cache-report",
     ]
+    if provider != "sglang-radix-v1":
+        command.extend(
+            [
+                "--enable-hierarchical-cache",
+                "--hicache-size",
+                str(cache["host_cache_gib"]),
+                "--hicache-write-policy",
+                "write_through",
+                "--hicache-storage-backend",
+                "dynamic" if provider == "sglang-letsinfer-prefix-v1" else "file",
+                "--hicache-storage-prefetch-policy",
+                "wait_complete",
+            ]
+        )
+        extra = (
+            {
+                "backend_name": "letsinfer",
+                "module_path": "letsinfer_sglang_cache.backend",
+                "class_name": "LetsInferHiCacheStorage",
+                "capacity_bytes": cache["durable_capacity_bytes"],
+                "resident_capacity_bytes": cache["resident_capacity_bytes"],
+                "ttl_seconds": cache["ttl_seconds"],
+                "direct_reads": cache["direct_reads"],
+            }
+            if provider == "sglang-letsinfer-prefix-v1"
+            else {"max_size": cache["durable_capacity_bytes"]}
+        )
+        command.extend(
+            ["--hicache-storage-backend-extra-config", _compact_json(extra)]
+        )
     setup = (
         "IFS= read -r LETSINFER_API_KEY < /run/secrets/letsinfer-api-key; "
         "printf 'api-key: %s\\nlog-level: warning\\n' \"$LETSINFER_API_KEY\" "
         "> /tmp/letsinfer-sglang.yaml; "
         "chmod 600 /tmp/letsinfer-sglang.yaml; unset LETSINFER_API_KEY; "
     )
+    if provider == "sglang-letsinfer-prefix-v1":
+        setup += (
+            "python3 -m pip install -q --no-index --no-deps "
+            "--target /tmp/letsinfer-python /plugins/*.whl; "
+            "export PYTHONPATH=/tmp/letsinfer-python:/plugins; "
+        )
+    environment = [("HF_HOME", "/root/.cache/huggingface"), ("HF_HUB_OFFLINE", "1")]
+    if provider == "sglang-hicache-file-v1":
+        environment.append(
+            ("SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR", "/root/.cache/letsinfer-prefix-store")
+        )
+    elif provider == "sglang-letsinfer-prefix-v1":
+        environment.extend(
+            [
+                ("LETSINFER_PREFIX_STORE_DIR", "/root/.cache/letsinfer-prefix-store"),
+                ("PYTHONPATH", "/plugins"),
+                ("PIP_DISABLE_PIP_VERSION_CHECK", "1"),
+                ("PIP_NO_CACHE_DIR", "1"),
+            ]
+        )
     return EngineLaunch(
         command=tuple(command),
         shell_setup=setup,
-        environment=(
-            ("HF_HOME", "/root/.cache/huggingface"),
-            ("HF_HUB_OFFLINE", "1"),
-            ("SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR", "/root/.cache/letsinfer-prefix-store"),
-        ),
-        mount_runtime_plugins=False,
-        mount_prefix_store=True,
+        environment=tuple(environment),
+        mount_runtime_plugins=provider == "sglang-letsinfer-prefix-v1",
+        mount_prefix_store=provider != "sglang-radix-v1",
         prewarm="openai",
         engine_argument_offset=3,
         protected_arguments=frozenset(
@@ -556,6 +673,7 @@ def _sglang_launch(manifest: dict[str, Any], serving: dict[str, Any], port: int)
                 "--hicache-write-policy",
                 "--hicache-storage-backend",
                 "--hicache-storage-prefetch-policy",
+                "--hicache-storage-backend-extra-config",
                 "--enable-cache-report",
             }
         ),

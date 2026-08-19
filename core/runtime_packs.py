@@ -300,6 +300,23 @@ def target_contract_sha256(contract: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_bytes(contract)).hexdigest()
 
 
+def benchmark_model_sha256(manifest: dict[str, Any]) -> str:
+    """Bind benchmark tokenization to one exact model artifact identity."""
+    model = manifest.get("model")
+    if not isinstance(model, dict):
+        raise RuntimePackError("release model identity is missing")
+    file_sha = model.get("sha256")
+    if isinstance(file_sha, str) and SHA256_RE.fullmatch(file_sha):
+        return file_sha
+    repository = model.get("repository") or model.get("id")
+    revision = model.get("revision")
+    if not isinstance(repository, str) or not repository or not isinstance(revision, str):
+        raise RuntimePackError("release model snapshot identity is incomplete")
+    return hashlib.sha256(
+        canonical_bytes({"repository": repository, "revision": revision})
+    ).hexdigest()
+
+
 def validate_benchmark_contract(value: Any) -> dict[str, Any]:
     """Validate the declarative, engine-neutral runtime benchmark contract."""
     where = "runtime.benchmark"

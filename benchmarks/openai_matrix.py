@@ -186,6 +186,13 @@ def validate_release_manifest(manifest: dict[str, Any]) -> tuple[str, str, str]:
     return release, engine_name, model_id
 
 
+def served_model_name(manifest: dict[str, Any]) -> str:
+    model = manifest.get("model")
+    if not isinstance(model, dict):
+        raise QualificationError("release manifest model must be an object")
+    return require_string(model, "alias", "release manifest.model")
+
+
 def contained_fixture(root: pathlib.Path, relative_text: str) -> pathlib.Path:
     relative = pathlib.Path(relative_text)
     if relative.is_absolute() or ".." in relative.parts:
@@ -989,6 +996,7 @@ def main() -> int:
     base_url = validate_base_url(arguments.base_url)
     manifest = read_json_object(arguments.release_manifest, "release manifest")
     release, engine_name, model_id = validate_release_manifest(manifest)
+    served_model = served_model_name(manifest)
     model_revision = _manifest_value(manifest, "model.revision")
     _, cells, tokenizer_identity = load_fixture_contract(
         arguments.fixture_manifest,
@@ -1018,7 +1026,7 @@ def main() -> int:
     before = validate_container(before_inspection, manifest)
     write_json_atomic(raw_directory / "container-before.json", before_inspection)
     preflight_result = preflight(
-        base_url, tls_context, min(arguments.timeout, 30), api_key, model_id
+        base_url, tls_context, min(arguments.timeout, 30), api_key, served_model
     )
     results: list[dict[str, Any]] = []
     pair_equality: dict[str, bool] = {}
@@ -1033,7 +1041,7 @@ def main() -> int:
                     base_url=base_url,
                     context=tls_context,
                     api_key=api_key,
-                    model_id=model_id,
+                    model_id=served_model,
                     timeout=arguments.timeout,
                     stream_directory=(
                         raw_directory / f"{cell['name']}-{phase}-streams"

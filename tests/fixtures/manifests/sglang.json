@@ -101,7 +101,8 @@
     "persistent": true,
     "replay_output_policy": "all-phases-exact",
     "prewarm": true,
-    "host_cache_gib": 4
+    "host_cache_gib": 4,
+    "durable_capacity_bytes": 68719476736
   },
   "serving": {
     "qualified": false,

@@ -21,6 +21,26 @@ from core import runtime_packs
 
 
 class RuntimePackTests(unittest.TestCase):
+    def test_benchmark_model_identity_binds_exact_file_or_snapshot(self) -> None:
+        self.assertEqual(
+            runtime_packs.benchmark_model_sha256(
+                {"model": {"sha256": "a" * 64}}
+            ),
+            "a" * 64,
+        )
+        snapshot = {
+            "model": {
+                "repository": "owner/model",
+                "revision": "b" * 40,
+            }
+        }
+        expected = hashlib.sha256(
+            runtime_packs.canonical_bytes(
+                {"repository": "owner/model", "revision": "b" * 40}
+            )
+        ).hexdigest()
+        self.assertEqual(runtime_packs.benchmark_model_sha256(snapshot), expected)
+
     def test_companion_executable_is_found_beside_installed_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bin_root = pathlib.Path(directory)

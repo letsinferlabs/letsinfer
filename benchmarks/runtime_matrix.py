@@ -41,6 +41,10 @@ from core.token_count import (  # pylint: disable=wrong-import-position
     parse_token_count_response,
     prepare_token_count_request,
 )
+from core.runtime_packs import (  # pylint: disable=wrong-import-position
+    RuntimePackError,
+    benchmark_model_sha256,
+)
 
 
 CONCURRENCIES = (1, 2, 4, 8, 16)
@@ -268,7 +272,10 @@ def load_benchmark_contract(
             "runtime benchmark cases must declare c1, c2, c4, c8, and c16"
         )
     tokenizer = contract["tokenizer"]
-    model_sha = manifest.get("model", {}).get("sha256")
+    try:
+        model_sha = benchmark_model_sha256(manifest)
+    except RuntimePackError as error:
+        raise RuntimeMatrixError(str(error)) from error
     image_id = manifest.get("image", {}).get("immutable_id", "")
     image_sha = image_id.removeprefix("sha256:")
     if tokenizer["model_sha256"] != model_sha:
@@ -709,10 +716,12 @@ def validate_capacity(
         serving, "max_context_tokens", "runtime.serving"
     )
     requested = max(len(cell["fixtures"]) for cell in selected)
-    if requested > max_connections or requested > max_active:
+    # Client concurrency is bounded by accepted connections.  The engine's
+    # active ceiling is a scheduler limit: excess accepted requests queue.
+    if requested > max_connections:
         raise RuntimeMatrixError(
-            f"selected c{requested} exceeds runtime connection/active ceilings "
-            f"({max_connections}/{max_active})"
+            f"selected c{requested} exceeds runtime connection ceiling "
+            f"({max_connections})"
         )
     for cell in selected:
         for fixture in cell["fixtures"]:
@@ -750,7 +759,13 @@ def summarize(cell: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         ),
         "ttft_ms": load.metric_summary(values("ttft_ms")),
         "wall_ms": load.metric_summary(values("wall_ms")),
-        "cached_prompt_tokens": load.metric_summary(values("cached_prompt_tokens")),
+        "cached_prompt_tokens": load.metric_summary(
+            [
+                0.0 if row.get("cached_prompt_tokens") is None
+                else float(row["cached_prompt_tokens"])
+                for row in requests
+            ]
+        ),
         "batch_wall_ms": result["batch_wall_ms"],
         "aggregate_completion_tokens_per_second": result[
             "job_completion_tokens_per_second"
@@ -926,7 +941,7 @@ def verified_source_identity(
     artifacts = sorted(
         (
             {"path": row["path"], "sha256": row["sha256"]}
-            for row in manifest["source_artifacts"]
+            for row in manifest.get("source_artifacts", [])
         ),
         key=lambda row: row["path"],
     )
@@ -969,9 +984,8 @@ def validate_cold_result(cell: dict[str, Any], result: dict[str, Any]) -> None:
         for index, row in enumerate(requests)
         if (
             not isinstance(row, dict)
-            or not isinstance(row.get("cached_prompt_tokens"), int)
+            or row.get("cached_prompt_tokens") not in (None, 0)
             or isinstance(row.get("cached_prompt_tokens"), bool)
-            or row.get("cached_prompt_tokens") != 0
         )
     ]
     if reused:
@@ -1425,6 +1439,7 @@ def main() -> int:
     )
     manifest = common.read_json_object(manifest_path, "runtime manifest")
     release, engine, model_id = common.validate_release_manifest(manifest)
+    served_model = common.served_model_name(manifest)
     plan_path = arguments.prompt_plan
     benchmark_contract: dict[str, Any] | None = None
     if plan_path is not None:
@@ -1536,7 +1551,7 @@ def main() -> int:
     raw.mkdir(parents=True)
     common.write_json_atomic(output / "container-before.json", before_inspection)
     preflight = common.preflight(
-        base_url, tls_context, min(arguments.timeout, 30), api_key, model_id
+        base_url, tls_context, min(arguments.timeout, 30), api_key, served_model
     )
     preflight["post_load_memory"] = require_post_load_warning_headroom(manifest)
     monitor = load.TelemetryMonitor(
@@ -1574,7 +1589,7 @@ def main() -> int:
                     base_url=base_url,
                     context=tls_context,
                     api_key=api_key,
-                    model_id=model_id,
+                    model_id=served_model,
                     timeout=arguments.timeout,
                     stream_directory=raw / f"{cell['name']}-streams",
                 )
