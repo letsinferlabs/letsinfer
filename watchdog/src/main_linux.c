@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define WATCHDOG_VERSION "0.11.0-rc.16"
+#define WATCHDOG_VERSION "0.11.0-rc.17"
 
 static void usage(FILE *stream, const char *program) {
     fprintf(stream,
@@ -24,7 +24,7 @@ static void usage(FILE *stream, const char *program) {
         "  --gateway-metrics PATH  Private gateway counter snapshot\n"
         "  --sample-ms N          Sampling interval (default 1000)\n"
         "  --flush-ms N           Durable flush interval (default 10000)\n"
-        "  --max-controllers N    Concurrent controllers, maximum 4\n"
+        "  --max-controllers N    Concurrent controllers, maximum 16\n"
         "  --protect-root PATH    Private protected-engine directory root\n"
         "  --warning-bytes N      Required available-memory warning threshold\n"
         "  --stop-bytes N         Required available-memory graceful-stop threshold\n"

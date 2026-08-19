@@ -8510,10 +8510,10 @@ def _local_controller_telemetry(
 ) -> dict[str, Any] | None:
     """Read the site agent's live aggregate without consuming a Watchdog slot."""
 
-    server_certificate = expanded_path(
-        str(config.get("watchdog_cert_file"))
-        if config and config.get("watchdog_cert_file")
-        else default_watchdog_cert_path()
+    controller_ca = expanded_path(
+        str(config.get("watchdog_controller_ca_file"))
+        if config and config.get("watchdog_controller_ca_file")
+        else default_watchdog_controller_ca_path()
     )
     client_certificate = expanded_path(
         str(config.get("watchdog_local_controller_cert_file"))
@@ -8526,12 +8526,12 @@ def _local_controller_telemetry(
         else default_watchdog_local_controller_key_path()
     )
     if not all(path.is_file() for path in (
-        server_certificate, client_certificate, client_key
+        controller_ca, client_certificate, client_key
     )):
         return None
     connection: http.client.HTTPSConnection | None = None
     try:
-        context = ssl.create_default_context(cafile=str(server_certificate))
+        context = ssl.create_default_context(cafile=str(controller_ca))
         context.check_hostname = False
         context.load_cert_chain(str(client_certificate), str(client_key))
         connection = http.client.HTTPSConnection(
@@ -12327,7 +12327,7 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
         telemetry_publisher = TelemetryPublisher(
             identity,
             watchdog_port=WATCHDOG_TELEMETRY_PORT,
-            watchdog_ca_file=default_watchdog_cert_path(),
+            watchdog_ca_file=default_watchdog_controller_ca_path(),
             watchdog_controller_cert_file=default_watchdog_local_controller_cert_path(),
             watchdog_controller_key_file=default_watchdog_local_controller_key_path(),
             local_accept=(
