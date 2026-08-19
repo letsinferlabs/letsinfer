@@ -29,6 +29,10 @@ a trip is actually latched.
 `letsinfer.service` owns Watchdog, `letsinfer-engine.service` owns the transient
 guarded launch, and `letsinfer-recovery.timer` repairs ordinary engine failures.
 Docker auto-restart remains disabled so there is one recovery authority.
+The resident binary belongs to core, while its active memory/PSI containment
+thresholds come from the selected immutable runtime. Core updates preserve
+those exact thresholds for compatible runtimes; they never replace them with a
+generic model-independent memory floor while inference is restored.
 
 Watchdog has a 24 MiB soft memory threshold, a strict 30 MiB cgroup limit, and
 no swap. The engine and transient Python launcher are outside that resident

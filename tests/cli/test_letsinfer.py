@@ -163,14 +163,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.11")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.12")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.11"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.12"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -2094,6 +2094,71 @@ class InstallTests(unittest.TestCase):
             self.assertTrue(payload["service"]["gateway_health"])
             self.assertTrue(payload["service"]["gateway_authenticated"])
             self.assertEqual(payload["lifecycle"]["state"], "ready")
+
+    def test_status_keeps_a_reachable_api_visible_when_runtime_metadata_is_incompatible(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = pathlib.Path(directory) / "service.json"
+            config_path.write_text("{}", encoding="utf-8")
+            arguments = argparse.Namespace(
+                config=str(config_path), name=None, model=None, json=True
+            )
+            config = {
+                "name": "letsinfer-test",
+                "model": "qwen3.8-27b",
+                "engine_port": 18000,
+                "gateway_port": 8000,
+                "tls_cert_file": "/tmp/server.crt",
+                "engine_api_key_file": "/tmp/engine-api-key",
+                "gateway_api_key_file": "/tmp/gateway-api-key",
+            }
+            inspection = {
+                "State": {"Status": "running", "Health": {"Status": "healthy"}},
+                "Config": {
+                    "Labels": {
+                        letsinfer.MANAGED_LABEL: "true",
+                        letsinfer.PORT_LABEL: "18000",
+                    }
+                },
+                "HostConfig": {"RestartPolicy": {"Name": "no"}},
+            }
+            with (
+                mock.patch.object(letsinfer, "read_service_config", return_value=config),
+                mock.patch.object(
+                    letsinfer,
+                    "configured_release",
+                    side_effect=letsinfer.LetsInferError("runtime API is incompatible"),
+                ),
+                mock.patch.object(
+                    letsinfer, "_service_state", return_value=("enabled", "active", 1)
+                ),
+                mock.patch.object(letsinfer, "container_inspect", return_value=inspection),
+                mock.patch.object(letsinfer, "health_ready", return_value=True),
+                mock.patch.object(
+                    letsinfer, "inference_auth_status", side_effect=[401, 400]
+                ),
+                mock.patch.object(
+                    letsinfer, "api_status", side_effect=[200, 401, 200]
+                ),
+                mock.patch.object(letsinfer, "model_alias_ready", return_value=True),
+                mock.patch.object(
+                    letsinfer,
+                    "protection_status",
+                    return_value={"armed": True, "phase": "armed", "trip_latched": False},
+                ),
+                mock.patch.object(
+                    letsinfer, "_unit_enabled_active", return_value=("enabled", "active")
+                ),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(letsinfer.status(arguments), 1)
+            payload = json.loads(output.getvalue())
+            self.assertTrue(payload["container"]["model_identity"])
+            self.assertTrue(payload["service"]["gateway_authenticated"])
+            self.assertTrue(payload["service"]["gateway_model_identity"])
+            self.assertFalse(payload["service"]["runtime_metadata_ready"])
+            self.assertEqual(
+                payload["lifecycle"]["reason"], "runtime-metadata-incompatible"
+            )
 
     def test_model_identity_uses_the_public_alias_not_upstream_repository(self) -> None:
         manifest = {

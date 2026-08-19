@@ -2636,7 +2636,9 @@ def write_core_watchdog_public_state(
     return path
 
 
-def core_watchdog_service_config(identity: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+def core_watchdog_service_config(
+    identity: Any, runtime_manifest: dict[str, Any] | None = None
+) -> tuple[dict[str, Any], dict[str, Any]]:
     binary, binary_sha256, source_sha256 = install_core_watchdog_runtime()
     data_root = default_watchdog_data_root()
     ensure_private_directory(data_root)
@@ -2670,7 +2672,12 @@ def core_watchdog_service_config(identity: Any) -> tuple[dict[str, Any], dict[st
         "watchdog_public_state_file": str(public_state),
         "gateway_telemetry_file": str(default_gateway_telemetry_path()),
     }
-    return config, {"watchdog": core_watchdog_contract()}
+    watchdog = (
+        runtime_manifest["watchdog"]
+        if runtime_manifest is not None
+        else core_watchdog_contract()
+    )
+    return config, {"watchdog": watchdog}
 
 
 def purge_watchdog_runtime(config: dict[str, Any]) -> None:
@@ -4600,15 +4607,24 @@ def model_identity_ready(
     cert_path: pathlib.Path | None,
     api_key_file: pathlib.Path,
 ) -> bool:
+    return model_alias_ready(
+        manifest["model"]["alias"], port, cert_path, api_key_file
+    )
+
+
+def model_alias_ready(
+    expected: str,
+    port: int,
+    cert_path: pathlib.Path | None,
+    api_key_file: pathlib.Path,
+) -> bool:
+    """Probe the served alias without requiring runtime-manifest compatibility."""
     status, payload = api_json(port, "/v1/models", cert_path, api_key_file)
     if status != 200 or not isinstance(payload, dict):
         return False
     data = payload.get("data")
     if not isinstance(data, list):
         return False
-    # Engines expose the stable public alias.  ``model.id`` remains the exact
-    # upstream repository identity used for acquisition and verification.
-    expected = manifest["model"]["alias"]
     return any(isinstance(item, dict) and item.get("id") == expected for item in data)
 
 
@@ -5847,10 +5863,13 @@ WantedBy=default.target
 
 
 def install_core_watchdog_service(
-    identity: Any, *, replace_active: bool = False
+    identity: Any,
+    *,
+    replace_active: bool = False,
+    runtime_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Install the one core-owned resident protector for this physical member."""
-    config, manifest = core_watchdog_service_config(identity)
+    config, manifest = core_watchdog_service_config(identity, runtime_manifest)
     unit_root = pathlib.Path.home() / ".config/systemd/user"
     unit_root.mkdir(parents=True, exist_ok=True)
     unit = unit_root / SERVICE_NAME
@@ -5938,13 +5957,30 @@ def verify_active_core_watchdog() -> tuple[pathlib.Path, str]:
     return binary, digest
 
 
-def install_core_plane_services(identity: Any, *, include_gateway: bool) -> None:
+def install_core_plane_services(
+    identity: Any, *, include_gateway: bool
+) -> dict[str, Any]:
     """Replace core-owned services while preserving the selected runtime."""
+    config_path = default_service_config_path()
+    runtime_configured = config_path.is_file()
+    runtime_manifest: dict[str, Any] | None = None
+    runtime_error: str | None = None
+    if runtime_configured:
+        try:
+            _, runtime_manifest = configured_release(read_service_config(config_path))
+        except LetsInferError as error:
+            runtime_error = str(error)
+
+    runtime_state = {
+        "configured": runtime_configured,
+        "compatible": not runtime_configured or runtime_manifest is not None,
+        "error": runtime_error,
+    }
     if platform.system() != "Linux":
         install_site_service_only()
         if include_gateway:
             install_core_gateway_service(replace_active=True)
-        return
+        return runtime_state
 
     preserved_units = (
         RECOVERY_TIMER_NAME,
@@ -5980,10 +6016,17 @@ def install_core_plane_services(identity: Any, *, include_gateway: bool) -> None
         stop_if_active(RECOVERY_TIMER_NAME)
         stop_if_active(ENGINE_SERVICE_NAME)
         install_site_service_only()
-        install_core_watchdog_service(identity, replace_active=True)
+        install_core_watchdog_service(
+            identity,
+            replace_active=True,
+            runtime_manifest=runtime_manifest,
+        )
         if include_gateway:
             install_core_gateway_service(replace_active=True)
-        if previous[ENGINE_SERVICE_NAME][1] == "active":
+        if (
+            previous[ENGINE_SERVICE_NAME][1] == "active"
+            and runtime_manifest is not None
+        ):
             # A core update must not wait for a potentially long model load.
             # The recovery timer owns subsequent retries and refuses them while
             # Watchdog has a safety trip latched.
@@ -5996,7 +6039,10 @@ def install_core_plane_services(identity: Any, *, include_gateway: bool) -> None
                     ENGINE_SERVICE_NAME,
                 ]
             )
-        if previous[RECOVERY_TIMER_NAME][1] == "active":
+        if (
+            previous[RECOVERY_TIMER_NAME][1] == "active"
+            and runtime_manifest is not None
+        ):
             run_passthrough(["systemctl", "--user", "start", RECOVERY_TIMER_NAME])
     except BaseException as failure:
         restore_errors: list[str] = []
@@ -6019,6 +6065,7 @@ def install_core_plane_services(identity: Any, *, include_gateway: bool) -> None
         raise LetsInferError(
             f"core-service upgrade failed; previous runtime state restored: {failure}"
         ) from failure
+    return runtime_state
 
 
 def render_recovery_service(
@@ -8020,8 +8067,9 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
         and service.get("gateway_health") is True
         and service.get("gateway_auth_required") is True
         and service.get("gateway_authenticated") is True
-        and service.get("gateway_model_identity") is True
     )
+    runtime_metadata_ready = service.get("runtime_metadata_ready") is not False
+    route_ready = service.get("gateway_model_identity") is True
     safety_ready = (
         protection.get("armed") is True
         and protection.get("trip_latched") is False
@@ -8065,7 +8113,14 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
             "reason": "runtime-shutdown",
             "transitional": True,
         }
-    if engine_ready and api_ready and safety_ready and ready_units == len(unit_states):
+    if (
+        engine_ready
+        and api_ready
+        and route_ready
+        and runtime_metadata_ready
+        and safety_ready
+        and ready_units == len(unit_states)
+    ):
         return {
             **details,
             "state": "ready",
@@ -8083,6 +8138,12 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
         "exited",
     }:
         return {**details, "state": "stopped", "reason": "runtime-stopped"}
+    if not runtime_metadata_ready:
+        return {
+            **details,
+            "state": "degraded",
+            "reason": "runtime-metadata-incompatible",
+        }
     return {**details, "state": "degraded", "reason": "component-not-ready"}
 
 
@@ -8119,6 +8180,13 @@ def status(arguments: argparse.Namespace) -> int:
         arguments.config or default_service_config_path()
     )
     config = read_service_config(config_path) if config_path.is_file() else None
+    configured_manifest: dict[str, Any] | None = None
+    runtime_metadata_error: str | None = None
+    if config is not None:
+        try:
+            _, configured_manifest = configured_release(config)
+        except LetsInferError as error:
+            runtime_metadata_error = str(error)
     if model is not None and (config is None or config.get("model") != model):
         raise LetsInferError(f"no installed runtime serves model {model!r}")
     name = arguments.name or (config["name"] if config else None)
@@ -8238,13 +8306,14 @@ def status(arguments: argparse.Namespace) -> int:
             authenticated_status = inference_auth_status(
                 int(port_text), cert_path, key_path
             )
-            try:
-                _, configured_manifest = configured_release(config)
+            if configured_manifest is not None:
                 engine_identity = model_identity_ready(
                     configured_manifest, int(port_text), cert_path, key_path
                 )
-            except LetsInferError:
-                engine_identity = False
+            else:
+                engine_identity = model_alias_ready(
+                    config["model"], int(port_text), cert_path, key_path
+                )
             engine_api_key_required = (
                 unauthenticated_status == 401
                 and authenticated_status in {400, 422}
@@ -8271,16 +8340,20 @@ def status(arguments: argparse.Namespace) -> int:
             )
             == 200
         )
-        try:
-            _, configured_manifest = configured_release(config)
+        if configured_manifest is not None:
             gateway_identity = model_identity_ready(
                 configured_manifest,
                 config["gateway_port"],
                 None,
                 gateway_key_path,
             )
-        except LetsInferError:
-            gateway_identity = False
+        else:
+            gateway_identity = model_alias_ready(
+                config["model"],
+                config["gateway_port"],
+                None,
+                gateway_key_path,
+            )
     recovery_enabled, recovery_active = _unit_enabled_active(RECOVERY_TIMER_NAME)
 
     payload = {
@@ -8311,6 +8384,8 @@ def status(arguments: argparse.Namespace) -> int:
             "gateway_auth_required": gateway_auth_required,
             "gateway_authenticated": gateway_authenticated,
             "gateway_model_identity": gateway_identity,
+            "runtime_metadata_ready": configured_manifest is not None,
+            "runtime_metadata_error": runtime_metadata_error,
             "gateway_protocol": config.get("gateway_protocol") if config else None,
             "gateway_endpoint": (
                 local_inference_endpoint(config["gateway_port"])
@@ -8342,7 +8417,7 @@ def status(arguments: argparse.Namespace) -> int:
                         "max_context_tokens",
                     )
                 }
-                if config and engine_identity
+                if configured_manifest is not None and engine_identity
                 else None
             ),
             "restart_policy": restart_policy,
@@ -10284,10 +10359,12 @@ def rebind_core_services(_: argparse.Namespace) -> int:
     ):
         print(f"CORE {PRODUCT_VERSION} services=none runtimes=unchanged")
         return 0
-    install_core_plane_services(
+    runtime_state = install_core_plane_services(
         identity, include_gateway=identity.role == "coordinator"
     )
     runtime = f" runtime={model}" if isinstance(model, str) else ""
+    if runtime_state["configured"] and not runtime_state["compatible"]:
+        runtime += " runtime_state=incompatible-stopped"
     print(
         f"CORE {PRODUCT_VERSION} services=rebound{runtime} runtimes=unchanged"
     )

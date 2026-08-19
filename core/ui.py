@@ -160,8 +160,9 @@ def runtime_status(
         and service.get("gateway_health") is True
         and service.get("gateway_auth_required") is True
         and service.get("gateway_authenticated") is True
-        and service.get("gateway_model_identity") is True
     )
+    runtime_metadata_ready = service.get("runtime_metadata_ready") is not False
+    route_ready = service.get("gateway_model_identity") is True
     safety_ready = (
         protection.get("armed") is True
         and protection.get("trip_latched") is False
@@ -174,7 +175,14 @@ def runtime_status(
         service.get("recovery_timer_active") == "active",
     )
     services_ready = sum(service_states)
-    ready = engine_ready and api_ready and safety_ready and services_ready == 5
+    ready = (
+        engine_ready
+        and api_ready
+        and route_ready
+        and runtime_metadata_ready
+        and safety_ready
+        and services_ready == 5
+    )
 
     model = str(container.get("model") or "No model")
     engine = str(container.get("engine") or "unknown")
@@ -248,8 +256,14 @@ def runtime_status(
     starting = lifecycle_state == "starting"
     row(
         "API",
-        api_ready,
-        "Ready" if api_ready else "Waiting" if starting else "Unavailable",
+        api_ready and route_ready,
+        (
+            "Ready"
+            if api_ready and route_ready
+            else "Waiting"
+            if starting
+            else "Unavailable"
+        ),
         (
             f"model route pending · {endpoint}"
             if starting and service.get("gateway_health") is True
@@ -257,6 +271,13 @@ def runtime_status(
         ),
         pending=starting and not api_ready,
     )
+    if not runtime_metadata_ready:
+        row(
+            "Runtime",
+            False,
+            "Incompatible",
+            "install a runtime compatible with this core",
+        )
     context = _context(capacity.get("max_context_tokens"))
     active = capacity.get("max_active_requests")
     active_detail = f" · {active} active" if isinstance(active, int) else ""
