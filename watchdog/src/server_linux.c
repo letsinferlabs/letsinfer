@@ -364,6 +364,16 @@ static int queue_site_status(
     watchdog_client *client,
     uint64_t request_id
 ) {
+    watchdog_public_state replacement;
+    if (load_public_state(server->config.site_state_path, &replacement) != 0
+        || strcmp(
+            replacement.installation_id,
+            server->public_state.installation_id) != 0) {
+        return queue_error(
+            client, request_id, 503u,
+            "Let's Infer runtime identity is temporarily unavailable");
+    }
+    server->public_state = replacement;
     const bool tripped = watchdog_safety_supervisor_tripped(&server->safety);
     const bool armed = watchdog_safety_supervisor_armed(&server->safety);
     const watchdog_safety_runtime *primary =

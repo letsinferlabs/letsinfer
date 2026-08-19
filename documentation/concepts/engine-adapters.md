@@ -97,6 +97,19 @@ DwarfStar listens on private loopback behind a small runtime gateway because
 its native server does not provide the required private TLS/authentication contract.
 Watchdog remains outside the inference path.
 
+For streaming requests the gateway enables each engine's native exact usage
+extension behind the adapter boundary. SGLang and vLLM provide cumulative
+continuous usage, so exact input, cached, and output-token counters advance
+while a response is still streaming. DwarfStar and llama.cpp are requested to
+include their native final usage record; their token rates remain unavailable
+until that record arrives when the selected build does not expose continuous
+usage. A bounded incremental SSE parser accepts fragmented events, reconciles
+cumulative counts with the final record, and accounts cancellation or a
+missing tail only from exact observations already received. Non-streaming
+usage, exact pre-dispatch prompt counts, and final stream usage share one
+reconciler, so counters cannot be double-counted. Missing or malformed usage
+is never estimated from response text.
+
 The generic benchmark runner sends the same OpenAI-v1 requests through the
 site gateway for any runtime and measures TTFT, decode and aggregate token
 throughput, latency, cache reports, health, OOM, restart, and telemetry under
@@ -158,6 +171,9 @@ template used by inference. Core validates its token-ID response while
 streaming it in bounded memory. Invalid or inexact shapes still fail closed
 before inference. This behavior belongs to the core SGLang adapter, so runtimes
 do not carry counting patches or model-specific translations.
+The adapter also enables SGLang's exact cumulative stream-usage mode, so future
+SGLang runtimes inherit live engine-neutral throughput without adding a
+runtime patch or configuration field.
 
 ## llama.cpp
 

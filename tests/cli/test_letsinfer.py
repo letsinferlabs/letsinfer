@@ -12,6 +12,7 @@ import os
 import pathlib
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -163,14 +164,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.14")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.15")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.14"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.15"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -1125,6 +1126,47 @@ class CommandTests(unittest.TestCase):
             evidence_dir="/tmp/letsinfer-qualification",
         )
 
+    def test_qualification_activation_atomically_replaces_the_single_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "qualification.json"
+            config = {"schema_version": letsinfer.SERVICE_CONFIG_VERSION, "value": "rc.5"}
+            manifest = {"model": {"alias": "qwen3.8-27b"}}
+            with (
+                mock.patch.object(
+                    letsinfer, "qualification_service_config_path", return_value=path
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "_unit_enabled_active",
+                    return_value=("static", "inactive"),
+                ),
+                mock.patch.object(
+                    letsinfer, "_retire_qualification_candidate"
+                ) as retire,
+                mock.patch.object(letsinfer, "_quiesce_resident_placement") as quiesce,
+                mock.patch.object(letsinfer, "write_watchdog_public_state") as watchdog,
+                mock.patch.object(letsinfer, "update_service_placement") as placement,
+            ):
+                self.assertEqual(
+                    letsinfer._activate_qualification_candidate(config, manifest), path
+                )
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), config)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            retire.assert_called_once_with(remove_container=True)
+            quiesce.assert_called_once_with()
+            watchdog.assert_called_once_with(config, manifest)
+            placement.assert_called_once_with(config, manifest, "starting")
+
+    def test_qualification_activation_refuses_a_live_resident_engine(self) -> None:
+        with mock.patch.object(
+            letsinfer,
+            "_unit_enabled_active",
+            return_value=("static", "active"),
+        ), self.assertRaisesRegex(
+            letsinfer.LetsInferError, "resident engine service to be stopped"
+        ):
+            letsinfer._activate_qualification_candidate({}, {})
+
     def test_stop_with_explicit_name_does_not_stop_resident_service(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_path = pathlib.Path(directory) / "service.json"
@@ -1499,6 +1541,9 @@ class InstallTests(unittest.TestCase):
             self.assertIn("installation_id=" + "b" * 64 + "\n", text)
             self.assertIn("max_active_requests=", text)
             self.assertIn("inference_port=8000\n", text)
+            active = path.parent / "site.state"
+            self.assertEqual(active.read_text(encoding="utf-8"), text)
+            self.assertEqual(active.stat().st_mode & 0o777, 0o600)
 
             config["release"] = "not portable\n"
             with self.assertRaisesRegex(letsinfer.LetsInferError, "not portable"):
@@ -2184,6 +2229,105 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(
                 payload["lifecycle"]["reason"], "runtime-metadata-incompatible"
             )
+
+    def test_status_prefers_live_qualification_candidate_over_stale_boot_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            candidate_path = root / "qualification.json"
+            candidate_path.write_text("{}\n", encoding="utf-8")
+            candidate = {
+                "name": "letsinfer-benchmark",
+                "model": "qwen3.8-27b",
+                "engine": "sglang",
+                "release": "qwen3.8-27b-sglang-0.1.0-rc.5",
+                "runtime_version": "0.1.0-rc.5",
+                "qualification_mode": True,
+                "engine_port": 18000,
+                "gateway_port": 8000,
+                "tls_cert_file": "/tmp/server.crt",
+                "engine_api_key_file": "/tmp/engine-api-key",
+                "gateway_api_key_file": "/tmp/gateway-api-key",
+            }
+            manifest = {
+                "serving": {
+                    "max_connections": 128,
+                    "max_active_requests": 8,
+                    "max_context_tokens": 262144,
+                }
+            }
+            inspection = {
+                "State": {"Status": "running", "Health": {"Status": "healthy"}},
+                "Config": {
+                    "Labels": {
+                        letsinfer.MANAGED_LABEL: "true",
+                        letsinfer.PORT_LABEL: "18000",
+                        letsinfer.RELEASE_LABEL: candidate["release"],
+                        letsinfer.MODEL_LABEL: "qwen3.8-27b",
+                        letsinfer.ENGINE_LABEL: "sglang",
+                        letsinfer.TARGET_ID_LABEL: "dgx-spark",
+                    }
+                },
+                "HostConfig": {"RestartPolicy": {"Name": "no"}},
+            }
+
+            def service_state(name: str = letsinfer.SERVICE_NAME) -> tuple[str, str, int]:
+                state = "inactive" if name == letsinfer.ENGINE_SERVICE_NAME else "active"
+                return "enabled", state, 19 * 1024 * 1024
+
+            arguments = argparse.Namespace(
+                config=None, name=None, model=None, json=True
+            )
+            with (
+                mock.patch.object(
+                    letsinfer, "active_service_config_path", return_value=candidate_path
+                ) as active_path,
+                mock.patch.object(
+                    letsinfer, "site_identity_path", return_value=root / "missing-site.json"
+                ),
+                mock.patch.object(letsinfer, "read_service_config", return_value=candidate),
+                mock.patch.object(
+                    letsinfer,
+                    "configured_release",
+                    return_value=(pathlib.Path("candidate.json"), manifest),
+                ),
+                mock.patch.object(letsinfer, "_service_state", side_effect=service_state),
+                mock.patch.object(letsinfer, "container_inspect", return_value=inspection),
+                mock.patch.object(letsinfer, "health_ready", return_value=True),
+                mock.patch.object(
+                    letsinfer, "inference_auth_status", side_effect=[401, 400]
+                ),
+                mock.patch.object(
+                    letsinfer, "api_status", side_effect=[200, 401, 200]
+                ),
+                mock.patch.object(letsinfer, "model_identity_ready", return_value=True),
+                mock.patch.object(
+                    letsinfer,
+                    "protection_status",
+                    return_value={
+                        "armed": True,
+                        "phase": "armed",
+                        "trip_latched": False,
+                    },
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "_unit_enabled_active",
+                    return_value=("disabled", "inactive"),
+                ),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(letsinfer.status(arguments), 0)
+
+            active_path.assert_called_once_with()
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["service"]["runtime_mode"], "qualification")
+            self.assertEqual(payload["lifecycle"]["state"], "ready")
+            self.assertEqual(payload["lifecycle"]["ready_services"], 3)
+            self.assertEqual(payload["lifecycle"]["total_services"], 3)
+            self.assertEqual(payload["container"]["runtime_version"], "0.1.0-rc.5")
+            self.assertEqual(payload["container"]["capacity"]["max_context_tokens"], 262144)
+            self.assertEqual(payload["container"]["capacity"]["max_active_requests"], 8)
+            self.assertTrue(payload["service"]["gateway_model_identity"])
 
     def test_model_identity_uses_the_public_alias_not_upstream_repository(self) -> None:
         manifest = {

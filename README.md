@@ -284,16 +284,20 @@ requests; received, admitted, completed, failed, cancelled, and retried
 requests; exact input, output, and cached tokens; queue, TTFT, and decode time;
 prefix hits; and telemetry-write failures. Controller telemetry schema 2
 derives one-second request and aggregate token rates from counter deltas and
-weighted per-request prefill/decode rates from exact token and timing deltas.
-Rates remain unavailable until two valid samples exist and exact-dependent
-rates remain `null` when exact token evidence is unavailable. The Mac app
+per-request prefill/decode rates from exact token and timing deltas. SGLang and
+vLLM cumulative stream usage advances those counters during inference;
+DwarfStar and llama.cpp expose final native usage where continuous usage is not
+available. Rates remain unavailable until two valid samples exist, and missing
+engine observations remain `null`. The Mac app
 decodes the complete native and aggregate contracts rather than estimating
 tokens from streamed text.
 
 Clients use a small length-framed protobuf protocol over mutual TLS. They can
 query capabilities, latest state, bounded history, live subscriptions, and
-typed Let's Infer runtime/protection status. The static status descriptor is
-owner-only and manifest-addressed; Watchdog derives live engine, trip, and
+typed Let's Infer runtime/protection status. The durable status descriptor is
+owner-only and manifest-addressed; an atomic active projection is reloaded on
+status requests so runtime identity changes appear without a Watchdog restart.
+Watchdog derives live engine, trip, and
 protection state from its own safety state. Authenticated connections expire
 after 30 seconds without a complete valid request, including when a peer sends
 only a partial frame.
@@ -552,8 +556,11 @@ letsinfer serve <model> --engine <engine> \
 
 This is the only path that may launch an unqualified serving configuration. It requires a
 caller-selected new evidence directory, records the launch as qualification,
-and does not change the manifest's qualified state. Normal `serve` and
-`install` remain fail-closed.
+and does not change the manifest's qualified state. One atomic candidate slot
+replaces any prior qualification launch while preserving the boot service.
+Its current manifest drives the gateway route, Watchdog identity, site
+placement, CLI status, and Mac app even when the retained boot config names an
+older runtime. Normal `serve` and `install` remain fail-closed.
 
 The current interface is:
 
@@ -649,7 +656,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.14`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.15`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its

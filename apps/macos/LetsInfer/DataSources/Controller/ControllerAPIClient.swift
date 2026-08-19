@@ -203,10 +203,58 @@ struct SitePlacementRecord: Decodable, Equatable, Identifiable, Sendable {
     let strategy: String
     let state: String
     let members: [String]
+    let endpoints: [SitePlacementEndpoint]
+    let capacity: SitePlacementCapacity?
+    let updatedAtUnix: Int
 
     enum CodingKeys: String, CodingKey {
         case placementID = "placement_id"
-        case model, runtime, target, strategy, state, members
+        case model, runtime, target, strategy, state, members, endpoints, capacity
+        case updatedAtUnix = "updated_at_unix"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        placementID = try container.decode(String.self, forKey: .placementID)
+        model = try container.decode(String.self, forKey: .model)
+        runtime = try container.decode(String.self, forKey: .runtime)
+        target = try container.decode(String.self, forKey: .target)
+        strategy = try container.decode(String.self, forKey: .strategy)
+        state = try container.decode(String.self, forKey: .state)
+        members = try container.decode([String].self, forKey: .members)
+        endpoints = try container.decodeIfPresent(
+            [SitePlacementEndpoint].self, forKey: .endpoints
+        ) ?? []
+        capacity = try container.decodeIfPresent(
+            SitePlacementCapacity.self, forKey: .capacity
+        )
+        updatedAtUnix = try container.decodeIfPresent(
+            Int.self, forKey: .updatedAtUnix
+        ) ?? 0
+    }
+}
+
+struct SitePlacementEndpoint: Decodable, Equatable, Sendable {
+    let memberID: String
+    let maxActiveRequests: Int?
+    let maxContextTokens: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case memberID = "member_id"
+        case maxActiveRequests = "max_active_requests"
+        case maxContextTokens = "max_context_tokens"
+    }
+}
+
+struct SitePlacementCapacity: Decodable, Equatable, Sendable {
+    let maxConnections: Int?
+    let maxActiveRequests: Int?
+    let maxContextTokens: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case maxConnections = "max_connections"
+        case maxActiveRequests = "max_active_requests"
+        case maxContextTokens = "max_context_tokens"
     }
 }
 
@@ -275,30 +323,44 @@ struct ControllerSiteDocument: Decodable, Equatable, Sendable {
     }
 
     var currentPlacements: [SitePlacementRecord] {
-        var selected: [String: SitePlacementRecord] = [:]
+        var selected: [String: (record: SitePlacementRecord, priority: (Int, Int, String))] = [:]
         var modelOrder: [String] = []
         for placement in placements {
             if selected[placement.model] == nil {
                 modelOrder.append(placement.model)
             }
+            let candidate = (
+                placement.updatedAtUnix,
+                Self.placementPriority(placement.state),
+                placement.placementID
+            )
             if let current = selected[placement.model],
-               Self.placementPriority(current.state) < Self.placementPriority(placement.state) {
+               !Self.isNewer(candidate, than: current.priority) {
                 continue
             }
-            selected[placement.model] = placement
+            selected[placement.model] = (placement, candidate)
         }
-        return modelOrder.compactMap { selected[$0] }
+        return modelOrder.compactMap { selected[$0]?.record }
     }
 
     private static func placementPriority(_ state: String) -> Int {
         switch state {
-        case "running": 0
-        case "starting": 1
+        case "failed": 0
+        case "stopped": 1
         case "draining": 2
-        case "failed": 3
-        case "stopped": 4
-        default: 5
+        case "starting": 3
+        case "running": 4
+        default: -1
         }
+    }
+
+    private static func isNewer(
+        _ candidate: (Int, Int, String),
+        than current: (Int, Int, String)
+    ) -> Bool {
+        if candidate.0 != current.0 { return candidate.0 > current.0 }
+        if candidate.1 != current.1 { return candidate.1 > current.1 }
+        return candidate.2 > current.2
     }
 }
 
@@ -402,6 +464,7 @@ struct SiteInferenceRates: Decodable, Equatable, Sendable {
     let retriesPerSecond: Double?
     let inputTokensPerSecond: Double?
     let outputTokensPerSecond: Double?
+    let aggregateTokensPerSecond: Double?
     let cachedTokensPerSecond: Double?
     let prefillTokensPerSecond: Double?
     let decodeTokensPerSecond: Double?
@@ -418,6 +481,7 @@ struct SiteInferenceRates: Decodable, Equatable, Sendable {
         case retriesPerSecond = "retries_per_second"
         case inputTokensPerSecond = "input_tokens_per_second"
         case outputTokensPerSecond = "output_tokens_per_second"
+        case aggregateTokensPerSecond = "aggregate_tokens_per_second"
         case cachedTokensPerSecond = "cached_tokens_per_second"
         case prefillTokensPerSecond = "prefill_tokens_per_second"
         case decodeTokensPerSecond = "decode_tokens_per_second"

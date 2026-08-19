@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define WATCHDOG_VERSION "0.11.0-rc.14"
+#define WATCHDOG_VERSION "0.11.0-rc.15"
 
 static void usage(FILE *stream, const char *program) {
     fprintf(stream,

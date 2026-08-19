@@ -195,6 +195,7 @@ actor WatchdogDataSource: SiteDataSource {
                     backend: liveStatus?.engine,
                     model: liveStatus?.model,
                     generationTokensPerSecond: decodeRate(sample, previous: previous),
+                    aggregateTokensPerSecond: outputRate(sample, previous: previous),
                     prefillTokensPerSecond: prefillRate(sample, previous: previous),
                     runningRequests: Int(sample.activeRequests),
                     waitingRequests: Int(sample.queuedRequests),
@@ -321,16 +322,32 @@ actor WatchdogDataSource: SiteDataSource {
         previous: WatchdogTelemetrySample?
     ) -> Double? {
         guard let previous,
-              sample.unixMilliseconds > previous.unixMilliseconds,
-              counterDelta(sample.exactTokenRequests, previous.exactTokenRequests) > 0 else {
+              sample.unixMilliseconds > previous.unixMilliseconds else {
             return nil
         }
         let output = counterDelta(sample.outputTokens, previous.outputTokens)
         let milliseconds = counterDelta(
             sample.decodeMilliseconds, previous.decodeMilliseconds
         )
-        guard output > 0, milliseconds > 0 else { return nil }
-        return Double(output) * 1_000 / Double(milliseconds)
+        if counterDelta(sample.exactTokenRequests, previous.exactTokenRequests) > 0,
+           output > 0, milliseconds > 0 {
+            return Double(output) * 1_000 / Double(milliseconds)
+        }
+        return outputRate(sample, previous: previous)
+    }
+
+    private static func outputRate(
+        _ sample: WatchdogTelemetrySample,
+        previous: WatchdogTelemetrySample?
+    ) -> Double? {
+        guard let previous,
+              sample.unixMilliseconds > previous.unixMilliseconds else {
+            return nil
+        }
+        let output = counterDelta(sample.outputTokens, previous.outputTokens)
+        guard output > 0 else { return nil }
+        return Double(output) * 1_000
+            / Double(sample.unixMilliseconds - previous.unixMilliseconds)
     }
 
     private static func prefillRate(
@@ -338,14 +355,18 @@ actor WatchdogDataSource: SiteDataSource {
         previous: WatchdogTelemetrySample?
     ) -> Double? {
         guard let previous,
-              sample.unixMilliseconds > previous.unixMilliseconds,
-              counterDelta(sample.exactTokenRequests, previous.exactTokenRequests) > 0 else {
+              sample.unixMilliseconds > previous.unixMilliseconds else {
             return nil
         }
         let input = counterDelta(sample.inputTokens, previous.inputTokens)
         let cached = counterDelta(sample.cachedTokens, previous.cachedTokens)
         let milliseconds = counterDelta(sample.ttftMilliseconds, previous.ttftMilliseconds)
-        guard input >= cached, input > cached, milliseconds > 0 else { return nil }
-        return Double(input - cached) * 1_000 / Double(milliseconds)
+        guard input >= cached, input > cached else { return nil }
+        if counterDelta(sample.exactTokenRequests, previous.exactTokenRequests) > 0,
+           milliseconds > 0 {
+            return Double(input - cached) * 1_000 / Double(milliseconds)
+        }
+        return Double(input - cached) * 1_000
+            / Double(sample.unixMilliseconds - previous.unixMilliseconds)
     }
 }

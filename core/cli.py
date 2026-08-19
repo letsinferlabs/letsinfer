@@ -1952,17 +1952,23 @@ def write_watchdog_public_state(
         ):
             raise LetsInferError(f"Watchdog public state {name} is not portable")
     ensure_private_directory(path.parent)
-    write_text(
-        path,
+    descriptor = (
         "version=1\n"
         + "".join(f"{name}={value}\n" for name, value in values.items())
         + f"cache_persistent={str(persistent_cache_for(manifest)).lower()}\n"
         + f"inference_port={config['gateway_port']}\n"
         + f"max_connections={serving['max_connections']}\n"
         + f"max_active_requests={serving['max_active_requests']}\n"
-        + f"max_context_tokens={serving['max_context_tokens']}\n",
+        + f"max_context_tokens={serving['max_context_tokens']}\n"
     )
+    write_text(path, descriptor)
     path.chmod(0o600)
+    # The manifest-addressed descriptor remains durable evidence. The resident
+    # Watchdog follows this stable, atomically replaced projection so a runtime
+    # switch does not require restarting the protector or its telemetry stream.
+    active = path.parent / "site.state"
+    write_text(active, descriptor)
+    active.chmod(0o600)
     return path
 
 
@@ -2605,7 +2611,7 @@ def active_memory_pressure_available_bytes(
     config_path: pathlib.Path | None = None,
 ) -> int:
     """Return the active runtime's exact Watchdog warning threshold."""
-    path = config_path or default_service_config_path()
+    path = config_path or active_service_config_path()
     if not path.exists():
         return core_watchdog_contract()["protection"]["warning_available_bytes"]
     return read_service_config(path)["memory_pressure_available_bytes"]
@@ -2643,9 +2649,18 @@ def core_watchdog_service_config(
     data_root = default_watchdog_data_root()
     ensure_private_directory(data_root)
     ensure_private_directory(data_root / PROTECTION_ROOT_NAME)
-    public_state = write_core_watchdog_public_state(
-        identity.installation_id, source_sha256
-    )
+    public_state = None
+    if runtime_manifest is not None:
+        active_config_path = active_service_config_path()
+        if active_config_path.is_file():
+            active_config = read_service_config(active_config_path)
+            public_state = write_watchdog_public_state(
+                active_config, runtime_manifest
+            ).parent / "site.state"
+    if public_state is None:
+        public_state = write_core_watchdog_public_state(
+            identity.installation_id, source_sha256
+        )
     if identity.role == "coordinator":
         listen = "0.0.0.0"
         allowlist = ensure_controller_authorization(
@@ -4852,13 +4867,10 @@ def serve(
     )
     tls_cert_file = expanded_path(arguments.tls_cert_file or default_tls_cert_path())
     tls_key_file = expanded_path(arguments.tls_key_file or default_tls_key_path())
-    protection_config = protection_config_for_serve(
-        getattr(arguments, "protection_config", None), name=name
-    )
-    protection_generation = secrets.token_hex(16) if protection_config else None
     manifest_sha256 = sha256_file(manifest_path)
     supplied_runtime_root = getattr(arguments, "runtime_artifact_root", None)
     runtime_digest = getattr(arguments, "runtime_digest", None)
+    runtime_receipt = runtime_receipt_for_manifest(manifest_path)
     if supplied_runtime_root is not None:
         runtime_artifact_root = pathlib.Path(supplied_runtime_root).expanduser()
         if runtime_digest is None:
@@ -4867,7 +4879,6 @@ def serve(
             except RuntimePackError as error:
                 raise LetsInferError(str(error)) from error
     else:
-        runtime_receipt = runtime_receipt_for_manifest(manifest_path)
         runtime_artifact_root = (
             pathlib.Path(runtime_receipt["object_root"]).expanduser()
             if runtime_receipt is not None
@@ -4933,6 +4944,42 @@ def serve(
     )
     api_key = read_api_key(api_key_file)
     validate_tls_material(tls_cert_file, tls_key_file)
+    evidence = expanded_path(
+        arguments.evidence_dir or default_evidence_dir(manifest)
+    )
+    qualification_config: dict[str, Any] | None = None
+    if qualification_mode:
+        if evidence.exists():
+            raise LetsInferError(f"refusing existing evidence directory: {evidence}")
+        qualification_config = _qualification_config(
+            manifest_path=manifest_path,
+            manifest=manifest,
+            release_root=release_root or manifest_source_root(manifest_path),
+            manifest_sha256=manifest_sha256,
+            name=name,
+            port=port,
+            model_cache=model_cache,
+            plugin_root=plugin_root,
+            store_root=store_root,
+            runtime_cache_root=runtime_cache_root,
+            api_key_file=api_key_file,
+            tls_cert_file=tls_cert_file,
+            tls_key_file=tls_key_file,
+            evidence_dir=evidence,
+            runtime_receipt=runtime_receipt,
+        )
+        protection_config = qualification_config
+        _, engine_state = _unit_enabled_active(ENGINE_SERVICE_NAME)
+        if engine_state not in {"inactive", "failed", "not-found"}:
+            raise LetsInferError(
+                "qualification requires the resident engine service to be stopped"
+            )
+        _retire_qualification_candidate(remove_container=True)
+    else:
+        protection_config = protection_config_for_serve(
+            getattr(arguments, "protection_config", None), name=name
+        )
+    protection_generation = secrets.token_hex(16) if protection_config else None
     inspection = container_inspect(name)
     if inspection is not None:
         if not arguments.existing_ok:
@@ -4996,10 +5043,11 @@ def serve(
             raise
 
     memory = require_memory_reserve(manifest, phase="launch")
-    evidence = pathlib.Path(arguments.evidence_dir) if arguments.evidence_dir else default_evidence_dir(manifest)
     evidence.mkdir(parents=True, exist_ok=False)
     ensure_private_directory(store_root)
     ensure_runtime_home(runtime_cache_root)
+    if qualification_config is not None:
+        _activate_qualification_candidate(qualification_config, manifest)
     launch = {
         "status": "admitted",
         "timestamp": dt.datetime.now().astimezone().isoformat(),
@@ -5071,6 +5119,8 @@ def serve(
                 "armed",
                 inspection=inspection,
             )
+        if qualification_config is not None:
+            update_service_placement(qualification_config, manifest, "running")
         atomic_json(evidence / "launch.json", launch)
         collect_container_evidence(
             name, evidence, secrets_to_redact=(api_key,)
@@ -5078,6 +5128,8 @@ def serve(
     except BaseException as error:
         if protection_config and not protection_trip_latched(protection_config):
             disarm_protection(protection_config)
+        if qualification_config is not None:
+            update_service_placement(qualification_config, manifest, "failed")
         launch["status"] = "failed"
         launch["error"] = str(error)
         atomic_json(evidence / "launch.json", launch)
@@ -5099,6 +5151,11 @@ def serve(
 
 def default_service_config_path() -> pathlib.Path:
     return site_config_root() / "service.json"
+
+
+def qualification_service_config_path() -> pathlib.Path:
+    """Return the single local qualification-slot descriptor."""
+    return site_config_root() / "qualification.json"
 
 
 def read_service_config(path: pathlib.Path) -> dict[str, Any]:
@@ -5261,6 +5318,15 @@ def read_service_config(path: pathlib.Path) -> dict[str, Any]:
             raise LetsInferError(f"service configuration {key} must be {expected.__name__}")
     if "runtime_digest" in config and not SHA256_RE.fullmatch(config["runtime_digest"]):
         raise LetsInferError("service configuration contains an invalid runtime digest")
+    qualification_mode = config.get("qualification_mode")
+    if qualification_mode is not None and not isinstance(qualification_mode, bool):
+        raise LetsInferError("service configuration qualification_mode must be bool")
+    if qualification_mode is True:
+        evidence = config.get("qualification_evidence_dir")
+        if not isinstance(evidence, str) or not pathlib.Path(evidence).is_absolute():
+            raise LetsInferError(
+                "qualification service configuration requires an absolute evidence directory"
+            )
     return config
 
 
@@ -5365,6 +5431,162 @@ def update_service_placement(
         raise LetsInferError(f"cannot update service placement: {error}") from error
 
 
+def _qualification_config(
+    *,
+    manifest_path: pathlib.Path,
+    manifest: dict[str, Any],
+    release_root: pathlib.Path,
+    manifest_sha256: str,
+    name: str,
+    port: int,
+    model_cache: pathlib.Path,
+    plugin_root: pathlib.Path,
+    store_root: pathlib.Path,
+    runtime_cache_root: pathlib.Path,
+    api_key_file: pathlib.Path,
+    tls_cert_file: pathlib.Path,
+    tls_key_file: pathlib.Path,
+    evidence_dir: pathlib.Path,
+    runtime_receipt: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Bind an explicit qualification launch to the site's one candidate slot."""
+    resident_path = default_service_config_path()
+    if not resident_path.is_file():
+        raise LetsInferError(
+            "qualification requires an installed Let's Infer service for gateway, "
+            "Watchdog, and site identity"
+        )
+    resident = read_service_config(resident_path)
+    control_root, installed_manifest_path = install_control_bundle(
+        manifest_path,
+        manifest,
+        artifact_roots=(release_root, source_root()),
+    )
+    placement = resolve_service_placement(manifest, manifest_sha256)
+    candidate = dict(resident)
+    for key in ("runtime_name", "runtime_version", "runtime_digest", "runtime_policy"):
+        candidate.pop(key, None)
+    candidate.update(
+        {
+            "schema_version": SERVICE_CONFIG_VERSION,
+            "engine": adapter_for(manifest).name,
+            "model": manifest["model"]["alias"],
+            "release": manifest["release"],
+            "manifest_sha256": manifest_sha256,
+            "name": name,
+            "engine_port": port,
+            **placement,
+            "model_cache": str(model_cache),
+            "plugin_root": str(plugin_root),
+            "store_root": str(store_root),
+            "runtime_cache_root": str(runtime_cache_root),
+            "engine_api_key_file": str(api_key_file),
+            "tls_cert_file": str(tls_cert_file),
+            "tls_key_file": str(tls_key_file),
+            "source_root": str(control_root),
+            "manifest_path": str(installed_manifest_path),
+            "memory_pressure_available_bytes": manifest["watchdog"]["protection"][
+                "warning_available_bytes"
+            ],
+            "protection_root": str(
+                expanded_path(resident["watchdog_data_root"])
+                / PROTECTION_ROOT_NAME
+                / placement["placement_id"]
+            ),
+            "qualification_mode": True,
+            "qualification_evidence_dir": str(evidence_dir),
+        }
+    )
+    if runtime_receipt is not None:
+        required = ("name", "version", "digest", "policy")
+        if not all(isinstance(runtime_receipt.get(key), str) for key in required):
+            raise LetsInferError("qualification runtime receipt is incomplete")
+        candidate.update(
+            {
+                "runtime_name": runtime_receipt["name"],
+                "runtime_version": runtime_receipt["version"],
+                "runtime_digest": runtime_receipt["digest"],
+                "runtime_policy": runtime_receipt["policy"],
+            }
+        )
+    candidate["watchdog_public_state_file"] = str(
+        expanded_path(candidate["watchdog_data_root"])
+        / WATCHDOG_PUBLIC_STATE_DIRECTORY
+        / f"{manifest_sha256}.state"
+    )
+    return candidate
+
+
+def _restore_resident_watchdog_projection() -> None:
+    resident_path = default_service_config_path()
+    if not resident_path.is_file():
+        return
+    resident = read_service_config(resident_path)
+    _, manifest = configured_release(resident)
+    write_watchdog_public_state(resident, manifest)
+
+
+def _quiesce_resident_placement() -> None:
+    """Remove the boot selection from routing while its unit is stopped."""
+    resident_path = default_service_config_path()
+    if not resident_path.is_file():
+        return
+    resident = read_service_config(resident_path)
+    _, manifest = configured_release(resident)
+    update_service_placement(resident, manifest, "stopped")
+
+
+def _retire_qualification_candidate(*, remove_container: bool) -> None:
+    """Retire the one candidate slot before replacement or resident recovery."""
+    state_path = qualification_service_config_path()
+    if not state_path.is_file():
+        return
+    config = read_service_config(state_path)
+    if config.get("qualification_mode") is not True:
+        raise LetsInferError("qualification slot has an invalid lifecycle mode")
+    _, manifest = configured_release(config)
+    update_service_placement(config, manifest, "stopped")
+    disarm_protection(config, wait_for_ack=False)
+    if remove_container and container_inspect(config["name"]) is not None:
+        _stop_managed_container(
+            config["name"], expanded_path(config["engine_api_key_file"])
+        )
+    state_path.unlink()
+    _fsync_path(state_path.parent)
+    _restore_resident_watchdog_projection()
+
+
+def _activate_qualification_candidate(
+    config: dict[str, Any], manifest: dict[str, Any]
+) -> pathlib.Path:
+    """Atomically replace the local qualification slot and publish its route."""
+    _, engine_state = _unit_enabled_active(ENGINE_SERVICE_NAME)
+    if engine_state not in {"inactive", "failed", "not-found"}:
+        raise LetsInferError(
+            "qualification requires the resident engine service to be stopped"
+        )
+    _retire_qualification_candidate(remove_container=True)
+    _quiesce_resident_placement()
+    state_path = qualification_service_config_path()
+    ensure_private_directory(state_path.parent)
+    atomic_json(state_path, config)
+    state_path.chmod(0o600)
+    write_watchdog_public_state(config, manifest)
+    update_service_placement(config, manifest, "starting")
+    return state_path
+
+
+def active_service_config_path() -> pathlib.Path:
+    """Prefer the explicit candidate slot over the boot-persistent selection."""
+    candidate = qualification_service_config_path()
+    if candidate.is_file():
+        config = read_service_config(candidate)
+        if config.get("qualification_mode") is not True:
+            raise LetsInferError("qualification slot has an invalid lifecycle mode")
+        return candidate
+    return default_service_config_path()
+
+
 def configured_release(
     config: dict[str, Any]
 ) -> tuple[pathlib.Path, dict[str, Any]]:
@@ -5428,6 +5650,9 @@ def retained_control_bundle_for_rollback(config: dict[str, Any]) -> bool:
 
 def serve_from_config(arguments: argparse.Namespace) -> int:
     config = read_service_config(pathlib.Path(arguments.config))
+    if config.get("qualification_mode") is True:
+        raise LetsInferError("qualification candidates cannot become boot services")
+    _retire_qualification_candidate(remove_container=True)
     configured_root = pathlib.Path(config["source_root"]).expanduser()
     try:
         exact_configured_root = configured_root.resolve(strict=True)
@@ -8009,6 +8234,16 @@ def stop(arguments: argparse.Namespace) -> int:
     if model is not None and (arguments.name is not None or arguments.config is not None):
         raise LetsInferError("a model cannot be combined with --name or --config")
     if arguments.name is None and arguments.config is None:
+        qualification_path = qualification_service_config_path()
+        if qualification_path.is_file():
+            qualification = read_service_config(qualification_path)
+            if qualification.get("qualification_mode") is not True:
+                raise LetsInferError("qualification slot has an invalid lifecycle mode")
+            if model is not None and qualification.get("model") != model:
+                raise LetsInferError(f"no installed runtime serves model {model!r}")
+            _retire_qualification_candidate(remove_container=True)
+            return 0
+    if arguments.name is None and arguments.config is None:
         group = _engine_group_lifecycle(model, "stop")
         if group is not None:
             print(
@@ -8016,6 +8251,15 @@ def stop(arguments: argparse.Namespace) -> int:
                 f"members={len(group['member_states'])}"
             )
             return 0
+    if arguments.name is not None:
+        qualification_path = qualification_service_config_path()
+        if qualification_path.is_file():
+            qualification = read_service_config(qualification_path)
+            if qualification.get("qualification_mode") is True and qualification[
+                "name"
+            ] == arguments.name:
+                _retire_qualification_candidate(remove_container=True)
+                return 0
     config_path = absolute_user_path(
         arguments.config or default_service_config_path()
     )
@@ -8074,13 +8318,23 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
         protection.get("armed") is True
         and protection.get("trip_latched") is False
     )
-    unit_states = (
-        service.get("active") == "active",
-        service.get("engine_active") == "active",
-        service.get("gateway_active") == "active",
-        service.get("site_active") == "active",
-        service.get("recovery_timer_active") == "active",
-    )
+    qualification_mode = service.get("runtime_mode") == "qualification"
+    if qualification_mode:
+        # The candidate owns the single inference slot directly. The resident
+        # engine unit and its recovery timer are intentionally quiesced.
+        unit_states = (
+            service.get("active") == "active",
+            service.get("gateway_active") == "active",
+            service.get("site_active") == "active",
+        )
+    else:
+        unit_states = (
+            service.get("active") == "active",
+            service.get("engine_active") == "active",
+            service.get("gateway_active") == "active",
+            service.get("site_active") == "active",
+            service.get("recovery_timer_active") == "active",
+        )
     ready_units = sum(unit_states)
     details = {
         "ready": False,
@@ -8132,7 +8386,7 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
         "paused",
     }:
         return {**details, "state": "failed", "reason": "runtime-failure"}
-    if engine_state in {"inactive", "not-found"} and container_state in {
+    if (qualification_mode or engine_state in {"inactive", "not-found"}) and container_state in {
         "absent",
         "created",
         "exited",
@@ -8145,6 +8399,39 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
             "reason": "runtime-metadata-incompatible",
         }
     return {**details, "state": "degraded", "reason": "component-not-ready"}
+
+
+def _local_controller_telemetry() -> dict[str, Any] | None:
+    """Read the normalized local site aggregate without weakening controller mTLS."""
+
+    server_certificate = default_watchdog_cert_path()
+    client_certificate = default_watchdog_local_controller_cert_path()
+    client_key = default_watchdog_local_controller_key_path()
+    if not all(path.is_file() for path in (
+        server_certificate, client_certificate, client_key
+    )):
+        return None
+    connection: http.client.HTTPSConnection | None = None
+    try:
+        context = ssl.create_default_context(cafile=str(server_certificate))
+        context.check_hostname = False
+        context.load_cert_chain(str(client_certificate), str(client_key))
+        connection = http.client.HTTPSConnection(
+            "127.0.0.1", CONTROLLER_CONTROL_PORT, timeout=1, context=context
+        )
+        connection.request("GET", "/control/v1/telemetry?history=0")
+        response = connection.getresponse()
+        body = response.read(1024 * 1024 + 1)
+        if response.status != 200 or len(body) > 1024 * 1024:
+            return None
+        value = json.loads(body)
+        aggregate = value.get("telemetry", {}).get("aggregate")
+        return aggregate if isinstance(aggregate, dict) else None
+    except (OSError, ssl.SSLError, http.client.HTTPException, json.JSONDecodeError):
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def status(arguments: argparse.Namespace) -> int:
@@ -8177,9 +8464,12 @@ def status(arguments: argparse.Namespace) -> int:
                 "site-wide engine-group status is available from the coordinator"
             )
     config_path = absolute_user_path(
-        arguments.config or default_service_config_path()
+        arguments.config or active_service_config_path()
     )
     config = read_service_config(config_path) if config_path.is_file() else None
+    qualification_mode = bool(
+        config is not None and config.get("qualification_mode") is True
+    )
     configured_manifest: dict[str, Any] | None = None
     runtime_metadata_error: str | None = None
     if config is not None:
@@ -8393,6 +8683,7 @@ def status(arguments: argparse.Namespace) -> int:
             ),
             "recovery_timer_enabled": recovery_enabled,
             "recovery_timer_active": recovery_active,
+            "runtime_mode": "qualification" if qualification_mode else "resident",
         },
         "container": {
             "name": name,
@@ -8408,6 +8699,7 @@ def status(arguments: argparse.Namespace) -> int:
             "model": labels.get(MODEL_LABEL) or (config.get("model") if config else None),
             "target": labels.get(TARGET_ID_LABEL),
             "runtime_version": config.get("runtime_version") if config else None,
+            "qualification_mode": qualification_mode,
             "capacity": (
                 {
                     key: configured_manifest["serving"][key]
@@ -8429,6 +8721,7 @@ def status(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     elif ui.Terminal(sys.stdout).interactive:
+        payload["telemetry"] = _local_controller_telemetry()
         ui.runtime_status(payload)
     else:
         memory = "none" if memory_bytes is None else str(memory_bytes)
@@ -9749,12 +10042,10 @@ def _benchmark_dashboard(
     progress = progress if isinstance(progress, dict) else {}
     status = str(state.get("state") or "unknown").upper()
     active = state.get("state") in benchmark_jobs.ACTIVE_STATES
-    color = ui.CYAN if active else (ui.GREEN if status == "COMPLETED" else ui.RED)
+    color = ui.GREEN if active or status == "COMPLETED" else ui.RED
     mark = "●" if terminal.unicode else "*"
-    brand = terminal.paint("LET'S INFER", ui.BOLD)
     lines = [
-        f"{terminal.paint(terminal.mark, ui.BOLD, ui.YELLOW)}  "
-        f"{brand}  /  BENCHMARK",
+        terminal.logo("benchmark"),
         "",
         f"{terminal.paint(mark, ui.BOLD, color)} "
         f"{terminal.paint(status, ui.BOLD, color)}  "
@@ -9768,7 +10059,7 @@ def _benchmark_dashboard(
         phase = "starting"
     lines.extend(
         [
-            f"  {terminal.paint(frame, ui.CYAN)} "
+            f"  {terminal.paint(frame, ui.GREEN if active else color)} "
             f"{terminal.paint(terminal.clip(message, terminal.width - 5), ui.BOLD)}",
             f"  {terminal.paint(f'phase {phase}', ui.DIM)}",
         ]
@@ -9807,7 +10098,7 @@ def _benchmark_dashboard(
                     "complete",
                 )
             elif cell == current:
-                cell_mark, cell_color, detail = frame, ui.CYAN, "running"
+                cell_mark, cell_color, detail = frame, ui.GREEN, "running"
             else:
                 cell_mark, cell_color, detail = (
                     ("○" if terminal.unicode else "-"),
@@ -9828,13 +10119,13 @@ def _benchmark_dashboard(
         and all(isinstance(value, int) and not isinstance(value, bool) for value in expected)
     ):
         lines.append(f"  EXPECTED  {expected[0]}–{expected[1]} min")
-    lines.extend(
-        [
-            f"  EVIDENCE  {terminal.clip(str(state.get('output_directory') or 'pending'), terminal.width - 12)}",
-            "",
-            "  Ctrl-C detaches; `letsinfer benchmark stop` cancels.",
-        ]
+    lines.append(
+        f"  EVIDENCE  {terminal.clip(str(state.get('output_directory') or 'pending'), terminal.width - 12)}"
     )
+    if active:
+        lines.extend(["", "  Ctrl-C detaches; `letsinfer benchmark stop` cancels."])
+    elif state.get("error"):
+        lines.extend(["", f"  {terminal.paint(str(state['error']), ui.RED)}"])
     return "\n".join(lines) + "\n"
 
 
@@ -9876,46 +10167,12 @@ def _benchmark_job_snapshot(*, machine: bool = False) -> int:
         return 0
 
     terminal = ui.Terminal(sys.stdout)
-    status = str(state.get("state") or "unknown").upper()
-    color = ui.CYAN if active else (ui.GREEN if status == "COMPLETED" else ui.RED)
-    mark = "●" if terminal.unicode else "*"
-    brand = terminal.paint("LET'S INFER", ui.BOLD)
-    terminal.stream.write(
-        f"{terminal.paint(terminal.mark, ui.BOLD, ui.YELLOW)}  "
-        f"{brand}  /  BENCHMARK\n\n"
-        f"{terminal.paint(mark, ui.BOLD, color)} "
-        f"{terminal.paint(status, ui.BOLD, color)}  "
-        f"{terminal.paint(str(state.get('runtime') or 'unknown runtime'), ui.BOLD)}\n"
+    frame = (
+        "⠋" if active and terminal.unicode
+        else "✓" if state.get("state") == "completed" and terminal.unicode
+        else "*"
     )
-    message = (
-        progress.get("message")
-        if isinstance(progress, dict) and isinstance(progress.get("message"), str)
-        else "Waiting for benchmark worker"
-    )
-    phase = (
-        progress.get("phase")
-        if isinstance(progress, dict) and isinstance(progress.get("phase"), str)
-        else "starting"
-    )
-    terminal.stream.write(f"  {terminal.paint(message, ui.BOLD)}\n")
-    terminal.stream.write(f"  {terminal.paint(f'phase {phase}', ui.DIM)}\n\n")
-    terminal.stream.write(f"  ELAPSED   {_duration(elapsed)}\n")
-    expected = progress.get("expected_minutes") if isinstance(progress, dict) else None
-    if (
-        isinstance(expected, list)
-        and len(expected) == 2
-        and all(isinstance(value, int) and not isinstance(value, bool) for value in expected)
-    ):
-        terminal.stream.write(f"  EXPECTED  {expected[0]}–{expected[1]} min\n")
-    terminal.stream.write(
-        f"  EVIDENCE  {state.get('output_directory') or 'pending'}\n"
-    )
-    if active:
-        terminal.stream.write("\n  Ctrl-C detaches; `letsinfer benchmark stop` cancels.\n")
-    elif state.get("error"):
-        terminal.stream.write(
-            f"\n  {terminal.paint(str(state['error']), ui.RED)}\n"
-        )
+    terminal.stream.write(_benchmark_dashboard(state, progress, elapsed, terminal, frame))
     terminal.stream.flush()
     return 0
 
@@ -13425,7 +13682,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         raw_arguments = list(argv) if argv is not None else sys.argv[1:]
         command_parser = parser()
         if not raw_arguments:
-            command_parser.print_help()
+            if ui.Terminal(sys.stdout).interactive:
+                ui.home()
+            else:
+                command_parser.print_help()
             return 0
         engine_arguments: list[str] = []
         if raw_arguments[:1] == ["derive"] and "--" in raw_arguments:

@@ -120,7 +120,7 @@ final class SiteMonitoringController: ObservableObject {
                 async let telemetryView = controllerAPI.telemetry(for: site)
                 let currentSite = try await siteView
                 applySiteView(currentSite, for: site)
-                telemetryViews[site.id] = try await telemetryView
+                applyTelemetryView(try await telemetryView, for: site.id)
                 controllerErrors[site.id] = nil
             } catch {
                 controllerErrors[site.id] = error.localizedDescription
@@ -147,7 +147,7 @@ final class SiteMonitoringController: ObservableObject {
                     async let telemetryView = controllerAPI.telemetry(for: site)
                     let currentSite = try await siteView
                     applySiteView(currentSite, for: site)
-                    telemetryViews[site.id] = try await telemetryView
+                    applyTelemetryView(try await telemetryView, for: site.id)
                     controllerErrors[site.id] = nil
                 } catch {
                     controllerErrors[site.id] = error.localizedDescription
@@ -425,9 +425,12 @@ final class SiteMonitoringController: ObservableObject {
     }
 
     private func apply(_ snapshot: SiteSnapshot) {
-        let enriched = coordinatorFacts(for: snapshot.siteID).map {
+        var enriched = coordinatorFacts(for: snapshot.siteID).map {
             snapshot.enriched(with: $0)
         } ?? snapshot
+        if let placement = currentPlacement(for: snapshot.siteID) {
+            enriched = enriched.enriched(with: placement)
+        }
         if snapshots[enriched.siteID].map({ $0.sampledAt <= enriched.sampledAt }) ?? true {
             snapshots[enriched.siteID] = enriched
         }
@@ -445,12 +448,43 @@ final class SiteMonitoringController: ObservableObject {
         let enriched = snapshots[savedSite.id].map { $0.enriched(with: facts) }
             ?? SiteSnapshot.controllerFacts(siteID: savedSite.id, facts: facts)
         guard let enriched else { return }
-        snapshots[savedSite.id] = enriched
+        let resolved: SiteSnapshot
+        if let placement = currentPlacement(in: envelope) {
+            resolved = enriched.enriched(with: placement)
+        } else {
+            resolved = enriched
+        }
+        snapshots[savedSite.id] = resolved
+        record(resolved)
+    }
+
+    private func applyTelemetryView(
+        _ envelope: ControllerTelemetryEnvelope,
+        for siteID: SavedSite.ID
+    ) {
+        telemetryViews[siteID] = envelope
+        guard let snapshot = snapshots[siteID] else { return }
+        let enriched = snapshot.enriched(with: envelope.telemetry.aggregate)
+        snapshots[siteID] = enriched
         record(enriched)
     }
 
     private func coordinatorFacts(for siteID: SavedSite.ID) -> SiteMemberFacts? {
         siteViews[siteID].flatMap(coordinatorFacts(in:))
+    }
+
+    private func currentPlacement(for siteID: SavedSite.ID) -> SitePlacementRecord? {
+        siteViews[siteID].flatMap(currentPlacement(in:))
+    }
+
+    private func currentPlacement(
+        in envelope: ControllerSiteEnvelope
+    ) -> SitePlacementRecord? {
+        let current = envelope.site.currentPlacements
+        return current.first { $0.state == "running" }
+            ?? current.first { $0.state == "starting" }
+            ?? current.first { $0.state == "draining" }
+            ?? current.first
     }
 
     private func coordinatorFacts(

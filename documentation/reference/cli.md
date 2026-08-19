@@ -8,15 +8,17 @@ non-coordinator member, and `all` commands run in either role. Invalid scope is
 rejected before the command handler or any side effect. Site mutations are
 coordinator-only and audited.
 
-Interactive terminals use the full Let's Infer mark and type treatment only for
-root help, command help, and site/runtime status cards. Running `letsinfer`
-without a command shows root help. Mutating commands use only a compact progress
-and success line on standard error; read and list results stay unadorned on
-standard output. Errors use one concise standard-error label and never repeat
-the banner. One-time API-key secrets and all durable command results remain on
-standard output. Redirected output, `TERM=dumb`, and JSON modes stay plain and
-byte-clean. Set `NO_COLOR` to keep the interactive layout while disabling
-color.
+Interactive terminals use the shared Let's Infer mark, type hierarchy, and
+product palette. Running `letsinfer` without a command shows the quiet
+action-first home surface; `--help` shows the complete command reference.
+Status exposes the request path, scheduler state, and normalized live aggregate,
+decode, and prefill rates when the private controller has them. Benchmark
+attachment uses the same bounded workload/progress language, and install/update
+show one truthful active step with elapsed time. Read and list results stay
+unadorned on standard output. One-time API-key secrets and all durable command
+results remain on standard output. Redirected output, `TERM=dumb`, and JSON
+modes preserve plain byte-clean contracts. `NO_COLOR` keeps the human layout
+without escape sequences. No presentation dependency is installed.
 
 ## Site, membership, and policy
 
@@ -204,6 +206,11 @@ API reachability and authentication come from live gateway probes even when
 immutable runtime metadata is incompatible. In that case the API can be shown
 as `Ready` while a separate `RUNTIME Incompatible` row explains why the
 overall lifecycle remains `degraded`.
+The interactive card reads the coordinator's normalized local aggregate over
+its existing mutual-TLS controller channel. A missing measurement is rendered
+as unavailable rather than inferred. `status --json` remains the stable
+machine health contract and is not decorated by this interactive telemetry
+lookup.
 
 `releases` lists installed runtime manifests, not test fixtures or a bundled
 model catalog.
@@ -240,7 +247,13 @@ identifiers are never published.
 
 `serve --qualification-mode --evidence-dir PATH` is the only path that permits
 an unqualified recipe. It is explicit, evidence-bound, and does not promote or
-make the candidate boot-persistent.
+make the candidate boot-persistent. Qualification owns one atomic local
+candidate slot. Starting a newer candidate first retires the prior candidate,
+then publishes the new manifest, placement, gateway route, protection root,
+and Watchdog projection as one lifecycle. The boot-persistent resident config
+is retained for restoration. During qualification, `status` labels the runtime
+`UNQUALIFIED`, reports candidate context, capacity, and version, and excludes the
+intentionally quiesced resident engine and recovery timer from service health.
 
 `pair` opens one temporary TLS 1.3 enrollment session on fixed port 9769 and
 prints an eight-digit setup code. Pairing completes only after the terminal and

@@ -115,20 +115,32 @@ struct ControllerAPIClientTests {
             "topology":{"valid":true,"topology_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
             "placements":[{
               "placement_id":"44444444444444444444444444444444",
-              "model":"fixture-model",
-              "runtime":"runtime@1",
-              "target":"fixture-target",
+              "model":"qwen3.8-27b",
+              "runtime":"qwen3.8-27b/sglang/dgx-spark@0.1.0-rc.2@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "target":"dgx-spark",
               "strategy":"single",
               "state":"running",
-              "members":["33333333333333333333333333333333"]
+              "members":["33333333333333333333333333333333"],
+              "endpoints":[{
+                "member_id":"33333333333333333333333333333333",
+                "max_active_requests":10,
+                "max_context_tokens":1000000
+              }],
+              "capacity":{
+                "max_connections":128,
+                "max_active_requests":10,
+                "max_context_tokens":1000000
+              },
+              "updated_at_unix":1700000010
             },{
               "placement_id":"55555555555555555555555555555555",
-              "model":"fixture-model",
-              "runtime":"runtime@old",
+              "model":"qwen3.8-27b",
+              "runtime":"qwen3.8-27b/sglang/dgx-spark@0.1.0-rc.1",
               "target":"fixture-target",
               "strategy":"single",
               "state":"stopped",
-              "members":["33333333333333333333333333333333"]
+              "members":["33333333333333333333333333333333"],
+              "updated_at_unix":1700000002
             }],
             "pending_topology_plans":[],
             "exposure":{
@@ -148,6 +160,7 @@ struct ControllerAPIClientTests {
         #expect(site.site.placements.first?.strategy == "single")
         #expect(site.site.currentPlacements.count == 1)
         #expect(site.site.currentPlacements.first?.state == "running")
+        #expect(site.site.currentPlacements.first?.capacity?.maxActiveRequests == 10)
         #expect(site.site.activeMemberCount == 1)
         #expect(site.site.exposure.state == "disabled")
         #expect(site.site.members.first?.facts?.inventory?.hostname == "homeai")
@@ -168,6 +181,57 @@ struct ControllerAPIClientTests {
         #expect(snapshot.system?.networkAddresses.first?.address == "192.168.1.66")
         #expect(snapshot.system?.containers.first?.name == "letsinfer-dwarfstar")
         #expect(snapshot.uptimeSeconds == 3_600)
+
+        let staleRuntimeSnapshot = SiteSnapshot(
+            siteID: siteID,
+            source: .watchdog,
+            sampledAt: Date(),
+            availability: .online,
+            uptimeSeconds: 3_600,
+            identity: nil,
+            metrics: MemberMetrics(llm: [
+                LLMMetrics(
+                    id: "letsinfer-gateway",
+                    backend: "core",
+                    model: "site",
+                    generationTokensPerSecond: nil,
+                    prefillTokensPerSecond: nil,
+                    runningRequests: 0,
+                    waitingRequests: 0,
+                    kvCacheUtilization: nil
+                )
+            ]),
+            letsinfer: SiteStatus(
+                installationID: "installation",
+                release: "0.11.0-rc.14",
+                model: "site",
+                engine: "core",
+                runtimeName: "site",
+                runtimeVersion: "1",
+                manifestSHA256: String(repeating: "a", count: 64),
+                cacheProvider: "none",
+                cachePersistent: false,
+                inferencePort: 8000,
+                maxConnections: 1,
+                maxActiveRequests: 1,
+                maxContextTokens: 1,
+                serviceState: "active",
+                engineState: "running",
+                protectionPhase: "armed",
+                protectionArmed: true,
+                tripLatched: false,
+                containerName: nil
+            )
+        )
+        let placement = try #require(site.site.currentPlacements.first)
+        let activeRuntimeSnapshot = staleRuntimeSnapshot.enriched(with: placement)
+        #expect(activeRuntimeSnapshot.letsinfer?.model == "qwen3.8-27b")
+        #expect(activeRuntimeSnapshot.letsinfer?.engine == "sglang")
+        #expect(activeRuntimeSnapshot.letsinfer?.runtimeVersion == "0.1.0-rc.2")
+        #expect(activeRuntimeSnapshot.letsinfer?.maxActiveRequests == 10)
+        #expect(activeRuntimeSnapshot.letsinfer?.maxConnections == 128)
+        #expect(activeRuntimeSnapshot.letsinfer?.maxContextTokens == 1_000_000)
+        #expect(activeRuntimeSnapshot.metrics.llm.first?.model == "qwen3.8-27b")
 
         let telemetryData = Data("""
         {
@@ -258,6 +322,7 @@ struct ControllerAPIClientTests {
                 "retries_per_second":0.25,
                 "input_tokens_per_second":6400.0,
                 "output_tokens_per_second":200.0,
+                "aggregate_tokens_per_second":200.0,
                 "cached_tokens_per_second":2400.0,
                 "prefill_tokens_per_second":25000.0,
                 "decode_tokens_per_second":256.0,
@@ -294,6 +359,7 @@ struct ControllerAPIClientTests {
                 "retries_per_second":0.25,
                 "input_tokens_per_second":6400.0,
                 "output_tokens_per_second":200.0,
+                "aggregate_tokens_per_second":201.0,
                 "cached_tokens_per_second":2400.0,
                 "prefill_tokens_per_second":25000.0,
                 "decode_tokens_per_second":256.0,
@@ -320,6 +386,14 @@ struct ControllerAPIClientTests {
         #expect(telemetry.telemetry.members.first?.sample.inference.counters.outputTokens == 1024)
         #expect(telemetry.telemetry.members.first?.sample.workload.throttled == false)
         #expect(telemetry.telemetry.members.first?.rates.outputTokensPerSecond == 200)
+        let liveSnapshot = activeRuntimeSnapshot.enriched(
+            with: telemetry.telemetry.aggregate
+        )
+        #expect(liveSnapshot.metrics.llm.first?.aggregateTokensPerSecond == 201)
+        #expect(liveSnapshot.metrics.llm.first?.generationTokensPerSecond == 256)
+        #expect(liveSnapshot.metrics.llm.first?.prefillTokensPerSecond == 25_000)
+        #expect(liveSnapshot.metrics.llm.first?.runningRequests == 2)
+        #expect(liveSnapshot.metrics.llm.first?.waitingRequests == 1)
 
         let actionData = Data("""
         {

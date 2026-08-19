@@ -119,7 +119,7 @@ class MacOSReleaseContractTests(unittest.TestCase):
         self.assertIn("environment: production-macos-release", workflow)
         self.assertIn("--latest=false", workflow)
         self.assertIn("branches:\n      - macos-release", workflow)
-        self.assertNotIn("Validate macOS", core_workflow)
+        self.assertNotIn("Publish macOS release", core_workflow)
         for action in re.findall(r"uses:\s*([^\s]+)", workflow):
             revision = action.rsplit("@", 1)[-1]
             self.assertRegex(revision, r"^[0-9a-f]{40}$")

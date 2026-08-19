@@ -17,6 +17,13 @@ distributed engine group; the app does not model a site as one DGX Spark.
 - Read topology, signed member inventory, placements, controller role, and
   bounded aggregate telemetry from the coordinator. Read one-second machine
   telemetry from Watchdog. A paired site never invokes SSH.
+- Treat the controller's newest placement as the active inference identity.
+  Watchdog refreshes its atomic runtime descriptor in place, and the placement
+  overlay prevents a stale `core/site` baseline from replacing the active
+  model, engine, version, context, or capacity while that refresh propagates.
+- Display engine-neutral aggregate throughput plus decode/prefill rates from
+  exact gateway counters. Unsupported live engine usage remains unavailable;
+  the app never estimates tokens from streamed text.
 - Never send arbitrary shell commands or expose controller credentials to the
   inference API.
 - Offer **Add to Home** only for a pristine site reached over a verified direct

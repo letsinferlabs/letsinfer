@@ -199,7 +199,20 @@ struct DataSourceTests {
         #expect(snapshot.metrics.llm.first?.runningRequests == 2)
         #expect(snapshot.metrics.llm.first?.waitingRequests == 1)
         #expect(snapshot.metrics.llm.first?.generationTokensPerSecond == 200)
+        #expect(snapshot.metrics.llm.first?.aggregateTokensPerSecond == 200)
         #expect(snapshot.metrics.llm.first?.prefillTokensPerSecond == 2_000)
+
+        var livePrevious = sample
+        livePrevious.unixMilliseconds -= 1_000
+        livePrevious.inputTokens -= 40
+        livePrevious.outputTokens -= 12
+        livePrevious.cachedTokens -= 10
+        let live = WatchdogDataSource.map(
+            sample, to: site, previous: livePrevious
+        )
+        #expect(live.metrics.llm.first?.generationTokensPerSecond == 12)
+        #expect(live.metrics.llm.first?.aggregateTokensPerSecond == 12)
+        #expect(live.metrics.llm.first?.prefillTokensPerSecond == 30)
     }
 
     @Test
