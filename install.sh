@@ -318,6 +318,25 @@ else
         sudo ln -s "$prefix/bin/$launcher_name" "$temporary_launcher"
         sudo mv -f -- "$temporary_launcher" "$launcher"
     done
+    # A prior user install can appear earlier in PATH than /usr/local/bin.
+    # Repoint only launchers whose symlink target proves they were created by
+    # Let's Infer's standard ~/.local layout; never replace an arbitrary file
+    # or user-managed link.
+    legacy_launcher_dir="$HOME/.local/bin"
+    for launcher_name in letsinfer letsinfer-recovery; do
+        legacy_launcher="$legacy_launcher_dir/$launcher_name"
+        if [ -L "$legacy_launcher" ]; then
+            legacy_target=$(readlink "$legacy_launcher")
+            case "$legacy_target" in
+                "$HOME"/.local/lib/letsinfer/*/bin/"$launcher_name")
+                    temporary_legacy="$legacy_launcher.letsinfer.$$"
+                    rm -f -- "$temporary_legacy"
+                    ln -s "$launcher_dir/$launcher_name" "$temporary_legacy"
+                    mv -f -- "$temporary_legacy" "$legacy_launcher"
+                    ;;
+            esac
+        fi
+    done
     command_path="$launcher_dir/letsinfer"
 fi
 umask 077
