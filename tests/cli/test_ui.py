@@ -213,6 +213,59 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("Blocked", rendered)
         self.assertNotIn("\033[", rendered)
 
+    def test_runtime_status_renders_startup_as_a_transition(self) -> None:
+        stream = FakeStream(tty=True)
+        payload = {
+            "service": {
+                "active": "active",
+                "engine_active": "activating",
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+                "gateway_model_identity": False,
+                "gateway_endpoint": "http://homeai.local:8000/v1",
+                "site_active": "active",
+                "recovery_timer_active": "active",
+                "memory_current_bytes": 19 * 1024 * 1024,
+                "memory_limit_bytes": 30 * 1024 * 1024,
+                "within_memory_limit": True,
+            },
+            "container": {
+                "state": "running",
+                "healthy": False,
+                "docker_health": "starting",
+                "model_identity": False,
+                "model": "qwen3.8-27b",
+                "engine": "sglang",
+                "target": "dgx-spark",
+                "runtime_version": "0.1.0-rc.3",
+            },
+            "protection": {
+                "phase": "starting",
+                "armed": False,
+                "trip_latched": False,
+            },
+        }
+        payload["lifecycle"] = letsinfer.runtime_lifecycle(payload)
+        self.assertEqual(payload["lifecycle"]["state"], "starting")
+        self.assertTrue(payload["lifecycle"]["transitional"])
+
+        ui.runtime_status(
+            payload,
+            stream=stream,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
+        )
+        rendered = stream.getvalue()
+        self.assertIn("STARTING", rendered)
+        self.assertIn("Waiting", rendered)
+        self.assertIn("Starting", rendered)
+        self.assertIn("Arming", rendered)
+        self.assertIn("engine unit activating", rendered)
+        self.assertNotIn("ATTENTION", rendered)
+        self.assertNotIn("Unavailable", rendered)
+        self.assertNotIn("protection needs attention", rendered)
+
     def test_site_status_is_branded_without_claiming_a_runtime(self) -> None:
         stream = FakeStream(tty=True)
         ui.site_status(
