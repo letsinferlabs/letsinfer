@@ -114,19 +114,26 @@ class TelemetryTests(unittest.TestCase):
         connection.getresponse.return_value = Response()
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            paths = [root / name for name in ("server.crt", "client.crt", "client.key")]
+            paths = [
+                root / name
+                for name in ("controller-ca.crt", "client.crt", "client.key")
+            ]
             for path in paths:
                 path.write_text("fixture", encoding="ascii")
             context = mock.Mock()
+            context_factory = mock.Mock(return_value=context)
             with (
-                mock.patch.object(letsinfer.ssl, "create_default_context", return_value=context),
+                mock.patch.object(
+                    letsinfer.ssl, "create_default_context", context_factory
+                ),
                 mock.patch.object(letsinfer.http.client, "HTTPSConnection", return_value=connection),
             ):
                 aggregate = letsinfer._local_controller_telemetry({
-                    "watchdog_cert_file": str(paths[0]),
+                    "watchdog_controller_ca_file": str(paths[0]),
                     "watchdog_local_controller_cert_file": str(paths[1]),
                     "watchdog_local_controller_key_file": str(paths[2]),
                 })
+        context_factory.assert_called_once_with(cafile=str(paths[0].resolve()))
         self.assertEqual(aggregate["active_requests"], 1)
         self.assertEqual(aggregate["rates"]["output_tokens_per_second"], 11.0)
 
