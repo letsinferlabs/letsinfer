@@ -5497,8 +5497,6 @@ ExecStart={_systemd_quote(executable)} service-start --config {_systemd_quote(co
 ExecStop={_systemd_quote(executable)} service-stop --config {_systemd_quote(config_path)}
 TimeoutStartSec={timeout}
 TimeoutStopSec=180
-Restart=on-failure
-RestartSec=30
 """
 
 
@@ -5986,7 +5984,18 @@ def install_core_plane_services(identity: Any, *, include_gateway: bool) -> None
         if include_gateway:
             install_core_gateway_service(replace_active=True)
         if previous[ENGINE_SERVICE_NAME][1] == "active":
-            run_passthrough(["systemctl", "--user", "start", ENGINE_SERVICE_NAME])
+            # A core update must not wait for a potentially long model load.
+            # The recovery timer owns subsequent retries and refuses them while
+            # Watchdog has a safety trip latched.
+            run_passthrough(
+                [
+                    "systemctl",
+                    "--user",
+                    "start",
+                    "--no-block",
+                    ENGINE_SERVICE_NAME,
+                ]
+            )
         if previous[RECOVERY_TIMER_NAME][1] == "active":
             run_passthrough(["systemctl", "--user", "start", RECOVERY_TIMER_NAME])
     except BaseException as failure:

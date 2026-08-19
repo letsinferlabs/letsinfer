@@ -163,14 +163,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.9")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.10")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.9"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.10"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -1747,7 +1747,7 @@ class InstallTests(unittest.TestCase):
         )
         self.assertIn("Type=oneshot", unit)
         self.assertIn("RemainAfterExit=yes", unit)
-        self.assertIn("Restart=on-failure", unit)
+        self.assertNotIn("Restart=", unit)
         self.assertIn("After=letsinfer.service", unit)
         self.assertIn("Environment=PYTHONDONTWRITEBYTECODE=1", unit)
         self.assertIn("service-start", unit)

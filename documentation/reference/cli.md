@@ -152,7 +152,8 @@ stores and launches the command as argv rather than evaluating that text.
 named by `--version`, and rebinds the core-owned services to it. When inference
 is active, the handoff stops recovery, drains the engine while the existing
 Watchdog is still armed, replaces the site/Watchdog/gateway services, and then
-restores the engine and recovery timer. The runtime's own immutable control
+queues engine restoration and restores the recovery timer without waiting for
+model load. Engine launch state remains visible through `status`. The runtime's own immutable control
 bundle is not rebound. `update` never resolves, downloads, upgrades, rolls
 back, or changes a runtime. Installed runtime
 receipts, model snapshots, caches, evidence, API keys, and service placement

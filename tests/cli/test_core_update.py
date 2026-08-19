@@ -116,7 +116,13 @@ class CoreUpdateTests(unittest.TestCase):
             [
                 ["systemctl", "--user", "stop", letsinfer.RECOVERY_TIMER_NAME],
                 ["systemctl", "--user", "stop", letsinfer.ENGINE_SERVICE_NAME],
-                ["systemctl", "--user", "start", letsinfer.ENGINE_SERVICE_NAME],
+                [
+                    "systemctl",
+                    "--user",
+                    "start",
+                    "--no-block",
+                    letsinfer.ENGINE_SERVICE_NAME,
+                ],
                 ["systemctl", "--user", "start", letsinfer.RECOVERY_TIMER_NAME],
             ],
         )
