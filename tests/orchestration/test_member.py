@@ -125,13 +125,13 @@ class MemberJobTests(unittest.TestCase):
                 store_path=pathlib.Path(directory) / "jobs.sqlite3",
                 handler=lambda job, _credential: calls.append(job["action"]) or {"state": "staged"},
             )
-            first = agent.execute(self.job(), engine_credential=self.credential)
-            second = agent.execute(self.job(), engine_credential=self.credential)
+            job = self.job()
+            first = agent.execute(job, engine_credential=self.credential)
+            second = agent.execute(job, engine_credential=self.credential)
             self.assertFalse(first["replayed"])
             self.assertTrue(second["replayed"])
             self.assertEqual(calls, ["stage"])
-            changed = self.job()
-            changed["expires_at_unix"] += 1
+            changed = {**job, "expires_at_unix": job["expires_at_unix"] + 1}
             with self.assertRaisesRegex(MemberJobError, "different bytes"):
                 agent.execute(changed, engine_credential=self.credential)
 
