@@ -83,7 +83,15 @@ class CoreUpdateTests(unittest.TestCase):
                 mock.patch.object(letsinfer, "default_service_config_path", return_value=config_path),
                 mock.patch.object(letsinfer, "read_service_config", return_value=previous),
                 mock.patch.object(letsinfer, "_unit_enabled_active", return_value=("enabled", "inactive")),
-                mock.patch.object(letsinfer, "install_core_plane_services") as install_services,
+                mock.patch.object(
+                    letsinfer,
+                    "install_core_plane_services",
+                    return_value={
+                        "configured": True,
+                        "compatible": True,
+                        "error": None,
+                    },
+                ) as install_services,
                 redirect_stdout(output),
             ):
                 result = letsinfer.rebind_core_services(argparse.Namespace())
@@ -96,21 +104,38 @@ class CoreUpdateTests(unittest.TestCase):
     def test_core_plane_handoff_quiesces_and_restores_runtime_services(self) -> None:
         commands: list[list[str]] = []
         identity = mock.Mock(role="coordinator")
-        with (
-            mock.patch.object(letsinfer.platform, "system", return_value="Linux"),
-            mock.patch.object(
-                letsinfer, "_unit_enabled_active", return_value=("enabled", "active")
-            ),
-            mock.patch.object(
-                letsinfer,
-                "run_passthrough",
-                side_effect=lambda value: commands.append(list(value)),
-            ),
-            mock.patch.object(letsinfer, "install_site_service_only") as install_site,
-            mock.patch.object(letsinfer, "install_core_watchdog_service") as install_watchdog,
-            mock.patch.object(letsinfer, "install_core_gateway_service") as install_gateway,
-        ):
-            letsinfer.install_core_plane_services(identity, include_gateway=True)
+        manifest = {"watchdog": {"protection": {"warning_available_bytes": 4 << 30}}}
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = pathlib.Path(directory) / "service.json"
+            config_path.write_text("{}\n", encoding="utf-8")
+            with (
+                mock.patch.object(letsinfer.platform, "system", return_value="Linux"),
+                mock.patch.object(
+                    letsinfer, "default_service_config_path", return_value=config_path
+                ),
+                mock.patch.object(letsinfer, "read_service_config", return_value={}),
+                mock.patch.object(
+                    letsinfer, "configured_release", return_value=(config_path, manifest)
+                ),
+                mock.patch.object(
+                    letsinfer, "_unit_enabled_active", return_value=("enabled", "active")
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "run_passthrough",
+                    side_effect=lambda value: commands.append(list(value)),
+                ),
+                mock.patch.object(letsinfer, "install_site_service_only") as install_site,
+                mock.patch.object(
+                    letsinfer, "install_core_watchdog_service"
+                ) as install_watchdog,
+                mock.patch.object(
+                    letsinfer, "install_core_gateway_service"
+                ) as install_gateway,
+            ):
+                state = letsinfer.install_core_plane_services(
+                    identity, include_gateway=True
+                )
         self.assertEqual(
             commands,
             [
@@ -126,9 +151,58 @@ class CoreUpdateTests(unittest.TestCase):
                 ["systemctl", "--user", "start", letsinfer.RECOVERY_TIMER_NAME],
             ],
         )
+        self.assertTrue(state["compatible"])
         install_site.assert_called_once_with()
-        install_watchdog.assert_called_once_with(identity, replace_active=True)
+        install_watchdog.assert_called_once_with(
+            identity, replace_active=True, runtime_manifest=manifest
+        )
         install_gateway.assert_called_once_with(replace_active=True)
+
+    def test_core_plane_handoff_stops_an_incompatible_runtime(self) -> None:
+        commands: list[list[str]] = []
+        identity = mock.Mock(role="coordinator")
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = pathlib.Path(directory) / "service.json"
+            config_path.write_text("{}\n", encoding="utf-8")
+            with (
+                mock.patch.object(letsinfer.platform, "system", return_value="Linux"),
+                mock.patch.object(
+                    letsinfer, "default_service_config_path", return_value=config_path
+                ),
+                mock.patch.object(letsinfer, "read_service_config", return_value={}),
+                mock.patch.object(
+                    letsinfer,
+                    "configured_release",
+                    side_effect=letsinfer.LetsInferError("runtime API is incompatible"),
+                ),
+                mock.patch.object(
+                    letsinfer, "_unit_enabled_active", return_value=("enabled", "active")
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "run_passthrough",
+                    side_effect=lambda value: commands.append(list(value)),
+                ),
+                mock.patch.object(letsinfer, "install_site_service_only"),
+                mock.patch.object(
+                    letsinfer, "install_core_watchdog_service"
+                ) as install_watchdog,
+                mock.patch.object(letsinfer, "install_core_gateway_service"),
+            ):
+                state = letsinfer.install_core_plane_services(
+                    identity, include_gateway=True
+                )
+        self.assertFalse(state["compatible"])
+        self.assertEqual(
+            commands,
+            [
+                ["systemctl", "--user", "stop", letsinfer.RECOVERY_TIMER_NAME],
+                ["systemctl", "--user", "stop", letsinfer.ENGINE_SERVICE_NAME],
+            ],
+        )
+        install_watchdog.assert_called_once_with(
+            identity, replace_active=True, runtime_manifest=None
+        )
 
     def test_parser_exposes_only_the_public_update_command(self) -> None:
         parsed = letsinfer.parser().parse_args(["update", "--version", "1.2.3"])

@@ -156,7 +156,11 @@ user runs `letsinfer upgrade`. Core updates are independent:
 `letsinfer update` installs a signed core release, safely drains and restores
 active inference around the core-service handoff, and does not rebind the
 runtime's immutable control bundle or change runtime selections, models,
-caches, or evidence.
+caches, or evidence. A compatible runtime's exact Watchdog policy is preserved
+when the resident core service is replaced. If the selected runtime is not
+compatible with the new core API, the update succeeds but leaves inference and
+automatic recovery stopped and reports `runtime_state=incompatible-stopped`;
+it never runs an unverifiable old control bundle under a new core.
 
 Let's Infer maps targets by capabilities, not hostnames. `letsinfer hardware` probes
 platform, NVIDIA compute capability, GPU count and partitioning, memory
@@ -645,7 +649,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.11`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.12`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its

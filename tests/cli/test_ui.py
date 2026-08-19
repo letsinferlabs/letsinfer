@@ -266,6 +266,48 @@ class TerminalTests(unittest.TestCase):
         self.assertNotIn("Unavailable", rendered)
         self.assertNotIn("protection needs attention", rendered)
 
+    def test_runtime_status_does_not_call_a_reachable_api_unavailable(self) -> None:
+        stream = FakeStream(tty=True)
+        payload = {
+            "service": {
+                "active": "active",
+                "engine_active": "active",
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+                "gateway_model_identity": True,
+                "runtime_metadata_ready": False,
+                "gateway_endpoint": "http://homeai.local:8000/v1",
+                "site_active": "active",
+                "recovery_timer_active": "active",
+                "memory_current_bytes": 19 * 1024 * 1024,
+                "memory_limit_bytes": 30 * 1024 * 1024,
+                "within_memory_limit": True,
+            },
+            "container": {
+                "state": "running",
+                "healthy": True,
+                "docker_health": "healthy",
+                "model_identity": True,
+                "model": "qwen3.8-27b",
+                "engine": "sglang",
+                "target": "dgx-spark",
+                "runtime_version": "0.1.0-rc.2",
+            },
+            "protection": {"armed": True, "trip_latched": False},
+        }
+        payload["lifecycle"] = letsinfer.runtime_lifecycle(payload)
+        ui.runtime_status(
+            payload,
+            stream=stream,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
+        )
+        rendered = stream.getvalue()
+        self.assertIn("API       Ready", rendered)
+        self.assertIn("RUNTIME   Incompatible", rendered)
+        self.assertNotIn("API       Unavailable", rendered)
+
     def test_site_status_is_branded_without_claiming_a_runtime(self) -> None:
         stream = FakeStream(tty=True)
         ui.site_status(
