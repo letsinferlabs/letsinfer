@@ -32,7 +32,9 @@ curl -fsSL https://letsinfer.ai/install.sh | sh
 
 The signed bootstrap selects Linux or macOS and x86_64 or arm64, installs the
 immutable core under `/opt/letsinfer`, exposes `letsinfer` in
-`/usr/local/bin`, and runs `letsinfer setup`. Use `--user` for `~/.local` or
+`/usr/local/bin`, and runs `letsinfer setup`. An interactive install renders
+one bounded percentage line; native Watchdog configure/build/test output is
+captured and shown only if that step fails. Use `--user` for `~/.local` or
 `--no-setup` when preparing files without creating a site.
 
 The bootstrap verifies a signed checksum and the archive's complete source
@@ -148,8 +150,10 @@ not a remotely trusted catalog. The ordinary user chooses only the model;
 `--engine` remains available to power users.
 Existing runtime installations remain locked to immutable content until the
 user runs `letsinfer upgrade`. Core updates are independent:
-`letsinfer update` installs a signed core release and rebinds services without
-changing runtime selections, models, caches, or evidence.
+`letsinfer update` installs a signed core release, safely drains and restores
+active inference around the core-service handoff, and does not rebind the
+runtime's immutable control bundle or change runtime selections, models,
+caches, or evidence.
 
 Let's Infer maps targets by capabilities, not hostnames. `letsinfer hardware` probes
 platform, NVIDIA compute capability, GPU count and partitioning, memory
@@ -636,7 +640,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.8`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.9`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its
