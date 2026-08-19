@@ -35,9 +35,13 @@ from ..site.topology import (
     validate_member_facts,
 )
 from ..token_count import (
+    SGLANG_ANTHROPIC_TOKEN_COUNT_PROTOCOL,
+    SGLANG_OPENAI_TOKENIZE_PATH,
     TOKEN_COUNT_PROTOCOLS,
     TokenCountError,
+    parse_sglang_tokenize_response,
     parse_token_count_response,
+    prepare_sglang_tokenize_request,
     prepare_token_count_request,
 )
 
@@ -977,12 +981,29 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
         try:
             connection, host = self._connect(backend)
             token = _read_backend_token(backend.credential_file)
-            count_body = prepare_token_count_request(
-                backend.token_count_protocol, backend.model, body
-            )
+            tokenize_fallback = False
+            try:
+                count_body = prepare_token_count_request(
+                    backend.token_count_protocol, backend.model, body
+                )
+                count_path = backend.token_count_path
+            except TokenCountError:
+                if (
+                    backend.token_count_protocol
+                    != SGLANG_ANTHROPIC_TOKEN_COUNT_PROTOCOL
+                ):
+                    raise
+                # SGLang's Anthropic count endpoint cannot represent every
+                # valid OpenAI history shape (notably reasoning_content). Its
+                # OpenAI tokenize endpoint runs the identical request model and
+                # chat-template path used by inference, so use it only when the
+                # compact lossless translation is unavailable.
+                count_body = prepare_sglang_tokenize_request(backend.model, body)
+                count_path = SGLANG_OPENAI_TOKENIZE_PATH
+                tokenize_fallback = True
             connection.request(
                 "POST",
-                backend.token_count_path,
+                count_path,
                 body=count_body,
                 headers={
                     "Authorization": f"Bearer {token}",
@@ -994,6 +1015,17 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                 },
             )
             response = connection.getresponse()
+            if tokenize_fallback:
+                if response.status != 200:
+                    response.read(MAX_USAGE_TAIL_BYTES)
+                    raise AdmissionError(
+                        "runtime exact token counting failed",
+                        status=503,
+                        code="exact_context_unavailable",
+                    )
+                return parse_sglang_tokenize_response(
+                    iter(lambda: response.read(64 * 1024), b"")
+                )
             payload = response.read(MAX_USAGE_TAIL_BYTES + 1)
             if response.status != 200 or len(payload) > MAX_USAGE_TAIL_BYTES:
                 raise AdmissionError(
