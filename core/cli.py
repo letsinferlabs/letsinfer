@@ -7918,6 +7918,93 @@ def stop(arguments: argparse.Namespace) -> int:
     return _stop_managed_container(name, key_path)
 
 
+def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive one explicit runtime lifecycle from observed component state."""
+    service_value = payload.get("service")
+    container_value = payload.get("container")
+    protection_value = payload.get("protection")
+    service = service_value if isinstance(service_value, Mapping) else {}
+    container = container_value if isinstance(container_value, Mapping) else {}
+    protection = (
+        protection_value if isinstance(protection_value, Mapping) else {}
+    )
+    engine_ready = (
+        container.get("state") == "running"
+        and container.get("healthy") is True
+        and container.get("docker_health") == "healthy"
+        and container.get("model_identity") is True
+    )
+    api_ready = (
+        service.get("gateway_active") == "active"
+        and service.get("gateway_health") is True
+        and service.get("gateway_auth_required") is True
+        and service.get("gateway_authenticated") is True
+        and service.get("gateway_model_identity") is True
+    )
+    safety_ready = (
+        protection.get("armed") is True
+        and protection.get("trip_latched") is False
+    )
+    unit_states = (
+        service.get("active") == "active",
+        service.get("engine_active") == "active",
+        service.get("gateway_active") == "active",
+        service.get("site_active") == "active",
+        service.get("recovery_timer_active") == "active",
+    )
+    ready_units = sum(unit_states)
+    details = {
+        "ready": False,
+        "transitional": False,
+        "ready_services": ready_units,
+        "total_services": len(unit_states),
+    }
+    if protection.get("trip_latched") is True:
+        return {**details, "state": "blocked", "reason": "protection-trip"}
+    engine_state = str(service.get("engine_active") or "unknown")
+    container_state = str(container.get("state") or "absent")
+    docker_health = str(container.get("docker_health") or "none")
+    protection_phase = str(protection.get("phase") or "unknown")
+    if (
+        engine_state in {"activating", "reloading"}
+        or container_state == "restarting"
+        or docker_health == "starting"
+        or protection_phase == "starting"
+    ):
+        return {
+            **details,
+            "state": "starting",
+            "reason": "runtime-startup",
+            "transitional": True,
+        }
+    if engine_state == "deactivating" or container_state == "removing":
+        return {
+            **details,
+            "state": "stopping",
+            "reason": "runtime-shutdown",
+            "transitional": True,
+        }
+    if engine_ready and api_ready and safety_ready and ready_units == len(unit_states):
+        return {
+            **details,
+            "state": "ready",
+            "reason": "all-components-ready",
+            "ready": True,
+        }
+    if engine_state == "failed" or docker_health == "unhealthy" or container_state in {
+        "dead",
+        "paused",
+    }:
+        return {**details, "state": "failed", "reason": "runtime-failure"}
+    if engine_state in {"inactive", "not-found"} and container_state in {
+        "absent",
+        "created",
+        "exited",
+    }:
+        return {**details, "state": "stopped", "reason": "runtime-stopped"}
+    return {**details, "state": "degraded", "reason": "component-not-ready"}
+
+
 def status(arguments: argparse.Namespace) -> int:
     model_value = getattr(arguments, "model", None)
     model = model_value if isinstance(model_value, str) else None
@@ -8182,6 +8269,7 @@ def status(arguments: argparse.Namespace) -> int:
         "protection": protection_status(config, inspection) if config else None,
         "config": str(config_path) if config else None,
     }
+    payload["lifecycle"] = runtime_lifecycle(payload)
     if arguments.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     elif ui.Terminal(sys.stdout).interactive:
@@ -8189,6 +8277,10 @@ def status(arguments: argparse.Namespace) -> int:
     else:
         memory = "none" if memory_bytes is None else str(memory_bytes)
         print(f"service={active} enabled={enabled} control_memory_bytes={memory}")
+        print(
+            f"lifecycle={payload['lifecycle']['state']} "
+            f"reason={payload['lifecycle']['reason']}"
+        )
         print(
             f"container={container_state} healthy={str(healthy).lower()} "
             f"docker_health={docker_health} tls={str(engine_tls).lower()} "
@@ -8209,20 +8301,12 @@ def status(arguments: argparse.Namespace) -> int:
                 f"trip_latched={str(protection['trip_latched']).lower()}"
             )
             print(f"endpoint={local_inference_endpoint(config['gateway_port'])}")
-    return (
-        0
-        if active == "active"
-        and healthy
-        and engine_api_key_required
-        and engine_identity
-        and gateway_active == "active"
-        and gateway_health
-        and gateway_auth_required
-        and gateway_authenticated
-        and gateway_identity
-        and (payload["protection"] is None or payload["protection"]["armed"])
-        else 1
-    )
+    return 0 if payload["lifecycle"]["state"] in {
+        "ready",
+        "starting",
+        "stopping",
+        "stopped",
+    } else 1
 
 
 def _managed_inspection(name: str) -> dict[str, Any]:
