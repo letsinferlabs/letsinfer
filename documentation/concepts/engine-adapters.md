@@ -53,7 +53,7 @@ release, container labels, upgrade, inspection, and doctor checks.
 
 The core validates the engine name against the adapter registry and requires
 the adapter's exact model format and cache provider. It also pins separate
-runtime and model-acquisition images, source files, model repository revision,
+runtime and model-acquisition images, source files, named model artifacts,
 the serving recipe and capacity, gates, and result hashes. Separating the
 acquisition image prevents
 an engine image without Python or `huggingface_hub` from breaking automatic
@@ -65,6 +65,14 @@ policy, systemd integration, and evidence capture. Runtime and acquisition
 images are requested at the exact target platform. Native vLLM wheel names
 must match that architecture, and containers carry target-platform,
 memory-model, and GPU-count labels so a mismatched container is never adopted.
+
+`model.artifact` selects the primary served-model dependency. The closed
+top-level `artifacts` array supports any number of runtime-named exact Hugging
+Face snapshots or hash-pinned GGUF files. Core derives their shared-store
+paths, acquires and verifies them, mounts the hub read-only, and expands only
+whole-token `${artifact:name}` references in `engine.arguments`. It does not
+interpret names or add engine flags for drafts, adapters, encoders, or other
+roles. Those semantics remain entirely in the runtime recipe.
 
 `min_available_gib` and `runtime_min_available_gib` are floors on a unified
 host/device memory pool. Separate GPU-memory floors are rejected for unified
@@ -134,6 +142,9 @@ private mounted storage root. The cache object configures the declared HiCache
 provider. All native context, tensor-parallel, attention, memory, scheduler,
 trust, and prefill flags pass unchanged from the runtime-owned argument array
 and are qualified as part of that exact recipe.
+Speculative decoding is no exception: a runtime declares its draft dependency
+as a named artifact and owns both `--speculative-draft-model-path` and its
+`${artifact:name}` value. The adapter has no draft-model field or behavior.
 For exact context admission and generated benchmarks, the adapter translates
 the supported OpenAI chat request into SGLang's authenticated, non-generating
 `/v1/messages/count_tokens` operation and accepts only its exact
@@ -148,7 +159,7 @@ shape that cannot be represented exactly is rejected before inference.
 - Persistent cache: not yet supported by this adapter
 - Runtime extension: none
 
-The model block must name one off-the-shelf `.gguf` file, an exact 40-hex
+The primary named artifact must identify one off-the-shelf `.gguf` file, an exact 40-hex
 repository revision, and the file's SHA-256. Let's Infer does not convert or
 requantize a checkpoint. The adapter passes the API-key file directly to
 `llama-server`, enables TLS, and controls model and served identity. Context,
@@ -162,7 +173,7 @@ engine's cache.
 
 ## DwarfStar
 
-- Model format: `dwarfstar-gguf-pair`
+- Model format: `gguf-file`
 - Cache provider: `dwarfstar-letsinfer-prefix-v1`
 - Persistent cache: supported through native bank-payload records and the
   engine-neutral Let's Infer store
@@ -170,12 +181,14 @@ engine's cache.
 - Token counting: exact GGUF-backed rendered-chat count through the
   authenticated gateway
 
-The model block separates the OpenAI served-model ID from two exact Hugging
-Face artifacts: a base GGUF and a DSpark drafter GGUF. Each artifact pins its
-own repository, 40-hex revision, cache path, filename, byte length, and
-SHA-256. Acquisition downloads both through the release's pinned helper image;
-verification checks both before launch. Neither artifact may silently replace
-the other or fall back to another quantization.
+The runtime selects its base GGUF as `model.artifact` and declares its DSpark
+GGUF as another named `gguf-file`. Its runtime-owned arguments bind
+`--dspark` to `${artifact:drafter}`. Core has no DwarfStar pair or drafter
+schema: both files use the same arbitrary artifact contract as any other
+engine dependency. Each artifact pins its own repository, 40-hex revision,
+filename, optional byte length, and SHA-256. Acquisition downloads both
+through the release's pinned helper image and verification checks both before
+launch.
 
 DwarfStar itself listens only on a dynamically selected loopback port. The
 gateway owns the public manifest port, TLS certificate, API-key check,

@@ -6,7 +6,7 @@ A runtime pack is the installable implementation of one model on one engine
 and one hardware target. Its exact identity is `model/engine/target`, for
 example `example-model/vllm/dgx-spark`. Each target variant owns its
 exact engine revision and image, patches, kernels or plugins, Let's Infer release
-configuration, model revision, compatibility limits, and qualification
+configuration, named model artifacts, compatibility limits, and qualification
 evidence. A target repository has full freedom to specialize all of those
 pieces; evidence never transfers to another target.
 

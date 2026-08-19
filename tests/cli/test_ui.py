@@ -393,7 +393,9 @@ class MainOutputTests(unittest.TestCase):
             for name, action in ACTIONS.items()
             if action.mutation in {MutationClass.NODE, MutationClass.SITE}
         }
-        self.assertEqual(mutations, set(letsinfer.ACTION_PROGRESS) - {"verify"})
+        self.assertEqual(
+            mutations - {"benchmark"}, set(letsinfer.ACTION_PROGRESS) - {"verify"}
+        )
         self.assertNotIn("key.list", letsinfer.ACTION_PROGRESS)
         self.assertNotIn("key.show", letsinfer.ACTION_PROGRESS)
 

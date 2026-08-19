@@ -30,8 +30,16 @@ class OpenAIMatrixTests(unittest.TestCase):
             "model": {
                 "id": "example/model",
                 "alias": "example",
-                "revision": "a" * 40,
+                "artifact": "model",
             },
+            "artifacts": [
+                {
+                    "name": "model",
+                    "format": "huggingface-snapshot",
+                    "repository": "example/model",
+                    "revision": "a" * 40,
+                }
+            ],
             "image": {"immutable_id": "sha256:" + "b" * 64},
             "serving": {
                 "qualified": False,
@@ -99,6 +107,11 @@ class OpenAIMatrixTests(unittest.TestCase):
             self.assertEqual((release, observed_engine, model), (
                 "example-r1", engine, "example/model"
             ))
+
+    def test_served_model_name_uses_public_alias(self) -> None:
+        manifest = self.release("sglang")
+        manifest["model"]["alias"] = "public-model"
+        self.assertEqual(MATRIX.served_model_name(manifest), "public-model")
 
     def test_fixture_contract_hashes_and_allocates_disjoint_cells(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

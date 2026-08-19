@@ -75,7 +75,6 @@ class RuntimeMatrixTests(unittest.TestCase):
             measured_commit = "a" * 40
             manifest = {
                 "serving": {"gate": {"measured_commit": measured_commit}},
-                "source_artifacts": [],
             }
             root, release, core_identity = self._control_bundle(parent, manifest)
 
@@ -84,6 +83,10 @@ class RuntimeMatrixTests(unittest.TestCase):
             )
             self.assertEqual(identity["kind"], "verified-control-bundle")
             self.assertEqual(identity["core_source_sha256"], core_identity)
+            self.assertEqual(
+                identity["source_artifacts_sha256"],
+                runtime_matrix.common.sha256_text("[]"),
+            )
 
             (root / "core" / "source.txt").write_text(
                 "tampered\n", encoding="utf-8"
@@ -164,7 +167,13 @@ class RuntimeMatrixTests(unittest.TestCase):
 
     def test_generated_partial_plan_validates_only_materialized_cells(self) -> None:
         manifest = {
-            "model": {"id": "fixture-model", "revision": "a" * 40}
+            "model": {"id": "fixture-model", "artifact": "model"},
+            "artifacts": [
+                {
+                    "name": "model",
+                    "revision": "a" * 40,
+                }
+            ],
         }
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -383,7 +392,7 @@ class RuntimeMatrixTests(unittest.TestCase):
         manifest = {
             "serving": {
                 "max_connections": 16,
-                "max_active_requests": 16,
+                "max_active_requests": 10,
                 "max_context_tokens": 557_056,
             }
         }
@@ -395,6 +404,7 @@ class RuntimeMatrixTests(unittest.TestCase):
         capacity = runtime_matrix.validate_capacity(manifest, selected)
         self.assertEqual(len(selected), 20)
         self.assertEqual(capacity["selected_max_concurrency"], 16)
+        self.assertEqual(capacity["runtime_max_active_requests"], 10)
 
     def test_runtime_manifest_path_is_a_valid_runtime_argument(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -426,6 +436,19 @@ class RuntimeMatrixTests(unittest.TestCase):
         self.assertEqual(
             cells["32k-c1"]["fixtures"][0]["expected_prompt_tokens"], 32768
         )
+
+    def test_expected_duration_scales_with_selected_prompt_volume(self) -> None:
+        short = [{"fixtures": [{"expected_prompt_tokens": 32_768}]}]
+        long = [{"fixtures": [{"expected_prompt_tokens": 262_144}]}]
+        short_range = runtime_matrix.expected_duration_range(
+            short, includes_materializer=True
+        )
+        long_range = runtime_matrix.expected_duration_range(
+            long, includes_materializer=True
+        )
+        self.assertLess(short_range[0], long_range[0])
+        self.assertLess(short_range[1], long_range[1])
+        self.assertLessEqual(short_range[0], short_range[1])
 
     def test_installed_runtime_name_resolves_to_exact_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -462,6 +485,27 @@ class RuntimeMatrixTests(unittest.TestCase):
         runtime_matrix.validate_cold_result(
             cell, {"requests": [{"cached_prompt_tokens": 0}]}
         )
+        runtime_matrix.validate_cold_result(
+            cell, {"requests": [{"cached_prompt_tokens": None}]}
+        )
+        summary = runtime_matrix.summarize(
+            cell,
+            {
+                "requests": [
+                    {
+                        "prompt_tokens": 65_536,
+                        "completion_tokens": 128,
+                        "decode_tokens_per_second": 24.0,
+                        "ttft_ms": 100.0,
+                        "wall_ms": 1000.0,
+                        "cached_prompt_tokens": None,
+                    }
+                ],
+                "batch_wall_ms": 1000.0,
+                "job_completion_tokens_per_second": 24.0,
+            },
+        )
+        self.assertEqual(summary["cached_prompt_tokens"]["max"], 0.0)
         with self.assertRaisesRegex(runtime_matrix.RuntimeMatrixError, "not cold"):
             runtime_matrix.validate_cold_result(
                 cell, {"requests": [{"cached_prompt_tokens": 65_536}]}

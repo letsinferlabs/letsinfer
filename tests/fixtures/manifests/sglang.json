@@ -53,10 +53,17 @@
   "model": {
     "alias": "fixture-model",
     "id": "example/fixture-model",
-    "revision": "1111111111111111111111111111111111111111",
-    "cache_repository": "models--example--fixture-model",
+    "artifact": "model",
     "acquisition_image": "registry.example/acquirer@sha256:7777777777777777777777777777777777777777777777777777777777777777"
   },
+  "artifacts": [
+    {
+      "name": "model",
+      "format": "huggingface-snapshot",
+      "repository": "example/fixture-model",
+      "revision": "1111111111111111111111111111111111111111"
+    }
+  ],
   "image": {
     "distribution": "local-image-id",
     "reference": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
@@ -101,7 +108,8 @@
     "persistent": true,
     "replay_output_policy": "all-phases-exact",
     "prewarm": true,
-    "host_cache_gib": 4
+    "host_cache_gib": 4,
+    "durable_capacity_bytes": 68719476736
   },
   "serving": {
     "qualified": false,
