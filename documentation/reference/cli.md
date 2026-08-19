@@ -149,8 +149,12 @@ repeated; short options use the same form, such as `--without=-fa`.
 stores and launches the command as argv rather than evaluating that text.
 
 `update` installs the latest signed stable core release, or the exact release
-named by `--version`, and rebinds existing services to it. It never resolves,
-downloads, upgrades, rolls back, or changes a runtime. Installed runtime
+named by `--version`, and rebinds the core-owned services to it. When inference
+is active, the handoff stops recovery, drains the engine while the existing
+Watchdog is still armed, replaces the site/Watchdog/gateway services, and then
+restores the engine and recovery timer. The runtime's own immutable control
+bundle is not rebound. `update` never resolves, downloads, upgrades, rolls
+back, or changes a runtime. Installed runtime
 receipts, model snapshots, caches, evidence, API keys, and service placement
 remain unchanged. An active benchmark must be stopped before updating core.
 

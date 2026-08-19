@@ -9,6 +9,30 @@ prefix=""
 launcher_dir="/usr/local/bin"
 user_install=0
 run_setup=1
+progress_active=0
+
+clear_progress() {
+    if [ "$progress_active" -eq 1 ]; then
+        printf '\r\033[2K' >&2
+    fi
+}
+
+progress() {
+    percent=$1
+    message=$2
+    if [ "$progress_active" -eq 1 ]; then
+        printf '\r\033[2K\033[1;33mϟ\033[0m  Installing Let\047s Infer  %3s%%  %s' \
+            "$percent" "$message" >&2
+    fi
+}
+
+finish_progress() {
+    if [ "$progress_active" -eq 1 ]; then
+        progress 100 "Complete"
+        printf '\n' >&2
+        progress_active=0
+    fi
+}
 
 usage() {
     cat <<'EOF'
@@ -21,6 +45,7 @@ EOF
 }
 
 fail() {
+    clear_progress
     printf 'letsinfer install: %s\n' "$*" >&2
     exit 1
 }
@@ -68,6 +93,14 @@ done
 allow_insecure=$(printenv LETSINFER_ALLOW_INSECURE_RELEASE_URL 2>/dev/null || true)
 signers_override=$(printenv LETSINFER_RELEASE_ALLOWED_SIGNERS_PATH 2>/dev/null || true)
 current_path=$(printenv PATH 2>/dev/null || true)
+case "${TERM:-}" in
+    ""|dumb) ;;
+    *)
+        if [ -t 2 ]; then
+            progress_active=1
+        fi
+        ;;
+esac
 
 case "$(uname -s)" in
     Linux) platform_os="linux" ;;
@@ -87,6 +120,7 @@ for command_name in curl python3 ssh-keygen tar mktemp; do
 done
 if [ "$user_install" -eq 0 ]; then
     command -v sudo >/dev/null 2>&1 || fail "sudo is required for the default system installation"
+    sudo -v
     prefix="/opt/letsinfer"
 fi
 
@@ -103,9 +137,12 @@ fi
 umask 077
 temporary=$(mktemp -d "/tmp/letsinfer-install.XXXXXXXX")
 cleanup() {
+    clear_progress
     rm -rf -- "$temporary"
 }
 trap cleanup EXIT HUP INT TERM
+
+progress 5 "Resolving release"
 
 checksums="$temporary/SHA256SUMS"
 signature="$temporary/SHA256SUMS.sig"
@@ -166,6 +203,7 @@ fi
 
 download "$release_base/SHA256SUMS.sig" "$signature"
 download "$release_base/$archive_name" "$archive"
+progress 35 "Verifying signed release"
 
 if [ -n "$signers_override" ]; then
     [ -f "$signers_override" ] \
@@ -213,6 +251,8 @@ if digest.hexdigest() != expected:
     raise SystemExit(1)
 PY
 
+progress 55 "Verifying source archive"
+
 unpacked="$temporary/unpacked"
 mkdir "$unpacked"
 tar -xzf "$archive" -C "$unpacked"
@@ -225,6 +265,8 @@ if [ -z "$version" ]; then
         python3 -c 'from core import PRODUCT_VERSION; print(PRODUCT_VERSION)'
     ) || fail "release version is unreadable"
 fi
+
+progress 70 "Installing core"
 
 if [ "$run_setup" -eq 1 ]; then
     if [ "$platform_os" = "linux" ]; then
@@ -281,7 +323,19 @@ fi
 umask 077
 
 if [ "$run_setup" -eq 1 ]; then
-    "$command_path" setup
+    setup_log="$temporary/setup.log"
+    progress 80 "Initializing services"
+    if ! "$command_path" setup >"$setup_log" 2>&1; then
+        clear_progress
+        sed -n '1,$p' "$setup_log" >&2
+        fail "site initialization failed"
+    fi
+fi
+
+finish_progress
+
+if [ "$run_setup" -eq 1 ] && [ -s "$setup_log" ]; then
+    sed -n '1,240p' "$setup_log" >&2
 fi
 
 if [ "$run_setup" -eq 1 ]; then
