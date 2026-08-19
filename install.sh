@@ -250,11 +250,21 @@ if [ "$run_setup" -eq 1 ]; then
     fi
 fi
 
+umask 022
 if [ "$user_install" -eq 1 ]; then
     "$unpacked/letsinfer/bin/letsinfer-install" --prefix "$prefix" >/dev/null
     command_path="$prefix/bin/letsinfer"
 else
     sudo "$unpacked/letsinfer/bin/letsinfer-install" --prefix "$prefix" >/dev/null
+    for managed_directory in \
+        "$prefix" \
+        "$prefix/bin" \
+        "$prefix/lib" \
+        "$prefix/lib/letsinfer" \
+        "$prefix/lib/letsinfer/$version"
+    do
+        sudo chmod 0755 "$managed_directory"
+    done
     sudo install -d -m 0755 "$launcher_dir"
     for launcher_name in letsinfer letsinfer-recovery; do
         launcher="$launcher_dir/$launcher_name"
@@ -268,6 +278,7 @@ else
     done
     command_path="$launcher_dir/letsinfer"
 fi
+umask 077
 
 if [ "$run_setup" -eq 1 ]; then
     "$command_path" setup
