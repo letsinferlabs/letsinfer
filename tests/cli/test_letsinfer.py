@@ -163,14 +163,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.13")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.14")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.13"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.14"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -3413,6 +3413,50 @@ class ControllerTests(unittest.TestCase):
 
 
 class RuntimeCommandTests(unittest.TestCase):
+    def test_benchmark_status_attaches_to_the_active_job(self) -> None:
+        arguments = letsinfer.parser().parse_args(["benchmark"])
+        state = {"job_id": "active-benchmark", "state": "running"}
+        with (
+            mock.patch.object(
+                letsinfer.benchmark_jobs, "active_state", return_value=state
+            ),
+            mock.patch.object(letsinfer, "_follow_benchmark_job") as follow,
+        ):
+            self.assertEqual(letsinfer.benchmark_runtime(arguments), 0)
+        follow.assert_called_once_with("active-benchmark")
+
+    def test_benchmark_dashboard_shows_current_completed_and_future_cells(self) -> None:
+        terminal = letsinfer.ui.Terminal(
+            io.StringIO(), environ={"TERM": "dumb", "COLUMNS": "80"}
+        )
+        rendered = letsinfer._benchmark_dashboard(
+            {
+                "state": "running",
+                "runtime": "fixture-model",
+                "output_directory": "/evidence/fixture",
+            },
+            {
+                "message": "Loading runtime for 64k-c1",
+                "phase": "workload:64k-c1:loading",
+                "expected_minutes": [18, 37],
+                "selected_cells": ["32k-c1", "64k-c1", "128k-c1"],
+                "completed_cells": ["32k-c1"],
+                "current_cell": "64k-c1",
+            },
+            243,
+            terminal,
+            "*",
+        )
+        self.assertIn("WORKLOADS", rendered)
+        self.assertIn("1/3", rendered)
+        self.assertIn("32k-c1", rendered)
+        self.assertIn("complete", rendered)
+        self.assertIn("64k-c1", rendered)
+        self.assertIn("running", rendered)
+        self.assertIn("128k-c1", rendered)
+        self.assertIn("waiting", rendered)
+        self.assertIn("ELAPSED   4m 03s", rendered)
+
     def test_benchmark_cli_delegates_without_engine_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

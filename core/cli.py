@@ -9738,6 +9738,106 @@ def _duration(seconds: float) -> str:
     return f"{seconds}s"
 
 
+def _benchmark_dashboard(
+    state: dict[str, Any],
+    progress: dict[str, Any] | None,
+    elapsed: float,
+    terminal: ui.Terminal,
+    frame: str,
+) -> str:
+    """Render one bounded live benchmark frame."""
+    progress = progress if isinstance(progress, dict) else {}
+    status = str(state.get("state") or "unknown").upper()
+    active = state.get("state") in benchmark_jobs.ACTIVE_STATES
+    color = ui.CYAN if active else (ui.GREEN if status == "COMPLETED" else ui.RED)
+    mark = "●" if terminal.unicode else "*"
+    brand = terminal.paint("LET'S INFER", ui.BOLD)
+    lines = [
+        f"{terminal.paint(terminal.mark, ui.BOLD, ui.YELLOW)}  "
+        f"{brand}  /  BENCHMARK",
+        "",
+        f"{terminal.paint(mark, ui.BOLD, color)} "
+        f"{terminal.paint(status, ui.BOLD, color)}  "
+        f"{terminal.paint(str(state.get('runtime') or 'unknown runtime'), ui.BOLD)}",
+    ]
+    message = progress.get("message")
+    if not isinstance(message, str) or not message:
+        message = "Waiting for benchmark worker"
+    phase = progress.get("phase")
+    if not isinstance(phase, str) or not phase:
+        phase = "starting"
+    lines.extend(
+        [
+            f"  {terminal.paint(frame, ui.CYAN)} "
+            f"{terminal.paint(terminal.clip(message, terminal.width - 5), ui.BOLD)}",
+            f"  {terminal.paint(f'phase {phase}', ui.DIM)}",
+        ]
+    )
+
+    selected = progress.get("selected_cells")
+    completed = progress.get("completed_cells")
+    current = progress.get("current_cell")
+    selected = (
+        [value for value in selected if isinstance(value, str) and value]
+        if isinstance(selected, list)
+        else []
+    )
+    completed_set = (
+        {value for value in completed if isinstance(value, str)}
+        if isinstance(completed, list)
+        else set()
+    )
+    current = current if isinstance(current, str) else None
+    if selected:
+        done = len([cell for cell in selected if cell in completed_set])
+        width = min(24, max(10, terminal.width - 28))
+        filled = int(width * done / len(selected))
+        bar = "█" * filled + "░" * (width - filled) if terminal.unicode else "=" * filled + "-" * (width - filled)
+        lines.extend(
+            [
+                "",
+                f"  WORKLOADS  [{bar}] {done}/{len(selected)}",
+            ]
+        )
+        for cell in selected:
+            if cell in completed_set:
+                cell_mark, cell_color, detail = (
+                    ("✓" if terminal.unicode else "+"),
+                    ui.GREEN,
+                    "complete",
+                )
+            elif cell == current:
+                cell_mark, cell_color, detail = frame, ui.CYAN, "running"
+            else:
+                cell_mark, cell_color, detail = (
+                    ("○" if terminal.unicode else "-"),
+                    ui.DIM,
+                    "waiting",
+                )
+            lines.append(
+                f"  {terminal.paint(cell_mark, cell_color)} "
+                f"{terminal.paint(cell.ljust(10), ui.BOLD if cell == current else ui.DIM)} "
+                f"{terminal.paint(detail, cell_color)}"
+            )
+
+    lines.extend(["", f"  ELAPSED   {_duration(elapsed)}"])
+    expected = progress.get("expected_minutes")
+    if (
+        isinstance(expected, list)
+        and len(expected) == 2
+        and all(isinstance(value, int) and not isinstance(value, bool) for value in expected)
+    ):
+        lines.append(f"  EXPECTED  {expected[0]}–{expected[1]} min")
+    lines.extend(
+        [
+            f"  EVIDENCE  {terminal.clip(str(state.get('output_directory') or 'pending'), terminal.width - 12)}",
+            "",
+            "  Ctrl-C detaches; `letsinfer benchmark stop` cancels.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _benchmark_job_snapshot(*, machine: bool = False) -> int:
     try:
         state = benchmark_jobs.read_state()
@@ -9827,6 +9927,10 @@ def _follow_benchmark_job(job_id: str) -> None:
         return
     frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
     frame_index = 0
+    detached = False
+    terminal_state = False
+    terminal.stream.write("\033[?1049h\033[?25l")
+    terminal.stream.flush()
     try:
         while True:
             state = benchmark_jobs.read_state()
@@ -9834,45 +9938,30 @@ def _follow_benchmark_job(job_id: str) -> None:
             if state is None or state.get("job_id") != job_id:
                 raise LetsInferError("benchmark job identity changed while attached")
             if state.get("state") in benchmark_jobs.TERMINAL_STATES:
-                terminal.stream.write(ui.CLEAR_LINE)
-                terminal.stream.flush()
-                _benchmark_job_snapshot()
-                return
+                terminal_state = True
+                break
             elapsed = (
                 time.time_ns() - state.get("started_unix_ns", time.time_ns())
             ) / 1_000_000_000
-            message = (
-                progress.get("message")
-                if isinstance(progress, dict) and isinstance(progress.get("message"), str)
-                else "Starting benchmark worker"
-            )
-            expected = progress.get("expected_minutes") if isinstance(progress, dict) else None
-            expectation = ""
-            if (
-                isinstance(expected, list)
-                and len(expected) == 2
-                and all(
-                    isinstance(value, int) and not isinstance(value, bool)
-                    for value in expected
-                )
-            ):
-                expectation = f" · expected {expected[0]}–{expected[1]} min"
             frame = frames[frame_index % len(frames)] if terminal.unicode else "*"
-            available = max(10, terminal.width - len(_duration(elapsed)) - len(expectation) - 7)
-            message = terminal.clip(message, available)
             terminal.stream.write(
-                f"{ui.CLEAR_LINE}{terminal.paint(frame, ui.CYAN)} "
-                f"{message} · elapsed {_duration(elapsed)}{expectation}"
+                "\033[H\033[2J"
+                + _benchmark_dashboard(state, progress, elapsed, terminal, frame)
             )
             terminal.stream.flush()
             frame_index += 1
-            time.sleep(0.2)
+            time.sleep(0.5)
     except KeyboardInterrupt:
-        terminal.stream.write(ui.CLEAR_LINE)
+        detached = True
+    finally:
+        terminal.stream.write("\033[?25h\033[?1049l")
         terminal.stream.flush()
+    if detached:
         terminal.warning(
             "Detached; benchmark continues. Run `letsinfer benchmark` to check it."
         )
+    elif terminal_state:
+        _benchmark_job_snapshot()
 
 
 def _benchmark_stop() -> int:
@@ -9945,7 +10034,16 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
             raise LetsInferError(
                 "benchmark workload options require a runtime name"
             )
-        return _benchmark_job_snapshot(machine=arguments.json)
+        if arguments.json:
+            return _benchmark_job_snapshot(machine=True)
+        try:
+            active = benchmark_jobs.active_state()
+        except benchmark_jobs.BenchmarkJobError as error:
+            raise LetsInferError(str(error)) from error
+        if active is not None:
+            _follow_benchmark_job(active["job_id"])
+            return 0
+        return _benchmark_job_snapshot()
     if arguments.runtime == "stop":
         if selectors or arguments.list or arguments.detach or arguments.json:
             raise LetsInferError("benchmark stop does not accept workload options")

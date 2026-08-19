@@ -31,6 +31,50 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
+    def test_progress_records_completed_current_and_future_workloads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "progress.json"
+            prior = (
+                runtime_matrix._PROGRESS_FILE,
+                runtime_matrix._PROGRESS_STARTED_UNIX_NS,
+                runtime_matrix._EXPECTED_MINUTES,
+                runtime_matrix._SELECTED_CELLS,
+                list(runtime_matrix._COMPLETED_CELLS),
+                runtime_matrix._CURRENT_CELL,
+            )
+            try:
+                runtime_matrix._PROGRESS_FILE = path
+                runtime_matrix._PROGRESS_STARTED_UNIX_NS = 1
+                runtime_matrix._EXPECTED_MINUTES = (18, 37)
+                runtime_matrix._SELECTED_CELLS = (
+                    "32k-c1",
+                    "64k-c1",
+                    "128k-c1",
+                )
+                runtime_matrix._COMPLETED_CELLS = ["32k-c1"]
+                runtime_matrix._CURRENT_CELL = "64k-c1"
+                runtime_matrix._write_benchmark_progress(
+                    "workload:64k-c1:loading",
+                    "Loading runtime for 64k-c1",
+                    "running",
+                )
+                value = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(value["completed_cells"], ["32k-c1"])
+                self.assertEqual(value["current_cell"], "64k-c1")
+                self.assertEqual(
+                    value["selected_cells"],
+                    ["32k-c1", "64k-c1", "128k-c1"],
+                )
+            finally:
+                (
+                    runtime_matrix._PROGRESS_FILE,
+                    runtime_matrix._PROGRESS_STARTED_UNIX_NS,
+                    runtime_matrix._EXPECTED_MINUTES,
+                    runtime_matrix._SELECTED_CELLS,
+                    runtime_matrix._COMPLETED_CELLS,
+                    runtime_matrix._CURRENT_CELL,
+                ) = prior
+
     def _control_bundle(
         self, parent: pathlib.Path, manifest: dict
     ) -> tuple[pathlib.Path, pathlib.Path, str]:

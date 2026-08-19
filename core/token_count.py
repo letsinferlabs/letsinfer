@@ -11,11 +11,14 @@ and rejects everything else.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from typing import Any
 
 
 LETSINFER_TOKEN_COUNT_PROTOCOL = "letsinfer-token-count-v1"
 SGLANG_ANTHROPIC_TOKEN_COUNT_PROTOCOL = "sglang-anthropic-count-tokens-v1"
+SGLANG_OPENAI_TOKENIZE_PATH = "/v1/tokenize"
+SGLANG_TOKENIZE_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
 TOKEN_COUNT_PROTOCOLS = frozenset(
     {
         LETSINFER_TOKEN_COUNT_PROTOCOL,
@@ -26,6 +29,143 @@ TOKEN_COUNT_PROTOCOLS = frozenset(
 
 class TokenCountError(ValueError):
     """A token-count request or response cannot be normalized exactly."""
+
+
+def prepare_sglang_tokenize_request(model: str, body: bytes) -> bytes:
+    """Build SGLang's exact OpenAI-chat tokenize request without lossy translation."""
+    try:
+        request = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise TokenCountError("request body is not valid JSON") from error
+    request = _object(request, "request")
+    if request.get("model") != model:
+        raise TokenCountError("request model does not match the selected runtime")
+    messages = request.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise TokenCountError("request.messages must be a non-empty list")
+
+    # These names belong to SGLang's TokenizeRequest itself. An OpenAI chat
+    # request may contain them as ignored extension fields, but allowing them
+    # to change tokenize behavior would no longer reproduce inference exactly.
+    request.pop("prompt", None)
+    request.pop("add_special_tokens", None)
+    return json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+
+
+def parse_sglang_tokenize_response(chunks: Iterable[bytes]) -> int:
+    """Validate SGLang's token-id response in bounded memory and return its count."""
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.chunks = iter(chunks)
+            self.chunk = b""
+            self.offset = 0
+            self.total = 0
+            self.pushed: int | None = None
+
+        def take(self) -> int | None:
+            if self.pushed is not None:
+                value = self.pushed
+                self.pushed = None
+                return value
+            while self.offset >= len(self.chunk):
+                try:
+                    chunk = next(self.chunks)
+                except StopIteration:
+                    return None
+                if not isinstance(chunk, bytes):
+                    raise TokenCountError("SGLang tokenize response chunks must be bytes")
+                self.total += len(chunk)
+                if self.total > SGLANG_TOKENIZE_RESPONSE_MAX_BYTES:
+                    raise TokenCountError("SGLang tokenize response exceeds its size limit")
+                self.chunk = chunk
+                self.offset = 0
+                if not chunk:
+                    continue
+            value = self.chunk[self.offset]
+            self.offset += 1
+            return value
+
+        def push(self, value: int) -> None:
+            if self.pushed is not None:
+                raise TokenCountError("invalid SGLang tokenize response parser state")
+            self.pushed = value
+
+    cursor = Cursor()
+    whitespace = {9, 10, 13, 32}
+
+    def nonspace() -> int | None:
+        value = cursor.take()
+        while value in whitespace:
+            value = cursor.take()
+        return value
+
+    def expect(value: int) -> None:
+        if nonspace() != value:
+            raise TokenCountError("invalid SGLang tokenize response")
+
+    def key(name: bytes) -> None:
+        expect(ord('"'))
+        for value in name:
+            if cursor.take() != value:
+                raise TokenCountError("invalid SGLang tokenize response")
+        if cursor.take() != ord('"'):
+            raise TokenCountError("invalid SGLang tokenize response")
+
+    def integer(first: int | None = None) -> int:
+        value = nonspace() if first is None else first
+        if value is None or not ord("0") <= value <= ord("9"):
+            raise TokenCountError("invalid SGLang tokenize response integer")
+        leading_zero = value == ord("0")
+        result = value - ord("0")
+        digits = 1
+        while True:
+            value = cursor.take()
+            if value is not None and ord("0") <= value <= ord("9"):
+                if leading_zero:
+                    raise TokenCountError("invalid SGLang tokenize response integer")
+                result = result * 10 + value - ord("0")
+                digits += 1
+                continue
+            if value is not None:
+                cursor.push(value)
+            if digits == 0:
+                raise TokenCountError("invalid SGLang tokenize response integer")
+            return result
+
+    expect(ord("{"))
+    key(b"tokens")
+    expect(ord(":"))
+    expect(ord("["))
+    token_count = 0
+    value = nonspace()
+    if value != ord("]"):
+        while True:
+            integer(value)
+            token_count += 1
+            delimiter = nonspace()
+            if delimiter == ord("]"):
+                break
+            if delimiter != ord(","):
+                raise TokenCountError("invalid SGLang tokenize token array")
+            value = nonspace()
+
+    expect(ord(","))
+    key(b"count")
+    expect(ord(":"))
+    declared_count = integer()
+    expect(ord(","))
+    key(b"max_model_len")
+    expect(ord(":"))
+    max_model_len = integer()
+    expect(ord("}"))
+    if nonspace() is not None:
+        raise TokenCountError("SGLang tokenize response has trailing data")
+    if token_count <= 0 or declared_count != token_count or max_model_len <= 0:
+        raise TokenCountError("invalid SGLang tokenize response counts")
+    return token_count
 
 
 def _object(value: Any, where: str) -> dict[str, Any]:
