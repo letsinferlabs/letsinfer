@@ -58,3 +58,10 @@ xcodebuild -project LetsInfer.xcodeproj -scheme LetsInfer \
 
 The production app uses bundle identifier `ai.letsinfer.macos`, targets macOS
 14 or newer, enables the hardened runtime, and has no Dock icon.
+
+## Release identity
+
+The app owns `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`; neither is
+derived from core's `PRODUCT_VERSION`. App releases use
+`macos-vVERSION-build.BUILD` tags and a separate signed/notarized pipeline.
+See [the release contract](../../documentation/operations/macos-release.md).

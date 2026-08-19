@@ -2,10 +2,11 @@
 
 [Back to documentation](../README.md)
 
-Let's Infer source releases are built from an explicit public allowlist. Local
-agent policy, handoff state, context, scratchpads, credentials, evidence,
-caches, nested Git metadata, and generated output are never publication
-inputs.
+Let's Infer core source releases are built from an explicit public allowlist.
+The independently released macOS application is not a core archive or install
+input. Local agent policy, handoff state, context, scratchpads, credentials,
+evidence, caches, nested Git metadata, and generated output are never
+publication inputs.
 
 Build twice and require byte equality:
 
@@ -41,9 +42,9 @@ evidence gates.
 ## Automated core releases
 
 Core releases use the protected `release` branch as their publication
-boundary. A pull request targeting `release` runs the complete Linux tests,
-builds and tests Watchdog, verifies two byte-identical public archives, and
-tests the macOS application. A merge to `release` repeats those gates and then:
+boundary. A pull request targeting `release` runs the complete core tests,
+builds and tests Watchdog, and verifies two byte-identical public archives. A
+merge to `release` repeats those gates and then:
 
 1. reads `PRODUCT_VERSION` and refuses an existing `vVERSION` tag;
 2. builds the public archive twice and requires byte equality;
@@ -81,6 +82,10 @@ An RC or historical release uses its explicit version:
 
 ```bash
 curl -fsSL \
-  https://github.com/letsinferlabs/letsinfer/releases/download/v0.11.0-rc.3/install.sh \
-  | sh -s -- --version 0.11.0-rc.3
+  https://github.com/letsinferlabs/letsinfer/releases/download/v0.11.0-rc.4/install.sh \
+  | sh -s -- --version 0.11.0-rc.4
 ```
+
+The macOS application has separate version/build metadata, a protected
+`macos-release` branch, namespaced tags, signing, notarization, and release
+assets. See [macOS release](macos-release.md).

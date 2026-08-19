@@ -20,6 +20,8 @@ when you need more detail:
   policies and failure recovery.
 - [Source release](operations/source-release.md) defines the deterministic
   public archive and clean-history boundary.
+- [macOS release](operations/macos-release.md) defines the app-owned version,
+  signing, notarization, and namespaced publication lifecycle.
 - [Watchdog](operations/watchdog.md) covers the always-running telemetry and
   crash/OOM protection service.
 
