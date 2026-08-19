@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import re
 import sys
 import threading
 import time
@@ -17,11 +18,18 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, TextIO
 RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
-RED = "\033[31m"
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
-CYAN = "\033[36m"
+# Shared product palette. True-color terminals render the same states as the
+# macOS app and website; redirected output and TERM=dumb remain byte-clean,
+# while NO_COLOR retains the human layout without terminal escape sequences.
+LIGHT = "\033[38;2;247;247;247m"
+BLUE = "\033[38;2;0;156;223m"
+GREEN = "\033[38;2;97;187;70m"
+YELLOW = "\033[38;2;255;185;0m"
+ORANGE = "\033[38;2;247;130;0m"
+RED = "\033[38;2;226;56;56m"
+CYAN = BLUE
 CLEAR_LINE = "\r\033[2K"
+ANSI = re.compile(r"\033\[[0-9;]*m")
 _activity = threading.local()
 
 
@@ -76,12 +84,30 @@ class Terminal:
         """Fit plain text to a terminal column budget before adding styles."""
         if width <= 0:
             return ""
-        if len(value) <= width:
+        plain = ANSI.sub("", value)
+        if len(plain) <= width:
             return value
         suffix = "…" if self.unicode else "..."
         if width <= len(suffix):
             return suffix[:width]
-        return value[: width - len(suffix)].rstrip() + suffix
+        return plain[: width - len(suffix)].rstrip() + suffix
+
+    def logo(self, section: str | None = None) -> str:
+        title = "LET'S INFER"
+        if section:
+            title += f"  /  {section.upper()}"
+        return (
+            f"{self.paint(self.mark, BOLD, LIGHT)}  "
+            f"{self.paint(title, BOLD)}"
+        )
+
+    def command(self, command: str, description: str) -> str:
+        command_width = min(34, max(24, self.width // 2))
+        command_text = self.paint(command.ljust(command_width), BOLD, GREEN)
+        detail = self.paint(
+            self.clip(description, max(1, self.width - command_width - 2)), DIM
+        )
+        return f"  {command_text}{detail}"
 
     @property
     def mark(self) -> str:
@@ -114,6 +140,26 @@ class Terminal:
         self.line("error", message)
 
 
+def home(
+    *,
+    stream: TextIO | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Render the quiet, action-first no-command surface."""
+
+    target = sys.stdout if stream is None else stream
+    terminal = Terminal(target, environ=environ)
+    target.write(
+        f"{terminal.logo()}\n\n"
+        f"{terminal.paint('Your inference site is ready', BOLD)}\n"
+        f"{terminal.paint('Install a model to start serving on one local endpoint.', DIM)}\n\n"
+        f"{terminal.command('letsinfer install <model>', 'Install a model')}\n"
+        f"{terminal.command('letsinfer status', 'View site health')}\n"
+        f"{terminal.command('letsinfer --help', 'Explore commands')}\n\n"
+    )
+    target.flush()
+
+
 def _mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -134,6 +180,12 @@ def _context(value: object) -> str:
     return f"{value} context"
 
 
+def _rate(value: object) -> str:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+        return "—"
+    return f"{value:.1f} tok/s"
+
+
 def runtime_status(
     payload: Mapping[str, Any],
     *,
@@ -148,6 +200,8 @@ def runtime_status(
     protection = _mapping(payload.get("protection"))
     lifecycle = _mapping(payload.get("lifecycle"))
     capacity = _mapping(container.get("capacity"))
+    telemetry = _mapping(payload.get("telemetry"))
+    rates = _mapping(telemetry.get("rates"))
 
     engine_ready = (
         container.get("state") == "running"
@@ -167,21 +221,26 @@ def runtime_status(
         protection.get("armed") is True
         and protection.get("trip_latched") is False
     )
-    service_states = (
-        service.get("active") == "active",
-        service.get("engine_active") == "active",
-        service.get("gateway_active") == "active",
-        service.get("site_active") == "active",
-        service.get("recovery_timer_active") == "active",
-    )
-    services_ready = sum(service_states)
+    qualification_mode = service.get("runtime_mode") == "qualification"
+    services_ready = lifecycle.get("ready_services")
+    services_total = lifecycle.get("total_services")
+    if not isinstance(services_ready, int) or not isinstance(services_total, int):
+        service_states = (
+            service.get("active") == "active",
+            service.get("engine_active") == "active",
+            service.get("gateway_active") == "active",
+            service.get("site_active") == "active",
+            service.get("recovery_timer_active") == "active",
+        )
+        services_ready = sum(service_states)
+        services_total = len(service_states)
     ready = (
         engine_ready
         and api_ready
         and route_ready
         and runtime_metadata_ready
         and safety_ready
-        and services_ready == 5
+        and services_ready == services_total
     )
 
     model = str(container.get("model") or "No model")
@@ -195,10 +254,7 @@ def runtime_status(
     target_name = str(container.get("target") or "unknown target")
     version = str(container.get("runtime_version") or "unknown version")
 
-    header = terminal.paint("LET'S INFER", BOLD)
-    target.write(
-        f"{terminal.paint(terminal.mark, BOLD, YELLOW)}  {header}\n\n"
-    )
+    target.write(f"{terminal.logo()}\n\n")
     lifecycle_state = str(lifecycle.get("state") or ("ready" if ready else "degraded"))
     state_color = {
         "ready": GREEN,
@@ -219,6 +275,9 @@ def runtime_status(
         "failed": "FAILED",
         "degraded": "ATTENTION",
     }.get(lifecycle_state, "ATTENTION")
+    if qualification_mode and lifecycle_state == "ready":
+        state = "UNQUALIFIED"
+        state_color = YELLOW
     state_prefix_width = len(state_mark) + 1 + len(state) + 2
     model = terminal.clip(model, terminal.width - state_prefix_width)
     target.write(
@@ -227,7 +286,11 @@ def runtime_status(
         f"{terminal.paint(model, BOLD)}\n"
     )
     runtime_identity = terminal.clip(
-        f"{engine_name} · {target_name} · {version}",
+        (
+            f"QUALIFICATION · {engine_name} · {target_name} · {version}"
+            if qualification_mode
+            else f"{engine_name} · {target_name} · {version}"
+        ),
         terminal.width - 2,
     )
     target.write(
@@ -305,7 +368,9 @@ def runtime_status(
         safety_ready,
         "Armed" if safety_ready else "Arming" if starting else "Blocked",
         (
-            "no trip · recovery ready"
+            "no trip · candidate guarded"
+            if safety_ready and qualification_mode
+            else "no trip · recovery ready"
             if safety_ready
             else "protection will arm when startup completes"
             if starting
@@ -315,14 +380,16 @@ def runtime_status(
     )
     row(
         "Services",
-        services_ready == 5,
-        "Starting" if starting else f"{services_ready}/5",
-        "all five units active"
-        if services_ready == 5
+        services_ready == services_total,
+        "Starting" if starting else f"{services_ready}/{services_total}",
+        "candidate control plane active"
+        if qualification_mode and services_ready == services_total
+        else "all five units active"
+        if services_ready == services_total
         else f"engine unit {service.get('engine_active')} · {services_ready}/5 ready"
-        if starting
-        else f"{5 - services_ready} unit(s) need attention",
-        pending=starting and services_ready != 5,
+        if starting and not qualification_mode
+        else f"{services_total - services_ready} unit(s) need attention",
+        pending=starting and services_ready != services_total,
     )
     memory = _mib(service.get("memory_current_bytes"))
     memory_limit = _mib(service.get("memory_limit_bytes"))
@@ -333,6 +400,55 @@ def runtime_status(
         "Normal" if within_limit else "High",
         f"{memory} / {memory_limit}",
     )
+    target.write(f"\n  {terminal.paint('Request path', BOLD)}\n")
+    route = (
+        ("CLIENT", True, "OpenAI-compatible"),
+        ("GATEWAY", api_ready, endpoint),
+        ("RUNTIME", engine_ready, f"{model} · {engine_name}"),
+        ("TARGET", engine_ready, target_name),
+    )
+    for index, (name, node_ready, detail) in enumerate(route):
+        mark = "●" if terminal.unicode and node_ready else "○" if terminal.unicode else "*"
+        color = GREEN if node_ready else RED
+        target.write(
+            f"  {terminal.paint(mark, BOLD, color)}  "
+            f"{terminal.paint(name.ljust(10), BOLD)}"
+            f"{terminal.paint(terminal.clip(detail, terminal.width - 16), DIM)}\n"
+        )
+        if index != len(route) - 1:
+            target.write(f"  {terminal.paint('│', DIM)}\n")
+
+    active_now = telemetry.get("active_requests")
+    queued_now = telemetry.get("queued_requests")
+    active_limit = capacity.get("max_active_requests")
+    target.write(f"\n  {terminal.paint('Scheduler', BOLD)}\n")
+    row(
+        "Active",
+        True,
+        str(active_now) if isinstance(active_now, int) else "—",
+        f"{active_limit} max" if isinstance(active_limit, int) else "runtime capacity",
+    )
+    row(
+        "Queue",
+        True,
+        str(queued_now) if isinstance(queued_now, int) else "—",
+        "dynamic admission",
+    )
+    if telemetry:
+        target.write(f"\n  {terminal.paint('Performance', BOLD)}\n")
+        row(
+            "Tokens",
+            True,
+            _rate(
+                rates.get("aggregate_tokens_per_second")
+                if rates.get("aggregate_tokens_per_second") is not None
+                else rates.get("output_tokens_per_second")
+            ),
+            (
+                f"{_rate(rates.get('decode_tokens_per_second'))} decode · "
+                f"{_rate(rates.get('prefill_tokens_per_second'))} prefill"
+            ),
+        )
     target.flush()
 
 
@@ -358,11 +474,7 @@ def site_status(
     )
     ready = site_ready and (gateway_ready if gateway_expected else True)
 
-    header = terminal.paint("LET'S INFER", BOLD)
-    target.write(
-        f"{terminal.paint(terminal.mark, BOLD, YELLOW)}  "
-        f"{header}\n\n"
-    )
+    target.write(f"{terminal.logo()}\n\n")
     state_color = GREEN if ready else YELLOW
     state_mark = "●" if terminal.unicode else "*"
     state = "ONLINE" if ready else "ATTENTION"
@@ -430,6 +542,14 @@ class Spinner:
         self._thread: threading.Thread | None = None
         self._started_at = 0.0
         self._rendered = False
+        lowered = message.lower()
+        self._section = (
+            "install"
+            if lowered.startswith("install")
+            else "update"
+            if lowered.startswith("updat")
+            else None
+        )
 
     @property
     def enabled(self) -> bool:
@@ -439,6 +559,12 @@ class Spinner:
         if not self.enabled:
             return self
         self._started_at = self._clock()
+        if self._section is not None:
+            self.terminal.stream.write(
+                f"{self.terminal.logo(self._section)}\n"
+                f"   {self.terminal.paint(self.message, DIM)}\n\n"
+            )
+            self.terminal.stream.flush()
         self._thread = threading.Thread(
             target=self._animate,
             name="letsinfer-cli-spinner",
@@ -454,7 +580,7 @@ class Spinner:
         frame_index = 0
         while not self._stop.is_set():
             elapsed = self._clock() - self._started_at
-            frame = self.terminal.paint(frames[frame_index % len(frames)], CYAN)
+            frame = self.terminal.paint(frames[frame_index % len(frames)], GREEN)
             suffix = self.terminal.paint(f"{elapsed:0.1f}s", DIM)
             try:
                 self.terminal.stream.write(
@@ -557,13 +683,8 @@ class ArgumentParser(argparse.ArgumentParser):
             for action in self._actions
         )
         command = self.prog.removeprefix("letsinfer ").strip()
-        title = "LET'S INFER"
-        if command and command != "letsinfer":
-            title += f"  /  {command}"
-        banner = (
-            f"{terminal.paint(terminal.mark, BOLD, YELLOW)}  "
-            f"{terminal.paint(title, BOLD)}\n\n"
-        )
+        section = command if command and command != "letsinfer" else None
+        banner = f"{terminal.logo(section)}\n\n"
         replacements = {
             "usage:": terminal.paint("Usage:", BOLD, CYAN),
             "positional arguments:": terminal.paint(
@@ -597,6 +718,13 @@ def fatal(message: str, *, stream: TextIO | None = None) -> None:
     """Write the existing FATAL contract, styling only its TTY label."""
     target = sys.stderr if stream is None else stream
     terminal = Terminal(target)
-    label = terminal.paint("FATAL:", BOLD, RED)
-    target.write(f"{label} {message}\n")
+    if terminal.interactive:
+        mark = "✗" if terminal.unicode else "ERROR"
+        target.write(
+            f"{terminal.paint(mark, BOLD, RED)}  "
+            f"{terminal.paint('FAILED', BOLD, RED)}\n"
+            f"   {terminal.paint(terminal.clip(message, terminal.width - 3), DIM)}\n"
+        )
+    else:
+        target.write(f"FATAL: {message}\n")
     target.flush()

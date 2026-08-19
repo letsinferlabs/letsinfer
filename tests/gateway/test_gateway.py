@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import pathlib
@@ -134,6 +135,7 @@ class GatewayPolicyTests(unittest.TestCase):
             memory_pressure=False,
             temperature_c=40.0,
             prefix_keys=set(),
+            engine="sglang",
         )
         response = mock.MagicMock(status=200)
         response.read.return_value = b'{"input_tokens":17}'
@@ -735,6 +737,167 @@ class GatewayPolicyTests(unittest.TestCase):
                 "prompt_tokens_details": {"cached_tokens": True},
             }
         }).encode()).exact)
+
+    def test_sglang_stream_instrumentation_preserves_request_fields(self) -> None:
+        backend = server.Backend(
+            placement_id="a" * 32,
+            member_id="b" * 32,
+            model="fixture-model",
+            url="http://127.0.0.1:18000",
+            credential_file="/api-key",
+            ca_file=None,
+            token_count_path="/v1/messages/count_tokens",
+            token_count_protocol="sglang-anthropic-count-tokens-v1",
+            max_active_requests=1,
+            max_context_tokens=1_000_000,
+            healthy=True,
+            memory_pressure=False,
+            temperature_c=40.0,
+            prefix_keys=set(),
+            engine="sglang",
+        )
+        body = json.dumps({
+            "model": "fixture-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "stream_options": {"include_usage": False},
+            "temperature": 0.2,
+        }).encode()
+        result = json.loads(server._instrument_stream_usage(backend, body))
+        self.assertEqual(result["temperature"], 0.2)
+        self.assertEqual(result["stream_options"], {
+            "include_usage": True,
+            "continuous_usage_stats": True,
+        })
+        self.assertEqual(
+            server._instrument_stream_usage(
+                dataclasses.replace(backend, engine="unknown"),
+                body,
+            ),
+            body,
+        )
+
+    def test_each_engine_adapter_requests_its_native_exact_stream_usage(self) -> None:
+        body = json.dumps({"model": "fixture-model", "stream": True}).encode()
+        base = server.Backend(
+            placement_id="a" * 32,
+            member_id="b" * 32,
+            model="fixture-model",
+            url="http://127.0.0.1:18000",
+            credential_file="/api-key",
+            ca_file=None,
+            token_count_path=None,
+            token_count_protocol=None,
+            max_active_requests=1,
+            max_context_tokens=1_000_000,
+            healthy=True,
+            memory_pressure=False,
+            temperature_c=40.0,
+            prefix_keys=set(),
+        )
+        for engine in ("dwarfstar", "llama.cpp", "sglang", "vllm"):
+            with self.subTest(engine=engine):
+                value = json.loads(server._instrument_stream_usage(
+                    dataclasses.replace(base, engine=engine), body
+                ))
+                self.assertTrue(value["stream_options"]["include_usage"])
+                self.assertEqual(
+                    value["stream_options"].get("continuous_usage_stats"),
+                    True if engine in {"sglang", "vllm"} else None,
+                )
+
+    def test_each_engine_native_usage_reconciles_without_fabrication(self) -> None:
+        continuous = (
+            b'data: {"choices":[{"index":0}],"usage":{"prompt_tokens":8,'
+            b'"completion_tokens":1}}\n\n'
+            b'data: {"choices":[{"index":0}],"usage":{"prompt_tokens":8,'
+            b'"completion_tokens":3}}\n\n'
+        )
+        final_only = (
+            b'data: {"choices":[],"usage":{"prompt_tokens":8,'
+            b'"completion_tokens":3}}\n\n'
+        )
+        for engine in ("dwarfstar", "llama.cpp", "sglang", "vllm"):
+            with self.subTest(engine=engine):
+                tracker = server.StreamingUsageTracker()
+                changes = tracker.feed(
+                    continuous if engine in {"sglang", "vllm"} else final_only
+                )
+                self.assertEqual(changes["input_tokens"], 8)
+                self.assertEqual(changes["output_tokens"], 3)
+                usage, remaining = tracker.reconcile(
+                    server.RequestUsage(8, 3, 0, True), exact_prompt_tokens=8
+                )
+                self.assertTrue(usage.exact)
+                self.assertEqual(remaining, {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                })
+
+    def test_cancelled_stream_keeps_only_observed_exact_usage(self) -> None:
+        tracker = server.StreamingUsageTracker()
+        tracker.feed(
+            b'data: {"choices":[{"index":0}],"usage":{"prompt_tokens":8,'
+            b'"completion_tokens":2}}\n\n'
+        )
+        usage, remaining = tracker.reconcile(
+            server.RequestUsage(), exact_prompt_tokens=8
+        )
+        self.assertEqual(usage.input_tokens, 8)
+        self.assertEqual(usage.output_tokens, 2)
+        self.assertEqual(remaining["output_tokens"], 0)
+
+    def test_stream_usage_parser_handles_fragments_and_cumulative_counts(self) -> None:
+        tracker = server.StreamingUsageTracker()
+        payload = (
+            b'data: {"choices":[{"index":0}],"usage":{"prompt_tokens":10,'
+            b'"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":3}}}\n\n'
+            b'data: {"choices":[{"index":0}],"usage":{"prompt_tokens":10,'
+            b'"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":3}}}\n\n'
+        )
+        totals = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+        for chunk in (payload[:7], payload[7:31], payload[31:119], payload[119:]):
+            for key, value in tracker.feed(chunk).items():
+                totals[key] += value
+        self.assertEqual(totals, {
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "cached_tokens": 3,
+        })
+
+        usage, changes = tracker.reconcile(
+            server.RequestUsage(10, 4, 3, True),
+            exact_prompt_tokens=10,
+        )
+        self.assertTrue(usage.exact)
+        self.assertEqual(changes, {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+        })
+
+    def test_stream_usage_ignores_malformed_and_bounds_partial_lines(self) -> None:
+        tracker = server.StreamingUsageTracker(max_pending_bytes=32)
+        self.assertEqual(
+            tracker.feed(b'data: {"usage":{"prompt_tokens":10}}\n'),
+            {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
+        )
+        tracker.feed(b"data: " + b"x" * 100)
+        tracker.feed(b"\n")
+        self.assertEqual(len(tracker.pending), 0)
+        self.assertFalse(tracker.saw_exact)
+
+    def test_usage_reconciliation_falls_back_to_exact_prompt_count(self) -> None:
+        tracker = server.StreamingUsageTracker()
+        usage, changes = tracker.reconcile(
+            server.RequestUsage(),
+            exact_prompt_tokens=37,
+        )
+        self.assertEqual(usage.input_tokens, 37)
+        self.assertIsNone(usage.output_tokens)
+        self.assertEqual(changes["input_tokens"], 37)
+        self.assertEqual(changes["output_tokens"], 0)
 
 
 if __name__ == "__main__":

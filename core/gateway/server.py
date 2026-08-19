@@ -102,6 +102,7 @@ class Backend:
     memory_pressure: bool
     temperature_c: float
     prefix_keys: set[str]
+    engine: str = ""
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -114,6 +115,139 @@ class RequestUsage:
     output_tokens: int | None = None
     cached_tokens: int | None = None
     exact: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class StreamingUsageEvent:
+    """One exact cumulative usage observation from an OpenAI SSE event."""
+
+    usage: RequestUsage
+    choice_index: int | None
+
+
+class StreamingUsageTracker:
+    """Bounded parser and monotonic reconciler for cumulative SSE usage."""
+
+    def __init__(self, *, max_pending_bytes: int = MAX_USAGE_TAIL_BYTES) -> None:
+        self.max_pending_bytes = max_pending_bytes
+        self.pending = bytearray()
+        self.discard_line = False
+        self.input_tokens = 0
+        self.cached_tokens = 0
+        self.aggregate_output_tokens = 0
+        self.choice_output_tokens: dict[int, int] = {}
+        self.accounted_input_tokens = 0
+        self.accounted_output_tokens = 0
+        self.accounted_cached_tokens = 0
+        self.saw_exact = False
+
+    def _observe(self, event: StreamingUsageEvent) -> dict[str, int]:
+        usage = event.usage
+        assert usage.input_tokens is not None
+        assert usage.output_tokens is not None
+        assert usage.cached_tokens is not None
+        self.saw_exact = True
+        self.input_tokens = max(self.input_tokens, usage.input_tokens)
+        self.cached_tokens = max(self.cached_tokens, usage.cached_tokens)
+        if event.choice_index is None:
+            self.aggregate_output_tokens = max(
+                self.aggregate_output_tokens, usage.output_tokens
+            )
+        else:
+            self.choice_output_tokens[event.choice_index] = max(
+                self.choice_output_tokens.get(event.choice_index, 0),
+                usage.output_tokens,
+            )
+        output_tokens = max(
+            self.aggregate_output_tokens,
+            sum(self.choice_output_tokens.values()),
+        )
+        changes = {
+            "input_tokens": self.input_tokens - self.accounted_input_tokens,
+            "output_tokens": output_tokens - self.accounted_output_tokens,
+            "cached_tokens": self.cached_tokens - self.accounted_cached_tokens,
+        }
+        self.accounted_input_tokens = self.input_tokens
+        self.accounted_output_tokens = output_tokens
+        self.accounted_cached_tokens = self.cached_tokens
+        return changes
+
+    def _line(self, line: bytes) -> dict[str, int]:
+        candidate = line.strip()
+        if not candidate.startswith(b"data:"):
+            return {}
+        candidate = candidate[5:].strip()
+        if not candidate.startswith(b"{"):
+            return {}
+        try:
+            value = json.loads(candidate)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        event = _streaming_usage_event(value)
+        return self._observe(event) if event is not None else {}
+
+    def feed(self, chunk: bytes) -> dict[str, int]:
+        """Consume arbitrarily fragmented SSE bytes and return metric deltas."""
+
+        changes = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+        for value in chunk:
+            if value == ord("\n"):
+                if not self.discard_line:
+                    for key, delta in self._line(bytes(self.pending)).items():
+                        changes[key] += delta
+                self.pending.clear()
+                self.discard_line = False
+                continue
+            if self.discard_line:
+                continue
+            self.pending.append(value)
+            if len(self.pending) > self.max_pending_bytes:
+                self.pending.clear()
+                self.discard_line = True
+        return changes
+
+    def reconcile(
+        self,
+        final_usage: RequestUsage,
+        *,
+        exact_prompt_tokens: int | None,
+    ) -> tuple[RequestUsage, dict[str, int]]:
+        """Reconcile a final response without double-counting live deltas."""
+
+        input_tokens = (
+            final_usage.input_tokens
+            if final_usage.input_tokens is not None
+            else exact_prompt_tokens
+        )
+        if input_tokens is None and self.saw_exact:
+            input_tokens = self.input_tokens
+        output_tokens = final_usage.output_tokens
+        if output_tokens is None and self.saw_exact:
+            output_tokens = self.accounted_output_tokens
+        cached_tokens = final_usage.cached_tokens
+        if cached_tokens is None and self.saw_exact:
+            cached_tokens = self.cached_tokens
+
+        # Exact cumulative engine observations cannot legitimately exceed the
+        # final usage. Keep telemetry counters monotonic if an interrupted or
+        # malformed tail omits or regresses that final summary.
+        accounted_input = max(self.accounted_input_tokens, input_tokens or 0)
+        accounted_output = max(self.accounted_output_tokens, output_tokens or 0)
+        accounted_cached = max(self.accounted_cached_tokens, cached_tokens or 0)
+        changes = {
+            "input_tokens": accounted_input - self.accounted_input_tokens,
+            "output_tokens": accounted_output - self.accounted_output_tokens,
+            "cached_tokens": accounted_cached - self.accounted_cached_tokens,
+        }
+        self.accounted_input_tokens = accounted_input
+        self.accounted_output_tokens = accounted_output
+        self.accounted_cached_tokens = accounted_cached
+        return RequestUsage(
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            final_usage.exact or self.saw_exact or exact_prompt_tokens is not None,
+        ), changes
 
 
 @dataclasses.dataclass
@@ -235,6 +369,15 @@ class PolicySnapshot:
                 or not isinstance(capacity, dict)
             ):
                 raise GatewayError(f"placement {placement['placement_id']} metadata is invalid")
+            runtime_parts = str(placement.get("runtime", "")).split("/", 2)
+            if (
+                len(runtime_parts) != 3
+                or not runtime_parts[1]
+            ):
+                raise GatewayError(
+                    f"placement {placement['placement_id']} runtime identity is invalid"
+                )
+            engine = runtime_parts[1]
             if placement["strategy"] == "distributed" and len(endpoints) != 1:
                 raise GatewayError(
                     f"distributed placement {placement['placement_id']} must expose "
@@ -350,6 +493,7 @@ class PolicySnapshot:
                     ),
                     temperature_c=max(temperatures) if temperatures else -1,
                     prefix_keys=set(prefix_keys),
+                    engine=engine,
                 )
                 backends.append(backend)
         with self.condition:
@@ -841,6 +985,44 @@ def _usage_from_json(value: Any) -> RequestUsage:
     return RequestUsage()
 
 
+def _streaming_usage_event(value: Any) -> StreamingUsageEvent | None:
+    usage = _usage_from_json(value)
+    if not usage.exact:
+        return None
+    choices = value.get("choices") if isinstance(value, dict) else None
+    choice_index: int | None = None
+    if isinstance(choices, list) and len(choices) == 1:
+        choice = choices[0]
+        index = choice.get("index") if isinstance(choice, dict) else None
+        if isinstance(index, int) and not isinstance(index, bool) and index >= 0:
+            choice_index = index
+    return StreamingUsageEvent(usage, choice_index)
+
+
+def _instrument_stream_usage(backend: Backend, body: bytes) -> bytes:
+    """Enable each engine's native exact streaming-usage capability."""
+
+    if backend.engine not in {"dwarfstar", "llama.cpp", "sglang", "vllm"}:
+        return body
+    try:
+        value = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return body
+    if not isinstance(value, dict) or value.get("stream") is not True:
+        return body
+    options = value.get("stream_options")
+    if options is None:
+        options = {}
+    if not isinstance(options, dict):
+        # Preserve the engine's validation behavior for malformed requests.
+        return body
+    options = {**options, "include_usage": True}
+    if backend.engine in {"sglang", "vllm"}:
+        options["continuous_usage_stats"] = True
+    value["stream_options"] = options
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
 def _usage_from_tail(tail: bytes) -> RequestUsage:
     best = RequestUsage()
     for line in tail.splitlines():
@@ -1151,6 +1333,7 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
         selected_placement_id: str | None = None
         selected_member_id: str | None = None
         usage = RequestUsage()
+        streaming_usage = StreamingUsageTracker()
         exact_prompt_tokens: int | None = None
         queue_seconds = 0.0
         first_byte_at: float | None = None
@@ -1224,7 +1407,14 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                         request_admitted = True
                     dispatch_at = time.monotonic()
                     engine_dispatched = True
-                    connection.request(self.command, self.path, body=body, headers=headers)
+                    dispatch_body = _instrument_stream_usage(backend, body)
+                    headers["Content-Length"] = str(len(dispatch_body))
+                    connection.request(
+                        self.command,
+                        self.path,
+                        body=dispatch_body,
+                        headers=headers,
+                    )
                     response = connection.getresponse()
                     if response.status >= 500 and not headers_sent:
                         response.read(MAX_USAGE_TAIL_BYTES)
@@ -1247,6 +1437,9 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                             break
                         if first_byte_at is None:
                             first_byte_at = time.monotonic()
+                        live_changes = streaming_usage.feed(chunk)
+                        if any(live_changes.values()):
+                            self.gateway.metrics.update(**live_changes)
                         self.wfile.write(chunk)
                         self.wfile.flush()
                         tail.extend(chunk)
@@ -1360,6 +1553,10 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                 self.gateway.metrics.update(queued_requests=-1)
             if active_metric:
                 self.gateway.metrics.update(active_requests=-1)
+            usage, usage_changes = streaming_usage.reconcile(
+                usage,
+                exact_prompt_tokens=exact_prompt_tokens if engine_dispatched else None,
+            )
             total_tokens = 0
             if engine_dispatched:
                 total_tokens = (
@@ -1382,9 +1579,7 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
             elif status == "failed" and not failure_metric_recorded:
                 self.gateway.metrics.update(requests_failed=1)
             self.gateway.metrics.update(
-                input_tokens=usage.input_tokens or 0,
-                output_tokens=usage.output_tokens or 0,
-                cached_tokens=usage.cached_tokens or 0,
+                **usage_changes,
                 queue_milliseconds=queue_ms,
                 ttft_milliseconds=ttft_ms or 0,
                 decode_milliseconds=decode_ms or 0,

@@ -141,6 +141,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(snapshot["schema_version"], 2)
         self.assertEqual(rates["requests_per_second"], 2.0)
         self.assertEqual(rates["output_tokens_per_second"], 20.0)
+        self.assertEqual(rates["aggregate_tokens_per_second"], 20.0)
         self.assertEqual(rates["decode_tokens_per_second"], 20.0)
         self.assertEqual(rates["prefill_tokens_per_second"], 4990.0)
         self.assertEqual(rates["average_ttft_milliseconds"], 100.0)
@@ -158,6 +159,32 @@ class TelemetryTests(unittest.TestCase):
             reboot_snapshot["aggregate"]["rates"]["requests_per_second"],
             11.0,
         )
+
+    def test_live_token_deltas_expose_rates_before_request_completion(self) -> None:
+        current = [1_700_000_000.0]
+        aggregate = TelemetryAggregator(clock=lambda: current[0])
+        first = decode_watchdog_record(
+            record(unix_ms=int(current[0] * 1000), counters=0), member_id=MEMBER
+        )
+        first["inference"]["active_requests"] = 1
+        aggregate.update(first)
+        current[0] += 1
+        second = decode_watchdog_record(
+            record(sequence=8, unix_ms=int(current[0] * 1000), counters=0),
+            member_id=MEMBER,
+        )
+        second["monotonic_ms"] = first["monotonic_ms"] + 1_000
+        second["inference"].update({
+            "active_requests": 1,
+            "input_tokens": 40,
+            "output_tokens": 12,
+            "cached_tokens": 10,
+        })
+        rates = aggregate.update(second)["aggregate"]["rates"]
+        self.assertEqual(rates["output_tokens_per_second"], 12.0)
+        self.assertEqual(rates["aggregate_tokens_per_second"], 12.0)
+        self.assertEqual(rates["decode_tokens_per_second"], 12.0)
+        self.assertEqual(rates["prefill_tokens_per_second"], 30.0)
 
     def test_removed_members_are_pruned_and_history_uses_wall_time(self) -> None:
         current = [1_700_000_000.0]

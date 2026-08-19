@@ -71,6 +71,7 @@ RATE_FIELDS = (
     "retries_per_second",
     "input_tokens_per_second",
     "output_tokens_per_second",
+    "aggregate_tokens_per_second",
     "cached_tokens_per_second",
     "prefill_tokens_per_second",
     "decode_tokens_per_second",
@@ -381,6 +382,13 @@ class TelemetryAggregator:
         )
         exact = totals["exact_token_requests"]
         prefill_tokens = max(0, totals["input_tokens"] - totals["cached_tokens"])
+        live_prefill_rate = sum(
+            float(max(0, window["input_tokens"] - window["cached_tokens"]))
+            * 1000.0
+            / float(window["elapsed_milliseconds"])
+            for window in windows
+        )
+        live_decode_rate = wall_rate("output_tokens")
         return {
             "requests_per_second": wall_rate("requests_received"),
             "failures_per_second": wall_rate("requests_failed"),
@@ -388,17 +396,18 @@ class TelemetryAggregator:
             "retries_per_second": wall_rate("requests_retried"),
             "input_tokens_per_second": wall_rate("input_tokens"),
             "output_tokens_per_second": wall_rate("output_tokens"),
+            "aggregate_tokens_per_second": wall_rate("output_tokens"),
             "cached_tokens_per_second": wall_rate("cached_tokens"),
             "prefill_tokens_per_second": (
                 float(prefill_tokens) * 1000.0 / totals["ttft_milliseconds"]
                 if exact > 0 and totals["ttft_milliseconds"] > 0
-                else None
+                else live_prefill_rate if prefill_tokens > 0 else None
             ),
             "decode_tokens_per_second": (
                 float(totals["output_tokens"]) * 1000.0
                 / totals["decode_milliseconds"]
                 if exact > 0 and totals["decode_milliseconds"] > 0
-                else None
+                else live_decode_rate if totals["output_tokens"] > 0 else None
             ),
             "average_queue_milliseconds": (
                 float(totals["queue_milliseconds"]) / settled

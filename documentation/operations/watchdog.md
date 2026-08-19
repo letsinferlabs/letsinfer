@@ -44,8 +44,12 @@ Protocol v3 exposes capabilities, latest state, bounded history, live
 subscriptions, and typed Let's Infer status over that same authenticated endpoint.
 The typed status includes the manifest-bound release, model, engine, runtime,
 cache, API port, serving capacity, and live lifecycle/protection state. Static
-fields come from an owner-only manifest-addressed descriptor; Watchdog remains
-authoritative for engine, trip, container, and protection state. A ready controller
+fields have a manifest-addressed evidence copy plus an atomically replaced
+owner-only active projection. Watchdog reloads that projection for each typed
+status request, so a runtime switch updates model, engine, version, and capacity
+without restarting the resident protector. The installation identity must
+remain unchanged, and Watchdog remains authoritative for engine, trip,
+container, and protection state. A ready controller
 must complete a valid request at least every 30 seconds, so a half-open or
 partial-frame connection cannot retain a bounded controller slot indefinitely.
 
@@ -54,10 +58,16 @@ counter contract: active/queued requests; received, admitted, completed,
 failed, cancelled, and retried requests; input/output/cached tokens; queue,
 TTFT, and decode time; exact-token coverage; prefix hits; and dropped/failed
 usage writes. The coordinator accepts only signed telemetry schema 2 and
-derives aggregate wall throughput plus weighted exact prefill/decode rates from
-successive counter windows. It returns `null` until the necessary interval or
-exact-token evidence exists. The Mac decodes all native fields and the full
-coordinator aggregate; it never estimates token counts from response text.
+derives aggregate wall throughput plus exact service-time prefill/decode rates
+from successive counter windows. During a request, native cumulative usage can
+also produce live wall-clock prefill/decode rates before the final timing
+record arrives. `aggregate_tokens_per_second` is the normalized site-wide
+output rate; `decode_tokens_per_second` retains exact service-time decode when
+available. It returns `null` when no exact engine token observation
+exists. The Mac decodes all native fields and the full coordinator aggregate;
+the controller's current placement overrides any stale core/site baseline
+identity, and historical placements stay collapsed to the newest record per
+model. It never estimates token counts from response text.
 
 Each installation has a random 256-bit installation ID and an owner-only
 controller registry. Watchdog accepts a certificate only when both normal CA

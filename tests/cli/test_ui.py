@@ -163,6 +163,15 @@ class TerminalTests(unittest.TestCase):
                 },
             },
             "protection": {"armed": True, "trip_latched": False},
+            "telemetry": {
+                "active_requests": 2,
+                "queued_requests": 1,
+                "rates": {
+                    "output_tokens_per_second": 58.9,
+                    "decode_tokens_per_second": 27.1,
+                    "prefill_tokens_per_second": 219.4,
+                },
+            },
         }
         ui.runtime_status(
             payload,
@@ -177,6 +186,10 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("557K context · 128 active", rendered)
         self.assertIn("http://homeai.local:8000/v1", rendered)
         self.assertIn("19.0 MiB / 30.0 MiB", rendered)
+        self.assertIn("Request path", rendered)
+        self.assertIn("Scheduler", rendered)
+        self.assertIn("Performance", rendered)
+        self.assertIn("58.9 tok/s", rendered)
         self.assertIn("\033[", rendered)
 
     def test_runtime_status_calls_out_a_protection_trip(self) -> None:
@@ -265,6 +278,58 @@ class TerminalTests(unittest.TestCase):
         self.assertNotIn("ATTENTION", rendered)
         self.assertNotIn("Unavailable", rendered)
         self.assertNotIn("protection needs attention", rendered)
+
+    def test_runtime_status_labels_a_healthy_candidate_without_false_service_failures(self) -> None:
+        stream = FakeStream(tty=True)
+        payload = {
+            "service": {
+                "active": "active",
+                "engine_active": "inactive",
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+                "gateway_model_identity": True,
+                "gateway_endpoint": "http://homeai.local:8000/v1",
+                "site_active": "active",
+                "recovery_timer_active": "inactive",
+                "runtime_mode": "qualification",
+                "memory_current_bytes": 19 * 1024 * 1024,
+                "memory_limit_bytes": 30 * 1024 * 1024,
+                "within_memory_limit": True,
+            },
+            "container": {
+                "state": "running",
+                "healthy": True,
+                "docker_health": "healthy",
+                "model_identity": True,
+                "model": "qwen3.8-27b",
+                "engine": "sglang",
+                "target": "dgx-spark",
+                "runtime_version": "0.1.0-rc.5",
+                "qualification_mode": True,
+                "capacity": {
+                    "max_context_tokens": 262144,
+                    "max_active_requests": 8,
+                },
+            },
+            "protection": {"armed": True, "trip_latched": False},
+        }
+        payload["lifecycle"] = letsinfer.runtime_lifecycle(payload)
+        ui.runtime_status(
+            payload,
+            stream=stream,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
+        )
+        rendered = stream.getvalue()
+        self.assertIn("UNQUALIFIED", rendered)
+        self.assertIn("QUALIFICATION · SGLang · dgx-spark · 0.1.0-rc.5", rendered)
+        self.assertIn("262K context · 8 active", rendered)
+        self.assertIn("3/3", rendered)
+        self.assertIn("candidate control plane active", rendered)
+        self.assertIn("API       Ready", rendered)
+        self.assertNotIn("FAILED", rendered)
+        self.assertNotIn("unit(s) need attention", rendered)
 
     def test_runtime_status_does_not_call_a_reachable_api_unavailable(self) -> None:
         stream = FakeStream(tty=True)
@@ -383,7 +448,7 @@ class TerminalTests(unittest.TestCase):
 
 
 class HelpTests(unittest.TestCase):
-    def test_root_without_a_command_shows_branded_help(self) -> None:
+    def test_root_without_a_command_shows_the_action_first_home(self) -> None:
         stdout = FakeStream(tty=True)
         stderr = FakeStream(tty=True)
         with (
@@ -394,7 +459,9 @@ class HelpTests(unittest.TestCase):
             result = letsinfer.main([])
         self.assertEqual(result, 0)
         self.assertIn("LET'S INFER", stdout.getvalue())
-        self.assertIn("Usage:", stdout.getvalue())
+        self.assertIn("Your inference site is ready", stdout.getvalue())
+        self.assertIn("letsinfer install <model>", stdout.getvalue())
+        self.assertNotIn("Usage:", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
 
     def test_tty_help_is_branded_and_colored(self) -> None:
@@ -421,7 +488,7 @@ class HelpTests(unittest.TestCase):
                 if isinstance(action, argparse._SubParsersAction)
             )
             value = subparsers.choices["install"].format_help()
-        self.assertIn("LET'S INFER  /  install", value)
+        self.assertIn("LET'S INFER  /  INSTALL", value)
         self.assertNotIn("\033[", value)
         self.assertIn("Arguments:", value)
         self.assertNotIn("Commands:\n  model", value)
@@ -433,6 +500,14 @@ class HelpTests(unittest.TestCase):
         self.assertIn("LET'S INFER", value)
         self.assertNotIn("\033[", value)
         self.assertIn("Usage:", value)
+
+    def test_root_without_a_tty_keeps_the_plain_help_contract(self) -> None:
+        stdout = FakeStream(tty=False)
+        with contextlib.redirect_stdout(stdout):
+            result = letsinfer.main([])
+        self.assertEqual(result, 0)
+        self.assertIn("Usage:", stdout.getvalue())
+        self.assertNotIn("\033[", stdout.getvalue())
 
 
 class MainOutputTests(unittest.TestCase):
@@ -602,6 +677,7 @@ class MainOutputTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(stdout.getvalue(), "INSTALLED RUNTIME fixture\n")
         self.assertIn("Installing the runtime", stderr.getvalue())
+        self.assertIn("LET'S INFER  /  INSTALL", stderr.getvalue())
         self.assertIn("Runtime installed", stderr.getvalue())
         self.assertIn(ui.CLEAR_LINE, stderr.getvalue())
 
@@ -630,6 +706,16 @@ class MainOutputTests(unittest.TestCase):
             result = letsinfer.main(["setup"])
         self.assertEqual(result, 1)
         self.assertEqual(stderr.getvalue(), "FATAL: port must be between 1 and 65535\n")
+
+    def test_tty_error_uses_the_bounded_failure_state(self) -> None:
+        stream = FakeStream(tty=True)
+        with mock.patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
+            ui.fatal("runtime is unavailable", stream=stream)
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", stream.getvalue())
+        self.assertIn("FAILED", plain)
+        self.assertIn("runtime is unavailable", plain)
+        self.assertNotIn("FATAL:", plain)
+        self.assertIn("\033[38;2;226;56;56m", stream.getvalue())
 
 
 if __name__ == "__main__":

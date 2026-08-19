@@ -437,12 +437,15 @@ struct MenuBarContentView: View {
                 Divider()
                 HStack(spacing: 0) {
                     runtimeMetric("DECODE", value: rate(llm.generationTokensPerSecond, unit: "tok/s"))
+                    runtimeMetric(
+                        "THROUGHPUT",
+                        value: rate(llm.aggregateTokensPerSecond, unit: "tok/s")
+                    )
                     runtimeMetric("PREFILL", value: rate(llm.prefillTokensPerSecond, unit: "tok/s"))
                     runtimeMetric(
                         "REQUESTS",
                         value: requestCount(running: llm.runningRequests, waiting: llm.waitingRequests)
                     )
-                    runtimeMetric("KV CACHE", value: percent(llm.kvCacheUtilization))
                 }
             }
         }

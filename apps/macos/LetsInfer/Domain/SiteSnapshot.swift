@@ -379,10 +379,33 @@ struct LLMMetrics: Equatable, Sendable, Identifiable {
     let backend: String?
     let model: String?
     let generationTokensPerSecond: Double?
+    let aggregateTokensPerSecond: Double?
     let prefillTokensPerSecond: Double?
     let runningRequests: Int?
     let waitingRequests: Int?
     let kvCacheUtilization: Double?
+
+    init(
+        id: String,
+        backend: String?,
+        model: String?,
+        generationTokensPerSecond: Double?,
+        aggregateTokensPerSecond: Double? = nil,
+        prefillTokensPerSecond: Double?,
+        runningRequests: Int?,
+        waitingRequests: Int?,
+        kvCacheUtilization: Double?
+    ) {
+        self.id = id
+        self.backend = backend
+        self.model = model
+        self.generationTokensPerSecond = generationTokensPerSecond
+        self.aggregateTokensPerSecond = aggregateTokensPerSecond
+        self.prefillTokensPerSecond = prefillTokensPerSecond
+        self.runningRequests = runningRequests
+        self.waitingRequests = waitingRequests
+        self.kvCacheUtilization = kvCacheUtilization
+    }
 }
 
 private extension String {
@@ -473,6 +496,121 @@ extension SiteSnapshot {
             metrics: metrics,
             letsinfer: letsinfer
         )
+    }
+
+    func enriched(with placement: SitePlacementRecord) -> SiteSnapshot {
+        guard let current = letsinfer,
+              let runtime = PlacementRuntimeIdentity(placement.runtime) else {
+            return self
+        }
+        let capacity = placement.capacity
+        let maxActive = capacity?.maxActiveRequests
+            ?? placement.endpoints.map(\.maxActiveRequests).compactMap { $0 }.reduce(0, +)
+        let maxContext = capacity?.maxContextTokens
+            ?? placement.endpoints.map(\.maxContextTokens).compactMap { $0 }.max()
+        let resolvedContext = maxContext.flatMap { $0 > 0 ? $0 : nil }
+            ?? current.maxContextTokens
+        let maxConnections = capacity?.maxConnections ?? max(maxActive, current.maxConnections)
+        let status = SiteStatus(
+            installationID: current.installationID,
+            release: runtime.version ?? current.release,
+            model: placement.model,
+            engine: runtime.engine,
+            runtimeName: runtime.name,
+            runtimeVersion: runtime.version,
+            manifestSHA256: current.manifestSHA256,
+            cacheProvider: current.cacheProvider,
+            cachePersistent: current.cachePersistent,
+            inferencePort: current.inferencePort,
+            maxConnections: maxConnections > 0 ? maxConnections : current.maxConnections,
+            maxActiveRequests: maxActive > 0 ? maxActive : current.maxActiveRequests,
+            maxContextTokens: resolvedContext,
+            serviceState: current.serviceState,
+            engineState: placement.state,
+            protectionPhase: current.protectionPhase,
+            protectionArmed: current.protectionArmed,
+            tripLatched: current.tripLatched,
+            containerName: current.containerName
+        )
+        var mergedMetrics = metrics
+        mergedMetrics.llm = metrics.llm.map { value in
+            LLMMetrics(
+                id: value.id,
+                backend: runtime.engine,
+                model: placement.model,
+                generationTokensPerSecond: value.generationTokensPerSecond,
+                aggregateTokensPerSecond: value.aggregateTokensPerSecond,
+                prefillTokensPerSecond: value.prefillTokensPerSecond,
+                runningRequests: value.runningRequests,
+                waitingRequests: value.waitingRequests,
+                kvCacheUtilization: value.kvCacheUtilization
+            )
+        }
+        return SiteSnapshot(
+            siteID: siteID,
+            source: source,
+            sampledAt: sampledAt,
+            availability: availability,
+            uptimeSeconds: uptimeSeconds,
+            identity: identity,
+            system: system,
+            metrics: mergedMetrics,
+            letsinfer: status
+        )
+    }
+
+    func enriched(with inference: SiteInferenceAggregate) -> SiteSnapshot {
+        var mergedMetrics = metrics
+        let previous = metrics.llm.first
+        mergedMetrics.llm = [
+            LLMMetrics(
+                id: previous?.id ?? "letsinfer-gateway",
+                backend: previous?.backend ?? letsinfer?.engine,
+                model: previous?.model ?? letsinfer?.model,
+                generationTokensPerSecond: inference.rates.decodeTokensPerSecond,
+                aggregateTokensPerSecond: inference.rates.aggregateTokensPerSecond
+                    ?? inference.rates.outputTokensPerSecond,
+                prefillTokensPerSecond: inference.rates.prefillTokensPerSecond,
+                runningRequests: Int(inference.activeRequests),
+                waitingRequests: Int(inference.queuedRequests),
+                kvCacheUtilization: previous?.kvCacheUtilization
+            )
+        ]
+        return SiteSnapshot(
+            siteID: siteID,
+            source: source,
+            sampledAt: sampledAt,
+            availability: availability,
+            uptimeSeconds: uptimeSeconds,
+            identity: identity,
+            system: system,
+            metrics: mergedMetrics,
+            letsinfer: letsinfer
+        )
+    }
+}
+
+private struct PlacementRuntimeIdentity {
+    let engine: String
+    let name: String
+    let version: String?
+
+    init?(_ value: String) {
+        let identity = value.components(separatedBy: "@sha256:").first ?? value
+        let parts = identity.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 3, !parts[1].isEmpty else { return nil }
+        let targetAndVersion = parts[2].split(
+            separator: "@", maxSplits: 1, omittingEmptySubsequences: false
+        )
+        guard let target = targetAndVersion.first, !target.isEmpty else { return nil }
+        engine = String(parts[1])
+        name = parts[0...1].map(String.init).joined(separator: "/")
+            + "/" + String(target)
+        if targetAndVersion.count == 2, !targetAndVersion[1].isEmpty {
+            version = String(targetAndVersion[1])
+        } else {
+            version = nil
+        }
     }
 }
 

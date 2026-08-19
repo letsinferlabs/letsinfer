@@ -34,15 +34,17 @@ class _BackendHandler(http.server.BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != f"Bearer {BACKEND_SECRET}":
             self.send_error(401)
             return
-        if self.path == "/v1/token-count":
-            payload = json.dumps(
-                {
+        if self.path in {"/v1/token-count", "/v1/messages/count_tokens"}:
+            value = (
+                {"input_tokens": self.server.prompt_tokens}
+                if self.path == "/v1/messages/count_tokens"
+                else {
                     "object": "token_count",
                     "model": MODEL,
                     "prompt_tokens": self.server.prompt_tokens,
-                },
-                separators=(",", ":"),
-            ).encode()
+                }
+            )
+            payload = json.dumps(value, separators=(",", ":")).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -72,6 +74,28 @@ class _BackendHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             self.wfile.flush()
+            self.close_connection = True
+            return
+        if self.server.mode == "stream":
+            chunks = [
+                b'data: {"choices":[{"index":0,"delta":{"content":"a"}}],'
+                b'"usage":{"prompt_tokens":16,"completion_tokens":1}}\n\n',
+                b'data: {"choices":[{"index":0,"delta":{"content":"bc"}}],'
+                b'"usage":{"prompt_tokens":16,"completion_tokens":3}}\n\n',
+                b'data: {"choices":[],"usage":{"prompt_tokens":16,'
+                b'"completion_tokens":3}}\n\ndata: [DONE]\n\n',
+            ]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(chunks[0])
+            self.wfile.flush()
+            self.server.stream_started.set()
+            self.server.release_stream.wait(timeout=5)
+            for chunk in chunks[1:]:
+                self.wfile.write(chunk)
+                self.wfile.flush()
             self.close_connection = True
             return
 
@@ -104,10 +128,13 @@ class _Backend(http.server.ThreadingHTTPServer):
         self.mode = mode
         self.prompt_tokens = prompt_tokens
         self.requests: list[tuple[str, bytes]] = []
+        self.stream_started = threading.Event()
+        self.release_stream = threading.Event()
         self.worker = threading.Thread(target=self.serve_forever, daemon=True)
         self.worker.start()
 
     def close(self) -> None:
+        self.release_stream.set()
         self.shutdown()
         self.server_close()
         self.worker.join(timeout=2)
@@ -388,6 +415,64 @@ class LiveGatewayTests(unittest.TestCase):
         self.assertEqual(rows[0]["output_tokens"], 4)
         self.assertEqual(rows[0]["cached_tokens"], 2)
         self.assertEqual(rows[0]["exact_tokens"], 1)
+
+    def test_sglang_stream_usage_updates_live_and_reconciles_once(self) -> None:
+        backend = self.backends[0]
+        backend.mode = "stream"
+        with state.SiteStore(identity=self.identity) as store:
+            placement = self._placement(self.backends)
+            placement["runtime"] = f"{MODEL}/sglang/target@1"
+            placement["endpoints"][0]["token_count_protocol"] = (
+                "sglang-anthropic-count-tokens-v1"
+            )
+            placement["endpoints"][0]["token_count_path"] = (
+                "/v1/messages/count_tokens"
+            )
+            store.set_placement(placement)
+        self.gateway.policy.reload(force=True)
+
+        result: list[tuple[int, bytes]] = []
+        worker = threading.Thread(
+            target=lambda: result.append(self._request(
+                "/v1/chat/completions",
+                token=self.token,
+                body={
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 16,
+                    "stream": True,
+                },
+            )),
+            daemon=True,
+        )
+        worker.start()
+        self.assertTrue(backend.stream_started.wait(timeout=2))
+        deadline = time.monotonic() + 2
+        while (
+            self.gateway.metrics.snapshot()["output_tokens"] < 1
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        live = self.gateway.metrics.snapshot()
+        self.assertEqual(live["input_tokens"], 16)
+        self.assertEqual(live["output_tokens"], 1)
+        self.assertEqual(live["active_requests"], 1)
+
+        backend.release_stream.set()
+        worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result[0][0], 200)
+        sent = json.loads(backend.requests[0][1])
+        self.assertEqual(sent["stream_options"], {
+            "include_usage": True,
+            "continuous_usage_stats": True,
+        })
+        final = self.gateway.metrics.snapshot()
+        self.assertEqual(final["input_tokens"], 16)
+        self.assertEqual(final["output_tokens"], 3)
+        rows = self._summaries()
+        self.assertEqual(rows[0]["input_tokens"], 16)
+        self.assertEqual(rows[0]["output_tokens"], 3)
 
     def test_backend_is_never_retried_after_response_headers(self) -> None:
         self.backends[0].mode = "partial"
