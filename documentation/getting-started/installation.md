@@ -111,9 +111,11 @@ existing stopped container only when both identities still match the active
 service configuration. A missing or different identity fails closed, so an
 upgrade cannot adopt a predecessor container or its integration mount.
 
-OCI installation requires the `oras` CLI. Mutable tags are rejected. A local
-directory is explicit developer input; production installations should come
-from a trusted catalog or an exact OCI digest.
+Public OCI runtime packs are pulled and digest-verified by Let's Infer without
+an external client. Private or otherwise authenticated registries can use an
+installed `oras` companion for their credential flow. Mutable tags are
+rejected. A local directory is explicit developer input; production
+installations should come from a trusted catalog or an exact OCI digest.
 Let's Infer core contains no built-in model releases.
 
 An unqualified candidate can be imported with all exact dependencies, but
