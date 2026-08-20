@@ -209,7 +209,10 @@ with a stable machine reason and the observed ready-service count. Transitional
 states are successful status observations, not health failures. The interactive
 card renders startup as `STARTING`: the gateway waits for model identity, the
 engine runs health checks, protection arms after readiness, and the remaining
-unit is described as activating. A protection trip always takes precedence and
+unit is described as activating. Gateway and runtime request-path rows inherit
+that same transition, so an isolated benchmark container swap is never
+mislabelled as an unavailable API or stopped runtime while startup is active. A
+protection trip always takes precedence and
 renders `BLOCKED`; terminal engine or Docker health failures render `FAILED`.
 API reachability and authentication come from live gateway probes even when
 runtime metadata is incompatible; the version row names that incompatibility

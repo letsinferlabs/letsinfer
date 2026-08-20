@@ -392,17 +392,37 @@ def dashboard_lines(
         ).rstrip()
 
     lines.extend(("", "Request path", terminal.paint("○  CLIENT", ui.DIM), terminal.paint("│", ui.DIM)))
-    gateway_state = "API Ready" if api_process_ready and route_ready else "UNAVAILABLE"
-    gateway_color = ui.GREEN if gateway_state == "API Ready" else ui.RED
+    gateway_state = (
+        "API Ready"
+        if api_process_ready and route_ready
+        else "STARTING"
+        if lifecycle_state == "starting"
+        else "UNAVAILABLE"
+    )
+    gateway_color = (
+        ui.GREEN
+        if gateway_state == "API Ready"
+        else ui.CYAN
+        if gateway_state == "STARTING"
+        else ui.RED
+    )
     lines.append(route("GATEWAY", gateway_state, endpoint, gateway_color))
     lines.extend(
         (
             terminal.paint("│", ui.DIM),
             route(
                 "RUNTIME",
-                "SERVING" if runtime_ready else "STOPPED",
+                "SERVING"
+                if runtime_ready
+                else "STARTING"
+                if lifecycle_state == "starting"
+                else "STOPPED",
                 f"{model} · {engine}",
-                ui.GREEN if runtime_ready else ui.RED,
+                ui.GREEN
+                if runtime_ready
+                else ui.CYAN
+                if lifecycle_state == "starting"
+                else ui.RED,
             ),
             terminal.paint("│", ui.DIM),
             route(
