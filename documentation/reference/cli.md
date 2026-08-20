@@ -225,6 +225,13 @@ room and excess requests queue. This is the same contract for DwarfStar,
 llama.cpp, SGLang, vLLM, and future adapters; the core contains no engine-specific
 pressure branch.
 
+`doctor` resolves the same active runtime slot as `status` and lifecycle
+commands. When a qualification candidate owns that slot, it validates the
+candidate manifest, container, protection binding, gateway, and shared control
+services while requiring the resident engine and recovery loop to remain
+quiesced. Operational readiness and stable-publication readiness remain
+separate results.
+
 The default queue wait has no server-side deadline and ends only when capacity
 becomes available or the client disconnects. An explicit
 `--gateway-queue-timeout` from 1 to 3600 seconds provides a finite deployment

@@ -561,8 +561,12 @@ source development on a machine without the installed runtime, use
 `--source-only`. `status` reports TLS, authentication, Docker health, restart
 policy, Watchdog protection/engine/recovery state, serving capacity, trip latch,
 and watchdog memory.
-`doctor` performs the stricter operational readiness audit and separately
-reports whether the candidate is publishable as a stable release. `logs`,
+`doctor` performs the stricter operational readiness audit against the active
+runtime slot and separately reports whether that runtime is publishable as a
+stable release. A healthy qualification candidate can therefore be
+operational without being publication-ready; an inactive resident selection
+is retained only as rollback metadata and is not audited as the serving
+runtime. `logs`,
 `start`, `restart`, `recover`, `stop`, and `uninstall` cover the service
 lifecycle. `restart` never clears a safety trip; `recover` is the explicit
 trip acknowledgement and recovery action.
@@ -683,7 +687,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.22`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.23`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its
