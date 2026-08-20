@@ -285,7 +285,7 @@ class TopologyTests(unittest.TestCase):
                     now_unix=1_700_000_000,
                 )
             self.assertTrue(pressured["health"]["memory_pressure"])
-            self.assertEqual(pressured["health"]["state"], "degraded")
+            self.assertEqual(pressured["health"]["state"], "healthy")
 
     def test_distributed_requires_bidirectional_verified_link(self) -> None:
         left, right = "1" * 32, "2" * 32
@@ -322,12 +322,14 @@ class TopologyTests(unittest.TestCase):
         with self.assertRaisesRegex(TopologyError, "exceeds"):
             TopologyGraph([exaggerated, facts(right, left)])
 
-    def test_pressure_and_stale_facts_fail_closed(self) -> None:
+    def test_memory_telemetry_does_not_block_placement_but_stale_facts_do(self) -> None:
         member_id = "1" * 32
         pressured = facts(member_id)
         pressured["health"]["memory_pressure"] = True
-        with self.assertRaisesRegex(TopologyError, "found 0"):
-            TopologyGraph([pressured]).resolve(target("single", 1), coordinator_id=member_id)
+        placement = TopologyGraph([pressured]).resolve(
+            target("single", 1), coordinator_id=member_id
+        )
+        self.assertEqual(placement.member_ids, (member_id,))
         stale = facts(member_id)
         stale["observed_at_unix"] -= 31
         with self.assertRaisesRegex(TopologyError, "stale"):

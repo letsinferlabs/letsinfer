@@ -297,7 +297,7 @@ class LiveGatewayTests(unittest.TestCase):
             ["fixture", MODEL],
         )
 
-    def test_memory_pressure_keeps_discovery_but_pauses_inference(self) -> None:
+    def test_memory_pressure_keeps_discovery_and_allows_engine_progress(self) -> None:
         with state.SiteStore(identity=self.identity) as store:
             for index in range(len(self.backends)):
                 member_id = f"{index + 1:032x}"
@@ -313,24 +313,17 @@ class LiveGatewayTests(unittest.TestCase):
             [item["id"] for item in json.loads(body)["data"]],
             ["fixture", MODEL],
         )
-        with self.assertRaises(urllib.error.HTTPError) as raised:
-            self._request(
-                "/v1/chat/completions",
-                body={
-                    "model": MODEL,
-                    "messages": [{"role": "user", "content": "hello"}],
-                    "max_tokens": 1,
-                },
-                token=self.token,
-            )
-        self.assertEqual(raised.exception.code, 503)
-        error_payload = json.loads(raised.exception.read())
-        self.assertEqual(error_payload, {
-            "error": {
-                "message": "qualified placement is waiting for memory headroom",
-                "type": "memory_pressure",
-            }
-        })
+        status, body = self._request(
+            "/v1/chat/completions",
+            body={
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 1,
+            },
+            token=self.token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["choices"][0]["message"]["content"], "ok")
 
     def test_impossible_context_fails_before_memory_pressure_queue(self) -> None:
         with state.SiteStore(identity=self.identity) as store:
@@ -366,6 +359,56 @@ class LiveGatewayTests(unittest.TestCase):
             }
         })
         self.assertEqual([backend.requests for backend in self.backends], [[], []])
+
+    def test_disconnected_client_is_removed_from_unlimited_queue(self) -> None:
+        self.gateway.queue_timeout_seconds = 0
+        held = [
+            self.gateway.policy.acquire_backend(
+                MODEL, prefix_key=None, timeout=0.1
+            )[0]
+            for _ in self.backends
+        ]
+        client = socket.create_connection(
+            ("127.0.0.1", self.gateway.server_port), timeout=2
+        )
+        body = json.dumps({
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 1,
+        }).encode()
+        request = (
+            f"POST /v1/chat/completions HTTP/1.1\r\n"
+            f"Host: 127.0.0.1\r\n"
+            f"Authorization: Bearer {self.token}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode() + body
+        try:
+            client.sendall(request)
+            deadline = time.monotonic() + 2
+            while (
+                self.gateway.metrics.snapshot()["queued_requests"] != 1
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            self.assertEqual(
+                self.gateway.metrics.snapshot()["queued_requests"], 1
+            )
+            client.close()
+            deadline = time.monotonic() + 2
+            while (
+                self.gateway.metrics.snapshot()["queued_requests"] != 0
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            metrics = self.gateway.metrics.snapshot()
+            self.assertEqual(metrics["queued_requests"], 0)
+            self.assertEqual(metrics["requests_cancelled"], 1)
+        finally:
+            client.close()
+            for backend in held:
+                self.gateway.policy.release_backend(backend)
 
     def test_browser_preflight_and_model_listing_preserve_api_key_auth(self) -> None:
         preflight = urllib.request.Request(

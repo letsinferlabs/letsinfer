@@ -43,6 +43,19 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("Resolving runtime", stream.getvalue())
         self.assertIn("Ready", stream.getvalue())
 
+    def test_logo_highlights_the_lockup_as_a_light_badge(self) -> None:
+        stream = FakeStream(tty=True)
+        terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
+        rendered = terminal.logo()
+        self.assertIn(
+            ui.BOLD
+            + ui.DARK
+            + ui.LIGHT_BACKGROUND
+            + " ϟ  LET'S INFER "
+            + ui.RESET,
+            rendered,
+        )
+
     def test_no_color_keeps_interaction_without_escape_styling(self) -> None:
         stream = FakeStream(tty=True)
         terminal = ui.Terminal(
@@ -236,13 +249,25 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("0.11.0-rc.3", rendered)
         self.assertIn("557K context", rendered)
         self.assertIn("homeai.local:8000/v1", rendered)
-        self.assertIn("19.0 MiB", rendered)
-        self.assertIn("30.0 MiB limit", rendered)
+        self.assertIn("19.0 / 30 MiB", rendered)
         self.assertIn("Request path", rendered)
         self.assertIn("Scheduler", rendered)
         self.assertIn("Performance", rendered)
         self.assertIn("58.9 tok/s", rendered)
         self.assertIn("\033[", rendered)
+        plain = ui.ANSI.sub("", rendered)
+        scheduler = plain.partition("Scheduler")[2].partition("Performance")[0]
+        self.assertNotIn("█", scheduler)
+        self.assertNotIn("· ·", scheduler)
+        header = next(line for line in plain.splitlines() if "LET'S INFER" in line)
+        self.assertRegex(header, r"Home\s+✓\s+Uptime —\s+ϟ\s+LET'S INFER")
+        self.assertGreater(header.index("LET'S INFER"), header.index("Uptime"))
+        summary = rendered.partition("Request path")[0]
+        self.assertNotIn("LIVE", summary)
+        self.assertNotIn("dgx-spark", summary)
+        self.assertNotIn("runtime pack", summary)
+        self.assertNotIn("candidate control plane active", summary)
+        self.assertNotIn("candidate guarded", summary)
 
     def test_runtime_status_calls_out_a_protection_trip(self) -> None:
         stream = FakeStream(tty=True)
@@ -274,14 +299,18 @@ class TerminalTests(unittest.TestCase):
             environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
         )
         rendered = stream.getvalue()
-        self.assertIn("ATTENTION", rendered)
+        self.assertIn("FAILED", rendered)
         self.assertIn("Blocked", rendered)
         self.assertNotIn("\033[", rendered)
 
-    def test_status_history_uses_distinct_yellow_to_red_charts(self) -> None:
+    def test_status_history_uses_the_exact_six_color_design_palette(self) -> None:
         stream = FakeStream(tty=True)
         terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
         payload = {
+            "service": {
+                "memory_current_bytes": 15 * 1024 * 1024,
+                "memory_limit_bytes": 30 * 1024 * 1024,
+            },
             "telemetry": {
                 "history": [
                     {
@@ -302,6 +331,9 @@ class TerminalTests(unittest.TestCase):
                     "memory_percent": 2,
                     "cpu_percent": 3,
                     "disk_percent": 4,
+                    "power_deci_w": 50,
+                    "network_rx_kib_s": 3,
+                    "network_tx_kib_s": 3,
                 },
             }
         }
@@ -314,18 +346,127 @@ class TerminalTests(unittest.TestCase):
                     "memory": [2, 3],
                     "cpu": [3, 4],
                     "nvme": [4, 5],
+                    "power": [4, 5],
+                    "network": [5, 6],
                 },
             )
         )
-        for color in (
-            ui.YELLOW,
-            "\033[38;2;255;166;0m",
-            "\033[38;2;252;148;0m",
-            ui.ORANGE,
-            "\033[38;2;237;93;26m",
-            ui.RED,
-        ):
+        self.assertEqual(
+            ui.HISTORY_CHART_COLORS,
+            (
+                "\033[38;2;0;156;223m",
+                "\033[38;2;151;57;153m",
+                "\033[38;2;97;187;70m",
+                "\033[38;2;255;185;0m",
+                "\033[38;2;247;130;0m",
+                "\033[38;2;226;56;56m",
+            ),
+        )
+        for color in ui.HISTORY_CHART_COLORS[2:]:
             self.assertIn(color, rendered)
+            self.assertNotIn(ui.DIM + color, rendered)
+        performance = rendered.partition("Performance")[2].partition("System")[0]
+        system = rendered.partition("System")[2].partition("Temperature")[0]
+        self.assertIn("Requests", performance)
+        self.assertIn("Watchdog", performance)
+        self.assertNotIn(ui.HISTORY_CHART_COLORS[0], performance)
+        self.assertNotIn(ui.HISTORY_CHART_COLORS[1], performance)
+        self.assertIn("Unified mem", system)
+        self.assertIn("Power", system)
+        self.assertIn("Network", system)
+        self.assertNotIn("Tokens", system)
+        self.assertNotIn("Requests", system)
+
+    def test_status_utilization_history_uses_an_absolute_percent_scale(self) -> None:
+        stream = FakeStream(tty=True)
+        terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
+        rendered = "\n".join(
+            status_ui.dashboard_lines(
+                {
+                    "telemetry": {
+                        "system": {
+                            "gpu_percent": 2,
+                            "memory_percent": 27,
+                            "cpu_percent": 10,
+                            "disk_percent": 20,
+                        }
+                    }
+                },
+                terminal,
+                session_history={
+                    "gpu": [2] * 24,
+                    "memory": [27] * 24,
+                    "cpu": [10] * 24,
+                    "nvme": [20] * 24,
+                },
+            )
+        )
+        history = ui.ANSI.sub("", rendered).partition("System")[2].partition("Temperature")[0]
+        rows = {
+            fields[0]: fields[-1]
+            for line in history.splitlines()
+            if (fields := line.strip(" │").split())
+        }
+        self.assertEqual(rows["GPU"], "▁" * 24)
+        self.assertEqual(rows["Unified"], "▃" * 24)
+        self.assertEqual(rows["CPU"], "▂" * 24)
+        self.assertEqual(rows["NVMe"], "▂" * 24)
+
+    def test_status_system_temperatures_are_bold_without_bolding_details(self) -> None:
+        stream = FakeStream(tty=True)
+        terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
+        rendered = "\n".join(
+            status_ui.dashboard_lines(
+                {
+                    "telemetry": {
+                        "system": {
+                            "gpu_temp_deci_c": 410,
+                            "gpu_clock_mhz": 2460,
+                            "system_temp_deci_c": 550,
+                            "cpu_clock_mhz": 3900,
+                            "nvme_temp_deci_c": 430,
+                            "disk_read_kib_s": 10,
+                            "disk_write_kib_s": 20,
+                        }
+                    }
+                },
+                terminal,
+            )
+        )
+        for temperature in ("41°C", "55°C", "43°C"):
+            self.assertIn(ui.BOLD + temperature, rendered)
+        temperature = rendered.partition("Temperature")[2]
+        self.assertNotIn("2.46G", temperature)
+        self.assertNotIn("R10/W20", temperature)
+
+    def test_status_temperature_history_uses_a_fixed_120_degree_scale(self) -> None:
+        stream = FakeStream(tty=True)
+        terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
+        rendered = "\n".join(
+            status_ui.dashboard_lines(
+                {
+                    "telemetry": {
+                        "system": {
+                            "gpu_temp_deci_c": 600,
+                            "system_temp_deci_c": 1200,
+                        }
+                    }
+                },
+                terminal,
+                session_history={
+                    "gpu_temp": [60.0] * 24,
+                    "cpu_temp": [120.0] * 24,
+                },
+            )
+        )
+        temperature = ui.ANSI.sub("", rendered).partition("Temperature")[2]
+        rows = {
+            fields[0]: fields[-1]
+            for line in temperature.splitlines()
+            if (fields := line.strip(" │").split())
+        }
+        self.assertEqual(rows["GPU"], "▅" * 24)
+        self.assertEqual(rows["CPU"], "█" * 24)
 
     def test_runtime_status_renders_startup_as_a_transition(self) -> None:
         stream = FakeStream(tty=True)
@@ -425,13 +566,61 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("dgx-spark", rendered)
         self.assertIn("0.1.0-rc.5", rendered)
         self.assertIn("262K context", rendered)
-        self.assertIn("3 / 3 active", rendered)
-        self.assertIn("candidate control plane active", rendered)
-        self.assertIn("API          Ready", rendered)
+        self.assertNotIn("Services", rendered)
+        self.assertNotIn("candidate control plane active", rendered)
+        self.assertIn("State        ✓  SERVING", rendered)
+        self.assertIn("API          ✓  homeai.local:8000/v1", rendered)
+        self.assertRegex(rendered, r"Guard\s+✓")
+        self.assertNotIn("Armed", rendered)
         self.assertNotIn("FAILED", rendered)
         self.assertNotIn("unit(s) need attention", rendered)
 
-    def test_runtime_status_names_memory_pressure_without_hiding_the_runtime(self) -> None:
+    def test_runtime_status_labels_an_intentionally_stopped_candidate(self) -> None:
+        stream = FakeStream(tty=True)
+        payload = {
+            "service": {
+                "active": "active",
+                "engine_active": "inactive",
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+                "gateway_model_identity": False,
+                "site_active": "active",
+                "runtime_mode": "qualification",
+            },
+            "container": {
+                "state": "exited",
+                "healthy": False,
+                "docker_health": "unhealthy",
+                "model_identity": False,
+                "model": "qwen3.8-27b",
+                "engine": "sglang",
+                "target": "dgx-spark",
+                "runtime_version": "0.1.0-rc.5",
+            },
+            "protection": {
+                "phase": "disarmed",
+                "armed": False,
+                "trip_latched": False,
+            },
+        }
+        payload["lifecycle"] = letsinfer.runtime_lifecycle(payload)
+        self.assertEqual(payload["lifecycle"]["state"], "stopped")
+        self.assertEqual(payload["lifecycle"]["reason"], "runtime-stopped")
+        ui.runtime_status(
+            payload,
+            stream=stream,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
+        )
+        rendered = stream.getvalue()
+        self.assertIn("STOPPED", rendered)
+        self.assertIn("Disarmed", rendered)
+        self.assertIn("intentional stop · no trip", rendered)
+        self.assertNotIn("FAILED", rendered)
+        self.assertNotIn("Blocked", rendered)
+
+    def test_memory_headroom_is_telemetry_not_a_runtime_state(self) -> None:
         stream = FakeStream(tty=True)
         payload = {
             "service": {
@@ -468,20 +657,29 @@ class TerminalTests(unittest.TestCase):
                 },
             },
             "protection": {"armed": True, "trip_latched": False},
+            "telemetry": {"active_requests": 0, "queued_requests": 1},
         }
         payload["lifecycle"] = letsinfer.runtime_lifecycle(payload)
-        self.assertEqual(payload["lifecycle"]["reason"], "memory-pressure")
+        self.assertEqual(payload["lifecycle"]["reason"], "all-components-ready")
         ui.runtime_status(
             payload,
             stream=stream,
             environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
         )
         rendered = stream.getvalue()
-        self.assertIn("PRESSURE", rendered)
-        self.assertIn("API          Paused", rendered)
-        self.assertIn("3.5 GiB available", rendered)
-        self.assertIn("4.0 GiB floor", rendered)
+        self.assertIn("SERVING", rendered)
+        self.assertIn("API          ✓  homeai.local:8000/v1", rendered)
+        self.assertRegex(rendered, r"Guard\s+✓")
+        self.assertNotIn("Armed", rendered)
+        self.assertIn("1 queued", rendered)
         self.assertIn("RUNTIME   SERVING", rendered)
+        self.assertIn("GATEWAY   API Ready", rendered)
+        performance = rendered.split("Performance", 1)[1].split("System", 1)[0]
+        self.assertIn("Requests     0 active · 1 queued", performance)
+        self.assertNotIn("PRESSURE", rendered)
+        self.assertNotIn("Queuing", rendered)
+        self.assertNotIn("GiB available", rendered)
+        self.assertNotIn("floor", rendered)
         self.assertNotIn("✓ API ready", rendered)
         self.assertNotIn("✓ Runtime serving", rendered)
         self.assertNotIn("✓ Protection armed", rendered)
@@ -567,7 +765,7 @@ class TerminalTests(unittest.TestCase):
             environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
         )
         rendered = stream.getvalue()
-        self.assertIn("API          Ready", rendered)
+        self.assertIn("API          ✓  homeai.local:8000/v1", rendered)
         self.assertIn("ATTENTION", rendered)
         self.assertNotIn("API          Unavailable", rendered)
 
@@ -641,8 +839,7 @@ class TerminalTests(unittest.TestCase):
         rendered = stream.getvalue()
         plain = re.sub(r"\x1b\[[0-9;]*m", "", rendered)
         self.assertTrue(all(len(line) <= 80 for line in plain.splitlines()))
-        self.assertIn("Services", plain)
-        self.assertIn("5 / 5 active", plain)
+        self.assertNotIn("Services", plain)
 
 
 class HelpTests(unittest.TestCase):
@@ -875,7 +1072,10 @@ class MainOutputTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(stdout.getvalue(), "INSTALLED RUNTIME fixture\n")
         self.assertIn("Installing the runtime", stderr.getvalue())
-        self.assertIn("LET'S INFER  /  INSTALL", stderr.getvalue())
+        self.assertIn(
+            "LET'S INFER  /  INSTALL",
+            ui.ANSI.sub("", stderr.getvalue()),
+        )
         self.assertIn("Runtime installed", stderr.getvalue())
         self.assertIn(ui.CLEAR_LINE, stderr.getvalue())
 

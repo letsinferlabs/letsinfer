@@ -245,6 +245,9 @@ class CoreUpdateTests(unittest.TestCase):
                     "run_passthrough",
                     side_effect=lambda value: commands.append(list(value)),
                 ),
+                mock.patch.object(
+                    letsinfer, "disarm_before_planned_stop"
+                ) as disarm,
                 mock.patch.object(letsinfer, "install_site_service_only") as install_site,
                 mock.patch.object(
                     letsinfer, "install_core_watchdog_service"
@@ -277,6 +280,7 @@ class CoreUpdateTests(unittest.TestCase):
             identity, replace_active=True, runtime_manifest=manifest
         )
         install_gateway.assert_called_once_with(replace_active=True)
+        disarm.assert_called_once_with({})
 
     def test_core_plane_handoff_stops_an_incompatible_runtime(self) -> None:
         commands: list[list[str]] = []
@@ -303,6 +307,9 @@ class CoreUpdateTests(unittest.TestCase):
                     "run_passthrough",
                     side_effect=lambda value: commands.append(list(value)),
                 ),
+                mock.patch.object(
+                    letsinfer, "disarm_before_planned_stop"
+                ) as disarm,
                 mock.patch.object(letsinfer, "install_site_service_only"),
                 mock.patch.object(
                     letsinfer, "install_core_watchdog_service"
@@ -323,6 +330,7 @@ class CoreUpdateTests(unittest.TestCase):
         install_watchdog.assert_called_once_with(
             identity, replace_active=True, runtime_manifest=None
         )
+        disarm.assert_called_once_with({})
 
     def test_core_plane_handoff_uses_the_active_candidate_not_stale_resident(self) -> None:
         identity = mock.Mock(role="coordinator")

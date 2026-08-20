@@ -29,23 +29,21 @@ watchdog_safety_decision watchdog_safety_decide(
     if (watchdog_safety_validate_thresholds(thresholds) != 0 || input == NULL) {
         return decision;
     }
-    if (input->available_bytes <= thresholds->emergency_available_bytes) {
-        return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_KILL, "host_memory_emergency"};
-    }
     if (input->cgroup_oom_kill_delta != 0
         || input->cgroup_oom_group_kill_delta != 0) {
         return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_KILL, "cgroup_oom_kill"};
     }
     /*
-     * Available-memory, swap, and PSI thresholds are admission signals.  The
-     * site agent publishes them and the gateway stops dispatching new work
-     * until headroom returns.  They must not turn ordinary KV-cache pressure
-     * into a destructive engine lifecycle event.  Containment is reserved for
-     * the hard emergency floor and observed cgroup limit/OOM events below.
+     * Available-memory, swap, PSI, and non-fatal cgroup allocation failures
+     * are observations for the shared state plane. A memory.max or oom counter
+     * without an oom_kill proves only that one allocation was denied; an
+     * engine may reject that request and remain healthy. These observations
+     * must neither override the engine's declared scheduler capacity nor turn
+     * ordinary KV-cache pressure into a destructive lifecycle event. Low host
+     * headroom alone is not proof that the protected runtime faulted.
+     * Containment is reserved for observed kernel OOM kills above. An engine
+     * that exits after a denied allocation is independently caught by pidfd.
      */
-    if (input->cgroup_oom_delta != 0 || input->cgroup_max_delta != 0) {
-        return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_STOP, "cgroup_memory_limit"};
-    }
     return decision;
 }
 

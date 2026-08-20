@@ -216,16 +216,26 @@ one-second dashboard and runs until `Ctrl-C`; `--json` and redirected output
 remain one-shot machine interfaces. The dashboard uses the authenticated site
 telemetry feed for scheduler, throughput, history, and system readings.
 
-Host memory pressure is a degraded admission state, not an API-process crash.
-Model discovery remains available, the dashboard names the available-memory
-and runtime-floor values, and new inference waits in the normal bounded queue
-until headroom returns. If the queue timeout expires, the request receives a
-structured `memory_pressure` 503; the healthy runtime is not stopped. Exact
-token counting happens before that pressure wait when the adapter declares the
-capability, so a chat that cannot fit any qualified placement receives an
-immediate `context_length_exceeded` 400 and is never dispatched. Watchdog
-contains only a hard emergency-floor or observed cgroup limit/OOM event. Such
-a protection trip remains a hard failure and still requires `letsinfer recover`.
+Host available memory is telemetry, not an availability or admission signal.
+Loaded engines commonly reserve weights, KV cache, and graph workspaces before
+serving, so a static host-headroom threshold cannot safely describe remaining
+request capacity. The shared state plane uses the engine-neutral capacity
+declared by the active runtime: requests enter while `max_active_requests` has
+room and excess requests queue. This is the same contract for DwarfStar,
+llama.cpp, SGLang, vLLM, and future adapters; the core contains no engine-specific
+pressure branch.
+
+The default queue wait has no server-side deadline and ends only when capacity
+becomes available or the client disconnects. An explicit
+`--gateway-queue-timeout` from 1 to 3600 seconds provides a finite deployment
+policy; `0` means unlimited. Exact token counting happens before capacity
+admission when the adapter declares the capability, so a chat that cannot fit
+any qualified placement receives an immediate `context_length_exceeded` 400
+and is never dispatched. A non-fatal cgroup allocation denial does not trip or
+stop a surviving runtime. Watchdog contains only after an observed kernel
+cgroup OOM kill, an unexpected protected-process exit, or unavailable
+protection identity. Such a protection trip remains a hard failure and still
+requires `letsinfer recover`.
 A missing measurement is rendered as unavailable rather than inferred.
 
 `releases` lists installed runtime manifests, not test fixtures or a bundled

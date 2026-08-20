@@ -14,16 +14,27 @@ It monitors Spark's unified-memory availability, swap, memory PSI, and cgroup
 OOM/limit events.
 
 Every runtime manifest must declare its target-specific warning,
-graceful-reserve, emergency-kill, swap, PSI, and containment thresholds. Core
+graceful-reserve, critical-pressure, swap, PSI, and containment thresholds. Core
 requires the warning floor to cover the runtime admission reserve and requires
 strictly ordered warning, graceful, and emergency floors; it does not infer a
 missing runtime threshold. The native executable likewise has no threshold
 defaults and refuses to start unless all manifest-derived memory, swap, PSI,
 state-failure, and containment values are supplied. Warning, graceful-reserve,
-swap, and PSI observations pause gateway admission and emit telemetry; they do
-not stop a healthy engine. New requests remain in the bounded gateway queue
-until headroom returns. Watchdog contains the engine only at the hard emergency
-floor or after an observed cgroup limit/OOM event. A trip is durably latched. Automatic recovery
+swap, PSI, host-headroom, and non-fatal cgroup allocation-limit observations
+are telemetry inputs to the shared state plane; they do not stop a healthy
+engine or override its declared scheduler capacity, including below the
+critical host-memory floor. The gateway admits up to the active runtime's
+`max_active_requests` and queues excess work identically for every engine
+adapter. Watchdog contains the engine only after an observed kernel cgroup OOM
+kill or an unexpected protected-process exit. Repeated loss or corruption of
+the private protection
+descriptor emits one degraded guard event while Watchdog continues monitoring
+the already-bound pidfd and cgroup; metadata loss alone neither stops nor trips
+a healthy runtime. Every deliberate process exit—including stop, restart,
+candidate replacement, benchmark isolation, core rebind, and uninstall—is
+gated on an acknowledged disarmed generation. A missing descriptor is rebuilt
+as a fresh disarmed generation and acknowledged before the exit proceeds.
+A trip is durably latched. Automatic recovery
 handles ordinary crashes and unhealthy containers but refuses an OOM or safety
 trip until an operator inspects it and runs `letsinfer recover`. `start` and
 `restart` never clear a trip. `recover` explicitly clears the safety latch and
