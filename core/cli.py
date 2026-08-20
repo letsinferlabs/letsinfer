@@ -117,6 +117,8 @@ from .runtime_packs import (
     verify_descriptor,
     write_selection,
 )
+from .updates import Component, UpdateManager, UpdatePoller
+from .updates.manager import UpdateError
 from . import benchmark_jobs, ui
 from .state_plane import runtime_lifecycle as derive_runtime_lifecycle
 from .platform import macos as macos_services
@@ -330,6 +332,91 @@ def target_contract(manifest: dict[str, Any]) -> dict[str, Any]:
 
 def source_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1]
+
+
+def _core_update_identity() -> str:
+    """Bind cached advice to the exact immutable core directory in use."""
+    root = source_root().resolve(strict=False)
+    manifest = root / CORE_SOURCE_MANIFEST
+    try:
+        document = (
+            json.loads(manifest.read_text(encoding="utf-8"))
+            if not manifest.is_symlink() and manifest.is_file()
+            else None
+        )
+        records = {
+            row["path"]: row["sha256"]
+            for row in document.get("files", [])
+            if isinstance(row, dict)
+            and isinstance(row.get("path"), str)
+            and isinstance(row.get("sha256"), str)
+        }
+        bound_paths = ("core/cli.py", "core/updates/manager.py")
+        if all(
+            records.get(relative) == sha256_file(root / relative)
+            for relative in bound_paths
+        ):
+            return sha256_file(manifest)
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        pass
+    # Development trees do not necessarily have a freshly materialized source
+    # manifest. Bind their cache to the update-facing implementation bytes;
+    # every installed release takes the exact manifest-bound branch above.
+    digest = hashlib.sha256(str(root).encode("utf-8"))
+    for relative in ("core/__init__.py", "core/cli.py", "core/updates/manager.py"):
+        path = root / relative
+        digest.update(relative.encode("utf-8"))
+        try:
+            digest.update(bytes.fromhex(sha256_file(path)))
+        except OSError:
+            digest.update(b"missing")
+    return digest.hexdigest()
+
+
+def _update_components() -> tuple[Component, ...]:
+    """Return core plus the one selected resident or qualification runtime."""
+    components = [
+        Component("core", "core", PRODUCT_VERSION, _core_update_identity())
+    ]
+    config_path = (
+        qualification_service_config_path()
+        if qualification_service_config_path().is_file()
+        else default_service_config_path()
+    )
+    if not config_path.is_file():
+        return tuple(components)
+    try:
+        config = read_service_config(config_path)
+        runtime_digest = config.get("runtime_digest")
+        receipt = next(
+            item for item in selections() if item["digest"] == runtime_digest
+        )
+        components.append(
+            Component(
+                "runtime",
+                receipt["model"],
+                receipt["version"],
+                receipt["digest"],
+                policy=receipt["policy"],
+                model=receipt["model"],
+                engine=receipt["engine"],
+                target=receipt["target"],
+                target_contract_sha256=receipt["target_contract_sha256"],
+                installed_source=receipt["source"],
+            )
+        )
+    except (LetsInferError, RuntimePackError, UpdateError, StopIteration):
+        # Core advice remains available while a partially removed runtime is
+        # repaired. Never let advisory state break another CLI command.
+        pass
+    return tuple(components)
+
+
+def _update_manager(catalog: str | None = None) -> UpdateManager:
+    return UpdateManager(
+        _update_components,
+        catalog_location=lambda: resolved_catalog_location(catalog),
+    )
 
 
 def releases_dir() -> pathlib.Path:
@@ -2210,6 +2297,64 @@ def clear_protection_trip(config: dict[str, Any]) -> bool:
 def protection_trip_latched(config: dict[str, Any]) -> bool:
     _, _, trip_path = protection_paths(config)
     return trip_path.is_file() and not trip_path.is_symlink()
+
+
+def retire_qualification_protection_slot(config: dict[str, Any]) -> None:
+    """Remove one safely retired qualification target from Watchdog's slot table."""
+    root = expanded_path(config["protection_root"])
+    if not root.exists():
+        return
+    if root.is_symlink():
+        raise LetsInferError("qualification protection root cannot be a symlink")
+    try:
+        expected = (
+            expanded_path(config["watchdog_data_root"])
+            / PROTECTION_ROOT_NAME
+            / config["placement_id"]
+        )
+    except (KeyError, TypeError) as error:
+        raise LetsInferError(
+            "qualification protection slot has an incomplete identity"
+        ) from error
+    try:
+        if root.resolve(strict=True) != expected.resolve(strict=True):
+            raise LetsInferError(
+                "refusing to retire a non-canonical qualification protection slot"
+            )
+    except OSError as error:
+        raise LetsInferError(
+            f"cannot resolve qualification protection slot: {error}"
+        ) from error
+    details = root.stat()
+    if (
+        not stat.S_ISDIR(details.st_mode)
+        or details.st_uid != os.getuid()
+        or stat.S_IMODE(details.st_mode) & 0o077
+    ):
+        raise LetsInferError(
+            "qualification protection root must be private and user-owned"
+        )
+    if protection_trip_latched(config):
+        raise LetsInferError(
+            "refusing to retire a qualification protection slot with a latched trip"
+        )
+
+    state_path, _, _ = protection_paths(config)
+    if state_path.is_file():
+        phase = _parse_protection_lines(state_path).get("phase")
+        if phase in {"starting", "armed"}:
+            # Watchdog intentionally retains a missing live target. Publish and
+            # await an explicit disarmed generation before removing the
+            # directory so its bounded in-memory slot can be released safely.
+            disarm_protection(config)
+            phase = _parse_protection_lines(state_path).get("phase")
+        if phase not in {"pending", "disarmed"}:
+            raise LetsInferError(
+                f"qualification protection slot is not safely retired: {phase or 'invalid'}"
+            )
+
+    shutil.rmtree(root)
+    _fsync_path(root.parent)
 
 
 def protection_status(
@@ -5714,6 +5859,7 @@ def _retire_qualification_candidate(*, remove_container: bool) -> None:
         write_text(archived_trip, trip_path.read_text(encoding="utf-8"))
         archived_trip.chmod(0o600)
         clear_protection_trip(config)
+    retire_qualification_protection_slot(config)
     state_path.unlink()
     _fsync_path(state_path.parent)
     _restore_resident_watchdog_projection()
@@ -8896,6 +9042,14 @@ def status(arguments: argparse.Namespace) -> int:
             if not isinstance(value, dict):
                 raise LetsInferError("status snapshot is invalid")
             value["exit_code"] = code
+            value["updates"] = [
+                {
+                    "kind": record.kind,
+                    "subject": record.subject,
+                    "version": record.available_version,
+                }
+                for record in _update_manager().cached().available
+            ]
             return value
 
         return ui.live_runtime_status(snapshot)
@@ -11399,6 +11553,76 @@ def update_core(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def check_updates(arguments: argparse.Namespace) -> int:
+    """Synchronously refresh core and selected-runtime availability."""
+    manager = _update_manager(arguments.catalog)
+    try:
+        snapshot = manager.refresh()
+    except (UpdateError, RuntimePackError, OSError) as error:
+        raise LetsInferError(f"update check failed: {error}") from error
+    if arguments.json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "busy": snapshot.busy,
+                    "updates_available": bool(snapshot.available),
+                    "components": [
+                        {
+                            "kind": record.kind,
+                            "subject": record.subject,
+                            "installed_version": record.installed_version,
+                            "available_version": record.available_version,
+                            "available_identity": record.available_identity,
+                            "available_source": record.available_source,
+                            "status": record.status,
+                            "checked_at_unix": record.checked_at_unix,
+                            "verified_at_unix": record.verified_at_unix,
+                            "error_code": record.error_code,
+                        }
+                        for record in snapshot.records
+                    ],
+                },
+                sort_keys=True,
+            )
+        )
+    else:
+        terminal = ui.Terminal(sys.stdout)
+        if terminal.interactive:
+            print(f"{terminal.logo('updates')}\n")
+        if snapshot.busy:
+            terminal.status("Another update check is already running; showing verified state")
+        for record in snapshot.records:
+            label = "Core" if record.kind == "core" else record.subject
+            if record.available:
+                terminal.warning(
+                    f"{label} {record.available_version} available "
+                    f"(installed {record.installed_version})"
+                )
+            elif record.status == "current":
+                terminal.success(f"{label} {record.installed_version} is current")
+            elif record.status == "pinned":
+                terminal.status(f"{label} {record.installed_version} is pinned")
+            else:
+                terminal.error(
+                    f"{label} could not be checked ({record.error_code or record.status})"
+                )
+        if snapshot.available:
+            for record in snapshot.available:
+                if record.kind == "core":
+                    terminal.status(
+                        f"Apply with `letsinfer update --version {record.available_version}`"
+                    )
+                else:
+                    terminal.status(f"Apply with `letsinfer upgrade {record.subject}`")
+    return int(
+        any(
+            record.status in {"unknown", "integrity_error"}
+            for record in snapshot.records
+        )
+    )
+
+
 def rebind_core_services(_: argparse.Namespace) -> int:
     """Bind existing node services to this core without selecting a runtime."""
     if not site_identity_path().is_file():
@@ -12942,6 +13166,8 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
     publisher_failed: list[bool] = []
     orchestration_failed: list[str] = []
     link_monitor_failed: list[str] = []
+    update_poller = UpdatePoller(_update_manager(), stop=stopped)
+    update_poller.start()
 
     def monitor_site_links() -> None:
         if identity.role != "coordinator":
@@ -13022,6 +13248,7 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
         monitor.join(timeout=2)
         link_thread.join(timeout=2)
         orchestration_thread.join(timeout=2)
+        update_poller.join(timeout=2)
         member_agent.close()
     if publisher_failed:
         raise LetsInferError("DNS-SD publisher exited while the site agent was active")
@@ -13930,6 +14157,13 @@ def parser() -> argparse.ArgumentParser:
         "--version", help="install this exact stable or release-candidate version"
     )
     updating.set_defaults(action=update_core, action_id="update")
+    update_operations = updating.add_subparsers(dest="update_operation")
+    update_check = update_operations.add_parser(
+        "check", help=help_label("check core and selected runtime", "update.check")
+    )
+    update_check.add_argument("--catalog")
+    update_check.add_argument("--json", action="store_true")
+    update_check.set_defaults(action=check_updates, action_id="update.check")
 
     runtime_listing = subcommands.add_parser(
         "runtimes", help="list installed immutable runtime packs"
@@ -14402,6 +14636,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     audit_sequence = None
     try:
         raw_arguments = list(argv) if argv is not None else sys.argv[1:]
+        if (
+            raw_arguments[:2] != ["update", "check"]
+            and raw_arguments[:1] != ["status"]
+            and "--json" not in raw_arguments
+            and ui.Terminal(sys.stderr).interactive
+        ):
+            ui.update_notice(_update_manager().cached().available)
         command_parser = parser()
         if not raw_arguments:
             if ui.Terminal(sys.stdout).interactive:

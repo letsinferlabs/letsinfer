@@ -303,6 +303,30 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("Blocked", rendered)
         self.assertNotIn("\033[", rendered)
 
+    def test_runtime_status_keeps_verified_update_context_in_live_panel(self) -> None:
+        stream = FakeStream(tty=True)
+        ui.runtime_status(
+            {
+                "service": {},
+                "container": {},
+                "protection": {},
+                "updates": [
+                    {"kind": "core", "subject": "core", "version": "0.11.0-rc.30"},
+                    {
+                        "kind": "runtime",
+                        "subject": "qwen3.8-27b",
+                        "version": "0.1.0-rc.11",
+                    },
+                ],
+            },
+            stream=stream,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
+        )
+        rendered = stream.getvalue()
+        self.assertIn("UPDATE AVAILABLE", rendered)
+        self.assertIn("Core 0.11.0-rc.30", rendered)
+        self.assertIn("qwen3.8-27b 0.1.0-rc.11", rendered)
+
     def test_status_history_uses_the_exact_six_color_design_palette(self) -> None:
         stream = FakeStream(tty=True)
         terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
@@ -839,6 +863,9 @@ class TerminalTests(unittest.TestCase):
                     "gateway_authenticated": True,
                 },
                 "runtime": None,
+                "updates": [
+                    {"kind": "core", "subject": "core", "version": "0.11.0-rc.30"}
+                ],
             },
             stream=stream,
             environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
@@ -849,6 +876,8 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("Home", rendered)
         self.assertIn("Not installed", rendered)
         self.assertIn("http://homeai.local:8000/v1", rendered)
+        self.assertIn("UPDATE AVAILABLE", rendered)
+        self.assertIn("Core 0.11.0-rc.30", rendered)
         self.assertNotIn("\033[", rendered)
 
     def test_runtime_status_fits_an_eighty_column_terminal(self) -> None:
