@@ -42,6 +42,13 @@ STATES = ("clean", "final", "open", "ready", "safe", "stable", "valid", "warm")
 ACTIONS = ("checked", "joined", "kept", "moved", "read", "saved", "sorted", "wrote")
 CHECKS = ("boundary", "order", "range", "retry", "state", "time", "type", "value")
 
+# Canonical source words are deliberately budgeted below the nominal token
+# target.  The suite is tokenizer-independent, and punctuation plus chat
+# rendering can make a word more than one token.  Exact runtime token counts
+# remain authoritative evidence; this fixed ratio only keeps the shared bytes
+# safely inside the declared context across supported tokenizers.
+SOURCE_WORDS_PER_TARGET_TOKEN = 0.87
+
 
 class PromptGenerationError(ValueError):
     """A benchmark contract could not be materialized exactly."""
@@ -71,7 +78,7 @@ def _next(state: int) -> int:
 
 def _source_text(seed: int, target_prompt_tokens: int) -> str:
     """Create the canonical event ledger without consulting a tokenizer."""
-    word_budget = max(256, int(target_prompt_tokens * 0.96))
+    word_budget = max(256, int(target_prompt_tokens * SOURCE_WORDS_PER_TARGET_TOKEN))
     state = (seed & 0xFFFFFFFF) or 0x9E3779B9
     words: list[str] = []
     while len(words) < word_budget:

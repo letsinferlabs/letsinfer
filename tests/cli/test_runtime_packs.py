@@ -107,7 +107,7 @@ class RuntimePackTests(unittest.TestCase):
         return {
             "schema_version": runtime_packs.BENCHMARK_SCHEMA_VERSION,
             "suite": "letsinfer-code-prose-v1",
-            "generator": {"id": "letsinfer-code-prose", "version": 1},
+            "generator": {"id": "letsinfer-code-prose", "version": 2},
             "tokenizer": {
                 "capability": "engine-rendered-chat-count-v1",
                 "model_sha256": "1" * 64,
