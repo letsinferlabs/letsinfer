@@ -21,6 +21,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterator, Sequence
 from typing import Any
@@ -46,6 +48,8 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 MAX_PACK_BYTES = 1 << 30
 MAX_PACK_FILES = 10_000
+MAX_OCI_MANIFEST_BYTES = 4 << 20
+MAX_OCI_TOKEN_BYTES = 64 << 10
 MAX_CATALOG_BYTES = 4 << 20
 MAX_CATALOG_SIGNATURE_BYTES = 16 << 10
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -80,6 +84,10 @@ SELECTION_FIELDS = {
 
 class RuntimePackError(ValueError):
     """A runtime source, artifact, catalog, or receipt is invalid."""
+
+
+class _OciAuthenticationRequired(RuntimePackError):
+    """A registry requires credentials unavailable to the native public puller."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -829,12 +837,342 @@ def _companion_executable(name: str) -> str | None:
     return None
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_arguments: Any, **_keywords: Any) -> None:
+        return None
+
+
+_OCI_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+_OCI_MANIFEST_ACCEPT = ", ".join(
+    (
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.oci.artifact.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    )
+)
+
+
+def _oci_open(request: urllib.request.Request) -> Any:
+    current = request
+    for _redirect in range(6):
+        try:
+            return _OCI_OPENER.open(current, timeout=30)
+        except urllib.error.HTTPError as error:
+            if error.code not in {301, 302, 303, 307, 308}:
+                raise
+            location = error.headers.get("Location")
+            error.close()
+            if not location:
+                raise RuntimePackError(
+                    "OCI registry redirect has no location"
+                ) from error
+            next_url = urllib.parse.urljoin(current.full_url, location)
+            old = urllib.parse.urlsplit(current.full_url)
+            new = urllib.parse.urlsplit(next_url)
+            if (
+                new.scheme != "https"
+                or not new.hostname
+                or new.username is not None
+                or new.password is not None
+            ):
+                raise RuntimePackError("OCI registry redirected away from HTTPS")
+            headers = {key: value for key, value in current.header_items()}
+            if (old.scheme, old.hostname, old.port) != (
+                new.scheme,
+                new.hostname,
+                new.port,
+            ):
+                headers = {
+                    key: value
+                    for key, value in headers.items()
+                    if key.lower() not in {"authorization", "host"}
+                }
+            current = urllib.request.Request(next_url, headers=headers)
+    raise RuntimePackError("OCI registry exceeded the redirect limit")
+
+
+def _read_oci_response(response: Any, *, limit: int, label: str) -> bytes:
+    final_url = urllib.parse.urlsplit(response.geturl())
+    if final_url.scheme != "https":
+        raise RuntimePackError(f"OCI {label} redirected away from HTTPS")
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise RuntimePackError(f"OCI {label} exceeds {limit} bytes")
+    return data
+
+
+def _bearer_challenge_parameters(value: str | None) -> dict[str, str]:
+    if not value or not value[:7].lower() == "bearer ":
+        raise _OciAuthenticationRequired(
+            "OCI registry requires unsupported authentication"
+        )
+    parameters: dict[str, str] = {}
+    for match in re.finditer(
+        r'([A-Za-z][A-Za-z0-9_-]*)=(?:"([^"\\]*(?:\\.[^"\\]*)*)"|([^,\s]+))',
+        value[7:],
+    ):
+        raw = match.group(2) if match.group(2) is not None else match.group(3)
+        parameters[match.group(1).lower()] = raw.replace(r'\"', '"').replace(
+            r"\\", "\\"
+        )
+    if "realm" not in parameters:
+        raise _OciAuthenticationRequired(
+            "OCI registry bearer challenge has no realm"
+        )
+    return parameters
+
+
+def _public_bearer_token(challenge: str | None, repository: str) -> str:
+    parameters = _bearer_challenge_parameters(challenge)
+    realm = urllib.parse.urlsplit(parameters["realm"])
+    if (
+        realm.scheme != "https"
+        or not realm.hostname
+        or realm.username is not None
+        or realm.password is not None
+        or realm.fragment
+    ):
+        raise _OciAuthenticationRequired(
+            "OCI registry bearer realm is not safe HTTPS"
+        )
+    query = [
+        (key, value)
+        for key, value in urllib.parse.parse_qsl(
+            realm.query, keep_blank_values=True
+        )
+        if key not in {"service", "scope"}
+    ]
+    if "service" in parameters:
+        query.append(("service", parameters["service"]))
+    query.append(
+        ("scope", parameters.get("scope", f"repository:{repository}:pull"))
+    )
+    token_url = urllib.parse.urlunsplit(
+        (
+            realm.scheme,
+            realm.netloc,
+            realm.path,
+            urllib.parse.urlencode(query),
+            "",
+        )
+    )
+    request = urllib.request.Request(
+        token_url,
+        headers={"Accept": "application/json", "User-Agent": "letsinfer/oci-pull"},
+    )
+    try:
+        with _oci_open(request) as response:
+            data = _read_oci_response(
+                response, limit=MAX_OCI_TOKEN_BYTES, label="token response"
+            )
+    except urllib.error.HTTPError as error:
+        if error.code in {401, 403}:
+            raise _OciAuthenticationRequired(
+                "OCI registry requires credentials"
+            ) from error
+        raise RuntimePackError(
+            f"cannot request OCI registry bearer token: HTTP {error.code}"
+        ) from error
+    except OSError as error:
+        raise RuntimePackError(
+            f"cannot request OCI registry bearer token: {error}"
+        ) from error
+    try:
+        document = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimePackError("OCI registry token response is invalid JSON") from error
+    token = document.get("token") if isinstance(document, dict) else None
+    if not isinstance(token, str) or not token:
+        token = document.get("access_token") if isinstance(document, dict) else None
+    if (
+        not isinstance(token, str)
+        or not token
+        or any(character.isspace() for character in token)
+    ):
+        raise _OciAuthenticationRequired(
+            "OCI registry returned no usable public token"
+        )
+    return token
+
+
+def _open_public_oci_request(
+    request: urllib.request.Request, repository: str
+) -> Any:
+    try:
+        return _oci_open(request)
+    except urllib.error.HTTPError as error:
+        if error.code not in {401, 403}:
+            raise RuntimePackError(
+                f"cannot read OCI registry object: HTTP {error.code}"
+            ) from error
+        challenge = error.headers.get("WWW-Authenticate")
+        error.close()
+    token = _public_bearer_token(challenge, repository)
+    authenticated = urllib.request.Request(
+        request.full_url,
+        headers={key: value for key, value in request.header_items()},
+    )
+    authenticated.add_header("Authorization", f"Bearer {token}")
+    try:
+        return _oci_open(authenticated)
+    except urllib.error.HTTPError as error:
+        if error.code in {401, 403}:
+            raise _OciAuthenticationRequired(
+                "OCI registry requires credentials"
+            ) from error
+        raise RuntimePackError(
+            f"cannot read OCI registry object: HTTP {error.code}"
+        ) from error
+    except OSError as error:
+        raise RuntimePackError(f"cannot read OCI registry object: {error}") from error
+
+
+def _native_pull_public_oci(reference: str, destination: pathlib.Path) -> None:
+    name, expected_manifest = reference.rsplit("@", 1)
+    registry, separator, repository = name.partition("/")
+    repository_parts = repository.split("/")
+    if (
+        not separator
+        or not registry
+        or not repository
+        or not re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", registry)
+        or not re.fullmatch(r"[A-Za-z0-9._/-]+", repository)
+        or any(part in {"", ".", ".."} for part in repository_parts)
+    ):
+        raise RuntimePackError("OCI runtime reference has an invalid registry path")
+    repository_path = urllib.parse.quote(repository, safe="/")
+    manifest_url = (
+        f"https://{registry}/v2/{repository_path}/manifests/"
+        f"{expected_manifest}"
+    )
+    manifest_request = urllib.request.Request(
+        manifest_url,
+        headers={
+            "Accept": _OCI_MANIFEST_ACCEPT,
+            "User-Agent": "letsinfer/oci-pull",
+        },
+    )
+    try:
+        with _open_public_oci_request(manifest_request, repository) as response:
+            manifest_data = _read_oci_response(
+                response, limit=MAX_OCI_MANIFEST_BYTES, label="manifest"
+            )
+    except OSError as error:
+        raise RuntimePackError(f"cannot read OCI registry manifest: {error}") from error
+    manifest_digest = "sha256:" + hashlib.sha256(manifest_data).hexdigest()
+    if manifest_digest != expected_manifest:
+        raise RuntimePackError(
+            "OCI runtime manifest digest differs from its reference"
+        )
+    try:
+        manifest = json.loads(manifest_data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimePackError("OCI runtime manifest is invalid JSON") from error
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schemaVersion") != 2
+        or manifest.get("mediaType")
+        not in {
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.oci.artifact.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+        }
+    ):
+        raise RuntimePackError("OCI runtime manifest schema is unsupported")
+    layers = manifest.get("layers")
+    if (
+        not isinstance(layers, list)
+        or len(layers) != 1
+        or not isinstance(layers[0], dict)
+    ):
+        raise RuntimePackError("OCI runtime manifest must contain exactly one layer")
+    layer = layers[0]
+    layer_digest = layer.get("digest")
+    layer_size = layer.get("size")
+    media_type = layer.get("mediaType")
+    annotations = layer.get("annotations")
+    title = (
+        annotations.get("org.opencontainers.image.title")
+        if isinstance(annotations, dict)
+        else None
+    )
+    if not isinstance(layer_digest, str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", layer_digest
+    ):
+        raise RuntimePackError("OCI runtime layer digest is invalid")
+    if (
+        type(layer_size) is not int
+        or layer_size <= 0
+        or layer_size > MAX_PACK_BYTES
+    ):
+        raise RuntimePackError("OCI runtime layer size is invalid")
+    if media_type != PACK_MEDIA_TYPE and title != "runtime.letsinfer":
+        raise RuntimePackError("OCI runtime layer media type is unsupported")
+    blob_url = f"https://{registry}/v2/{repository_path}/blobs/{layer_digest}"
+    blob_request = urllib.request.Request(
+        blob_url,
+        headers={"Accept": media_type, "User-Agent": "letsinfer/oci-pull"},
+    )
+    partial = destination / ".runtime.letsinfer.partial"
+    output = destination / "runtime.letsinfer"
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with _open_public_oci_request(blob_request, repository) as response:
+            final_url = urllib.parse.urlsplit(response.geturl())
+            if final_url.scheme != "https":
+                raise RuntimePackError("OCI runtime layer redirected away from HTTPS")
+            length = response.headers.get("Content-Length")
+            if length is not None:
+                try:
+                    content_length = int(length)
+                except ValueError as error:
+                    raise RuntimePackError(
+                        "OCI runtime layer Content-Length is invalid"
+                    ) from error
+                if content_length != layer_size:
+                    raise RuntimePackError(
+                        "OCI runtime layer size differs from its manifest"
+                    )
+            with partial.open("xb") as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > layer_size or total > MAX_PACK_BYTES:
+                        raise RuntimePackError(
+                            "OCI runtime layer exceeds its declared size"
+                        )
+                    digest.update(chunk)
+                    handle.write(chunk)
+        if total != layer_size:
+            raise RuntimePackError("OCI runtime layer size differs from its manifest")
+        if "sha256:" + digest.hexdigest() != layer_digest:
+            raise RuntimePackError("OCI runtime layer digest differs from its manifest")
+        partial.replace(output)
+    except RuntimePackError:
+        if partial.exists():
+            partial.unlink()
+        raise
+    except OSError as error:
+        if partial.exists():
+            partial.unlink()
+        raise RuntimePackError(f"cannot read OCI runtime layer: {error}") from error
+
+
 def _pull_oci(reference: str, destination: pathlib.Path) -> None:
     if not REGISTRY_DIGEST_RE.fullmatch(reference):
         raise RuntimePackError("OCI runtime references must be pinned by sha256 digest")
-    executable = _companion_executable("oras")
-    if executable is None:
-        raise RuntimePackError("OCI runtime installation requires the oras CLI")
+    try:
+        _native_pull_public_oci(reference, destination)
+        return
+    except _OciAuthenticationRequired as native_error:
+        executable = _companion_executable("oras")
+        if executable is None:
+            raise RuntimePackError(
+                "OCI runtime requires registry authentication; install or configure oras"
+            ) from native_error
     result = subprocess.run(
         [executable, "pull", "--output", str(destination), reference],
         text=True,

@@ -412,11 +412,12 @@ letsinfer stop
 ```
 
 Local runtime repositories are the development path. Published OCI runtime
-references must be pinned by digest and require `oras`; mutable tags are
-rejected. Model names resolve from installed runtime receipts or an explicit
-trusted local catalog or signature-verified remote catalog; Let's Infer core
-does not ship a hidden model registry. Importing
-an unqualified candidate succeeds without making it the boot service.
+references must be pinned by digest. Public packs require no external OCI
+client; an installed `oras` companion remains available for authenticated
+registry flows. Mutable tags are rejected. Model names resolve from installed
+runtime receipts or an explicit trusted local catalog or signature-verified
+remote catalog; Let's Infer core does not ship a hidden model registry.
+Importing an unqualified candidate succeeds without making it the boot service.
 Candidate execution remains restricted to explicit
 `serve --qualification-mode --evidence-dir ...` launches.
 
@@ -698,7 +699,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.30`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.31`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its
