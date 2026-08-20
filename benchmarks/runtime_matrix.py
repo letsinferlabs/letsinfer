@@ -1249,7 +1249,10 @@ def run_isolated_matrix(
     assert output is not None
     if output.exists():
         raise RuntimeMatrixError(f"refusing existing output directory: {output}")
-    _require_container_absent(arguments.container)
+    # ``letsinfer serve --qualification-mode`` owns the single candidate-slot
+    # replacement transaction.  Do not reject its currently active container
+    # here: the outer benchmark lifecycle records whether inference was active
+    # and restores the final isolated candidate after the matrix exits.
     output.mkdir(parents=True)
     results_root = output / "cells"
     stores_root = arguments.store_root or output / "stores"

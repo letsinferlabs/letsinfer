@@ -5900,10 +5900,8 @@ def bind_config_to_control_bundle(config: dict[str, Any]) -> dict[str, Any]:
     manifest_path, manifest = validate_control_bundle(
         source, manifest_path, manifest_sha
     )
-    candidate_root, manifest_path = install_control_bundle(
-        manifest_path,
-        manifest,
-        artifact_roots=(source, source_root()),
+    candidate_root, manifest_path = _bind_runtime_release_to_current_core(
+        manifest_path, manifest, previous_root=source
     )
     if manifest["model"]["alias"] != config["model"]:
         raise LetsInferError("previous service bundle model alias is inconsistent")
@@ -5911,6 +5909,21 @@ def bind_config_to_control_bundle(config: dict[str, Any]) -> dict[str, Any]:
     bound["source_root"] = str(candidate_root)
     bound["manifest_path"] = str(manifest_path)
     return bound
+
+
+def _bind_runtime_release_to_current_core(
+    manifest_path: pathlib.Path,
+    manifest: dict[str, Any],
+    *,
+    previous_root: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path]:
+    """Compose unchanged runtime artifacts with exactly the executing core."""
+
+    return install_control_bundle(
+        manifest_path,
+        manifest,
+        artifact_roots=(previous_root, source_root()),
+    )
 
 
 def retained_control_bundle_for_rollback(config: dict[str, Any]) -> bool:
@@ -6522,11 +6535,16 @@ def install_core_plane_services(
     config_path = candidate_path if candidate_path.is_file() else resident_path
     runtime_configured = config_path.is_file()
     qualification_active = config_path == candidate_path and runtime_configured
+    runtime_config: dict[str, Any] | None = None
+    bound_runtime_config: dict[str, Any] | None = None
     runtime_manifest: dict[str, Any] | None = None
     runtime_error: str | None = None
     if runtime_configured:
         try:
-            _, runtime_manifest = configured_release(read_service_config(config_path))
+            runtime_config = read_service_config(config_path)
+            configured_release(runtime_config)
+            bound_runtime_config = bind_config_to_control_bundle(runtime_config)
+            _, runtime_manifest = configured_release(bound_runtime_config)
         except LetsInferError as error:
             runtime_error = str(error)
 
@@ -6569,6 +6587,9 @@ def install_core_plane_services(
             detail = (result.stderr or result.stdout).strip() or "unknown systemctl error"
             errors.append(f"restore {name}: {detail}")
 
+    runtime_binding_snapshots: dict[
+        pathlib.Path, tuple[str, int] | None
+    ] | None = None
     try:
         # Recovery must be quiesced before inference. The existing Watchdog stays
         # active until the engine has stopped, so there is never an unprotected
@@ -6589,6 +6610,12 @@ def install_core_plane_services(
         )
         if include_gateway:
             install_core_gateway_service(replace_active=True)
+        if bound_runtime_config is not None and runtime_manifest is not None:
+            runtime_binding_snapshots = _install_runtime_control_binding(
+                config_path,
+                bound_runtime_config,
+                runtime_manifest,
+            )
         if (
             previous[ENGINE_SERVICE_NAME][1] == "active"
             and runtime_manifest is not None
@@ -6612,6 +6639,11 @@ def install_core_plane_services(
             run_passthrough(["systemctl", "--user", "start", RECOVERY_TIMER_NAME])
     except BaseException as failure:
         restore_errors: list[str] = []
+        if runtime_binding_snapshots is not None:
+            try:
+                _restore_runtime_control_binding(runtime_binding_snapshots)
+            except BaseException as error:
+                restore_errors.append(f"restore runtime control binding: {error}")
         # Individual installers restore their own files. Restore only the
         # runtime-facing active states that this transaction intentionally
         # quiesced or that systemd stopped through unit dependencies.
@@ -6748,6 +6780,77 @@ def _restore_user_file(
     path.parent.mkdir(parents=True, exist_ok=True)
     write_text(path, contents)
     path.chmod(mode)
+
+
+def _runtime_control_binding_paths(
+    config_path: pathlib.Path, config: dict[str, Any]
+) -> tuple[pathlib.Path, ...]:
+    if config.get("qualification_mode") is True:
+        return (config_path,)
+    unit_root = pathlib.Path.home() / ".config/systemd/user"
+    return (
+        config_path,
+        unit_root / ENGINE_SERVICE_NAME,
+        unit_root / RECOVERY_SERVICE_NAME,
+    )
+
+
+def _restore_runtime_control_binding(
+    snapshots: dict[pathlib.Path, tuple[str, int] | None]
+) -> None:
+    reload_units = any(path.name.endswith(".service") for path in snapshots)
+    for path, snapshot in snapshots.items():
+        _restore_user_file(path, snapshot)
+    if reload_units:
+        run(["systemctl", "--user", "daemon-reload"])
+
+
+def _install_runtime_control_binding(
+    config_path: pathlib.Path,
+    config: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[pathlib.Path, tuple[str, int] | None]:
+    """Atomically move a selected runtime onto this core's control bundle."""
+    paths = _runtime_control_binding_paths(config_path, config)
+    snapshots = {path: _snapshot_user_file(path) for path in paths}
+    try:
+        atomic_json(config_path, config)
+        config_path.chmod(0o600)
+        if config.get("qualification_mode") is not True:
+            unit_root = pathlib.Path.home() / ".config/systemd/user"
+            engine_unit = unit_root / ENGINE_SERVICE_NAME
+            recovery_unit = unit_root / RECOVERY_SERVICE_NAME
+            write_text(
+                engine_unit,
+                render_engine_service(
+                    config_path,
+                    manifest["container"]["startup_timeout_seconds"],
+                    pathlib.Path(config["source_root"]),
+                ),
+            )
+            write_text(
+                recovery_unit,
+                render_recovery_service(
+                    config["name"],
+                    pathlib.Path(config["protection_root"]),
+                    pathlib.Path(config["source_root"]),
+                ),
+            )
+            engine_unit.chmod(0o644)
+            recovery_unit.chmod(0o644)
+            run(["systemctl", "--user", "daemon-reload"])
+    except BaseException as failure:
+        try:
+            _restore_runtime_control_binding(snapshots)
+        except BaseException as rollback_error:
+            raise LetsInferError(
+                "runtime control rebind failed and rollback was incomplete: "
+                f"{rollback_error}"
+            ) from failure
+        raise LetsInferError(
+            f"runtime control rebind failed; previous binding restored: {failure}"
+        ) from failure
+    return snapshots
 
 
 def _restore_unit_enablement(name: str, previous: str) -> None:
@@ -10714,14 +10817,37 @@ def _benchmark_stop() -> int:
     except benchmark_jobs.BenchmarkJobError as error:
         raise LetsInferError(str(error)) from error
     terminal = ui.Terminal(sys.stderr)
-    with ui.progress("Stopping the benchmark", stream=sys.stderr):
-        stopped = benchmark_jobs.wait_for_exit(state["pid"], timeout_seconds=30)
+    timeout_seconds = _benchmark_stop_timeout_seconds()
+    with ui.progress(
+        "Stopping the benchmark and restoring inference", stream=sys.stderr
+    ):
+        stopped = benchmark_jobs.wait_for_exit(
+            state["pid"], timeout_seconds=timeout_seconds
+        )
     if not stopped:
         raise LetsInferError(
-            "benchmark did not stop within 30 seconds; its worker remains isolated"
+            f"benchmark did not stop within {timeout_seconds} seconds; "
+            "its worker remains isolated"
         )
     terminal.success("Benchmark stopped")
     return 0
+
+
+def _benchmark_stop_timeout_seconds() -> int:
+    """Allow a cancelled benchmark to reload the runtime it displaced."""
+
+    path = qualification_service_config_path()
+    if not path.is_file():
+        return 30
+    try:
+        config = read_service_config(path)
+        _manifest_path, manifest = configured_release(config)
+        startup = manifest["container"]["startup_timeout_seconds"]
+    except (KeyError, LetsInferError, OSError, TypeError):
+        return 30
+    if not isinstance(startup, int) or isinstance(startup, bool) or startup <= 0:
+        return 30
+    return min(3_600, max(30, startup + 60))
 
 
 def _benchmark_self_command(
@@ -10817,6 +10943,15 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         raise LetsInferError("installed runtime descriptor identity mismatch")
     if "benchmark" not in runtime_descriptor.descriptor:
         raise LetsInferError("installed runtime has no benchmark contract")
+    # Runtime receipts retain the immutable control bundle that was current at
+    # install time.  Benchmarking must not execute that historical core after a
+    # core-only update.  Recompose the unchanged runtime artifacts with this
+    # executable's core and dispatch the worker from that immutable bundle.
+    original_root = root
+    root, manifest_path = _bind_runtime_release_to_current_core(
+        manifest_path, manifest, previous_root=original_root
+    )
+    verify_release_sources(manifest, root)
     runtime_config_value = read_json(runtime_config)
     if runtime_config_value.get("benchmark") != runtime_descriptor.descriptor["benchmark"]:
         raise LetsInferError(
@@ -10837,7 +10972,7 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         sys.executable,
         str(runner),
         "--runtime",
-        arguments.runtime,
+        str(manifest_path),
         "--letsinfer-bin",
         str(letsinfer_bin),
         "--runtime-config",
@@ -11013,30 +11148,28 @@ def _run_benchmark_with_service_isolation(
             "runtime protection is already tripped; run letsinfer recover before "
             "benchmarking"
         )
-    # A completed or failed qualification run deliberately leaves its candidate
-    # available for inspection.  A later benchmark is itself an explicit
-    # replacement request, so retire that candidate atomically when it owns the
-    # same temporary container slot.  Otherwise the matrix cannot reach its
-    # normal serve path to perform candidate replacement.
-    cleanup_target: str | None = None
-    if cleanup_command is not None and "--name" in cleanup_command:
-        name_index = cleanup_command.index("--name") + 1
-        if name_index < len(cleanup_command):
-            cleanup_target = cleanup_command[name_index]
-    if cleanup_target is not None:
-        candidate_path = qualification_service_config_path()
-        if candidate_path.is_file():
-            candidate = read_service_config(candidate_path)
-            if (
-                candidate.get("qualification_mode") is True
-                and candidate.get("name") == cleanup_target
-            ):
-                if protection_trip_latched(candidate):
-                    raise LetsInferError(
-                        "runtime protection is already tripped; run letsinfer "
-                        "recover before benchmarking"
-                    )
-                _retire_qualification_candidate(remove_container=True)
+    # Preserve the inference-slot intent before the matrix begins.  Each cell
+    # deliberately replaces the candidate container and store, so restoration
+    # means rearming the final candidate when the slot was serving beforehand.
+    # The runtime matrix delegates replacement to ``serve``; duplicating that
+    # transaction here creates a cancellation window with no candidate to
+    # restore.
+    candidate_was_running = False
+    candidate_path = qualification_service_config_path()
+    if candidate_path.is_file():
+        candidate = read_service_config(candidate_path)
+        if candidate.get("qualification_mode") is not True:
+            raise LetsInferError("qualification slot has an invalid lifecycle mode")
+        if protection_trip_latched(candidate):
+            raise LetsInferError(
+                "runtime protection is already tripped; run letsinfer recover "
+                "before benchmarking"
+            )
+        candidate_inspection = container_inspect(candidate["name"])
+        candidate_was_running = bool(
+            candidate_inspection is not None
+            and candidate_inspection.get("State", {}).get("Running") is True
+        )
     _, engine_state = _unit_enabled_active(ENGINE_SERVICE_NAME)
     _, recovery_state = _unit_enabled_active(RECOVERY_TIMER_NAME)
     safe_states = {"active", "inactive", "failed", "not-found"}
@@ -11086,6 +11219,28 @@ def _run_benchmark_with_service_isolation(
                     "remove temporary benchmark container: "
                     + (detail or "unknown cleanup error")
                 )
+        if not benchmark_trip_latched:
+            final_candidate_path = qualification_service_config_path()
+            if candidate_was_running:
+                if not final_candidate_path.is_file():
+                    restore_errors.append(
+                        "restore qualification candidate: candidate slot is absent"
+                    )
+                else:
+                    try:
+                        final_candidate = read_service_config(final_candidate_path)
+                        _qualification_candidate_lifecycle(final_candidate, "start")
+                    except BaseException as error:
+                        restore_errors.append(
+                            f"restore qualification candidate: {error}"
+                        )
+            elif final_candidate_path.is_file():
+                try:
+                    _retire_qualification_candidate(remove_container=True)
+                except BaseException as error:
+                    restore_errors.append(
+                        f"retire temporary qualification candidate: {error}"
+                    )
         if engine_stopped and not benchmark_trip_latched:
             try:
                 run_passthrough(

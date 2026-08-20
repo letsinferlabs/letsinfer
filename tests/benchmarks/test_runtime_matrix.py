@@ -722,7 +722,9 @@ class RuntimeMatrixTests(unittest.TestCase):
                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
             with (
-                mock.patch.object(runtime_matrix, "_require_container_absent"),
+                mock.patch.object(
+                    runtime_matrix, "_require_container_absent"
+                ) as require_absent,
                 mock.patch.object(
                     runtime_matrix, "_command_output", return_value=""
                 ) as lifecycle,
@@ -777,6 +779,8 @@ class RuntimeMatrixTests(unittest.TestCase):
                     cells,
                     {"commit": "a" * 40},
                 )
+
+            require_absent.assert_not_called()
 
             index = json.loads((output / "matrix-index.json").read_text())
             self.assertEqual(process_number, 2)
