@@ -173,14 +173,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.24")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.25")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.24"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.25"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -4602,6 +4602,54 @@ class RuntimeCommandTests(unittest.TestCase):
                     protection_config={"protection_root": "/watchdog"},
                 )
         unit_state.assert_not_called()
+
+    def test_benchmark_retires_preserved_candidate_in_temporary_slot(self) -> None:
+        command = ["runner", "--c1"]
+        cleanup = ["letsinfer", "stop", "--name", "letsinfer-benchmark"]
+        resident = {"protection_root": "/watchdog/protected/resident"}
+        candidate = {
+            "name": "letsinfer-benchmark",
+            "qualification_mode": True,
+            "protection_root": "/watchdog/protected/runtime",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path = pathlib.Path(directory) / "qualification.json"
+            candidate_path.write_text("{}\n", encoding="utf-8")
+            with (
+                mock.patch.object(
+                    letsinfer,
+                    "_unit_enabled_active",
+                    side_effect=[("static", "inactive"), ("enabled", "inactive")],
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "qualification_service_config_path",
+                    return_value=candidate_path,
+                ),
+                mock.patch.object(
+                    letsinfer, "read_service_config", return_value=candidate
+                ),
+                mock.patch.object(
+                    letsinfer, "protection_trip_latched", return_value=False
+                ),
+                mock.patch.object(
+                    letsinfer, "_retire_qualification_candidate"
+                ) as retire,
+                mock.patch.object(letsinfer, "run_passthrough") as run_passthrough,
+                mock.patch.object(
+                    letsinfer,
+                    "run",
+                    return_value=subprocess.CompletedProcess(cleanup, 0, "", ""),
+                ),
+            ):
+                letsinfer._run_benchmark_with_service_isolation(
+                    command,
+                    protection_config=resident,
+                    cleanup_command=cleanup,
+                )
+
+        retire.assert_called_once_with(remove_container=True)
+        run_passthrough.assert_called_once_with(command)
 
     def test_benchmark_cli_list_does_not_create_an_output_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

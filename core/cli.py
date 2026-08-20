@@ -11009,6 +11009,30 @@ def _run_benchmark_with_service_isolation(
             "runtime protection is already tripped; run letsinfer recover before "
             "benchmarking"
         )
+    # A completed or failed qualification run deliberately leaves its candidate
+    # available for inspection.  A later benchmark is itself an explicit
+    # replacement request, so retire that candidate atomically when it owns the
+    # same temporary container slot.  Otherwise the matrix cannot reach its
+    # normal serve path to perform candidate replacement.
+    cleanup_target: str | None = None
+    if cleanup_command is not None and "--name" in cleanup_command:
+        name_index = cleanup_command.index("--name") + 1
+        if name_index < len(cleanup_command):
+            cleanup_target = cleanup_command[name_index]
+    if cleanup_target is not None:
+        candidate_path = qualification_service_config_path()
+        if candidate_path.is_file():
+            candidate = read_service_config(candidate_path)
+            if (
+                candidate.get("qualification_mode") is True
+                and candidate.get("name") == cleanup_target
+            ):
+                if protection_trip_latched(candidate):
+                    raise LetsInferError(
+                        "runtime protection is already tripped; run letsinfer "
+                        "recover before benchmarking"
+                    )
+                _retire_qualification_candidate(remove_container=True)
     _, engine_state = _unit_enabled_active(ENGINE_SERVICE_NAME)
     _, recovery_state = _unit_enabled_active(RECOVERY_TIMER_NAME)
     safe_states = {"active", "inactive", "failed", "not-found"}
