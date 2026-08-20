@@ -515,6 +515,10 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("STARTING", rendered)
         self.assertIn("Starting", rendered)
         self.assertIn("Arming", rendered)
+        self.assertIn("GATEWAY   STARTING", rendered)
+        self.assertIn("RUNTIME   STARTING", rendered)
+        self.assertNotIn("UNAVAILABLE", rendered)
+        self.assertNotIn("RUNTIME   STOPPED", rendered)
         self.assertNotIn("ATTENTION", rendered)
         self.assertNotIn("Unavailable", rendered)
 
