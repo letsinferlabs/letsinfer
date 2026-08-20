@@ -475,6 +475,18 @@ class UpdateCommandTests(unittest.TestCase):
             self.assertEqual(cli.check_updates(arguments), 1)
         self.assertIn("same_version_identity_changed", output.getvalue())
 
+    def test_busy_check_without_verified_state_returns_failure(self):
+        manager = mock.Mock()
+        manager.refresh.return_value = UpdateSnapshot((), busy=True)
+        output = io.StringIO()
+        arguments = types.SimpleNamespace(catalog=None, json=False)
+        with (
+            mock.patch.object(cli, "_update_manager", return_value=manager),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(cli.check_updates(arguments), 1)
+        self.assertIn("Another update check is already running", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11616,7 +11616,8 @@ def check_updates(arguments: argparse.Namespace) -> int:
                 else:
                     terminal.status(f"Apply with `letsinfer upgrade {record.subject}`")
     return int(
-        any(
+        (snapshot.busy and not snapshot.records)
+        or any(
             record.status in {"unknown", "integrity_error"}
             for record in snapshot.records
         )
