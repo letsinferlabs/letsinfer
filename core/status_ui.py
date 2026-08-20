@@ -93,7 +93,11 @@ def _meter(terminal: ui.Terminal, value: float, *, width: int = 16) -> str:
 
 
 def _sparkline(
-    terminal: ui.Terminal, values: Iterable[float], *, width: int = 24
+    terminal: ui.Terminal,
+    values: Iterable[float],
+    *,
+    width: int = 24,
+    color: str | None = None,
 ) -> str:
     raw = list(values)
     if not raw:
@@ -107,10 +111,11 @@ def _sparkline(
         points.append(raw[left] + (raw[right] - raw[left]) * fraction)
     blocks = "▁▂▃▄▅▆▇█"
     maximum = max(max(points), 1.0)
-    return "".join(
+    rendered = "".join(
         blocks[min(7, max(0, round(max(0.0, value) / maximum * 7)))]
         for value in points
     )
+    return terminal.paint(rendered, color) if color is not None else rendered
 
 
 def _row(
@@ -376,11 +381,70 @@ def dashboard_lines(
     ]
     chart_width = 24 if width >= 64 else 16
     lines.extend(("", f"History  {terminal.paint('last 5 min · 1 sec', ui.DIM)}"))
-    lines.append(_row(terminal, "Tokens", f"{_rate(aggregate_rate)}/s", _sparkline(terminal, token_history, width=chart_width), width=width))
-    lines.append(_row(terminal, "Requests", f"{active_value} active", _sparkline(terminal, request_history, width=chart_width), width=width))
-    for label, key in (("GPU", "gpu"), ("Memory", "memory"), ("CPU", "cpu"), ("NVMe", "nvme")):
+    history_colors = (
+        ui.YELLOW,
+        "\033[38;2;255;166;0m",
+        "\033[38;2;252;148;0m",
+        ui.ORANGE,
+        "\033[38;2;237;93;26m",
+        ui.RED,
+    )
+    lines.append(
+        _row(
+            terminal,
+            "Tokens",
+            f"{_rate(aggregate_rate)}/s",
+            _sparkline(
+                terminal,
+                token_history,
+                width=chart_width,
+                color=history_colors[0],
+            ),
+            width=width,
+        )
+    )
+    lines.append(
+        _row(
+            terminal,
+            "Requests",
+            f"{active_value} active",
+            _sparkline(
+                terminal,
+                request_history,
+                width=chart_width,
+                color=history_colors[1],
+            ),
+            width=width,
+        )
+    )
+    for index, (label, key) in enumerate(
+        (("GPU", "gpu"), ("Memory", "memory"), ("CPU", "cpu"), ("NVMe", "nvme")),
+        start=2,
+    ):
         values = history.get(key, [])
-        lines.append(_row(terminal, label, _percent(system.get({"gpu": "gpu_percent", "memory": "memory_percent", "cpu": "cpu_percent", "nvme": "disk_percent"}[key])), _sparkline(terminal, values, width=chart_width), width=width))
+        lines.append(
+            _row(
+                terminal,
+                label,
+                _percent(
+                    system.get(
+                        {
+                            "gpu": "gpu_percent",
+                            "memory": "memory_percent",
+                            "cpu": "cpu_percent",
+                            "nvme": "disk_percent",
+                        }[key]
+                    )
+                ),
+                _sparkline(
+                    terminal,
+                    values,
+                    width=chart_width,
+                    color=history_colors[index],
+                ),
+                width=width,
+            )
+        )
 
     lines.extend(("", "System"))
     lines.append(_row(terminal, "GPU", _percent(system.get("gpu_percent")), f"{_temperature(system.get('gpu_temp_deci_c'))} · {_clock(system.get('gpu_clock_mhz'))}", width=width))

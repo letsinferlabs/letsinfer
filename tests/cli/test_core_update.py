@@ -159,6 +159,9 @@ class CoreUpdateTests(unittest.TestCase):
                         "error": None,
                     },
                 ) as install_services,
+                mock.patch.object(
+                    letsinfer, "wait_for_core_plane_ready"
+                ) as wait_ready,
                 redirect_stdout(output),
             ):
                 result = letsinfer.rebind_core_services(argparse.Namespace())
@@ -166,7 +169,57 @@ class CoreUpdateTests(unittest.TestCase):
             install_services.assert_called_once_with(
                 site, include_gateway=True
             )
+            wait_ready.assert_called_once_with(include_gateway=True)
             self.assertIn("runtime=qwen3.8-27b runtimes=unchanged", output.getvalue())
+
+    def test_core_plane_readiness_requires_stable_services_and_gateway(self) -> None:
+        with (
+            mock.patch.object(letsinfer.platform, "system", return_value="Linux"),
+            mock.patch.object(
+                letsinfer,
+                "_unit_enabled_active",
+                return_value=("enabled", "active"),
+            ) as unit_state,
+            mock.patch.object(
+                letsinfer,
+                "api_status",
+                side_effect=(None, 200, 200, 200),
+            ) as gateway_status,
+            mock.patch.object(letsinfer.time, "sleep") as sleep,
+        ):
+            letsinfer.wait_for_core_plane_ready(
+                include_gateway=True,
+                timeout_seconds=10,
+                poll_seconds=0.1,
+                stable_polls=3,
+            )
+        self.assertEqual(gateway_status.call_count, 4)
+        self.assertEqual(unit_state.call_count, 12)
+        self.assertEqual(sleep.call_count, 3)
+
+    def test_core_plane_readiness_fails_closed_after_bounded_wait(self) -> None:
+        with (
+            mock.patch.object(letsinfer.platform, "system", return_value="Linux"),
+            mock.patch.object(
+                letsinfer,
+                "_unit_enabled_active",
+                return_value=("enabled", "activating"),
+            ),
+            mock.patch.object(
+                letsinfer.time,
+                "monotonic",
+                side_effect=(0.0, 0.0, 2.0),
+            ),
+            mock.patch.object(letsinfer.time, "sleep"),
+            self.assertRaisesRegex(
+                letsinfer.LetsInferError, "did not become stable"
+            ),
+        ):
+            letsinfer.wait_for_core_plane_ready(
+                include_gateway=False,
+                timeout_seconds=1,
+                poll_seconds=0.1,
+            )
 
     def test_core_plane_handoff_quiesces_and_restores_runtime_services(self) -> None:
         commands: list[list[str]] = []
