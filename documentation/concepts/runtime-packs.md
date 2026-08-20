@@ -26,11 +26,12 @@ it does not carry scripts, plans, or materialized prompts. An engine-specific
 shim that exports native cache state or exact rendered-chat token counting can
 remain with the engine, but it implements a versioned Let's Infer capability.
 
-At benchmark time, Let's Infer uses that capability to calibrate deterministic
-synthetic prompts. Generated prompt bytes and the derived plan live only in
-evidence. Their hashes are bound to the runtime contract, core generator and
-templates, model, engine image, and render contract, so tokenizer approximation
-and cross-runtime prompt reuse fail closed.
+At benchmark time, core deterministically generates the same versioned code and
+prose bytes for every model. The adapter counts the complete rendered requests
+but never changes their bytes. Generated prompts and the derived plan live only
+in evidence. Their hashes are bound to the runtime contract, core generator and
+templates, model, engine image, and render contract; per-stream actual token
+counts make tokenizer differences explicit.
 
 Sealed public results live at the target root as structured `benchmark.json`,
 not prose or runtime-provided benchmark code. Let's Infer creates a private

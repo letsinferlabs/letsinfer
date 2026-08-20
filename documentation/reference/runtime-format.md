@@ -197,8 +197,10 @@ never stored in the receipt. Receipts never contain registry credentials.
 `benchmark.json` contains no prose or executable hooks. Its top-level ID is a
 SHA-256 bound to the private installation ID, benchmark timestamp, and exact
 `runtime.json.benchmark` digest. Each result identifies a neutral
-`ppN,tgN,cN` workload and records aggregate/decode TPS, TTFT, TTFT statistic,
-prefix-cache state, maximum GPU/CPU utilization and temperature, maximum CPU,
+`ppN,tgN,cN` workload. Code and prose are flat sibling rows distinguished by
+`prompt_domain`; each also pins `prompt_suite`, the ordered
+`prompt_set_sha256`, and one `actual_prompt_tokens` count per stream. Rows
+record aggregate/decode TPS, TTFT, TTFT statistic, prefix-cache state, maximum GPU/CPU utilization and temperature, maximum CPU,
 GPU, VRAM, and system-RAM clocks, and a compact fixed-schema one-second
 Watchdog timeline. Published maxima must equal their timeline maxima. A clock
 that the target cannot expose is recorded as `-1` in every sample and maximum.

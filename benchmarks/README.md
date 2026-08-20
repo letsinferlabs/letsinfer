@@ -52,15 +52,15 @@ temporary container and service restoration, including after the launching
 terminal exits.
 
 With no selectors, the current standard contract runs the complete
-32K/64K/128K/256K by C1/C2/C4/C8/C16 cross-product. Before measurement, Let's Infer
-starts the exact runtime in qualification mode and asks its registered adapter
-for rendered-chat token counts. The versioned core generator then calibrates
-only the selected synthetic prompts to exact counts. Generated prompts and the
-derived plan live under the new evidence directory.
+32K/64K/128K/256K by C1/C2/C4/C8/C16 cross-product for both code and prose.
+The versioned core generator owns fixed model-neutral bytes and stream order;
+the registered adapter counts each complete rendered request without resizing
+it. Generated prompts and the derived plan live under the new evidence
+directory.
 
 Every measured cell receives a fresh Let's Infer-managed container and empty
 prefix store. The runner rejects cache reuse, identity drift, tokenizer/model/
-image mismatch, approximate prompt counts, unsafe post-load headroom, and any
+image mismatch, invalid prompt counts, unsafe post-load headroom, and any
 mismatch between a CLI sampling override and the declared contract.
 
 On a service host, the worker temporarily stops the recovery timer and active
@@ -73,7 +73,8 @@ developer checkout must be clean and match the measured commit, or provide a
 source attestation copied from the exact clean checkpoint.
 
 The command writes a validated `benchmark.json` beside the complete evidence.
-Each row reports the neutral workload, aggregate/decode throughput, TTFT,
+Each flat row reports the neutral workload, code/prose domain, suite and
+prompt-set identities, per-stream actual prompt counts, aggregate/decode throughput, TTFT,
 whether any prompt prefix was cached, maximum GPU/CPU utilization and
 temperature, CPU/GPU/VRAM/system-RAM clocks, NVMe temperature, root-storage
 usage, NVMe read/write throughput and their maxima, and a compact fixed-schema
@@ -123,14 +124,14 @@ python3 benchmarks/openai_load.py \
 ## Standard prompt generation
 
 [`prompts/PROTOCOL.md`](prompts/PROTOCOL.md) defines the standard model-neutral
-templates. [`prompt_generator.py`](prompt_generator.py) deterministically
-creates synthetic documents and calibrates the complete rendered request
-through the runtime's exact tokenizer capability. It fails closed if the exact
-declared count cannot be reached.
+code/prose templates and stream ordering. [`prompt_generator.py`](prompt_generator.py)
+deterministically creates fixed bytes without consulting a tokenizer. The
+runtime's exact tokenizer capability only records rendered counts; a request
+that does not fit fails closed instead of being resized.
 
 The runtime contract pins the suite and generator versions, model and engine
-image identities, rendered-chat contract, request settings, cases,
-concurrencies, and seeds. Evidence pins the runtime contract, generator source,
+image identities, rendered-chat contract, request settings, cases, and
+concurrencies. Evidence pins the runtime contract, generator source,
 templates, generated prompt set, derived plan, and exact tokenizer identity.
 Materialized prompts are evidence—not source, runtime-pack content, or reusable
 inputs for another runtime identity.

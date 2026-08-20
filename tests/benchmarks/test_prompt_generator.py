@@ -15,9 +15,9 @@ from benchmarks import prompt_generator
 
 def contract() -> dict[str, object]:
     return {
-        "schema_version": 1,
-        "suite": "letsinfer-standard-context-v1",
-        "generator": {"id": "letsinfer-synthetic-document", "version": 1},
+        "schema_version": 2,
+        "suite": "letsinfer-code-prose-v1",
+        "generator": {"id": "letsinfer-code-prose", "version": 1},
         "tokenizer": {
             "capability": "engine-rendered-chat-count-v1",
             "model_sha256": "1" * 64,
@@ -35,10 +35,8 @@ def contract() -> dict[str, object]:
         "cases": [
             {
                 "id": "fixture",
-                "workload": "context-summary-v1",
                 "prompt_tokens": 2048,
                 "concurrencies": [1],
-                "seed": 7,
             }
         ],
     }
@@ -67,16 +65,22 @@ class PromptGeneratorTests(unittest.TestCase):
                 model_revision="a" * 40,
             )
             self.assertEqual(first_plan.read_bytes(), second_plan.read_bytes())
-            first_prompt = next((first / "prompts").iterdir())
-            second_prompt = next((second / "prompts").iterdir())
-            self.assertEqual(first_prompt.read_bytes(), second_prompt.read_bytes())
-            self.assertEqual(len(first_prompt.read_text(encoding="utf-8")), 2048)
+            first_prompts = sorted((first / "prompts").iterdir())
+            second_prompts = sorted((second / "prompts").iterdir())
+            self.assertEqual(len(first_prompts), 2)
+            self.assertEqual(
+                [path.read_bytes() for path in first_prompts],
+                [path.read_bytes() for path in second_prompts],
+            )
+            self.assertNotEqual(first_prompts[0].read_bytes(), first_prompts[1].read_bytes())
 
             plan = json.loads(first_plan.read_text(encoding="utf-8"))
             row = plan["fixtures"][0]
+            first_prompt = first / row["path"]
             self.assertEqual(
                 row["sha256"], hashlib.sha256(first_prompt.read_bytes()).hexdigest()
             )
+            self.assertEqual(row["expected_prompt_tokens"], len(first_prompt.read_text()))
             materialization = json.loads(
                 (first / "materialization.json").read_text(encoding="utf-8")
             )
@@ -88,19 +92,28 @@ class PromptGeneratorTests(unittest.TestCase):
                 hashlib.sha256(first_plan.read_bytes()).hexdigest(),
             )
 
-    def test_materialization_fails_closed_without_exact_count(self) -> None:
+    def test_prompt_bytes_do_not_depend_on_model_tokenizer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(
-                prompt_generator.PromptGenerationError,
-                "cannot reach|cannot calibrate",
-            ):
-                prompt_generator.materialize(
-                    contract(),
-                    pathlib.Path(directory) / "out",
-                    lambda _text: 1,
-                    model_id="fixture-model",
-                    model_revision="a" * 40,
-                )
+            root = pathlib.Path(directory)
+            first = root / "first"
+            second = root / "second"
+            first_plan = prompt_generator.materialize(
+                contract(), first, len, model_id="model-a", model_revision="a" * 40
+            )
+            second_plan = prompt_generator.materialize(
+                contract(),
+                second,
+                lambda text: max(1, len(text) // 2),
+                model_id="model-b",
+                model_revision="b" * 40,
+            )
+            self.assertEqual(
+                [path.read_bytes() for path in sorted((first / "prompts").iterdir())],
+                [path.read_bytes() for path in sorted((second / "prompts").iterdir())],
+            )
+            first_counts = [row["expected_prompt_tokens"] for row in json.loads(first_plan.read_text())["fixtures"]]
+            second_counts = [row["expected_prompt_tokens"] for row in json.loads(second_plan.read_text())["fixtures"]]
+            self.assertNotEqual(first_counts, second_counts)
 
     def test_materialization_writes_only_selected_cells(self) -> None:
         value = contract()
@@ -112,11 +125,14 @@ class PromptGeneratorTests(unittest.TestCase):
                 len,
                 model_id="fixture-model",
                 model_revision="a" * 40,
-                selected_cells=["fixture-c1"],
+                selected_cells=["fixture-code-c1"],
             )
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
         self.assertEqual(len(plan["fixtures"]), 1)
-        self.assertEqual(plan["contexts"][0]["cells"], {"c1": ["fixture-c1-s00"]})
+        self.assertEqual(
+            plan["contexts"][0]["cells"],
+            {"code-c1": ["fixture-code-s00"]},
+        )
 
 
 if __name__ == "__main__":

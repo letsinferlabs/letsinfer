@@ -251,9 +251,11 @@ model catalog.
 `benchmark` runs the standard suite declared by the installed immutable
 runtime without accepting engine flags or runtime-provided code. Selectors form
 a cross product; with no selectors it runs every declared standard context and
-concurrency cell. Let's Infer calibrates deterministic synthetic prompts through
-the exact runtime tokenizer-count capability and writes prompts, their derived
-plan, identity hashes, and a validated `benchmark.json` into evidence. Every measured cell uses a fresh
+concurrency cell for both canonical code and prose. Core generates the same
+versioned prompt bytes for every model, then the exact runtime tokenizer-count
+capability records the rendered count without resizing them. Prompts, their
+derived plan, identity hashes, and a validated `benchmark.json` are written
+into evidence. Every measured domain/cell uses a fresh
 managed container and an empty prefix store. The output directory defaults to
 a timestamped path under `~/.cache/letsinfer/benchmarks/`. `--list` validates the
 declarative contract and prints selected cells without starting inference.

@@ -49,9 +49,9 @@ MAX_PACK_FILES = 10_000
 MAX_CATALOG_BYTES = 4 << 20
 MAX_CATALOG_SIGNATURE_BYTES = 16 << 10
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-BENCHMARK_SCHEMA_VERSION = 1
-BENCHMARK_SUITE = "letsinfer-standard-context-v1"
-BENCHMARK_GENERATOR = "letsinfer-synthetic-document"
+BENCHMARK_SCHEMA_VERSION = 2
+BENCHMARK_SUITE = "letsinfer-code-prose-v1"
+BENCHMARK_GENERATOR = "letsinfer-code-prose"
 BENCHMARK_GENERATOR_VERSION = 1
 BENCHMARK_TOKENIZER_CAPABILITY = "engine-rendered-chat-count-v1"
 BENCHMARK_RENDER_CONTRACT = "openai-chat-user-v1"
@@ -443,14 +443,12 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         case_where = f"{where}.cases[{index}]"
         if not isinstance(case, dict) or set(case) != {
             "id",
-            "workload",
             "prompt_tokens",
             "concurrencies",
-            "seed",
         }:
             raise RuntimePackError(
-                f"{case_where} must contain exactly id, workload, prompt_tokens, "
-                "concurrencies, and seed"
+                f"{case_where} must contain exactly id, prompt_tokens, and "
+                "concurrencies"
             )
         case_id = case.get("id")
         if not isinstance(case_id, str) or not SAFE_NAME_RE.fullmatch(case_id):
@@ -458,8 +456,6 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         if case_id in seen:
             raise RuntimePackError(f"duplicate runtime benchmark case: {case_id}")
         seen.add(case_id)
-        if case.get("workload") != "context-summary-v1":
-            raise RuntimePackError(f"{case_where}.workload is unsupported")
         prompt_tokens = case.get("prompt_tokens")
         if (
             not isinstance(prompt_tokens, int)
@@ -483,9 +479,6 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             raise RuntimePackError(
                 f"{case_where}.concurrencies must be sorted unique values from 1 through 128"
             )
-        case_seed = case.get("seed")
-        if not isinstance(case_seed, int) or isinstance(case_seed, bool) or case_seed < 0:
-            raise RuntimePackError(f"{case_where}.seed must be non-negative")
     return value
 
 
