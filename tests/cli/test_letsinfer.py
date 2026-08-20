@@ -173,14 +173,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.29")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.30")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.29"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.30"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -1373,8 +1373,10 @@ class CommandTests(unittest.TestCase):
             root = pathlib.Path(directory)
             state_path = root / "qualification.json"
             state_path.write_text("{}\n", encoding="utf-8")
-            protection_root = root / "protection"
-            protection_root.mkdir()
+            placement_id = "a" * 32
+            protection_root = root / letsinfer.PROTECTION_ROOT_NAME / placement_id
+            protection_root.mkdir(parents=True)
+            protection_root.chmod(0o700)
             trip = protection_root / letsinfer.PROTECTION_TRIP_NAME
             trip.write_text('{"reason":"candidate-failed"}\n', encoding="utf-8")
             trip.chmod(0o600)
@@ -1383,6 +1385,8 @@ class CommandTests(unittest.TestCase):
                 "qualification_mode": True,
                 "qualification_evidence_dir": str(evidence),
                 "protection_root": str(protection_root),
+                "watchdog_data_root": str(root),
+                "placement_id": placement_id,
                 "name": "letsinfer-sglang",
                 "engine_api_key_file": str(root / "key"),
             }
@@ -1402,6 +1406,7 @@ class CommandTests(unittest.TestCase):
                 letsinfer._retire_qualification_candidate(remove_container=True)
 
             self.assertFalse(state_path.exists())
+            self.assertFalse(protection_root.exists())
             self.assertFalse(trip.exists())
             self.assertEqual(
                 (evidence / "retired-protection-trip.json").read_text(encoding="utf-8"),
@@ -1589,6 +1594,9 @@ class CommandTests(unittest.TestCase):
             mock.patch.object(letsinfer, "_stop_managed_container") as stop,
             mock.patch.object(letsinfer, "update_service_placement"),
             mock.patch.object(letsinfer, "protection_trip_latched", return_value=False),
+            mock.patch.object(
+                letsinfer, "retire_qualification_protection_slot"
+            ) as retire_slot,
             mock.patch.object(letsinfer, "_fsync_path"),
             mock.patch.object(letsinfer, "_restore_resident_watchdog_projection"),
         ):
@@ -1596,7 +1604,102 @@ class CommandTests(unittest.TestCase):
 
         disarm.assert_not_called()
         stop.assert_called_once_with("letsinfer-benchmark", pathlib.Path("/engine-key"))
+        retire_slot.assert_called_once_with(config)
         state_path.unlink.assert_called_once_with()
+
+    def test_retiring_qualification_protection_slot_disarms_and_removes_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            watchdog_root = root / "watchdog"
+            placement_id = "a" * 32
+            protection_root = watchdog_root / letsinfer.PROTECTION_ROOT_NAME / placement_id
+            protection_root.mkdir(parents=True, mode=0o700)
+            state = protection_root / letsinfer.PROTECTION_STATE_NAME
+            state.write_text(
+                letsinfer._protection_descriptor(
+                    "b" * 32,
+                    "starting",
+                    "letsinfer-benchmark",
+                    {
+                        "container_id": "c" * 64,
+                        "pid": 123,
+                        "start_ticks": 456,
+                        "boot_id": "d" * 36,
+                        "cgroup": "/sys/fs/cgroup/test",
+                    },
+                ),
+                encoding="utf-8",
+            )
+            state.chmod(0o600)
+            config = {
+                "protection_root": str(protection_root),
+                "watchdog_data_root": str(watchdog_root),
+                "placement_id": placement_id,
+            }
+
+            def disarm(actual: dict[str, object]) -> None:
+                self.assertIs(actual, config)
+                state.write_text(
+                    letsinfer._protection_descriptor(
+                        "b" * 32, "disarmed", "letsinfer-benchmark"
+                    ),
+                    encoding="utf-8",
+                )
+                state.chmod(0o600)
+
+            with mock.patch.object(
+                letsinfer, "disarm_protection", side_effect=disarm
+            ) as disarm_call:
+                letsinfer.retire_qualification_protection_slot(config)
+
+            disarm_call.assert_called_once_with(config)
+            self.assertFalse(protection_root.exists())
+
+    def test_retiring_qualification_protection_slot_preserves_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            watchdog_root = root / "watchdog"
+            placement_id = "a" * 32
+            protection_root = watchdog_root / letsinfer.PROTECTION_ROOT_NAME / placement_id
+            protection_root.mkdir(parents=True, mode=0o700)
+            trip = protection_root / letsinfer.PROTECTION_TRIP_NAME
+            trip.write_text("{}\n", encoding="utf-8")
+            trip.chmod(0o600)
+            config = {
+                "protection_root": str(protection_root),
+                "watchdog_data_root": str(watchdog_root),
+                "placement_id": placement_id,
+            }
+            with self.assertRaisesRegex(
+                letsinfer.LetsInferError, "latched trip"
+            ):
+                letsinfer.retire_qualification_protection_slot(config)
+            self.assertTrue(trip.is_file())
+
+    def test_repeated_qualification_retirement_never_fills_watchdog_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            watchdog_root = pathlib.Path(directory) / "watchdog"
+            protected = watchdog_root / letsinfer.PROTECTION_ROOT_NAME
+            for index in range(70):
+                placement_id = f"{index:032x}"
+                protection_root = protected / placement_id
+                protection_root.mkdir(parents=True, mode=0o700)
+                state = protection_root / letsinfer.PROTECTION_STATE_NAME
+                state.write_text(
+                    letsinfer._protection_descriptor(
+                        f"{index + 1:032x}", "pending", "letsinfer-benchmark"
+                    ),
+                    encoding="utf-8",
+                )
+                state.chmod(0o600)
+                letsinfer.retire_qualification_protection_slot(
+                    {
+                        "protection_root": str(protection_root),
+                        "watchdog_data_root": str(watchdog_root),
+                        "placement_id": placement_id,
+                    }
+                )
+            self.assertEqual(list(protected.iterdir()), [])
 
     def test_candidate_recover_clears_trip_and_rearms_exact_container(self) -> None:
         config = {

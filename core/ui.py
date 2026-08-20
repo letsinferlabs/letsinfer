@@ -175,6 +175,45 @@ def home(
     target.flush()
 
 
+def update_labels(records: Iterable[object]) -> list[str]:
+    """Normalize update records or status dictionaries for every UI surface."""
+    labels = []
+    for record in records:
+        if isinstance(record, Mapping):
+            kind = record.get("kind", "")
+            subject = record.get("subject", "")
+            version = record.get("version") or record.get("available_version", "")
+        else:
+            kind = getattr(record, "kind", "")
+            subject = getattr(record, "subject", "")
+            version = getattr(record, "available_version", "")
+        label = "Core" if kind == "core" else subject
+        if isinstance(label, str) and label and isinstance(version, str) and version:
+            labels.append(f"{label} {version}")
+    return labels
+
+
+def update_notice(
+    records: Iterable[object],
+    *,
+    stream: TextIO | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Render verified cached availability without touching the network."""
+    target = sys.stderr if stream is None else stream
+    terminal = Terminal(target, environ=environ)
+    if not terminal.interactive:
+        return
+    labels = update_labels(records)
+    if not labels:
+        return
+    terminal.warning("Update available · " + " · ".join(labels))
+    target.write(
+        terminal.paint("  Run `letsinfer update check` for verified details.\n", DIM)
+    )
+    target.flush()
+
+
 def _mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -202,6 +241,14 @@ def site_status(
     ready = site_ready and (gateway_ready if gateway_expected else True)
 
     target.write(f"{terminal.logo()}\n\n")
+    updates = payload.get("updates")
+    if isinstance(updates, list) and updates:
+        labels = update_labels(updates)
+        if labels:
+            target.write(
+                f"{terminal.paint('↑ UPDATE AVAILABLE', BOLD, YELLOW)}"
+                f"{terminal.paint(' · ' + ' · '.join(labels), DIM)}\n\n"
+            )
     state_color = GREEN if ready else YELLOW
     state_mark = "●" if terminal.unicode else "*"
     state = "ONLINE" if ready else "ATTENTION"

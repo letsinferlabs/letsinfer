@@ -2,6 +2,29 @@
 
 [Back to documentation](../README.md)
 
+Check both independently distributed layers without changing either one:
+
+```bash
+letsinfer update check
+```
+
+Core availability is advertised by the GitHub release channel and runtime
+availability by the signed catalog's immutable OCI digest for the selected
+model/engine/target. The site agent refreshes this state hourly. Normal
+CLI commands only read the local identity-bound snapshot, so an unavailable
+registry or catalog cannot delay inference administration. The notice tells
+the user what can move; it never applies an update automatically. The core
+installer still verifies checksums and the release signature before applying.
+The advisory snapshot is the private node-local database
+`~/.local/share/letsinfer/updates.sqlite3`; it contains component identities,
+versions, immutable sources, and verification timestamps, never credentials.
+
+Update core without changing runtime selection:
+
+```bash
+letsinfer update
+```
+
 Upgrade follows the policy recorded at installation:
 
 - `recommended` follows the catalog's current recommended engine;

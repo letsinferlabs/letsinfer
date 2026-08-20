@@ -61,6 +61,7 @@ ACTIONS = {
         _action("engines", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE, requires_site=False),
         _action("hardware", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE, requires_site=False),
         _action("update", CommandScope.ALL, MutationClass.NODE, AuditPolicy.SUCCESS, requires_site=False),
+        _action("update.check", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE, requires_site=False),
         _action("topology.show", CommandScope.COORDINATOR, MutationClass.READ, AuditPolicy.SENSITIVE_READ),
         _action("topology.probe", CommandScope.COORDINATOR, MutationClass.SITE, AuditPolicy.ALWAYS),
         _action("topology.plan", CommandScope.COORDINATOR, MutationClass.SITE, AuditPolicy.ALWAYS),

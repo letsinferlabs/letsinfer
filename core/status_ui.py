@@ -276,7 +276,16 @@ def dashboard_lines(
     hardware = str(site.get("hardware_name") or "Local inference node")
     hostname = str(site.get("hostname") or "local")
     role = str(site.get("role") or "node")
-    lines.extend((terminal.paint(f"{hardware} · {hostname} · {role}", ui.DIM), ""))
+    lines.append(terminal.paint(f"{hardware} · {hostname} · {role}", ui.DIM))
+    updates = payload.get("updates")
+    if isinstance(updates, list) and updates:
+        labels = ui.update_labels(updates)
+        if labels:
+            lines.append(
+                terminal.paint("↑  UPDATE AVAILABLE", ui.BOLD, ui.YELLOW)
+                + terminal.paint(" · " + " · ".join(labels), ui.DIM)
+            )
+    lines.append("")
     state_symbol = (
         "✓" if terminal.unicode and serving
         else "•" if terminal.unicode and lifecycle_state == "starting"

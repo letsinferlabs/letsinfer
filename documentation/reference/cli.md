@@ -100,6 +100,7 @@ letsinfer inspect RUNTIME [--target TARGET] [--command] [--diff] [--json]
 letsinfer upgrade RUNTIME [--target TARGET] [--catalog LOCATION] [--to SOURCE] [--dry-run]
 letsinfer rollback RUNTIME [--target TARGET] [--dry-run]
 letsinfer update [--version VERSION]
+letsinfer update check [--catalog LOCATION] [--json]
 ```
 
 `pack` creates a deterministic `.letsinfer` artifact. `install` accepts local
@@ -166,6 +167,23 @@ selected runtime's exact protection thresholds. An incompatible selected
 runtime is stopped, its recovery timer remains stopped, and the result reports
 `runtime_state=incompatible-stopped` instead of retrying an unverifiable
 runtime. An active benchmark must be stopped before updating core.
+
+`update check` synchronously refreshes availability for core and the one
+selected resident or qualification runtime. It is read-only: core remains on
+the GitHub release channel, whose installer verifies the release signature,
+while runtime availability comes from the signed catalog's target-compatible,
+digest-pinned OCI record. The command does not download or activate either
+component. Use `--json` for its versioned machine-readable result.
+
+The always-running site agent performs the same check hourly with bounded
+jitter. It writes
+one transactional node-local SQLite snapshot. Other CLI commands read that
+snapshot only and never wait on the network; when a verified update exists,
+interactive commands show one compact notice on stderr. Redirected and JSON
+output remain byte-clean. A transient network or catalog failure retains a
+previously verified update only while its installed component identity still
+matches. Changing an installed core or runtime invalidates stale advice
+immediately. Concurrent checks are collapsed by a bounded cross-process lease.
 
 ## Model and service lifecycle
 
