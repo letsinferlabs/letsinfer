@@ -211,10 +211,14 @@ unit is described as activating. A protection trip always takes precedence and
 renders `BLOCKED`; terminal engine or Docker health failures render `FAILED`.
 API reachability and authentication come from live gateway probes even when
 runtime metadata is incompatible; the version row names that incompatibility
-while the overall lifecycle remains degraded. Interactive `letsinfer status` is a live,
-one-second dashboard and runs until `Ctrl-C`; `--json` and redirected output
-remain one-shot machine interfaces. The dashboard uses the authenticated site
-telemetry feed for scheduler, throughput, history, and system readings.
+while the overall lifecycle remains degraded. A running, Docker-healthy
+container with a freshly verified served-model identity remains serving when a
+separate direct health probe times out under a saturated prefill; only an
+absent, exited, unhealthy, or identity-mismatched runtime is shown as stopped
+or failed. Interactive `letsinfer status` is a live, one-second dashboard and
+runs until `Ctrl-C`; `--json` and redirected output remain one-shot machine
+interfaces. The dashboard uses the authenticated site telemetry feed for
+scheduler, throughput, history, and system readings.
 
 Host available memory is telemetry, not an availability or admission signal.
 Loaded engines commonly reserve weights, KV cache, and graph workspaces before

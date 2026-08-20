@@ -198,6 +198,7 @@ def dashboard_lines(
 
     lifecycle_state = str(lifecycle.get("state") or "degraded")
     serving = lifecycle_state == "ready"
+    runtime_ready = lifecycle.get("runtime_ready") is True
     state = (
         "SERVING"
         if serving
@@ -394,7 +395,24 @@ def dashboard_lines(
     gateway_state = "API Ready" if api_process_ready and route_ready else "UNAVAILABLE"
     gateway_color = ui.GREEN if gateway_state == "API Ready" else ui.RED
     lines.append(route("GATEWAY", gateway_state, endpoint, gateway_color))
-    lines.extend((terminal.paint("│", ui.DIM), route("RUNTIME", "SERVING" if container.get("healthy") is True else "STOPPED", f"{model} · {engine}", ui.GREEN if container.get("healthy") is True else ui.RED), terminal.paint("│", ui.DIM), route("TARGET", "READY" if container.get("healthy") is True else "WAITING", target, ui.GREEN if container.get("healthy") is True else ui.YELLOW)))
+    lines.extend(
+        (
+            terminal.paint("│", ui.DIM),
+            route(
+                "RUNTIME",
+                "SERVING" if runtime_ready else "STOPPED",
+                f"{model} · {engine}",
+                ui.GREEN if runtime_ready else ui.RED,
+            ),
+            terminal.paint("│", ui.DIM),
+            route(
+                "TARGET",
+                "READY" if runtime_ready else "WAITING",
+                target,
+                ui.GREEN if runtime_ready else ui.YELLOW,
+            ),
+        )
+    )
 
     scheduler_capacity = str(maximum) if maximum is not None else "—"
     lines.extend(

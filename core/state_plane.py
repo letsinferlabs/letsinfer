@@ -62,7 +62,6 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
     )
     engine_ready = (
         container.get("state") == "running"
-        and container.get("healthy") is True
         and container.get("docker_health") == "healthy"
         and container.get("model_identity") is True
     )
@@ -99,6 +98,7 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
     details = {
         "ready": False,
         "transitional": False,
+        "runtime_ready": engine_ready,
         "ready_services": ready_units,
         "total_services": len(unit_states),
     }
