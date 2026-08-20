@@ -103,6 +103,7 @@ typedef struct watchdog_safety_runtime {
     uint32_t state_failures;
     bool has_pressure_baseline;
     bool has_cgroup_baseline;
+    bool state_warned;
     bool warned;
     bool tripped;
 } watchdog_safety_runtime;

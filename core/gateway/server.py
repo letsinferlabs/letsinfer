@@ -15,6 +15,7 @@ import pathlib
 import queue
 import re
 import secrets
+import select
 import signal
 import socket
 import ssl
@@ -23,9 +24,11 @@ import threading
 import time
 import urllib.parse
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from ..state_plane import backend_available as backend_is_operational
+from ..state_plane import engine_has_capacity
 from ..site.state import SiteError, SiteIdentity, SiteStore, read_identity
 from ..site.topology import (
     MAX_FACT_AGE_SECONDS,
@@ -54,7 +57,7 @@ PUBLIC_INFERENCE_PATHS = PUBLIC_INFERENCE_GET_PATHS | PUBLIC_INFERENCE_POST_PATH
 CORS_REQUEST_HEADERS_MAX_BYTES = 2048
 CORS_HEADER_TOKEN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 MAX_CONNECTIONS = 256
-DEFAULT_QUEUE_TIMEOUT_SECONDS = 300
+DEFAULT_QUEUE_TIMEOUT_SECONDS = 0
 BACKEND_RESPONSE_TIMEOUT_SECONDS = 3600
 BACKEND_MAX_COOLDOWN_SECONDS = 30
 PREFIX_AFFINITY_MAX_ENTRIES = 4096
@@ -84,6 +87,10 @@ class AdmissionError(GatewayError):
 
 class PlacementContextMismatch(GatewayError):
     """The request can be retried only on a larger qualified placement."""
+
+
+class ClientDisconnected(Exception):
+    """The waiting inference client closed its HTTP connection."""
 
 
 @dataclasses.dataclass
@@ -482,20 +489,7 @@ class PolicySnapshot:
                     token_count_protocol=token_count_protocol,
                     max_active_requests=max_active_requests,
                     max_context_tokens=max_context_tokens,
-                    # Memory pressure pauses admission, but it does not make
-                    # an otherwise healthy model disappear from discovery.
-                    # A protection trip remains a hard health failure.
-                    healthy=(
-                        endpoint.get("healthy", True) is True
-                        and live_health["protection_trip"] is False
-                        and (
-                            live_health["state"] == "healthy"
-                            or (
-                                live_health["state"] == "degraded"
-                                and live_health["memory_pressure"] is True
-                            )
-                        )
-                    ),
+                    healthy=backend_is_operational(endpoint, live_health),
                     memory_pressure=(
                         endpoint.get("memory_pressure", False) is True
                         or live_health["memory_pressure"] is True
@@ -583,9 +577,8 @@ class PolicySnapshot:
     def context_backends(self, model: str) -> tuple[Backend, ...]:
         """Return healthy endpoints suitable for read-only admission inspection.
 
-        Exact token counting must remain available while generation admission
-        is paused for memory pressure. This lets the gateway reject an
-        impossible context immediately instead of queueing it forever.
+        Exact token counting stays available before capacity admission so the
+        gateway can reject an impossible context instead of queueing forever.
         """
         self.reload()
         with self.lock:
@@ -599,7 +592,6 @@ class PolicySnapshot:
         candidates.sort(
             key=lambda backend: (
                 backend.token_count_path is None,
-                backend.memory_pressure,
                 -backend.max_context_tokens,
                 backend.member_id,
             )
@@ -613,10 +605,13 @@ class PolicySnapshot:
         prefix_key: str | None,
         timeout: float,
         excluded: set[tuple[str, str, str]] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> tuple[Backend, float]:
         started = time.monotonic()
-        deadline = started + timeout
+        deadline = None if timeout <= 0 else started + timeout
         while True:
+            if cancelled is not None and cancelled():
+                raise ClientDisconnected()
             self.reload()
             excluded_keys = excluded or set()
             with self.condition:
@@ -631,7 +626,6 @@ class PolicySnapshot:
                     for backend in self.backends
                     if backend.model == model
                     and backend.healthy
-                    and not backend.memory_pressure
                     and self.backend_available(backend)
                 ]
                 if available_for_model and all(
@@ -643,10 +637,12 @@ class PolicySnapshot:
                     for backend in self.backends
                     if backend.model == model
                     and backend.healthy
-                    and not backend.memory_pressure
                     and self.backend_available(backend)
                     and backend.key not in excluded_keys
-                    and self.active[backend.key] < backend.max_active_requests
+                    and engine_has_capacity(
+                        active_requests=self.active[backend.key],
+                        max_active_requests=backend.max_active_requests,
+                    )
                 ]
                 if candidates:
                     candidates.sort(
@@ -666,22 +662,13 @@ class PolicySnapshot:
                     selected = candidates[0]
                     self.active[selected.key] += 1
                     return selected, time.monotonic() - started
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                if any(
-                    backend.model == model
-                    and backend.healthy
-                    and backend.memory_pressure
-                    for backend in self.backends
-                ):
-                    raise AdmissionError(
-                        "qualified placement is waiting for memory headroom",
-                        status=503,
-                        code="memory_pressure",
-                    )
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
                 raise GatewayError("no qualified placement became available before queue timeout")
             with self.condition:
-                self.condition.wait(timeout=min(0.25, remaining))
+                self.condition.wait(
+                    timeout=0.25 if remaining is None else min(0.25, remaining)
+                )
 
     def release_backend(self, backend: Backend) -> None:
         with self.condition:
@@ -1107,6 +1094,20 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, _format: str, *_arguments: Any) -> None:
         return
 
+    def _client_disconnected(self) -> bool:
+        """Detect an abandoned request while it is waiting for admission."""
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            if not readable:
+                return False
+            return self.connection.recv(
+                1, socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)
+            ) == b""
+        except (BlockingIOError, InterruptedError):
+            return False
+        except (OSError, ValueError):
+            return True
+
     def end_headers(self) -> None:
         # The LAN endpoint authenticates with bearer keys, never browser
         # cookies. Allow local browser clients to use the same OpenAI surface
@@ -1461,6 +1462,7 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                     prefix_key=prefix_key,
                     timeout=self.gateway.queue_timeout_seconds,
                     excluded=attempted,
+                    cancelled=self._client_disconnected,
                 )
                 queue_seconds += waited
                 if queued_metric:
@@ -1568,7 +1570,6 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                             if candidate.model == model
                             and candidate.key not in attempted
                             and candidate.healthy
-                            and not candidate.memory_pressure
                             and self.gateway.policy.backend_available(candidate)
                             and candidate.token_count_path is not None
                         ]
@@ -1588,7 +1589,6 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                             if candidate.model == model
                             and candidate.key not in attempted
                             and candidate.healthy
-                            and not candidate.memory_pressure
                             and self.gateway.policy.backend_available(candidate)
                             and candidate.max_context_tokens >= total_requested
                         ]
@@ -1613,7 +1613,6 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                             if candidate.model == model
                             and candidate.key not in attempted
                             and candidate.healthy
-                            and not candidate.memory_pressure
                             and self.gateway.policy.backend_available(candidate)
                         ]
                     if not alternatives:
@@ -1633,7 +1632,7 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                             active_metric = False
                         backend = None
             self.close_connection = True
-        except (BrokenPipeError, ConnectionResetError):
+        except (ClientDisconnected, BrokenPipeError, ConnectionResetError):
             status = "cancelled"
             self.gateway.metrics.update(requests_cancelled=1)
             self.close_connection = True
@@ -1783,6 +1782,10 @@ def run_gateway(arguments: argparse.Namespace) -> int:
         raise GatewayError("gateway port must be between 1 and 65535")
     if arguments.max_connections < 1 or arguments.max_connections > MAX_CONNECTIONS:
         raise GatewayError(f"max connections must be between 1 and {MAX_CONNECTIONS}")
+    if arguments.queue_timeout < 0 or arguments.queue_timeout > 3600:
+        raise GatewayError(
+            "queue timeout must be 0 (unlimited) or between 1 and 3600 seconds"
+        )
     server = GatewayServer(
         (arguments.listen, arguments.port), identity=identity,
         telemetry_file=pathlib.Path(arguments.telemetry_file).expanduser(),

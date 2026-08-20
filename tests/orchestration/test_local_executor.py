@@ -163,6 +163,23 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             self.config["container_name"], pathlib.Path(self.config["credential_file"])
         )
 
+    def test_stop_refuses_to_exit_before_watchdog_disarm_ack(self) -> None:
+        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        with (
+            mock.patch.object(cli, "_read_engine_group_config", return_value=self.config),
+            mock.patch.object(
+                cli,
+                "disarm_protection",
+                side_effect=cli.LetsInferError("Watchdog did not acknowledge"),
+            ),
+            mock.patch.object(cli, "_stop_managed_container") as stop,
+        ):
+            with self.assertRaisesRegex(
+                cli.LetsInferError, "Watchdog did not acknowledge"
+            ):
+                executor.stop(self.job)
+        stop.assert_not_called()
+
     def test_explicit_recovery_clears_only_its_trip_before_start(self) -> None:
         executor = cli.LocalEngineGroupExecutor(self.member_id)
         with (

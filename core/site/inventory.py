@@ -18,6 +18,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ..state_plane import member_health_state
 from .topology import validate_member_facts
 
 
@@ -550,7 +551,10 @@ def collect_local_facts(
             "letsinfer_version": product_version,
         },
         "health": {
-            "state": "degraded" if protection_tripped or memory_pressure else "healthy",
+            # Loaded inference engines commonly preallocate weights, KV cache,
+            # and graph workspaces. Low host headroom is telemetry, not proof
+            # that the healthy engine cannot admit through its own scheduler.
+            "state": member_health_state(protection_tripped=protection_tripped),
             "memory_pressure": memory_pressure,
             "protection_trip": protection_tripped,
             "max_temperature_c": max(temperatures),

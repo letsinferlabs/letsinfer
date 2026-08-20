@@ -22,6 +22,7 @@ int main(void) {
 #ifdef __linux__
     test_safety_supervisor_discovers_private_targets();
     test_safety_process_exit_latches_trip();
+    test_safety_descriptor_loss_degrades_without_trip();
 #endif
     if (watchdog_test_failures == 0) {
         puts("watchdog tests passed");

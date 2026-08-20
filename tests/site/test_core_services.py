@@ -37,7 +37,7 @@ class CoreServiceTests(unittest.TestCase):
             "gateway_listen": "0.0.0.0",
             "gateway_port": 8000,
             "gateway_telemetry_file": "/private/gateway.state",
-            "gateway_queue_timeout_seconds": 300,
+            "gateway_queue_timeout_seconds": 0,
             "gateway_max_connections": 256,
         }
         unit = cli.render_gateway_service(

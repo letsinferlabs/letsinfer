@@ -11,6 +11,7 @@ import time
 import unittest
 from unittest import mock
 
+from core.engines import ADAPTERS
 from core.gateway import server
 from core.site import state
 from tests.gateway.helpers import (
@@ -50,6 +51,12 @@ class GatewayPolicyTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.environment.stop()
         self.temporary.cleanup()
+
+    def test_queue_wait_is_unlimited_by_default(self) -> None:
+        arguments = server.parser().parse_args(
+            ["--telemetry-file", str(pathlib.Path(self.temporary.name) / "metrics")]
+        )
+        self.assertEqual(arguments.queue_timeout, 0)
 
     def placement(self, *, temperature: float = 45.0) -> dict:
         return {
@@ -544,8 +551,10 @@ class GatewayPolicyTests(unittest.TestCase):
             )
         policy.reload(force=True)
         self.assertTrue(policy.backends[0].memory_pressure)
-        with self.assertRaisesRegex(server.AdmissionError, "memory headroom"):
-            policy.acquire_backend("fixture-model", prefix_key=None, timeout=0.01)
+        selected, _ = policy.acquire_backend(
+            "fixture-model", prefix_key=None, timeout=0.01
+        )
+        policy.release_backend(selected)
 
         with state.SiteStore(identity=self.identity) as store:
             set_member_facts(
@@ -559,7 +568,7 @@ class GatewayPolicyTests(unittest.TestCase):
         policy.reload(force=True)
         self.assertEqual(policy.backends, [])
 
-    def test_memory_pressure_waiter_runs_when_headroom_returns(self) -> None:
+    def test_memory_telemetry_does_not_override_declared_engine_capacity(self) -> None:
         policy = server.PolicySnapshot(self.identity)
         with state.SiteStore(identity=self.identity) as store:
             set_member_facts(
@@ -567,31 +576,69 @@ class GatewayPolicyTests(unittest.TestCase):
                 self.identity.member_id,
                 routing_facts(self.identity.member_id, memory_pressure=True),
             )
-        policy.reload(force=True)
-        selected: list[server.Backend] = []
+        for engine in sorted(ADAPTERS):
+            with self.subTest(engine=engine):
+                placement = self.placement()
+                placement["runtime"] = f"fixture-model/{engine}/fixture-target"
+                placement["endpoints"][0]["max_active_requests"] = 2
+                placement["capacity"]["max_active_requests"] = 2
+                with state.SiteStore(identity=self.identity) as store:
+                    store.set_placement(placement)
+                policy.reload(force=True)
+                first, _ = policy.acquire_backend(
+                    "fixture-model", prefix_key=None, timeout=0.1
+                )
+                second, _ = policy.acquire_backend(
+                    "fixture-model", prefix_key=None, timeout=0.1
+                )
+                self.assertEqual(first.engine, engine)
+                self.assertEqual(second.engine, engine)
+                selected: list[server.Backend] = []
+                completed = threading.Event()
+
+                def wait_for_engine_capacity() -> None:
+                    backend, _ = policy.acquire_backend(
+                        "fixture-model", prefix_key=None, timeout=1
+                    )
+                    selected.append(backend)
+                    completed.set()
+
+                waiter = threading.Thread(target=wait_for_engine_capacity)
+                waiter.start()
+                self.assertFalse(completed.wait(0.1))
+                policy.release_backend(first)
+                self.assertTrue(completed.wait(1))
+                waiter.join(timeout=1)
+                self.assertEqual(len(selected), 1)
+                self.assertEqual(selected[0].engine, engine)
+                policy.release_backend(second)
+                policy.release_backend(selected[0])
+
+    def test_unlimited_admission_wait_stops_when_client_disconnects(self) -> None:
+        policy = server.PolicySnapshot(self.identity)
+        held, _ = policy.acquire_backend(
+            "fixture-model", prefix_key=None, timeout=0.1
+        )
+        cancelled = threading.Event()
         completed = threading.Event()
 
-        def wait_for_headroom() -> None:
-            backend, _ = policy.acquire_backend(
-                "fixture-model", prefix_key=None, timeout=1
-            )
-            selected.append(backend)
+        def wait_for_capacity() -> None:
+            with self.assertRaises(server.ClientDisconnected):
+                policy.acquire_backend(
+                    "fixture-model",
+                    prefix_key=None,
+                    timeout=0,
+                    cancelled=cancelled.is_set,
+                )
             completed.set()
 
-        waiter = threading.Thread(target=wait_for_headroom)
+        waiter = threading.Thread(target=wait_for_capacity)
         waiter.start()
         self.assertFalse(completed.wait(0.1))
-        with state.SiteStore(identity=self.identity) as store:
-            set_member_facts(
-                store,
-                self.identity.member_id,
-                routing_facts(self.identity.member_id, memory_pressure=False),
-            )
-        policy.reload(force=True)
+        cancelled.set()
         self.assertTrue(completed.wait(1))
         waiter.join(timeout=1)
-        self.assertEqual(len(selected), 1)
-        policy.release_backend(selected[0])
+        policy.release_backend(held)
 
     def test_prefix_affinity_is_bounded_and_survives_policy_reload(self) -> None:
         other = "e" * 32

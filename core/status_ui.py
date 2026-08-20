@@ -8,6 +8,7 @@ import re
 from typing import Any, Iterable, Mapping
 
 from . import ui
+from .state_plane import runtime_lifecycle
 
 
 ANSI = re.compile(r"\033\[[0-9;]*m")
@@ -82,13 +83,11 @@ def _clock(value: object) -> str:
     return "—" if amount < 0 else f"{amount / 1000:.2f} GHz"
 
 
-def _meter(terminal: ui.Terminal, value: float, *, width: int = 16) -> str:
-    bounded = max(0.0, min(100.0, value))
-    filled = round(bounded / 100.0 * width)
-    if bounded > 0 and filled == 0:
-        filled = 1
-    return terminal.paint(" " * filled, "\033[48;2;247;247;247m") + terminal.paint(
-        ("· " * width)[: width - filled], ui.DIM
+def _temperature_detail(
+    terminal: ui.Terminal, temperature: object, remainder: str
+) -> str:
+    return terminal.paint(_temperature(temperature), ui.BOLD) + terminal.paint(
+        f" · {remainder}", ui.DIM
     )
 
 
@@ -98,6 +97,7 @@ def _sparkline(
     *,
     width: int = 24,
     color: str | None = None,
+    scale_maximum: float | None = None,
 ) -> str:
     raw = list(values)
     if not raw:
@@ -110,7 +110,11 @@ def _sparkline(
         fraction = position - left
         points.append(raw[left] + (raw[right] - raw[left]) * fraction)
     blocks = "▁▂▃▄▅▆▇█"
-    maximum = max(max(points), 1.0)
+    maximum = (
+        max(scale_maximum, 1.0)
+        if scale_maximum is not None
+        else max(max(points), 1.0)
+    )
     rendered = "".join(
         blocks[min(7, max(0, round(max(0.0, value) / maximum * 7)))]
         for value in points
@@ -125,14 +129,35 @@ def _row(
     detail: str = "",
     *,
     color: str | None = None,
+    dim_detail: bool = True,
     width: int,
 ) -> str:
     label_text = terminal.paint(label.ljust(13), ui.DIM)
     value_text = terminal.paint(value.ljust(14), *(filter(None, (ui.BOLD, color))))
-    detail_text = terminal.paint(
-        terminal.clip(detail, max(1, width - 29)), ui.DIM
+    clipped_detail = terminal.clip(detail, max(1, width - 29))
+    detail_text = (
+        terminal.paint(clipped_detail, ui.DIM) if dim_detail else clipped_detail
     )
     return f"{label_text}{value_text}{detail_text}".rstrip()
+
+
+def _health_row(
+    terminal: ui.Terminal,
+    label: str,
+    symbol: str,
+    text: str,
+    *,
+    color: str,
+    width: int,
+) -> str:
+    """Render one compact health fact without a synthetic detail column."""
+    label_text = terminal.paint(label.ljust(13), ui.DIM)
+    symbol_text = terminal.paint(symbol, ui.BOLD, color)
+    detail = terminal.paint(
+        terminal.clip(text, max(1, width - 16)),
+        ui.DIM,
+    )
+    return f"{label_text}{symbol_text}  {detail}".rstrip()
 
 
 def _panel(terminal: ui.Terminal, values: Iterable[str]) -> list[str]:
@@ -162,7 +187,7 @@ def dashboard_lines(
     service = _mapping(payload.get("service"))
     container = _mapping(payload.get("container"))
     protection = _mapping(payload.get("protection"))
-    lifecycle = _mapping(payload.get("lifecycle"))
+    lifecycle = _mapping(payload.get("lifecycle") or runtime_lifecycle(payload))
     capacity = _mapping(container.get("capacity"))
     telemetry = _mapping(payload.get("telemetry"))
     rates = _mapping(telemetry.get("rates"))
@@ -171,27 +196,10 @@ def dashboard_lines(
     history = session_history or {}
     width = max(42, min(terminal.width, 76) - 6)
 
-    pressure = service.get("memory_pressure") is True
-    derived_ready = (
-        container.get("state") == "running"
-        and container.get("healthy") is True
-        and container.get("docker_health") == "healthy"
-        and container.get("model_identity") is True
-        and service.get("gateway_active") == "active"
-        and service.get("gateway_health") is True
-        and service.get("gateway_authenticated") is True
-        and service.get("gateway_model_identity") is True
-        and protection.get("armed") is True
-        and protection.get("trip_latched") is False
-    )
-    lifecycle_state = str(
-        lifecycle.get("state") or ("ready" if derived_ready else "degraded")
-    )
+    lifecycle_state = str(lifecycle.get("state") or "degraded")
     serving = lifecycle_state == "ready"
     state = (
-        "PRESSURE"
-        if pressure
-        else "SERVING"
+        "SERVING"
         if serving
         else "STARTING"
         if lifecycle_state == "starting"
@@ -202,9 +210,7 @@ def dashboard_lines(
         else "ATTENTION"
     )
     state_color = (
-        ui.ORANGE
-        if pressure
-        else ui.GREEN
+        ui.GREEN
         if serving
         else ui.CYAN
         if lifecycle_state == "starting"
@@ -212,8 +218,7 @@ def dashboard_lines(
         if lifecycle_state in {"failed", "blocked"}
         else ui.YELLOW
     )
-    site_state = "Ready" if serving and not pressure else "Pressure" if pressure else "Attention"
-    site_color = ui.GREEN if serving and not pressure else ui.ORANGE if pressure else ui.YELLOW
+    site_color = ui.GREEN if serving else ui.YELLOW
     endpoint = str(service.get("gateway_endpoint") or "LAN HTTP · API key").removeprefix(
         "http://"
     )
@@ -232,18 +237,6 @@ def dashboard_lines(
         capacity.get("max_active_requests")
     )
     allocated = _integer(capacity.get("max_active_requests"))
-    services_total = _integer(lifecycle.get("total_services"))
-    services_ready = _integer(lifecycle.get("ready_services"))
-    if services_total is None or services_ready is None:
-        service_states = (
-            service.get("active") == "active",
-            service.get("engine_active") == "active",
-            service.get("gateway_active") == "active",
-            service.get("site_active") == "active",
-            service.get("recovery_timer_active") == "active",
-        )
-        services_total = len(service_states)
-        services_ready = sum(service_states)
     api_process_ready = (
         service.get("gateway_active") == "active"
         and service.get("gateway_health") is True
@@ -252,73 +245,141 @@ def dashboard_lines(
     )
     route_ready = service.get("gateway_model_identity") is True
 
-    lines = [terminal.logo(), ""]
     display_name = str(site.get("display_name") or "Home")
-    lines.append(
-        f"{terminal.paint(display_name, ui.BOLD)}  "
-        f"{terminal.paint(site_state, ui.BOLD, site_color)}  "
-        f"{terminal.paint(_format_uptime(site.get('uptime_seconds')), ui.DIM)}"
+    uptime = _format_uptime(site.get("uptime_seconds"))
+    site_mark = (
+        "✓" if terminal.unicode and serving
+        else "!" if not serving
+        else "OK"
     )
+    brand = terminal.logo()
+    display_budget = max(
+        1,
+        width
+        - len(site_mark)
+        - len(uptime)
+        - len(ANSI.sub("", brand))
+        - 6,
+    )
+    display_name = terminal.clip(display_name, display_budget)
+    identity = (
+        f"{terminal.paint(display_name, ui.BOLD)}  "
+        f"{terminal.paint(site_mark, ui.BOLD, site_color)}  "
+        f"{terminal.paint(uptime, ui.DIM)}"
+    )
+    identity_gap = " " * max(
+        2,
+        width - len(ANSI.sub("", identity)) - len(ANSI.sub("", brand)),
+    )
+    lines = [f"{identity}{identity_gap}{brand}"]
     hardware = str(site.get("hardware_name") or "Local inference node")
     hostname = str(site.get("hostname") or "local")
     role = str(site.get("role") or "node")
     lines.extend((terminal.paint(f"{hardware} · {hostname} · {role}", ui.DIM), ""))
+    state_symbol = (
+        "✓" if terminal.unicode and serving
+        else "•" if terminal.unicode and lifecycle_state == "starting"
+        else "○" if terminal.unicode and lifecycle_state == "stopped"
+        else "✗" if terminal.unicode and lifecycle_state in {"failed", "blocked"}
+        else "!" if terminal.unicode
+        else "OK" if serving
+        else "!"
+    )
     lines.append(
-        _row(
+        _health_row(
             terminal,
             "State",
+            state_symbol,
             state,
-            terminal.paint("LIVE", ui.BOLD, ui.GREEN) + terminal.paint(" · 1 sec", ui.DIM),
             color=state_color,
             width=width,
         )
     )
     lines.append(_row(terminal, "Model", model, _context(capacity.get("max_context_tokens")), width=width))
-    lines.append(_row(terminal, "Engine", engine, target, width=width))
+    lines.append(_row(terminal, "Engine", engine, width=width))
     runtime_metadata_ready = service.get("runtime_metadata_ready") is not False
     lines.append(
         _row(
             terminal,
             "Version",
             version,
-            "runtime pack" if runtime_metadata_ready else "runtime metadata incompatible",
+            "" if runtime_metadata_ready else "runtime metadata incompatible",
             color=None if runtime_metadata_ready else ui.RED,
             width=width,
         )
     )
-    api_state = "Paused" if pressure else "Ready" if api_process_ready and route_ready else "Starting" if lifecycle_state == "starting" else "Unavailable"
-    api_color = ui.ORANGE if pressure else ui.GREEN if api_state == "Ready" else ui.CYAN if api_state == "Starting" else ui.RED
-    api_detail = (
-        f"memory pressure · {_bytes_gib(service.get('memory_available_bytes'))} available"
-        if pressure
-        else endpoint
+    api_state = "Ready" if api_process_ready and route_ready else "Starting" if lifecycle_state == "starting" else "Unavailable"
+    api_color = ui.GREEN if api_state == "Ready" else ui.CYAN if api_state == "Starting" else ui.RED
+    api_detail = endpoint
+    api_symbol = (
+        "✓" if terminal.unicode and api_state == "Ready"
+        else "•" if terminal.unicode and api_state == "Starting"
+        else "✗" if terminal.unicode and api_state == "Unavailable"
+        else "!" if terminal.unicode
+        else "OK" if api_state == "Ready"
+        else "!"
     )
-    lines.append(_row(terminal, "API", api_state, api_detail, color=api_color, width=width))
+    api_text = (
+        api_detail
+        if api_state == "Ready"
+        else f"{api_state} · {api_detail}"
+    )
     lines.append(
-        _row(
+        _health_row(
             terminal,
-            "Services",
-            f"{services_ready} / {services_total} active",
-            "candidate control plane active" if service.get("runtime_mode") == "qualification" else "gateway · engine · watchdog · recovery · telemetry",
+            "API",
+            api_symbol,
+            api_text,
+            color=api_color,
             width=width,
         )
     )
-    safety = "Pressure" if pressure else "Armed" if protection.get("armed") is True else "Arming" if lifecycle_state == "starting" else "Blocked"
-    safety_color = ui.ORANGE if pressure else ui.GREEN if safety == "Armed" else ui.CYAN if safety == "Arming" else ui.RED
-    safety_detail = (
-        f"admission paused · {_bytes_gib(service.get('memory_pressure_floor_bytes'))} floor"
-        if pressure
-        else "no trip · candidate guarded"
-        if service.get("runtime_mode") == "qualification"
-        else "no trip · recovery ready"
+    safety = (
+        "Armed"
+        if protection.get("armed") is True
+        else "Arming"
+        if lifecycle_state == "starting"
+        else "Disarmed"
+        if lifecycle_state == "stopped"
+        else "Blocked"
     )
-    lines.append(_row(terminal, "Safety", safety, safety_detail, color=safety_color, width=width))
+    safety_color = (
+        ui.GREEN
+        if safety == "Armed"
+        else ui.CYAN
+        if safety == "Arming"
+        else ui.YELLOW
+        if safety == "Disarmed"
+        else ui.RED
+    )
+    safety_detail = (
+        "intentional stop · no trip"
+        if lifecycle_state == "stopped"
+        else ""
+    )
+    guard_symbol = (
+        "✓" if terminal.unicode and safety == "Armed"
+        else "•" if terminal.unicode and safety == "Arming"
+        else "○" if terminal.unicode and safety == "Disarmed"
+        else "✗" if terminal.unicode and safety == "Blocked"
+        else "!" if terminal.unicode
+        else "OK" if safety == "Armed"
+        else "!"
+    )
+    guard_text = (
+        ""
+        if safety == "Armed"
+        else safety
+        if not safety_detail
+        else f"{safety} · {safety_detail}"
+    )
     lines.append(
-        _row(
+        _health_row(
             terminal,
-            "Watchdog",
-            _mib(service.get("memory_current_bytes")),
-            f"{_mib(service.get('memory_limit_bytes'))} limit",
+            "Guard",
+            guard_symbol,
+            guard_text,
+            color=safety_color,
             width=width,
         )
     )
@@ -330,8 +391,8 @@ def dashboard_lines(
         ).rstrip()
 
     lines.extend(("", "Request path", terminal.paint("○  CLIENT", ui.DIM), terminal.paint("│", ui.DIM)))
-    gateway_state = "PRESSURE" if pressure else "API Ready" if api_process_ready and route_ready else "UNAVAILABLE"
-    gateway_color = ui.ORANGE if pressure else ui.GREEN if gateway_state == "API Ready" else ui.RED
+    gateway_state = "API Ready" if api_process_ready and route_ready else "UNAVAILABLE"
+    gateway_color = ui.GREEN if gateway_state == "API Ready" else ui.RED
     lines.append(route("GATEWAY", gateway_state, endpoint, gateway_color))
     lines.extend((terminal.paint("│", ui.DIM), route("RUNTIME", "SERVING" if container.get("healthy") is True else "STOPPED", f"{model} · {engine}", ui.GREEN if container.get("healthy") is True else ui.RED), terminal.paint("│", ui.DIM), route("TARGET", "READY" if container.get("healthy") is True else "WAITING", target, ui.GREEN if container.get("healthy") is True else ui.YELLOW)))
 
@@ -342,13 +403,18 @@ def dashboard_lines(
             f"Scheduler  {terminal.paint(f'{scheduler_capacity} max · dynamic admission', ui.DIM)}",
         )
     )
-    meter_width = 22 if width >= 64 else 16
     active_value = active or 0
     queued_value = queued or 0
-    denominator = max(maximum or 1, 1)
-    lines.append(_row(terminal, "Active", f"{active_value} requests", _meter(terminal, active_value / denominator * 100, width=meter_width), width=width))
-    lines.append(_row(terminal, "Queue", f"{queued_value} waiting", _meter(terminal, queued_value / denominator * 100, width=meter_width), width=width))
-    lines.append(_row(terminal, "Allocated", f"{allocated or 0} / {maximum or '—'}", _meter(terminal, (allocated or 0) / denominator * 100, width=meter_width), width=width))
+    lines.append(_row(terminal, "Active", f"{active_value} requests", width=width))
+    lines.append(_row(terminal, "Queue", f"{queued_value} waiting", width=width))
+    lines.append(
+        _row(
+            terminal,
+            "Allocated",
+            f"{allocated or 0} / {maximum or '—'}",
+            width=width,
+        )
+    )
 
     aggregate_rate = (
         rates.get("aggregate_tokens_per_second")
@@ -359,103 +425,100 @@ def dashboard_lines(
     prefill_rate = rates.get("prefill_tokens_per_second")
     ttft = _number(rates.get("average_ttft_milliseconds"))
     prefix = _number(rates.get("prefix_cache_hit_ratio"))
+    chart_width = 24 if width >= 64 else 16
+    watchdog_current = _number(service.get("memory_current_bytes"))
+    watchdog_limit = _number(service.get("memory_limit_bytes"))
+    watchdog_usage = (
+        "—"
+        if min(watchdog_current, watchdog_limit) < 0
+        else f"{watchdog_current / 1024**2:.1f} / {watchdog_limit / 1024**2:.0f} MiB"
+    )
     lines.extend(("", "Performance"))
     lines.append(_row(terminal, "Tokens", f"{_rate(aggregate_rate)} tok/s", f"{_rate(decode_rate)} decode · {_rate(prefill_rate)} prefill", width=width))
     lines.append(_row(terminal, "Latency", "—" if ttft < 0 else f"{ttft / 1000:.2f}s TTFT", "— prefix hit" if prefix < 0 else f"{prefix * 100:.0f}% prefix hit", width=width))
     lines.append(_row(terminal, "Context", f"— / {_context(capacity.get('max_context_tokens')).removesuffix(' context')}", "live usage unavailable", width=width))
-
-    historical = telemetry.get("history")
-    historical_rows = historical if isinstance(historical, list) else []
-    token_history = [
-        _number(
-            _mapping(
-                _mapping(_mapping(row).get("aggregate")).get("rates")
-            ).get("aggregate_tokens_per_second"),
-            0,
-        )
-        for row in historical_rows
-    ]
-    request_history = [
-        _number(_mapping(row).get("aggregate", {}).get("active_requests"), 0)
-        for row in historical_rows
-    ]
-    chart_width = 24 if width >= 64 else 16
-    lines.extend(("", f"History  {terminal.paint('last 5 min · 1 sec', ui.DIM)}"))
-    history_colors = (
-        ui.YELLOW,
-        "\033[38;2;255;166;0m",
-        "\033[38;2;252;148;0m",
-        ui.ORANGE,
-        "\033[38;2;237;93;26m",
-        ui.RED,
-    )
-    lines.append(
-        _row(
-            terminal,
-            "Tokens",
-            f"{_rate(aggregate_rate)}/s",
-            _sparkline(
-                terminal,
-                token_history,
-                width=chart_width,
-                color=history_colors[0],
-            ),
-            width=width,
-        )
-    )
     lines.append(
         _row(
             terminal,
             "Requests",
-            f"{active_value} active",
-            _sparkline(
-                terminal,
-                request_history,
-                width=chart_width,
-                color=history_colors[1],
-            ),
+            f"{active_value} active · {queued_value} queued",
             width=width,
         )
     )
-    for index, (label, key) in enumerate(
-        (("GPU", "gpu"), ("Memory", "memory"), ("CPU", "cpu"), ("NVMe", "nvme")),
-        start=2,
-    ):
+    lines.append(_row(terminal, "Watchdog", watchdog_usage, width=width))
+
+    memory_used = _number(system.get("memory_used_mib"))
+    memory_total = _number(system.get("memory_total_mib"))
+    memory_value = _percent(system.get("memory_percent"))
+    if min(memory_used, memory_total) >= 0:
+        memory_value += f" {memory_used / 1024:.0f}/{memory_total / 1024:.0f}G"
+    gpu_value = _percent(system.get("gpu_percent"))
+    gpu_clock = _number(system.get("gpu_clock_mhz"))
+    if gpu_clock >= 0:
+        gpu_value += f" {gpu_clock / 1000:.2f}G"
+    cpu_value = _percent(system.get("cpu_percent"))
+    cpu_clock = _number(system.get("cpu_clock_mhz"))
+    if cpu_clock >= 0:
+        cpu_value += f" {cpu_clock / 1000:.2f}G"
+    nvme_value = _percent(system.get("disk_percent"))
+    disk_read = _number(system.get("disk_read_kib_s"), 0)
+    disk_write = _number(system.get("disk_write_kib_s"), 0)
+    nvme_value += f" R{disk_read:.0f}/W{disk_write:.0f}"
+    power_watts = _number(system.get("power_deci_w"))
+    power_value = "—" if power_watts < 0 else f"{power_watts / 10:.0f} W"
+    rx = _number(system.get("network_rx_kib_s"), 0)
+    tx = _number(system.get("network_tx_kib_s"), 0)
+    network_value = f"{rx + tx:.0f}K/s ↓{rx:.0f} ↑{tx:.0f}"
+
+    system_rows = (
+        ("GPU", "gpu", gpu_value, 100.0),
+        ("Unified mem", "memory", memory_value, 100.0),
+        ("CPU", "cpu", cpu_value, 100.0),
+        ("NVMe", "nvme", nvme_value, 100.0),
+        ("Power", "power", power_value, None),
+        ("Network", "network", network_value, None),
+    )
+    lines.extend(("", f"System  {terminal.paint('last 5 min · 1 sec', ui.DIM)}"))
+    for index, (label, key, value, scale_maximum) in enumerate(system_rows):
         values = history.get(key, [])
         lines.append(
             _row(
                 terminal,
                 label,
-                _percent(
-                    system.get(
-                        {
-                            "gpu": "gpu_percent",
-                            "memory": "memory_percent",
-                            "cpu": "cpu_percent",
-                            "nvme": "disk_percent",
-                        }[key]
-                    )
-                ),
+                value,
                 _sparkline(
                     terminal,
                     values,
                     width=chart_width,
-                    color=history_colors[index],
+                    color=ui.HISTORY_CHART_COLORS[index],
+                    scale_maximum=scale_maximum,
                 ),
+                dim_detail=False,
                 width=width,
             )
         )
 
-    lines.extend(("", "System"))
-    lines.append(_row(terminal, "GPU", _percent(system.get("gpu_percent")), f"{_temperature(system.get('gpu_temp_deci_c'))} · {_clock(system.get('gpu_clock_mhz'))}", width=width))
-    memory_used = _number(system.get("memory_used_mib"))
-    memory_total = _number(system.get("memory_total_mib"))
-    memory_detail = "—" if min(memory_used, memory_total) < 0 else f"{memory_used / 1024:.1f} / {memory_total / 1024:.1f} GB"
-    lines.append(_row(terminal, "Unified mem", _percent(system.get("memory_percent")), memory_detail, width=width))
-    lines.append(_row(terminal, "CPU", _percent(system.get("cpu_percent")), f"{_temperature(system.get('system_temp_deci_c'))} · {_clock(system.get('cpu_clock_mhz'))}", width=width))
-    lines.append(_row(terminal, "NVMe", _percent(system.get("disk_percent")), f"{_temperature(system.get('nvme_temp_deci_c'))} · R/W {_number(system.get('disk_read_kib_s'), 0):.0f}/{_number(system.get('disk_write_kib_s'), 0):.0f} KiB/s", width=width))
-    lines.append(_row(terminal, "Power", "—" if _number(system.get("power_deci_w")) < 0 else f"{_number(system.get('power_deci_w')) / 10:.0f} W", "total draw", width=width))
-    rx = _number(system.get("network_rx_kib_s"), 0)
-    tx = _number(system.get("network_tx_kib_s"), 0)
-    lines.append(_row(terminal, "Network", f"{rx + tx:.0f} KiB/s", f"down {rx:.0f} · up {tx:.0f}", width=width))
+    temperature_rows = (
+        ("GPU", "gpu_temp", system.get("gpu_temp_deci_c"), ui.YELLOW),
+        ("CPU", "cpu_temp", system.get("system_temp_deci_c"), ui.ORANGE),
+        ("NVMe", "nvme_temp", system.get("nvme_temp_deci_c"), ui.RED),
+    )
+    lines.extend(("", f"Temperature  {terminal.paint('last 5 min · 1 sec', ui.DIM)}"))
+    for label, key, value, color in temperature_rows:
+        lines.append(
+            _row(
+                terminal,
+                label,
+                _temperature(value),
+                _sparkline(
+                    terminal,
+                    history.get(key, []),
+                    width=chart_width,
+                    color=color,
+                    scale_maximum=120.0,
+                ),
+                dim_detail=False,
+                width=width,
+            )
+        )
     return _panel(terminal, lines)

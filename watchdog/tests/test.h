@@ -25,5 +25,6 @@ void test_safety_decision_precedence(void);
 void test_safety_thresholds_and_descriptor(void);
 void test_safety_supervisor_discovers_private_targets(void);
 void test_safety_process_exit_latches_trip(void);
+void test_safety_descriptor_loss_degrades_without_trip(void);
 
 #endif

@@ -15,6 +15,8 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ..state_plane import member_available
+
 
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SAFE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -381,9 +383,7 @@ class TopologyGraph:
             and accelerator["minimum_memory_gib"] >= expected_accelerator.get("minimum_memory_gib", 0)
             and memory["topology"] == expected_memory["topology"]
             and memory["total_gib"] >= expected_memory["minimum_total_gib"]
-            and member["health"]["state"] == "healthy"
-            and not member["health"]["memory_pressure"]
-            and not member["health"]["protection_trip"]
+            and member_available(member["health"])
         )
 
     def _link_satisfies(self, left: str, right: str, contract: Mapping[str, Any]) -> bool:
@@ -426,9 +426,7 @@ class TopologyGraph:
             or len(members) != len(set(members))
             or any(member_id not in self.members for member_id in members)
             or any(
-                self.members[member_id]["health"]["state"] != "healthy"
-                or self.members[member_id]["health"]["memory_pressure"]
-                or self.members[member_id]["health"]["protection_trip"]
+                not member_available(self.members[member_id]["health"])
                 for member_id in members
             )
         ):

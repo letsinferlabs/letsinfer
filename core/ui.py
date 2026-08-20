@@ -22,12 +22,25 @@ DIM = "\033[2m"
 # macOS app and website; redirected output and TERM=dumb remain byte-clean,
 # while NO_COLOR retains the human layout without terminal escape sequences.
 LIGHT = "\033[38;2;247;247;247m"
+DARK = "\033[38;2;30;30;30m"
+LIGHT_BACKGROUND = "\033[48;2;247;247;247m"
 BLUE = "\033[38;2;0;156;223m"
+PURPLE = "\033[38;2;151;57;153m"
 GREEN = "\033[38;2;97;187;70m"
 YELLOW = "\033[38;2;255;185;0m"
 ORANGE = "\033[38;2;247;130;0m"
 RED = "\033[38;2;226;56;56m"
 CYAN = BLUE
+# Exact chromatic constants from private-design/colors.json. The runtime keeps
+# literal values so it never depends on the private design repository.
+HISTORY_CHART_COLORS = (
+    BLUE,
+    PURPLE,
+    GREEN,
+    YELLOW,
+    ORANGE,
+    RED,
+)
 CLEAR_LINE = "\r\033[2K"
 ANSI = re.compile(r"\033\[[0-9;]*m")
 _activity = threading.local()
@@ -93,13 +106,15 @@ class Terminal:
         return plain[: width - len(suffix)].rstrip() + suffix
 
     def logo(self, section: str | None = None) -> str:
-        title = "LET'S INFER"
-        if section:
-            title += f"  /  {section.upper()}"
-        return (
-            f"{self.paint(self.mark, BOLD, LIGHT)}  "
-            f"{self.paint(title, BOLD)}"
+        lockup = self.paint(
+            f" {self.mark}  LET'S INFER ",
+            BOLD,
+            DARK,
+            LIGHT_BACKGROUND,
         )
+        if not section:
+            return lockup
+        return f"{lockup} {self.paint(f'/  {section.upper()}', DIM)}"
 
     def command(self, command: str, description: str) -> str:
         command_width = min(34, max(24, self.width // 2))
@@ -578,6 +593,11 @@ def live_runtime_status(snapshot: Callable[[], Mapping[str, Any]]) -> int:
         "memory": [],
         "cpu": [],
         "nvme": [],
+        "power": [],
+        "network": [],
+        "gpu_temp": [],
+        "cpu_temp": [],
+        "nvme_temp": [],
     }
     first = True
     try:
@@ -590,15 +610,25 @@ def live_runtime_status(snapshot: Callable[[], Mapping[str, Any]]) -> int:
                 return int(payload.get("exit_code") or 0)
             telemetry = _mapping(payload.get("telemetry"))
             system = _mapping(telemetry.get("system"))
-            for name, field in (
-                ("gpu", "gpu_percent"),
-                ("memory", "memory_percent"),
-                ("cpu", "cpu_percent"),
-                ("nvme", "disk_percent"),
+            for name, fields, divisor in (
+                ("gpu", ("gpu_percent",), 1.0),
+                ("memory", ("memory_percent",), 1.0),
+                ("cpu", ("cpu_percent",), 1.0),
+                ("nvme", ("disk_percent",), 1.0),
+                ("power", ("power_deci_w",), 10.0),
+                ("network", ("network_rx_kib_s", "network_tx_kib_s"), 1.0),
+                ("gpu_temp", ("gpu_temp_deci_c",), 10.0),
+                ("cpu_temp", ("system_temp_deci_c",), 10.0),
+                ("nvme_temp", ("nvme_temp_deci_c",), 10.0),
             ):
-                value = system.get(field)
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    history[name].append(max(0.0, float(value)))
+                values = [system.get(field) for field in fields]
+                if all(
+                    isinstance(value, (int, float)) and not isinstance(value, bool)
+                    for value in values
+                ):
+                    history[name].append(
+                        max(0.0, sum(float(value) for value in values) / divisor)
+                    )
                     del history[name][:-300]
             lines = dashboard_lines(payload, terminal, session_history=history)
             sys.stdout.write("\033[2J\033[H" if first else "\033[H\033[J")

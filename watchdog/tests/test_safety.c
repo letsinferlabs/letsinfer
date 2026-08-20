@@ -31,10 +31,9 @@ void test_safety_decision_precedence(void) {
     watchdog_safety_decision result = watchdog_safety_decide(&limits, &input);
     TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
 
-    input.available_bytes = UINT64_C(7) << 30u;
+    input.available_bytes = 0u;
     result = watchdog_safety_decide(&limits, &input);
-    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_KILL);
-    TEST_ASSERT(strcmp(result.reason, "host_memory_emergency") == 0);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
 
     input.available_bytes = UINT64_C(14) << 30u;
     input.cgroup_oom_group_kill_delta = 1u;
@@ -73,14 +72,28 @@ void test_safety_decision_precedence(void) {
     input.available_bytes = UINT64_C(80) << 30u;
     input.cgroup_max_delta = 1u;
     result = watchdog_safety_decide(&limits, &input);
-    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_STOP);
-    TEST_ASSERT(strcmp(result.reason, "cgroup_memory_limit") == 0);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
 
     input.cgroup_max_delta = 0u;
+    input.cgroup_oom_delta = 1u;
+    result = watchdog_safety_decide(&limits, &input);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
+
+    input.cgroup_oom_delta = 0u;
     input.cgroup_oom_kill_delta = 1u;
     result = watchdog_safety_decide(&limits, &input);
     TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_KILL);
     TEST_ASSERT(strcmp(result.reason, "cgroup_oom_kill") == 0);
+
+    input.cgroup_oom_kill_delta = 0u;
+    input.available_bytes = 0u;
+    input.swap_used_bytes = UINT64_MAX;
+    input.psi_some_delta_us = UINT64_MAX;
+    input.psi_full_delta_us = UINT64_MAX;
+    input.cgroup_oom_delta = UINT64_MAX;
+    input.cgroup_max_delta = UINT64_MAX;
+    result = watchdog_safety_decide(&limits, &input);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
 }
 
 void test_safety_thresholds_and_descriptor(void) {
@@ -232,6 +245,62 @@ void test_safety_process_exit_latches_trip(void) {
 
     watchdog_safety_close(&runtime);
     TEST_ASSERT(unlink(trip) == 0);
+    TEST_ASSERT(unlink(events) == 0);
+    TEST_ASSERT(rmdir(root) == 0);
+}
+
+void test_safety_descriptor_loss_degrades_without_trip(void) {
+    char root[] = "/tmp/letsinfer-safety-state-XXXXXX";
+    TEST_ASSERT(mkdtemp(root) != NULL);
+    TEST_ASSERT(chmod(root, 0700) == 0);
+    char state[512];
+    char trip[512];
+    char events[512];
+    TEST_ASSERT(snprintf(state, sizeof(state), "%s/protected-engine.state", root) > 0);
+    TEST_ASSERT(snprintf(trip, sizeof(trip), "%s/protection-trip.json", root) > 0);
+    TEST_ASSERT(snprintf(events, sizeof(events), "%s/safety-events.ndjson", root) > 0);
+
+    watchdog_safety_config config = {
+        .state_path = state,
+        .thresholds = thresholds()
+    };
+    watchdog_safety_runtime runtime;
+    TEST_ASSERT(watchdog_safety_open(&runtime, &config) == 0);
+
+    const pid_t child = fork();
+    TEST_ASSERT(child >= 0);
+    if (child == 0) {
+        for (;;) pause();
+    }
+    const int pid_fd = (int)syscall(SYS_pidfd_open, child, 0u);
+    TEST_ASSERT(pid_fd >= 0);
+    runtime.pid_fd = pid_fd;
+    runtime.container_pid = child;
+    runtime.target.phase = WATCHDOG_SAFETY_PHASE_ARMED;
+    runtime.state_failures = config.thresholds.state_failures - 1u;
+    TEST_ASSERT(snprintf(
+        runtime.target.generation,
+        sizeof(runtime.target.generation),
+        "0123456789abcdef0123456789abcdef"
+    ) > 0);
+    TEST_ASSERT(snprintf(
+        runtime.target.container_id,
+        sizeof(runtime.target.container_id),
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    ) > 0);
+
+    watchdog_safety_result result;
+    const watchdog_sample sample = {0};
+    TEST_ASSERT(watchdog_safety_tick(&runtime, &sample, NULL, NULL, &result) == 0);
+    TEST_ASSERT(result.has_event);
+    TEST_ASSERT(strcmp(result.kind, "protection.degraded") == 0);
+    TEST_ASSERT(strcmp(result.reason, "protection_state_unavailable") == 0);
+    TEST_ASSERT(!runtime.tripped);
+    TEST_ASSERT(access(trip, F_OK) != 0);
+
+    watchdog_safety_close(&runtime);
+    TEST_ASSERT(kill(child, SIGTERM) == 0);
+    TEST_ASSERT(waitpid(child, NULL, 0) == child);
     TEST_ASSERT(unlink(events) == 0);
     TEST_ASSERT(rmdir(root) == 0);
 }

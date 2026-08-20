@@ -118,6 +118,7 @@ from .runtime_packs import (
     write_selection,
 )
 from . import benchmark_jobs, ui
+from .state_plane import runtime_lifecycle as derive_runtime_lifecycle
 from .platform import macos as macos_services
 from .site.state import (
     SiteError,
@@ -2166,6 +2167,16 @@ def publish_protection_state(
 def disarm_protection(config: dict[str, Any], *, wait_for_ack: bool = True) -> None:
     state_path, _, _ = protection_paths(config)
     if not state_path.is_file():
+        # The descriptor may have been lost while Watchdog still retains the
+        # already-bound pidfd in memory. Recreate an explicit disarmed
+        # generation and require its acknowledgement; treating a missing file
+        # as unprotected would let a planned stop look like a crash.
+        publish_protection_state(
+            config,
+            secrets.token_hex(16),
+            "disarmed",
+            wait_for_ack=wait_for_ack,
+        )
         return
     try:
         current = _parse_protection_lines(state_path)
@@ -2175,6 +2186,11 @@ def disarm_protection(config: dict[str, Any], *, wait_for_ack: bool = True) -> N
         )
     except (KeyError, OSError, UnicodeError) as error:
         raise LetsInferError(f"cannot disarm Watchdog protection: {error}") from error
+
+
+def disarm_before_planned_stop(config: dict[str, Any]) -> None:
+    """Acknowledge disarm before any deliberate managed-process exit."""
+    disarm_protection(config)
 
 
 def clear_protection_trip(config: dict[str, Any]) -> bool:
@@ -4829,6 +4845,11 @@ def prepare_new_launch(
         memory = require_memory_reserve(manifest, phase="launch")
         if qualification_config is not None:
             if qualification_existing:
+                # Even when the candidate descriptor was lost, the resident
+                # Watchdog may still be bound to this exact single-slot
+                # container. Recreate the slot's disarmed generation and wait
+                # for acknowledgement before the orphaned process can exit.
+                disarm_protection(qualification_config)
                 _stop_managed_container(name, api_key_file)
             _activate_qualification_candidate(qualification_config, manifest)
     except BaseException:
@@ -5106,7 +5127,7 @@ def serve(
             return 0
         except BaseException:
             if protection_config and not protection_trip_latched(protection_config):
-                disarm_protection(protection_config)
+                disarm_before_planned_stop(protection_config)
             raise
 
     evidence.mkdir(parents=True, exist_ok=False)
@@ -5198,7 +5219,7 @@ def serve(
         )
     except BaseException as error:
         if protection_config and not protection_trip_latched(protection_config):
-            disarm_protection(protection_config)
+            disarm_before_planned_stop(protection_config)
         if qualification_config is not None:
             update_service_placement(qualification_config, manifest, "failed")
         launch["status"] = "failed"
@@ -5336,7 +5357,7 @@ def read_service_config(path: pathlib.Path) -> dict[str, Any]:
         raise LetsInferError("service configuration contains an invalid gateway protocol")
     if config["gateway_max_connections"] not in range(1, 257):
         raise LetsInferError("service configuration contains an invalid gateway connection limit")
-    if config["gateway_queue_timeout_seconds"] not in range(1, 3601):
+    if config["gateway_queue_timeout_seconds"] not in range(0, 3601):
         raise LetsInferError("service configuration contains an invalid gateway queue timeout")
     for key in ("source_root", "manifest_path"):
         value = pathlib.Path(config[key]).expanduser()
@@ -5626,6 +5647,12 @@ def _quiesce_resident_runtime_for_qualification() -> dict[str, tuple[str, str]]:
     if previous[RECOVERY_TIMER_NAME][1] == "active":
         run_passthrough(["systemctl", "--user", "stop", RECOVERY_TIMER_NAME])
     if previous[ENGINE_SERVICE_NAME][1] == "active":
+        resident_path = default_service_config_path()
+        if not resident_path.is_file():
+            raise LetsInferError(
+                "resident engine service is active without a service configuration"
+            )
+        disarm_before_planned_stop(read_service_config(resident_path))
         run_passthrough(["systemctl", "--user", "stop", ENGINE_SERVICE_NAME])
     for name, (_enabled, active) in previous.items():
         if active == "failed":
@@ -5663,12 +5690,15 @@ def _retire_qualification_candidate(*, remove_container: bool) -> None:
     if config.get("qualification_mode") is not True:
         raise LetsInferError("qualification slot has an invalid lifecycle mode")
     _, manifest = configured_release(config)
-    update_service_placement(config, manifest, "stopped")
-    disarm_protection(config, wait_for_ack=False)
+    # A candidate can be stopped only after the resident Watchdog has observed
+    # the disarmed generation. Otherwise the planned PID exit is
+    # indistinguishable from an engine crash and can create a false trip.
+    disarm_before_planned_stop(config)
     if remove_container and container_inspect(config["name"]) is not None:
         _stop_managed_container(
             config["name"], expanded_path(config["engine_api_key_file"])
         )
+    update_service_placement(config, manifest, "stopped")
     if protection_trip_latched(config):
         # Retirement is the explicit acknowledgement boundary for this
         # candidate only. Preserve its trip beside the launch evidence before
@@ -5709,7 +5739,7 @@ def _qualification_candidate_lifecycle(
     require_systemd_restart_authority(inspection)
 
     if action == "stop":
-        disarm_protection(config, wait_for_ack=False)
+        disarm_protection(config)
         run(["docker", "update", "--restart", "no", config["name"]])
         if inspection.get("State", {}).get("Running", False):
             run(["docker", "stop", "--time", "120", config["name"]])
@@ -5730,7 +5760,7 @@ def _qualification_candidate_lifecycle(
         if action in {"restart", "recover"} and inspection.get("State", {}).get(
             "Running", False
         ):
-            disarm_protection(config, wait_for_ack=False)
+            disarm_protection(config)
             run(["docker", "update", "--restart", "no", config["name"]])
             run(["docker", "stop", "--time", "120", config["name"]])
             inspection = container_inspect(config["name"])
@@ -5789,7 +5819,7 @@ def _qualification_candidate_lifecycle(
     except BaseException:
         if not protection_trip_latched(config):
             try:
-                disarm_protection(config, wait_for_ack=False)
+                disarm_before_planned_stop(config)
             except BaseException:
                 pass
         try:
@@ -6056,7 +6086,7 @@ def install_core_gateway_service(
         "gateway_protocol": "http",
         "gateway_port": 8000,
         "gateway_max_connections": 256,
-        "gateway_queue_timeout_seconds": 300,
+        "gateway_queue_timeout_seconds": 0,
         "gateway_telemetry_file": str(default_gateway_telemetry_path()),
     }
     ensure_private_directory(config_path.parent)
@@ -6511,6 +6541,12 @@ def install_core_plane_services(
         # active until the engine has stopped, so there is never an unprotected
         # live engine during the immutable core handoff.
         stop_if_active(RECOVERY_TIMER_NAME)
+        if previous[ENGINE_SERVICE_NAME][1] == "active":
+            if not resident_path.is_file():
+                raise LetsInferError(
+                    "engine service is active without a resident service configuration"
+                )
+            disarm_before_planned_stop(read_service_config(resident_path))
         stop_if_active(ENGINE_SERVICE_NAME)
         install_site_service_only()
         install_core_watchdog_service(
@@ -6715,6 +6751,7 @@ def install_user_service(
     }
     managed_paths = (config_path, *paths.values())
     snapshots = {path: _snapshot_user_file(path) for path in managed_paths}
+    previous_config: dict[str, Any] | None = None
     if snapshots[config_path] is not None:
         previous_config = read_service_config(config_path)
         if not retained_control_bundle_for_rollback(previous_config):
@@ -6760,6 +6797,11 @@ def install_user_service(
         if previous_states[GATEWAY_SERVICE_NAME][1] == "active":
             run_passthrough(["systemctl", "--user", "stop", GATEWAY_SERVICE_NAME])
         if previous_states[ENGINE_SERVICE_NAME][1] == "active":
+            if previous_config is None:
+                raise LetsInferError(
+                    "engine service is active without a previous service configuration"
+                )
+            disarm_before_planned_stop(previous_config)
             run_passthrough(["systemctl", "--user", "stop", ENGINE_SERVICE_NAME])
         if previous_states[SERVICE_NAME][1] == "active":
             run_passthrough(["systemctl", "--user", "stop", SERVICE_NAME])
@@ -6839,10 +6881,27 @@ def install_user_service(
             run(["systemctl", "--user", "restart", RECOVERY_TIMER_NAME])
     except BaseException as failure:
         rollback_errors: list[str] = []
+        rollback_safe = True
         if replacement_loaded:
+            inspection = container_inspect(config["name"])
+            if (
+                inspection is not None
+                and inspection.get("State", {}).get("Running") is True
+            ):
+                try:
+                    disarm_before_planned_stop(config)
+                except BaseException as error:
+                    rollback_safe = False
+                    rollback_errors.append(
+                        f"disarm replacement runtime before rollback: {error}"
+                    )
+        if replacement_loaded and rollback_safe:
             for name in (
-                RECOVERY_TIMER_NAME, GATEWAY_SERVICE_NAME, SITE_SERVICE_NAME,
-                SERVICE_NAME, ENGINE_SERVICE_NAME
+                RECOVERY_TIMER_NAME,
+                GATEWAY_SERVICE_NAME,
+                ENGINE_SERVICE_NAME,
+                SERVICE_NAME,
+                SITE_SERVICE_NAME,
             ):
                 result = run(
                     ["systemctl", "--user", "stop", name], check=False
@@ -6853,6 +6912,11 @@ def install_user_service(
                         or "unknown systemctl error"
                     )
                     rollback_errors.append(f"stop replacement {name}: {detail}")
+        if not rollback_safe:
+            raise LetsInferError(
+                "service activation failed and rollback could not safely stop "
+                "the replacement runtime: " + "; ".join(rollback_errors)
+            ) from failure
         for path in managed_paths:
             try:
                 _restore_user_file(path, snapshots[path])
@@ -7945,6 +8009,7 @@ def _controller_site_action(
                 check=False,
             )
             if active.returncode == 0:
+                disarm_before_planned_stop(config)
                 run_passthrough(
                     ["systemctl", "--user", "stop", ENGINE_SERVICE_NAME]
                 )
@@ -7960,6 +8025,8 @@ def _controller_site_action(
                 "enabled", "static",
             }:
                 raise LetsInferError(f"{ENGINE_SERVICE_NAME} is not installed")
+            if action in {"restart", "recover"}:
+                disarm_before_planned_stop(config)
             if action == "recover":
                 clear_protection_trip(config)
             elif protection_trip_latched(config):
@@ -8527,7 +8594,7 @@ def _stop_managed_container(
 def stop_from_config(arguments: argparse.Namespace) -> int:
     config = read_service_config(pathlib.Path(arguments.config))
     _, manifest = configured_release(config)
-    disarm_protection(config, wait_for_ack=False)
+    disarm_before_planned_stop(config)
     result = _stop_managed_container(
         config["name"], expanded_path(config["engine_api_key_file"])
     )
@@ -8588,133 +8655,23 @@ def stop(arguments: argparse.Namespace) -> int:
             check=False,
         )
         if active.returncode == 0:
+            assert config is not None
+            disarm_before_planned_stop(config)
             run_passthrough(
                 ["systemctl", "--user", "stop", ENGINE_SERVICE_NAME]
             )
             print(f"STOPPED {ENGINE_SERVICE_NAME}")
             return 0
     if config is not None:
-        disarm_protection(config)
+        disarm_before_planned_stop(config)
     key_path = expanded_path(config["engine_api_key_file"]) if config is not None else None
     return _stop_managed_container(name, key_path)
 
 
 def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Derive one explicit runtime lifecycle from observed component state."""
-    service_value = payload.get("service")
-    container_value = payload.get("container")
-    protection_value = payload.get("protection")
-    service = service_value if isinstance(service_value, Mapping) else {}
-    container = container_value if isinstance(container_value, Mapping) else {}
-    protection = (
-        protection_value if isinstance(protection_value, Mapping) else {}
-    )
-    engine_ready = (
-        container.get("state") == "running"
-        and container.get("healthy") is True
-        and container.get("docker_health") == "healthy"
-        and container.get("model_identity") is True
-    )
-    api_ready = (
-        service.get("gateway_active") == "active"
-        and service.get("gateway_health") is True
-        and service.get("gateway_auth_required") is True
-        and service.get("gateway_authenticated") is True
-    )
-    runtime_metadata_ready = service.get("runtime_metadata_ready") is not False
-    route_ready = service.get("gateway_model_identity") is True
-    safety_ready = (
-        protection.get("armed") is True
-        and protection.get("trip_latched") is False
-    )
-    memory_pressure = service.get("memory_pressure") is True
-    qualification_mode = service.get("runtime_mode") == "qualification"
-    if qualification_mode:
-        # The candidate owns the single inference slot directly. The resident
-        # engine unit and its recovery timer are intentionally quiesced.
-        unit_states = (
-            service.get("active") == "active",
-            service.get("gateway_active") == "active",
-            service.get("site_active") == "active",
-        )
-    else:
-        unit_states = (
-            service.get("active") == "active",
-            service.get("engine_active") == "active",
-            service.get("gateway_active") == "active",
-            service.get("site_active") == "active",
-            service.get("recovery_timer_active") == "active",
-        )
-    ready_units = sum(unit_states)
-    details = {
-        "ready": False,
-        "transitional": False,
-        "ready_services": ready_units,
-        "total_services": len(unit_states),
-    }
-    if protection.get("trip_latched") is True:
-        return {**details, "state": "blocked", "reason": "protection-trip"}
-    engine_state = str(service.get("engine_active") or "unknown")
-    container_state = str(container.get("state") or "absent")
-    docker_health = str(container.get("docker_health") or "none")
-    protection_phase = str(protection.get("phase") or "unknown")
-    if (
-        engine_state in {"activating", "reloading"}
-        or container_state == "restarting"
-        or docker_health == "starting"
-        or protection_phase == "starting"
-    ):
-        return {
-            **details,
-            "state": "starting",
-            "reason": "runtime-startup",
-            "transitional": True,
-        }
-    if engine_state == "deactivating" or container_state == "removing":
-        return {
-            **details,
-            "state": "stopping",
-            "reason": "runtime-shutdown",
-            "transitional": True,
-        }
-    if (
-        engine_ready
-        and api_ready
-        and route_ready
-        and runtime_metadata_ready
-        and safety_ready
-        and ready_units == len(unit_states)
-    ):
-        if memory_pressure:
-            return {
-                **details,
-                "state": "degraded",
-                "reason": "memory-pressure",
-            }
-        return {
-            **details,
-            "state": "ready",
-            "reason": "all-components-ready",
-            "ready": True,
-        }
-    if engine_state == "failed" or docker_health == "unhealthy" or container_state in {
-        "dead",
-        "paused",
-    }:
-        return {**details, "state": "failed", "reason": "runtime-failure"}
-    if (qualification_mode or engine_state in {"inactive", "not-found"}) and container_state in {
-        "absent",
-        "created",
-        "exited",
-    }:
-        return {**details, "state": "stopped", "reason": "runtime-stopped"}
-    if not runtime_metadata_ready:
-        return {
-            **details,
-            "state": "degraded",
-            "reason": "runtime-metadata-incompatible",
-        }
-    return {**details, "state": "degraded", "reason": "component-not-ready"}
+    """Compatibility entry point for the shared operational state plane."""
+
+    return derive_runtime_lifecycle(payload)
 
 
 def _local_controller_telemetry(
@@ -9241,6 +9198,8 @@ def _run_engine_service_action(
     )
     if enabled.returncode != 0 or enabled.stdout.strip() not in {"enabled", "static"}:
         raise LetsInferError(f"{ENGINE_SERVICE_NAME} is not installed")
+    if action in {"restart", "recover"}:
+        disarm_before_planned_stop(config)
     if action == "recover":
         cleared_trip = clear_protection_trip(config)
     else:
@@ -9328,7 +9287,7 @@ def _doctor_engine_groups(
         "gateway_protocol": "http",
         "gateway_port": 8000,
         "gateway_max_connections": 256,
-        "gateway_queue_timeout_seconds": 300,
+        "gateway_queue_timeout_seconds": 0,
         "gateway_telemetry_file": str(default_gateway_telemetry_path()),
     }
     try:
@@ -9831,8 +9790,10 @@ def uninstall(arguments: argparse.Namespace) -> int:
     )
     config = read_service_config(config_path)
     _remove_all_engine_groups()
+    _retire_qualification_candidate(remove_container=True)
     active = run(["systemctl", "--user", "is-active", SERVICE_NAME], check=False)
     if active.returncode == 0:
+        disarm_before_planned_stop(config)
         run_passthrough(["systemctl", "--user", "stop", SERVICE_NAME])
     else:
         inspection = container_inspect(config["name"])
@@ -10209,7 +10170,7 @@ def _upgrade_install_arguments(
         engine_port=config["engine_port"] if config else 18000,
         gateway_listen=config["gateway_listen"] if config else "0.0.0.0",
         gateway_max_connections=(config["gateway_max_connections"] if config else 128),
-        gateway_queue_timeout=(config["gateway_queue_timeout_seconds"] if config else 300),
+        gateway_queue_timeout=(config["gateway_queue_timeout_seconds"] if config else 0),
         name=config["name"] if config else None,
         model_cache=config["model_cache"] if config else None,
         plugin_root=None,
@@ -10979,6 +10940,11 @@ def _run_benchmark_with_service_isolation(
             )
             recovery_stopped = True
         if engine_state == "active":
+            if protection_config is None:
+                raise LetsInferError(
+                    "active engine has no protection configuration for benchmark isolation"
+                )
+            disarm_before_planned_stop(protection_config)
             run_passthrough(
                 ["systemctl", "--user", "stop", ENGINE_SERVICE_NAME]
             )
@@ -12204,7 +12170,7 @@ class LocalEngineGroupExecutor:
             return self._safe_result(config, "running")
         except BaseException:
             if not protection_trip_latched(protection):
-                disarm_protection(protection, wait_for_ack=False)
+                disarm_before_planned_stop(protection)
             inspection = container_inspect(config["container_name"])
             if inspection is not None:
                 run(["docker", "update", "--restart", "no", config["container_name"]], check=False)
@@ -12282,7 +12248,7 @@ class LocalEngineGroupExecutor:
             "protection_root": config["protection_root"],
             "name": config["container_name"],
         }
-        disarm_protection(protection)
+        disarm_before_planned_stop(protection)
         _stop_managed_container(
             config["container_name"], pathlib.Path(config["credential_file"])
         )
@@ -13816,7 +13782,12 @@ def parser() -> argparse.ArgumentParser:
     installing.add_argument("--engine-port", type=int, default=18000, help=argparse.SUPPRESS)
     installing.add_argument("--gateway-listen", default="0.0.0.0")
     installing.add_argument("--gateway-max-connections", type=int, default=128)
-    installing.add_argument("--gateway-queue-timeout", type=int, default=300)
+    installing.add_argument(
+        "--gateway-queue-timeout",
+        type=int,
+        default=0,
+        help="seconds to wait for admission; 0 waits until the client disconnects",
+    )
     installing.add_argument("--name")
     installing.add_argument("--model-cache")
     installing.add_argument("--plugin-root")
@@ -14120,7 +14091,7 @@ def parser() -> argparse.ArgumentParser:
     gateway.add_argument("--listen", default="127.0.0.1")
     gateway.add_argument("--port", type=int, default=8000)
     gateway.add_argument("--telemetry-file", required=True)
-    gateway.add_argument("--queue-timeout", type=int, default=300)
+    gateway.add_argument("--queue-timeout", type=int, default=0)
     gateway.add_argument("--max-connections", type=int, default=128)
     gateway.set_defaults(action=gateway_command, action_id="gateway")
     site_agent = subcommands.add_parser("site-agent", help=argparse.SUPPRESS)
@@ -14184,8 +14155,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if max_connections is not None and max_connections not in range(1, 257):
             raise LetsInferError("gateway max connections must be between 1 and 256")
         queue_timeout = getattr(arguments, "gateway_queue_timeout", None)
-        if queue_timeout is not None and queue_timeout not in range(1, 3601):
-            raise LetsInferError("gateway queue timeout must be between 1 and 3600 seconds")
+        if queue_timeout is not None and queue_timeout not in range(0, 3601):
+            raise LetsInferError(
+                "gateway queue timeout must be 0 (unlimited) or between 1 and 3600 seconds"
+            )
         watchdog_port = getattr(arguments, "watchdog_port", None)
         if watchdog_port is not None and watchdog_port not in range(1, 65536):
             raise LetsInferError("watchdog port must be between 1 and 65535")

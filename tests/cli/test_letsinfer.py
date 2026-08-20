@@ -173,14 +173,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.21")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.22")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.21"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.22"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -1165,8 +1165,20 @@ class CommandTests(unittest.TestCase):
                 "inactive" if "stop" in value else "active",
             )
 
+        resident_path = mock.Mock()
+        resident_path.is_file.return_value = True
+        resident_config = {"name": "resident"}
         with (
             mock.patch.object(letsinfer, "_unit_enabled_active", side_effect=unit_state),
+            mock.patch.object(
+                letsinfer, "default_service_config_path", return_value=resident_path
+            ),
+            mock.patch.object(
+                letsinfer, "read_service_config", return_value=resident_config
+            ),
+            mock.patch.object(
+                letsinfer, "disarm_before_planned_stop"
+            ) as disarm,
             mock.patch.object(letsinfer, "run_passthrough", side_effect=command),
             mock.patch.object(letsinfer, "_restore_resident_watchdog_projection"),
         ):
@@ -1188,6 +1200,7 @@ class CommandTests(unittest.TestCase):
                 ["systemctl", "--user", "start", letsinfer.RECOVERY_TIMER_NAME],
             ],
         )
+        disarm.assert_called_once_with(resident_config)
 
     def test_qualification_handoff_resets_stale_resident_unit_failures(self) -> None:
         states = {
@@ -1226,6 +1239,11 @@ class CommandTests(unittest.TestCase):
             ),
             mock.patch.object(
                 letsinfer,
+                "disarm_protection",
+                side_effect=lambda *_args: events.append("disarm-candidate"),
+            ),
+            mock.patch.object(
+                letsinfer,
                 "_stop_managed_container",
                 side_effect=lambda *_args: events.append("stop-candidate"),
             ),
@@ -1246,8 +1264,45 @@ class CommandTests(unittest.TestCase):
         self.assertIs(admitted, memory)
         self.assertIs(handoff, previous)
         self.assertEqual(
-            events, ["quiesce", "reserve", "stop-candidate", "activate"]
+            events,
+            ["quiesce", "reserve", "disarm-candidate", "stop-candidate", "activate"],
         )
+
+    def test_orphan_candidate_never_exits_before_watchdog_disarm_ack(self) -> None:
+        previous = {
+            letsinfer.RECOVERY_TIMER_NAME: ("enabled", "active"),
+            letsinfer.ENGINE_SERVICE_NAME: ("static", "active"),
+        }
+        with (
+            mock.patch.object(
+                letsinfer,
+                "_quiesce_resident_runtime_for_qualification",
+                return_value=previous,
+            ),
+            mock.patch.object(letsinfer, "require_memory_reserve", return_value={}),
+            mock.patch.object(
+                letsinfer,
+                "disarm_protection",
+                side_effect=letsinfer.LetsInferError("Watchdog did not acknowledge"),
+            ),
+            mock.patch.object(letsinfer, "_stop_managed_container") as stop,
+            mock.patch.object(letsinfer, "_activate_qualification_candidate") as activate,
+            mock.patch.object(
+                letsinfer, "_restore_resident_runtime_after_qualification"
+            ) as restore,
+            self.assertRaisesRegex(letsinfer.LetsInferError, "Watchdog did not acknowledge"),
+        ):
+            letsinfer.prepare_new_launch(
+                {"model": {}},
+                qualification_config={"qualification_mode": True},
+                qualification_existing=True,
+                name="letsinfer-sglang",
+                api_key_file=pathlib.Path("/engine-key"),
+            )
+
+        stop.assert_not_called()
+        activate.assert_not_called()
+        restore.assert_called_once_with(previous)
 
     def test_qualification_launch_restores_resident_when_admission_fails(self) -> None:
         previous = {
@@ -1420,7 +1475,7 @@ class CommandTests(unittest.TestCase):
             )
         matching.assert_called_once()
         authority.assert_called_once_with(inspection)
-        disarm.assert_called_once_with(config, wait_for_ack=False)
+        disarm.assert_called_once_with(config)
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
             [
@@ -1429,6 +1484,77 @@ class CommandTests(unittest.TestCase):
             ],
         )
         placement.assert_called_once_with(config, manifest, "stopped")
+
+    def test_candidate_stop_never_exits_before_watchdog_disarm_ack(self) -> None:
+        config = {
+            "qualification_mode": True,
+            "name": "letsinfer-sglang",
+            "engine_port": 18000,
+            "manifest_sha256": "a" * 64,
+        }
+        manifest = {"container": {}}
+        inspection = {"State": {"Running": True}}
+        with (
+            mock.patch.object(
+                letsinfer,
+                "configured_release",
+                return_value=(pathlib.Path("/release"), manifest),
+            ),
+            mock.patch.object(
+                letsinfer, "container_inspect", return_value=inspection
+            ),
+            mock.patch.object(letsinfer, "require_matching_container"),
+            mock.patch.object(letsinfer, "require_systemd_restart_authority"),
+            mock.patch.object(
+                letsinfer,
+                "disarm_protection",
+                side_effect=letsinfer.LetsInferError("Watchdog did not acknowledge"),
+            ),
+            mock.patch.object(letsinfer, "run") as run,
+            mock.patch.object(letsinfer, "update_service_placement") as placement,
+        ):
+            with self.assertRaisesRegex(
+                letsinfer.LetsInferError, "Watchdog did not acknowledge"
+            ):
+                letsinfer._qualification_candidate_lifecycle(config, "stop")
+        run.assert_not_called()
+        placement.assert_not_called()
+
+    def test_candidate_retirement_never_exits_before_watchdog_disarm_ack(self) -> None:
+        state_path = mock.Mock()
+        state_path.is_file.return_value = True
+        config = {
+            "qualification_mode": True,
+            "name": "letsinfer-sglang",
+        }
+        with (
+            mock.patch.object(
+                letsinfer,
+                "qualification_service_config_path",
+                return_value=state_path,
+            ),
+            mock.patch.object(letsinfer, "read_service_config", return_value=config),
+            mock.patch.object(
+                letsinfer,
+                "configured_release",
+                return_value=(pathlib.Path("/release"), {"model": {}}),
+            ),
+            mock.patch.object(letsinfer, "update_service_placement") as placement,
+            mock.patch.object(
+                letsinfer,
+                "disarm_protection",
+                side_effect=letsinfer.LetsInferError("Watchdog did not acknowledge"),
+            ),
+            mock.patch.object(letsinfer, "container_inspect") as inspect,
+            mock.patch.object(letsinfer, "_stop_managed_container") as stop,
+        ):
+            with self.assertRaisesRegex(
+                letsinfer.LetsInferError, "Watchdog did not acknowledge"
+            ):
+                letsinfer._retire_qualification_candidate(remove_container=True)
+        inspect.assert_not_called()
+        stop.assert_not_called()
+        placement.assert_not_called()
 
     def test_candidate_recover_clears_trip_and_rearms_exact_container(self) -> None:
         config = {
@@ -1471,6 +1597,115 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(
             [call.args[1] for call in protection.call_args_list],
             ["b" * 32, "b" * 32, "b" * 32],
+        )
+        self.assertEqual(
+            [call.args[2] for call in placement.call_args_list],
+            ["starting", "running"],
+        )
+
+    def test_candidate_start_rearms_the_preserved_stopped_container(self) -> None:
+        config = {
+            "qualification_mode": True,
+            "name": "letsinfer-sglang",
+            "engine_port": 18000,
+            "manifest_sha256": "a" * 64,
+            "tls_cert_file": "/tls.crt",
+            "engine_api_key_file": "/engine-key",
+        }
+        manifest = {"container": {"startup_timeout_seconds": 60}}
+        stopped = {"State": {"Running": False}}
+        running = {"State": {"Running": True}}
+        with (
+            mock.patch.object(
+                letsinfer,
+                "configured_release",
+                return_value=(pathlib.Path("/release"), manifest),
+            ),
+            mock.patch.object(
+                letsinfer,
+                "container_inspect",
+                side_effect=[stopped, running, running],
+            ),
+            mock.patch.object(letsinfer, "require_matching_container"),
+            mock.patch.object(letsinfer, "require_systemd_restart_authority"),
+            mock.patch.object(
+                letsinfer, "protection_trip_latched", return_value=False
+            ),
+            mock.patch.object(letsinfer, "write_watchdog_public_state"),
+            mock.patch.object(letsinfer, "update_service_placement") as placement,
+            mock.patch.object(letsinfer.secrets, "token_hex", return_value="c" * 32),
+            mock.patch.object(letsinfer, "publish_protection_state") as protection,
+            mock.patch.object(letsinfer, "require_memory_reserve"),
+            mock.patch.object(letsinfer, "run") as run,
+            mock.patch.object(letsinfer, "wait_for_ready"),
+            mock.patch.object(letsinfer, "model_identity_ready", return_value=True),
+            mock.patch.object(letsinfer, "prewarm"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(
+                letsinfer._qualification_candidate_lifecycle(config, "start"), 0
+            )
+        run.assert_called_once_with(["docker", "start", "letsinfer-sglang"])
+        self.assertEqual(
+            [call.args[1] for call in protection.call_args_list],
+            ["c" * 32, "c" * 32, "c" * 32],
+        )
+        self.assertEqual(
+            [call.args[2] for call in placement.call_args_list],
+            ["starting", "running"],
+        )
+
+    def test_candidate_restart_quiesces_and_rearms_the_exact_container(self) -> None:
+        config = {
+            "qualification_mode": True,
+            "name": "letsinfer-sglang",
+            "engine_port": 18000,
+            "manifest_sha256": "a" * 64,
+            "tls_cert_file": "/tls.crt",
+            "engine_api_key_file": "/engine-key",
+        }
+        manifest = {"container": {"startup_timeout_seconds": 60}}
+        running = {"State": {"Running": True}}
+        stopped = {"State": {"Running": False}}
+        with (
+            mock.patch.object(
+                letsinfer,
+                "configured_release",
+                return_value=(pathlib.Path("/release"), manifest),
+            ),
+            mock.patch.object(
+                letsinfer,
+                "container_inspect",
+                side_effect=[running, stopped, running, running],
+            ),
+            mock.patch.object(letsinfer, "require_matching_container"),
+            mock.patch.object(letsinfer, "require_systemd_restart_authority"),
+            mock.patch.object(
+                letsinfer, "protection_trip_latched", return_value=False
+            ),
+            mock.patch.object(letsinfer, "disarm_protection") as disarm,
+            mock.patch.object(letsinfer, "write_watchdog_public_state"),
+            mock.patch.object(letsinfer, "update_service_placement") as placement,
+            mock.patch.object(letsinfer.secrets, "token_hex", return_value="d" * 32),
+            mock.patch.object(letsinfer, "publish_protection_state"),
+            mock.patch.object(letsinfer, "require_memory_reserve"),
+            mock.patch.object(letsinfer, "run") as run,
+            mock.patch.object(letsinfer, "wait_for_ready"),
+            mock.patch.object(letsinfer, "model_identity_ready", return_value=True),
+            mock.patch.object(letsinfer, "prewarm"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(
+                letsinfer._qualification_candidate_lifecycle(config, "restart"), 0
+            )
+        disarm.assert_called_once_with(config)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                ["docker", "update", "--restart", "no", "letsinfer-sglang"],
+                ["docker", "stop", "--time", "120", "letsinfer-sglang"],
+                ["docker", "start", "letsinfer-sglang"],
+            ],
         )
         self.assertEqual(
             [call.args[2] for call in placement.call_args_list],
@@ -1527,6 +1762,30 @@ class CommandTests(unittest.TestCase):
             "qualification-engine", letsinfer.expanded_path("/tmp/key")
         )
 
+    def test_service_stop_never_exits_before_watchdog_disarm_ack(self) -> None:
+        config = {"name": "installed-engine", "engine_api_key_file": "/tmp/key"}
+        with (
+            mock.patch.object(letsinfer, "read_service_config", return_value=config),
+            mock.patch.object(
+                letsinfer,
+                "configured_release",
+                return_value=(pathlib.Path("/release"), {"model": {}}),
+            ),
+            mock.patch.object(
+                letsinfer,
+                "disarm_protection",
+                side_effect=letsinfer.LetsInferError("Watchdog did not acknowledge"),
+            ),
+            mock.patch.object(letsinfer, "_stop_managed_container") as stop,
+            mock.patch.object(letsinfer, "update_service_placement") as placement,
+        ):
+            with self.assertRaisesRegex(
+                letsinfer.LetsInferError, "Watchdog did not acknowledge"
+            ):
+                letsinfer.stop_from_config(argparse.Namespace(config="/service.json"))
+        stop.assert_not_called()
+        placement.assert_not_called()
+
     def test_stop_without_name_stops_active_resident_service(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_path = pathlib.Path(directory) / "service.json"
@@ -1542,6 +1801,9 @@ class CommandTests(unittest.TestCase):
                 mock.patch.object(letsinfer, "read_service_config", return_value=config),
                 mock.patch.object(letsinfer, "run", return_value=active) as run,
                 mock.patch.object(letsinfer, "run_passthrough") as run_passthrough,
+                mock.patch.object(
+                    letsinfer, "disarm_before_planned_stop"
+                ) as disarm,
                 mock.patch.object(letsinfer, "_stop_managed_container") as stop_container,
                 contextlib.redirect_stdout(io.StringIO()),
             ):
@@ -1553,6 +1815,7 @@ class CommandTests(unittest.TestCase):
         run_passthrough.assert_called_once_with(
             ["systemctl", "--user", "stop", letsinfer.ENGINE_SERVICE_NAME]
         )
+        disarm.assert_called_once_with(config)
         stop_container.assert_not_called()
 
     def test_acquire_is_a_separate_exact_artifact_command(self) -> None:
@@ -1841,6 +2104,27 @@ class InstallTests(unittest.TestCase):
                 )
             self.assertTrue(letsinfer.clear_protection_trip(config))
             self.assertFalse(trip.exists())
+
+    def test_missing_protection_descriptor_requires_fresh_disarm_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = {
+                "name": "letsinfer-test",
+                "protection_root": directory,
+            }
+            with (
+                mock.patch.object(
+                    letsinfer.secrets, "token_hex", return_value="b" * 32
+                ),
+                mock.patch.object(letsinfer, "publish_protection_state") as publish,
+            ):
+                letsinfer.disarm_protection(config)
+
+        publish.assert_called_once_with(
+            config,
+            "b" * 32,
+            "disarmed",
+            wait_for_ack=True,
+        )
 
     def test_watchdog_status_descriptor_is_private_exact_and_manifest_addressed(self) -> None:
         manifest = json.loads(DWARFSTAR_MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -2368,10 +2652,14 @@ class InstallTests(unittest.TestCase):
     def test_restart_reactivates_recovery_timer(self) -> None:
         enabled = mock.Mock(returncode=0, stdout="static\n")
         arguments = mock.Mock(config="/tmp/letsinfer-service.json")
+        config = {"name": "resident"}
         with (
-            mock.patch.object(letsinfer, "read_service_config"),
+            mock.patch.object(letsinfer, "read_service_config", return_value=config),
             mock.patch.object(letsinfer, "protection_trip_latched", return_value=False),
             mock.patch.object(letsinfer, "clear_protection_trip") as clear,
+            mock.patch.object(
+                letsinfer, "disarm_before_planned_stop"
+            ) as disarm,
             mock.patch.object(letsinfer, "run", return_value=enabled) as run,
             mock.patch.object(letsinfer, "run_passthrough") as restart,
             contextlib.redirect_stdout(io.StringIO()),
@@ -2385,20 +2673,26 @@ class InstallTests(unittest.TestCase):
             ["systemctl", "--user", "restart", letsinfer.RECOVERY_TIMER_NAME]
         )
         clear.assert_not_called()
+        disarm.assert_called_once_with(config)
 
     def test_recover_explicitly_acknowledges_trip_before_restart(self) -> None:
         enabled = mock.Mock(returncode=0, stdout="static\n")
         arguments = mock.Mock(config="/tmp/letsinfer-service.json")
+        config = {"name": "resident"}
         with (
-            mock.patch.object(letsinfer, "read_service_config"),
+            mock.patch.object(letsinfer, "read_service_config", return_value=config),
             mock.patch.object(
                 letsinfer, "clear_protection_trip", return_value=True
             ) as clear,
+            mock.patch.object(
+                letsinfer, "disarm_before_planned_stop"
+            ) as disarm,
             mock.patch.object(letsinfer, "run", return_value=enabled),
             mock.patch.object(letsinfer, "run_passthrough") as restart,
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(letsinfer.recover_service(arguments), 0)
+        disarm.assert_called_once_with(config)
         clear.assert_called_once()
         restart.assert_called_once_with(
             ["systemctl", "--user", "restart", letsinfer.ENGINE_SERVICE_NAME]
@@ -2892,7 +3186,7 @@ class InstallTests(unittest.TestCase):
             "gateway_protocol": "http",
             "gateway_port": 8000,
             "gateway_max_connections": 128,
-            "gateway_queue_timeout_seconds": 300,
+            "gateway_queue_timeout_seconds": 0,
             "gateway_telemetry_file": "/watchdog/data/gateway.state",
             "tls_cert_file": "/tls/server.crt",
             "tls_key_file": "/tls/server.key",
@@ -2989,6 +3283,10 @@ class InstallTests(unittest.TestCase):
                 mock.patch.object(
                     letsinfer, "run_passthrough", side_effect=service_command
                 ) as commands,
+                mock.patch.object(
+                    letsinfer, "disarm_before_planned_stop"
+                ) as disarm,
+                mock.patch.object(letsinfer, "container_inspect", return_value=None),
                 self.assertRaisesRegex(
                     letsinfer.LetsInferError, "previous installation restored"
                 ),
@@ -3018,6 +3316,7 @@ class InstallTests(unittest.TestCase):
             commands.assert_any_call(
                 ["systemctl", "--user", "start", letsinfer.ENGINE_SERVICE_NAME]
             )
+            disarm.assert_called_once_with(old_config)
 
     def test_no_start_refuses_to_replace_active_service(self) -> None:
         states = {
@@ -3457,6 +3756,41 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(
             store.record_action.call_args.kwargs["correlation_id"], "d" * 32
         )
+
+    def test_controller_restart_disarms_before_resident_service_exit(self) -> None:
+        principal = letsinfer.ControllerPrincipal("a" * 32, "administrator", "b" * 64)
+        config = {
+            "model": "example-model",
+            "name": "resident",
+            "placement_id": "c" * 32,
+        }
+        enabled = mock.Mock(returncode=0, stdout="static\n")
+        store = mock.MagicMock()
+        store.__enter__.return_value = store
+        store.__exit__.return_value = None
+        with (
+            mock.patch.object(letsinfer, "_engine_group_lifecycle", return_value=None),
+            mock.patch.object(letsinfer, "read_service_config", return_value=config),
+            mock.patch.object(letsinfer, "protection_trip_latched", return_value=False),
+            mock.patch.object(
+                letsinfer, "disarm_before_planned_stop"
+            ) as disarm,
+            mock.patch.object(letsinfer, "run", return_value=enabled),
+            mock.patch.object(letsinfer, "run_passthrough") as service,
+            mock.patch.object(letsinfer, "_site_store", return_value=store),
+        ):
+            result = letsinfer._controller_site_action(
+                principal,
+                "restart",
+                {"model": "example-model"},
+                "d" * 32,
+            )
+
+        disarm.assert_called_once_with(config)
+        service.assert_called_once_with(
+            ["systemctl", "--user", "restart", letsinfer.ENGINE_SERVICE_NAME]
+        )
+        self.assertEqual(result["state"], "running")
 
     def test_controller_topology_and_exposure_forward_actor_identity(self) -> None:
         principal = letsinfer.ControllerPrincipal("a" * 32, "administrator", "b" * 64)
@@ -4067,15 +4401,21 @@ class RuntimeCommandTests(unittest.TestCase):
 
     def test_benchmark_suspends_and_restores_active_engine(self) -> None:
         command = ["runner", "--c1"]
+        config = {"protection_root": "/watchdog/protected/runtime"}
         with (
             mock.patch.object(
                 letsinfer,
                 "_unit_enabled_active",
                 side_effect=[("static", "active"), ("enabled", "active")],
             ),
+            mock.patch.object(
+                letsinfer, "disarm_before_planned_stop"
+            ) as disarm,
             mock.patch.object(letsinfer, "run_passthrough") as run,
         ):
-            letsinfer._run_benchmark_with_service_isolation(command)
+            letsinfer._run_benchmark_with_service_isolation(
+                command, protection_config=config
+            )
 
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
@@ -4087,9 +4427,11 @@ class RuntimeCommandTests(unittest.TestCase):
                 ["systemctl", "--user", "restart", letsinfer.RECOVERY_TIMER_NAME],
             ],
         )
+        disarm.assert_called_once_with(config)
 
     def test_benchmark_failure_still_restores_active_engine(self) -> None:
         command = ["runner", "--c1"]
+        config = {"protection_root": "/watchdog/protected/runtime"}
 
         def execute(actual: list[str]) -> None:
             if actual == command:
@@ -4104,9 +4446,14 @@ class RuntimeCommandTests(unittest.TestCase):
             mock.patch.object(
                 letsinfer, "run_passthrough", side_effect=execute
             ) as run,
+            mock.patch.object(
+                letsinfer, "disarm_before_planned_stop"
+            ) as disarm,
         ):
             with self.assertRaisesRegex(letsinfer.LetsInferError, "benchmark failed"):
-                letsinfer._run_benchmark_with_service_isolation(command)
+                letsinfer._run_benchmark_with_service_isolation(
+                    command, protection_config=config
+                )
 
         self.assertEqual(
             [call.args[0] for call in run.call_args_list[-2:]],
@@ -4115,6 +4462,7 @@ class RuntimeCommandTests(unittest.TestCase):
                 ["systemctl", "--user", "restart", letsinfer.RECOVERY_TIMER_NAME],
             ],
         )
+        disarm.assert_called_once_with(config)
 
     def test_benchmark_trip_leaves_engine_and_recovery_stopped(self) -> None:
         command = ["runner", "--c8", "--128k"]
@@ -4138,6 +4486,9 @@ class RuntimeCommandTests(unittest.TestCase):
             mock.patch.object(
                 letsinfer, "run_passthrough", side_effect=execute
             ) as run,
+            mock.patch.object(
+                letsinfer, "disarm_before_planned_stop"
+            ) as disarm,
         ):
             with self.assertRaisesRegex(
                 letsinfer.LetsInferError,
@@ -4156,6 +4507,22 @@ class RuntimeCommandTests(unittest.TestCase):
                 command,
             ],
         )
+        disarm.assert_called_once_with(config)
+
+    def test_benchmark_never_stops_active_engine_without_protection_config(self) -> None:
+        with (
+            mock.patch.object(
+                letsinfer,
+                "_unit_enabled_active",
+                side_effect=[("static", "active"), ("enabled", "inactive")],
+            ),
+            mock.patch.object(letsinfer, "run_passthrough") as run,
+            self.assertRaisesRegex(
+                letsinfer.LetsInferError, "no protection configuration"
+            ),
+        ):
+            letsinfer._run_benchmark_with_service_isolation(["runner"])
+        run.assert_not_called()
 
     def test_benchmark_refuses_preexisting_protection_trip(self) -> None:
         with (

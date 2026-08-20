@@ -478,6 +478,7 @@ static int load_descriptor(watchdog_safety_runtime *runtime, watchdog_safety_res
         && strcmp(candidate.boot_id, runtime->target.boot_id) == 0
         && strcmp(candidate.cgroup_path, runtime->target.cgroup_path) == 0) {
         runtime->state_failures = 0u;
+        runtime->state_warned = false;
         return 0;
     }
     if (candidate.phase == WATCHDOG_SAFETY_PHASE_PENDING
@@ -485,6 +486,7 @@ static int load_descriptor(watchdog_safety_runtime *runtime, watchdog_safety_res
         close_target(runtime);
         runtime->target = candidate;
         runtime->state_failures = 0u;
+        runtime->state_warned = false;
         if (acknowledge(runtime, &candidate) != 0) return -1;
         return emit_event(
             runtime,
@@ -503,6 +505,7 @@ static int load_descriptor(watchdog_safety_runtime *runtime, watchdog_safety_res
     }
     runtime->target = candidate;
     runtime->state_failures = 0u;
+    runtime->state_warned = false;
     if (acknowledge(runtime, &candidate) != 0) return -1;
     return emit_event(
         runtime,
@@ -587,16 +590,29 @@ int watchdog_safety_tick(
         );
     }
 
+    if (runtime->state_failures >= runtime->config.thresholds.state_failures
+        && !runtime->state_warned) {
+        runtime->state_warned = true;
+        return emit_event(
+            runtime,
+            result,
+            "protection.degraded",
+            2u,
+            "protection_state_unavailable",
+            "{\"generation\":\"%s\",\"container_id\":\"%s\","
+            "\"state_failures\":%u}",
+            runtime->target.generation,
+            runtime->target.container_id,
+            runtime->state_failures
+        );
+    }
+
     watchdog_safety_input input;
     memset(&input, 0, sizeof(input));
     if (read_memory(&input) != 0) return -1;
     read_pressure(runtime, &input);
     if (read_cgroup_events(runtime, &input) != 0) return -1;
     watchdog_safety_decision decision = watchdog_safety_decide(&runtime->config.thresholds, &input);
-    if (runtime->state_failures >= runtime->config.thresholds.state_failures
-        && decision.action == WATCHDOG_SAFETY_ACTION_NONE) {
-        decision = (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_STOP, "protection_state_unavailable"};
-    }
     if (input.available_bytes <= runtime->config.thresholds.warning_available_bytes
         && !runtime->warned && decision.action == WATCHDOG_SAFETY_ACTION_NONE) {
         runtime->warned = true;
