@@ -15,12 +15,61 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
 from core import runtime_packs
 
 
 class RuntimePackTests(unittest.TestCase):
+    class _Response:
+        def __init__(
+            self,
+            data: bytes,
+            url: str,
+            headers: dict[str, str] | None = None,
+        ) -> None:
+            self._stream = io.BytesIO(data)
+            self._url = url
+            self.headers = headers or {}
+
+        def __enter__(self) -> "RuntimePackTests._Response":
+            return self
+
+        def __exit__(self, *_arguments: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return self._url
+
+        def read(self, size: int = -1) -> bytes:
+            return self._stream.read(size)
+
+    def _oci_manifest(self, payload: bytes, *, size: int | None = None) -> bytes:
+        return json.dumps(
+            {
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {
+                    "mediaType": "application/vnd.oci.empty.v1+json",
+                    "digest": "sha256:" + hashlib.sha256(b"{}").hexdigest(),
+                    "size": 2,
+                },
+                "layers": [
+                    {
+                        "mediaType": runtime_packs.PACK_MEDIA_TYPE,
+                        "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                        "size": len(payload) if size is None else size,
+                        "annotations": {
+                            "org.opencontainers.image.title": "runtime.letsinfer"
+                        },
+                    }
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
     def test_benchmark_model_identity_binds_exact_file_or_snapshot(self) -> None:
         self.assertEqual(
             runtime_packs.benchmark_model_sha256(
@@ -71,6 +120,195 @@ class RuntimePackTests(unittest.TestCase):
                 self.assertEqual(
                     runtime_packs._companion_executable("oras"), str(companion)
                 )
+
+    def test_native_public_oci_pull_verifies_manifest_and_layer(self) -> None:
+        payload = b"runtime-pack"
+        manifest = self._oci_manifest(payload)
+        manifest_digest = hashlib.sha256(manifest).hexdigest()
+        reference = f"registry.example/owner/runtime@sha256:{manifest_digest}"
+        manifest_url = (
+            "https://registry.example/v2/owner/runtime/manifests/sha256:"
+            + manifest_digest
+        )
+        challenge = (
+            'Bearer realm="https://auth.example/token",'
+            'service="registry.example",scope="repository:owner/runtime:pull"'
+        )
+        unauthorized = urllib.error.HTTPError(
+            manifest_url,
+            401,
+            "unauthorized",
+            {"WWW-Authenticate": challenge},
+            io.BytesIO(),
+        )
+        responses = [
+            unauthorized,
+            self._Response(b'{"token":"public-token"}', "https://auth.example/token"),
+            self._Response(manifest, manifest_url),
+            self._Response(
+                payload,
+                "https://objects.example/runtime",
+                {"Content-Length": str(len(payload))},
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            runtime_packs, "_oci_open", side_effect=responses
+        ) as opener:
+            destination = pathlib.Path(directory)
+            runtime_packs._native_pull_public_oci(reference, destination)
+            self.assertEqual((destination / "runtime.letsinfer").read_bytes(), payload)
+            retry = opener.call_args_list[2].args[0]
+            self.assertEqual(retry.get_header("Authorization"), "Bearer public-token")
+
+    def test_oci_redirect_strips_cross_origin_credentials_and_host(self) -> None:
+        source_url = (
+            "https://registry.example/v2/owner/runtime/blobs/sha256:abc"
+        )
+        redirect = urllib.error.HTTPError(
+            source_url,
+            307,
+            "temporary redirect",
+            {"Location": "https://objects.example/signed"},
+            io.BytesIO(),
+        )
+        response = self._Response(b"payload", "https://objects.example/signed")
+        request = urllib.request.Request(
+            source_url,
+            headers={
+                "Authorization": "Bearer secret",
+                "Host": "registry.example",
+                "User-Agent": "letsinfer/oci-pull",
+            },
+        )
+        with mock.patch.object(
+            runtime_packs._OCI_OPENER, "open", side_effect=[redirect, response]
+        ) as opener:
+            self.assertIs(runtime_packs._oci_open(request), response)
+            redirected = opener.call_args_list[1].args[0]
+            headers = {key.lower(): value for key, value in redirected.header_items()}
+            self.assertNotIn("authorization", headers)
+            self.assertNotIn("host", headers)
+            self.assertEqual(headers["user-agent"], "letsinfer/oci-pull")
+
+    def test_oci_redirect_rejects_https_downgrade(self) -> None:
+        source_url = (
+            "https://registry.example/v2/owner/runtime/blobs/sha256:abc"
+        )
+        redirect = urllib.error.HTTPError(
+            source_url,
+            307,
+            "temporary redirect",
+            {"Location": "http://objects.example/signed"},
+            io.BytesIO(),
+        )
+        with mock.patch.object(
+            runtime_packs._OCI_OPENER, "open", side_effect=redirect
+        ), self.assertRaisesRegex(
+            runtime_packs.RuntimePackError, "redirected away from HTTPS"
+        ):
+            runtime_packs._oci_open(urllib.request.Request(source_url))
+
+    def test_native_public_oci_pull_rejects_manifest_digest_mismatch(self) -> None:
+        payload = b"runtime-pack"
+        manifest = self._oci_manifest(payload)
+        reference = "registry.example/owner/runtime@sha256:" + "0" * 64
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            runtime_packs,
+            "_oci_open",
+            return_value=self._Response(
+                manifest,
+                "https://registry.example/v2/owner/runtime/manifests/sha256:" + "0" * 64,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "manifest digest differs"
+            ):
+                runtime_packs._native_pull_public_oci(
+                    reference, pathlib.Path(directory)
+                )
+
+    def test_native_public_oci_pull_rejects_layer_digest_mismatch(self) -> None:
+        expected = b"runtime-pack"
+        actual = b"runtime-pock"
+        manifest = self._oci_manifest(expected)
+        manifest_digest = hashlib.sha256(manifest).hexdigest()
+        reference = f"registry.example/owner/runtime@sha256:{manifest_digest}"
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            runtime_packs,
+            "_oci_open",
+            side_effect=[
+                self._Response(
+                    manifest,
+                    "https://registry.example/v2/owner/runtime/manifests/sha256:"
+                    + manifest_digest,
+                ),
+                self._Response(
+                    actual,
+                    "https://objects.example/runtime",
+                    {"Content-Length": str(len(actual))},
+                ),
+            ],
+        ):
+            destination = pathlib.Path(directory)
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "layer digest differs"
+            ):
+                runtime_packs._native_pull_public_oci(reference, destination)
+            self.assertFalse((destination / "runtime.letsinfer").exists())
+            self.assertFalse((destination / ".runtime.letsinfer.partial").exists())
+
+    def test_native_public_oci_pull_rejects_oversized_layer(self) -> None:
+        payload = b"runtime-pack"
+        manifest = self._oci_manifest(
+            payload, size=runtime_packs.MAX_PACK_BYTES + 1
+        )
+        manifest_digest = hashlib.sha256(manifest).hexdigest()
+        reference = f"registry.example/owner/runtime@sha256:{manifest_digest}"
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            runtime_packs,
+            "_oci_open",
+            return_value=self._Response(
+                manifest,
+                "https://registry.example/v2/owner/runtime/manifests/sha256:"
+                + manifest_digest,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "layer size is invalid"
+            ):
+                runtime_packs._native_pull_public_oci(
+                    reference, pathlib.Path(directory)
+                )
+
+    def test_private_oci_requires_optional_oras_fallback(self) -> None:
+        reference = "registry.example/owner/runtime@sha256:" + "a" * 64
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            runtime_packs,
+            "_native_pull_public_oci",
+            side_effect=runtime_packs._OciAuthenticationRequired("private"),
+        ), mock.patch.object(
+            runtime_packs, "_companion_executable", return_value=None
+        ):
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "requires registry authentication"
+            ):
+                runtime_packs._pull_oci(reference, pathlib.Path(directory))
+
+    def test_private_oci_uses_oras_when_available(self) -> None:
+        reference = "registry.example/owner/runtime@sha256:" + "a" * 64
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            runtime_packs,
+            "_native_pull_public_oci",
+            side_effect=runtime_packs._OciAuthenticationRequired("private"),
+        ), mock.patch.object(
+            runtime_packs, "_companion_executable", return_value="/opt/letsinfer/oras"
+        ), mock.patch.object(
+            runtime_packs.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as run:
+            runtime_packs._pull_oci(reference, pathlib.Path(directory))
+            self.assertEqual(run.call_args.args[0][0], "/opt/letsinfer/oras")
 
     def test_production_catalog_and_trust_key_are_zero_configuration_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(

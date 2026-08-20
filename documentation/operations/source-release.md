@@ -86,7 +86,7 @@ An RC or historical release uses its explicit version:
 
 ```bash
 curl -fsSL https://letsinfer.ai/install.sh \
-  | sh -s -- --version 0.11.0-rc.30
+  | sh -s -- --version 0.11.0-rc.31
 ```
 
 `install.sh` supports Linux and macOS on x86_64 and arm64. The default system
