@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define WATCHDOG_VERSION "0.11.0-rc.17"
+#define WATCHDOG_VERSION "0.11.0-rc.18"
 
 static void usage(FILE *stream, const char *program) {
     fprintf(stream,
@@ -27,11 +27,11 @@ static void usage(FILE *stream, const char *program) {
         "  --max-controllers N    Concurrent controllers, maximum 16\n"
         "  --protect-root PATH    Private protected-engine directory root\n"
         "  --warning-bytes N      Required available-memory warning threshold\n"
-        "  --stop-bytes N         Required available-memory graceful-stop threshold\n"
+        "  --stop-bytes N         Required available-memory graceful-reserve threshold\n"
         "  --kill-bytes N         Required available-memory emergency-kill threshold\n"
-        "  --swap-stop-bytes N    Required swap-use graceful-stop threshold\n"
-        "  --psi-some-us N        Required one-second partial-stall stop threshold\n"
-        "  --psi-full-us N        Required one-second full-stall stop threshold\n"
+        "  --swap-stop-bytes N    Required swap-use pressure threshold\n"
+        "  --psi-some-us N        Required one-second partial-stall pressure threshold\n"
+        "  --psi-full-us N        Required one-second full-stall pressure threshold\n"
         "  --state-failures N     Required handshake failures before containment\n"
         "  --containment-grace-ms N  Required grace before escalating stop to kill\n"
         "  --version              Print version\n"

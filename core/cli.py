@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import datetime as dt
 import getpass
 import hashlib
 import hmac
 import http.server
+import io
 import json
 import os
 import pathlib
@@ -1641,10 +1643,14 @@ def docker_command(
 
 
 def parse_mem_available_gib(text: str) -> int:
+    return parse_mem_available_bytes(text) // (1024**3)
+
+
+def parse_mem_available_bytes(text: str) -> int:
     for line in text.splitlines():
         fields = line.split()
         if fields and fields[0] == "MemAvailable:" and len(fields) >= 2:
-            return int(fields[1]) // 1048576
+            return int(fields[1]) * 1024
     raise LetsInferError("MemAvailable is missing from /proc/meminfo")
 
 
@@ -5653,6 +5659,125 @@ def _retire_qualification_candidate(*, remove_container: bool) -> None:
     _restore_resident_watchdog_projection()
 
 
+def _qualification_candidate_lifecycle(
+    config: dict[str, Any], action: str
+) -> int:
+    """Apply one lifecycle action to the candidate that owns the inference slot."""
+    if config.get("qualification_mode") is not True:
+        raise LetsInferError("qualification slot has an invalid lifecycle mode")
+    if action not in {"start", "stop", "restart", "recover"}:
+        raise LetsInferError("qualification lifecycle action is invalid")
+    _, manifest = configured_release(config)
+    inspection = container_inspect(config["name"])
+    if inspection is None:
+        raise LetsInferError(
+            "qualification candidate container is absent; relaunch the runtime candidate"
+        )
+    require_matching_container(
+        inspection,
+        manifest,
+        config["engine_port"],
+        manifest_sha256=config["manifest_sha256"],
+        runtime_digest=config.get("runtime_digest"),
+    )
+    require_systemd_restart_authority(inspection)
+
+    if action == "stop":
+        disarm_protection(config, wait_for_ack=False)
+        run(["docker", "update", "--restart", "no", config["name"]])
+        if inspection.get("State", {}).get("Running", False):
+            run(["docker", "stop", "--time", "120", config["name"]])
+        update_service_placement(config, manifest, "stopped")
+        print(f"STOPPED {config['name']} candidate=preserved")
+        return 0
+
+    if action == "recover":
+        cleared_trip = clear_protection_trip(config)
+    else:
+        if protection_trip_latched(config):
+            raise LetsInferError(
+                "runtime protection is tripped; use `letsinfer recover`"
+            )
+        cleared_trip = False
+
+    try:
+        if action in {"restart", "recover"} and inspection.get("State", {}).get(
+            "Running", False
+        ):
+            disarm_protection(config, wait_for_ack=False)
+            run(["docker", "update", "--restart", "no", config["name"]])
+            run(["docker", "stop", "--time", "120", config["name"]])
+            inspection = container_inspect(config["name"])
+            if inspection is None:
+                raise LetsInferError(
+                    "qualification candidate disappeared during restart"
+                )
+
+        write_watchdog_public_state(config, manifest)
+        update_service_placement(config, manifest, "starting")
+        generation = secrets.token_hex(16)
+        publish_protection_state(config, generation, "pending")
+        if not inspection.get("State", {}).get("Running", False):
+            require_memory_reserve(manifest, phase="launch")
+            run(["docker", "start", config["name"]])
+            inspection = container_inspect(config["name"])
+            if inspection is None:
+                raise LetsInferError(
+                    "qualification candidate disappeared after start"
+                )
+        publish_protection_state(
+            config, generation, "starting", inspection=inspection
+        )
+        certificate = expanded_path(config["tls_cert_file"])
+        api_key = expanded_path(config["engine_api_key_file"])
+        wait_for_ready(
+            config["name"],
+            config["engine_port"],
+            manifest["container"]["startup_timeout_seconds"],
+            certificate,
+            manifest,
+        )
+        if not model_identity_ready(
+            manifest, config["engine_port"], certificate, api_key
+        ):
+            raise LetsInferError(
+                "authenticated model identity does not match the release manifest"
+            )
+        prewarm(
+            manifest,
+            config["name"],
+            config["engine_port"],
+            certificate,
+            api_key,
+        )
+        require_memory_reserve(manifest, phase="runtime")
+        current = container_inspect(config["name"])
+        if current is None:
+            raise LetsInferError(
+                "qualification candidate disappeared before protection armed"
+            )
+        publish_protection_state(
+            config, generation, "armed", inspection=current
+        )
+        update_service_placement(config, manifest, "running")
+    except BaseException:
+        if not protection_trip_latched(config):
+            try:
+                disarm_protection(config, wait_for_ack=False)
+            except BaseException:
+                pass
+        try:
+            update_service_placement(config, manifest, "failed")
+        except BaseException:
+            pass
+        raise
+    print(
+        f"{action.upper()} {config['name']} candidate=active "
+        f"protection_trip_cleared={str(cleared_trip).lower()}"
+    )
+    return 0
+
+
 def _activate_qualification_candidate(
     config: dict[str, Any], manifest: dict[str, Any]
 ) -> pathlib.Path:
@@ -8345,8 +8470,7 @@ def stop(arguments: argparse.Namespace) -> int:
                 raise LetsInferError("qualification slot has an invalid lifecycle mode")
             if model is not None and qualification.get("model") != model:
                 raise LetsInferError(f"no installed runtime serves model {model!r}")
-            _retire_qualification_candidate(remove_container=True)
-            return 0
+            return _qualification_candidate_lifecycle(qualification, "stop")
     if arguments.name is None and arguments.config is None:
         group = _engine_group_lifecycle(model, "stop")
         if group is not None:
@@ -8362,12 +8486,15 @@ def stop(arguments: argparse.Namespace) -> int:
             if qualification.get("qualification_mode") is True and qualification[
                 "name"
             ] == arguments.name:
-                _retire_qualification_candidate(remove_container=True)
-                return 0
+                return _qualification_candidate_lifecycle(qualification, "stop")
     config_path = absolute_user_path(
         arguments.config or default_service_config_path()
     )
     config = read_service_config(config_path) if config_path.is_file() else None
+    if config is not None and config.get("qualification_mode") is True:
+        if model is not None and config.get("model") != model:
+            raise LetsInferError(f"no installed runtime serves model {model!r}")
+        return _qualification_candidate_lifecycle(config, "stop")
     if model is not None and (config is None or config.get("model") != model):
         raise LetsInferError(f"no installed runtime serves model {model!r}")
     explicit_name = arguments.name is not None
@@ -8422,6 +8549,7 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
         protection.get("armed") is True
         and protection.get("trip_latched") is False
     )
+    memory_pressure = service.get("memory_pressure") is True
     qualification_mode = service.get("runtime_mode") == "qualification"
     if qualification_mode:
         # The candidate owns the single inference slot directly. The resident
@@ -8479,6 +8607,12 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
         and safety_ready
         and ready_units == len(unit_states)
     ):
+        if memory_pressure:
+            return {
+                **details,
+                "state": "degraded",
+                "reason": "memory-pressure",
+            }
         return {
             **details,
             "state": "ready",
@@ -8537,14 +8671,37 @@ def _local_controller_telemetry(
         connection = http.client.HTTPSConnection(
             "127.0.0.1", CONTROLLER_CONTROL_PORT, timeout=1, context=context
         )
-        connection.request("GET", "/control/v1/telemetry?history=0")
+        connection.request("GET", "/control/v1/telemetry?history=300")
         response = connection.getresponse()
         body = response.read(1024 * 1024 + 1)
         if response.status != 200 or len(body) > 1024 * 1024:
             return None
         value = json.loads(body)
-        aggregate = value.get("telemetry", {}).get("aggregate")
-        return aggregate if isinstance(aggregate, dict) else None
+        telemetry = value.get("telemetry")
+        aggregate = telemetry.get("aggregate") if isinstance(telemetry, dict) else None
+        if not isinstance(aggregate, dict):
+            return None
+        result = dict(aggregate)
+        result["updated_unix_ms"] = telemetry.get("unix_ms")
+        members = telemetry.get("members")
+        if isinstance(members, list):
+            fresh = next(
+                (
+                    row
+                    for row in members
+                    if isinstance(row, dict)
+                    and row.get("stale") is False
+                    and isinstance(row.get("sample"), dict)
+                ),
+                None,
+            )
+            if fresh is not None:
+                sample = fresh["sample"]
+                result["system"] = sample.get("system")
+                result["workload"] = sample.get("workload")
+        history = value.get("history")
+        result["history"] = history if isinstance(history, list) else []
+        return result
     except (OSError, ssl.SSLError, http.client.HTTPException, json.JSONDecodeError):
         return None
     finally:
@@ -8553,6 +8710,24 @@ def _local_controller_telemetry(
 
 
 def status(arguments: argparse.Namespace) -> int:
+    if (
+        not arguments.json
+        and ui.Terminal(sys.stdout).interactive
+        and not getattr(arguments, "_single_snapshot", False)
+    ):
+        def snapshot() -> dict[str, Any]:
+            values = vars(arguments).copy()
+            values.update({"json": True, "_single_snapshot": True})
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = status(argparse.Namespace(**values))
+            value = json.loads(output.getvalue())
+            if not isinstance(value, dict):
+                raise LetsInferError("status snapshot is invalid")
+            value["exit_code"] = code
+            return value
+
+        return ui.live_runtime_status(snapshot)
     model_value = getattr(arguments, "model", None)
     model = model_value if isinstance(model_value, str) else None
     if model is not None and (arguments.name is not None or arguments.config is not None):
@@ -8763,6 +8938,21 @@ def status(arguments: argparse.Namespace) -> int:
                 gateway_key_path,
             )
     recovery_enabled, recovery_active = _unit_enabled_active(RECOVERY_TIMER_NAME)
+    memory_available_bytes: int | None = None
+    try:
+        memory_available_bytes = parse_mem_available_bytes(
+            pathlib.Path("/proc/meminfo").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, ValueError, LetsInferError):
+        pass
+    memory_pressure_floor_bytes = (
+        config.get("memory_pressure_available_bytes") if config else None
+    )
+    memory_pressure = (
+        memory_available_bytes is not None
+        and memory_pressure_floor_bytes is not None
+        and memory_available_bytes <= memory_pressure_floor_bytes
+    )
 
     payload = {
         "service": {
@@ -8802,6 +8992,9 @@ def status(arguments: argparse.Namespace) -> int:
             "recovery_timer_enabled": recovery_enabled,
             "recovery_timer_active": recovery_active,
             "runtime_mode": "qualification" if qualification_mode else "resident",
+            "memory_pressure": memory_pressure,
+            "memory_available_bytes": memory_available_bytes,
+            "memory_pressure_floor_bytes": memory_pressure_floor_bytes,
         },
         "container": {
             "name": name,
@@ -8835,11 +9028,38 @@ def status(arguments: argparse.Namespace) -> int:
         "protection": protection_status(config, inspection) if config else None,
         "config": str(config_path) if config else None,
     }
+    try:
+        identity = read_site_identity()
+        site_summary: dict[str, Any] = {
+            **identity_json(identity),
+            "hostname": identity.coordinator_address or socket.gethostname(),
+        }
+        with SiteStore(identity=identity) as store:
+            member = next(
+                (
+                    row
+                    for row in store.members()
+                    if row.get("member_id") == identity.member_id
+                ),
+                None,
+            )
+        facts = member.get("facts") if isinstance(member, dict) else None
+        inventory = facts.get("inventory") if isinstance(facts, dict) else None
+        if isinstance(inventory, dict):
+            site_summary["hardware_name"] = (
+                inventory.get("dgx_name")
+                or inventory.get("board_model")
+                or inventory.get("product_name")
+            )
+            site_summary["uptime_seconds"] = inventory.get("uptime_seconds")
+        payload["site"] = site_summary
+    except (OSError, SiteError, StopIteration):
+        payload["site"] = None
     payload["lifecycle"] = runtime_lifecycle(payload)
+    payload["telemetry"] = _local_controller_telemetry(config)
     if arguments.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     elif ui.Terminal(sys.stdout).interactive:
-        payload["telemetry"] = _local_controller_telemetry(config)
         ui.runtime_status(payload)
     else:
         memory = "none" if memory_bytes is None else str(memory_bytes)
@@ -8910,6 +9130,15 @@ def _run_engine_service_action(
     if model is not None and arguments.config is not None:
         raise LetsInferError("a model cannot be combined with --config")
     if arguments.config is None:
+        candidate_path = qualification_service_config_path()
+        if candidate_path.is_file():
+            candidate = read_service_config(candidate_path)
+            if candidate.get("qualification_mode") is not True:
+                raise LetsInferError("qualification slot has an invalid lifecycle mode")
+            if model is not None and candidate.get("model") != model:
+                raise LetsInferError(f"no installed runtime serves model {model!r}")
+            return _qualification_candidate_lifecycle(candidate, action)
+    if arguments.config is None:
         group = _engine_group_lifecycle(model, action)
         if group is not None:
             print(
@@ -8922,6 +9151,10 @@ def _run_engine_service_action(
         arguments.config or default_service_config_path()
     )
     config = read_service_config(config_path)
+    if config.get("qualification_mode") is True:
+        if model is not None and config.get("model") != model:
+            raise LetsInferError(f"no installed runtime serves model {model!r}")
+        return _qualification_candidate_lifecycle(config, action)
     if model is not None and config.get("model") != model:
         raise LetsInferError(f"no installed runtime serves model {model!r}")
     enabled = run(

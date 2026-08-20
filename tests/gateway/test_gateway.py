@@ -544,7 +544,7 @@ class GatewayPolicyTests(unittest.TestCase):
             )
         policy.reload(force=True)
         self.assertTrue(policy.backends[0].memory_pressure)
-        with self.assertRaisesRegex(server.GatewayError, "queue timeout"):
+        with self.assertRaisesRegex(server.AdmissionError, "memory headroom"):
             policy.acquire_backend("fixture-model", prefix_key=None, timeout=0.01)
 
         with state.SiteStore(identity=self.identity) as store:
@@ -558,6 +558,40 @@ class GatewayPolicyTests(unittest.TestCase):
             )
         policy.reload(force=True)
         self.assertEqual(policy.backends, [])
+
+    def test_memory_pressure_waiter_runs_when_headroom_returns(self) -> None:
+        policy = server.PolicySnapshot(self.identity)
+        with state.SiteStore(identity=self.identity) as store:
+            set_member_facts(
+                store,
+                self.identity.member_id,
+                routing_facts(self.identity.member_id, memory_pressure=True),
+            )
+        policy.reload(force=True)
+        selected: list[server.Backend] = []
+        completed = threading.Event()
+
+        def wait_for_headroom() -> None:
+            backend, _ = policy.acquire_backend(
+                "fixture-model", prefix_key=None, timeout=1
+            )
+            selected.append(backend)
+            completed.set()
+
+        waiter = threading.Thread(target=wait_for_headroom)
+        waiter.start()
+        self.assertFalse(completed.wait(0.1))
+        with state.SiteStore(identity=self.identity) as store:
+            set_member_facts(
+                store,
+                self.identity.member_id,
+                routing_facts(self.identity.member_id, memory_pressure=False),
+            )
+        policy.reload(force=True)
+        self.assertTrue(completed.wait(1))
+        waiter.join(timeout=1)
+        self.assertEqual(len(selected), 1)
+        policy.release_backend(selected[0])
 
     def test_prefix_affinity_is_bounded_and_survives_policy_reload(self) -> None:
         other = "e" * 32

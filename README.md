@@ -671,7 +671,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.17`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.18`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its

@@ -134,6 +134,9 @@ class TelemetryTests(unittest.TestCase):
                     "watchdog_local_controller_key_file": str(paths[2]),
                 })
         context_factory.assert_called_once_with(cafile=str(paths[0].resolve()))
+        connection.request.assert_called_once_with(
+            "GET", "/control/v1/telemetry?history=300"
+        )
         self.assertEqual(aggregate["active_requests"], 1)
         self.assertEqual(aggregate["rates"]["output_tokens_per_second"], 11.0)
 
