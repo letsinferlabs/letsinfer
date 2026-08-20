@@ -173,14 +173,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.18")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.19")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.18"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.19"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -1205,6 +1205,113 @@ class CommandTests(unittest.TestCase):
         run.assert_called_once_with(
             ["systemctl", "--user", "reset-failed", letsinfer.ENGINE_SERVICE_NAME]
         )
+
+    def test_qualification_launch_checks_memory_after_resident_handoff(self) -> None:
+        events: list[str] = []
+        previous = {
+            letsinfer.RECOVERY_TIMER_NAME: ("enabled", "active"),
+            letsinfer.ENGINE_SERVICE_NAME: ("static", "active"),
+        }
+        memory = {"host_available_gib": 112}
+        with (
+            mock.patch.object(
+                letsinfer,
+                "_quiesce_resident_runtime_for_qualification",
+                side_effect=lambda: events.append("quiesce") or previous,
+            ),
+            mock.patch.object(
+                letsinfer,
+                "require_memory_reserve",
+                side_effect=lambda *_args, **_kwargs: events.append("reserve") or memory,
+            ),
+            mock.patch.object(
+                letsinfer,
+                "_stop_managed_container",
+                side_effect=lambda *_args: events.append("stop-candidate"),
+            ),
+            mock.patch.object(
+                letsinfer,
+                "_activate_qualification_candidate",
+                side_effect=lambda *_args: events.append("activate"),
+            ),
+        ):
+            admitted, handoff = letsinfer.prepare_new_launch(
+                {"model": {}},
+                qualification_config={"qualification_mode": True},
+                qualification_existing=True,
+                name="letsinfer-sglang",
+                api_key_file=pathlib.Path("/engine-key"),
+            )
+
+        self.assertIs(admitted, memory)
+        self.assertIs(handoff, previous)
+        self.assertEqual(
+            events, ["quiesce", "reserve", "stop-candidate", "activate"]
+        )
+
+    def test_qualification_launch_restores_resident_when_admission_fails(self) -> None:
+        previous = {
+            letsinfer.RECOVERY_TIMER_NAME: ("enabled", "active"),
+            letsinfer.ENGINE_SERVICE_NAME: ("static", "active"),
+        }
+        with (
+            mock.patch.object(
+                letsinfer,
+                "_quiesce_resident_runtime_for_qualification",
+                return_value=previous,
+            ),
+            mock.patch.object(
+                letsinfer,
+                "require_memory_reserve",
+                side_effect=letsinfer.LetsInferError("insufficient headroom"),
+            ),
+            mock.patch.object(
+                letsinfer, "_restore_resident_runtime_after_qualification"
+            ) as restore,
+            mock.patch.object(
+                letsinfer, "_activate_qualification_candidate"
+            ) as activate,
+            self.assertRaisesRegex(letsinfer.LetsInferError, "insufficient headroom"),
+        ):
+            letsinfer.prepare_new_launch(
+                {"model": {}},
+                qualification_config={"qualification_mode": True},
+                qualification_existing=False,
+                name="letsinfer-sglang",
+                api_key_file=pathlib.Path("/engine-key"),
+            )
+
+        restore.assert_called_once_with(previous)
+        activate.assert_not_called()
+
+    def test_normal_launch_admission_does_not_touch_resident_units(self) -> None:
+        memory = {"host_available_gib": 112}
+        with (
+            mock.patch.object(
+                letsinfer,
+                "require_memory_reserve",
+                return_value=memory,
+            ) as reserve,
+            mock.patch.object(
+                letsinfer, "_quiesce_resident_runtime_for_qualification"
+            ) as quiesce,
+            mock.patch.object(
+                letsinfer, "_activate_qualification_candidate"
+            ) as activate,
+        ):
+            admitted, handoff = letsinfer.prepare_new_launch(
+                {"model": {}},
+                qualification_config=None,
+                qualification_existing=False,
+                name="letsinfer-sglang",
+                api_key_file=pathlib.Path("/engine-key"),
+            )
+
+        self.assertIs(admitted, memory)
+        self.assertIsNone(handoff)
+        reserve.assert_called_once_with({"model": {}}, phase="launch")
+        quiesce.assert_not_called()
+        activate.assert_not_called()
 
     def test_retiring_failed_candidate_archives_and_clears_only_its_trip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
