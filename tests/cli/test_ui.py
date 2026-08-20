@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 
 from core import cli as letsinfer
-from core import ui
+from core import status_ui, ui
 from core.actions import ACTIONS, AuditPolicy, CommandScope, MutationClass
 
 
@@ -277,6 +277,55 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("ATTENTION", rendered)
         self.assertIn("Blocked", rendered)
         self.assertNotIn("\033[", rendered)
+
+    def test_status_history_uses_distinct_yellow_to_red_charts(self) -> None:
+        stream = FakeStream(tty=True)
+        terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
+        payload = {
+            "telemetry": {
+                "history": [
+                    {
+                        "aggregate": {
+                            "active_requests": 1,
+                            "rates": {"aggregate_tokens_per_second": 1.0},
+                        }
+                    },
+                    {
+                        "aggregate": {
+                            "active_requests": 2,
+                            "rates": {"aggregate_tokens_per_second": 2.0},
+                        }
+                    },
+                ],
+                "system": {
+                    "gpu_percent": 1,
+                    "memory_percent": 2,
+                    "cpu_percent": 3,
+                    "disk_percent": 4,
+                },
+            }
+        }
+        rendered = "\n".join(
+            status_ui.dashboard_lines(
+                payload,
+                terminal,
+                session_history={
+                    "gpu": [1, 2],
+                    "memory": [2, 3],
+                    "cpu": [3, 4],
+                    "nvme": [4, 5],
+                },
+            )
+        )
+        for color in (
+            ui.YELLOW,
+            "\033[38;2;255;166;0m",
+            "\033[38;2;252;148;0m",
+            ui.ORANGE,
+            "\033[38;2;237;93;26m",
+            ui.RED,
+        ):
+            self.assertIn(color, rendered)
 
     def test_runtime_status_renders_startup_as_a_transition(self) -> None:
         stream = FakeStream(tty=True)
