@@ -4809,6 +4809,35 @@ def protection_config_for_serve(
     return config
 
 
+def prepare_new_launch(
+    manifest: dict[str, Any],
+    *,
+    qualification_config: dict[str, Any] | None,
+    qualification_existing: bool,
+    name: str,
+    api_key_file: pathlib.Path,
+) -> tuple[dict[str, Any], dict[str, tuple[str, str]] | None]:
+    """Admit one launch, transactionally replacing a resident for qualification."""
+    resident_handoff: dict[str, tuple[str, str]] | None = None
+    if qualification_config is not None:
+        resident_handoff = _quiesce_resident_runtime_for_qualification()
+    try:
+        # A qualification candidate replaces the resident model in the single
+        # local inference slot. Measure launch headroom only after that exact
+        # resident has been quiesced; otherwise unified-memory hosts reject a
+        # safe replacement because both models appear resident at once.
+        memory = require_memory_reserve(manifest, phase="launch")
+        if qualification_config is not None:
+            if qualification_existing:
+                _stop_managed_container(name, api_key_file)
+            _activate_qualification_candidate(qualification_config, manifest)
+    except BaseException:
+        if resident_handoff is not None:
+            _restore_resident_runtime_after_qualification(resident_handoff)
+        raise
+    return memory, resident_handoff
+
+
 def authorize_serving_launch(
     serving: dict[str, Any],
     *,
@@ -5080,19 +5109,16 @@ def serve(
                 disarm_protection(protection_config)
             raise
 
-    memory = require_memory_reserve(manifest, phase="launch")
     evidence.mkdir(parents=True, exist_ok=False)
     ensure_private_directory(store_root)
     ensure_runtime_home(runtime_cache_root)
-    if qualification_config is not None:
-        resident_handoff = _quiesce_resident_runtime_for_qualification()
-        try:
-            if qualification_existing:
-                _stop_managed_container(name, api_key_file)
-            _activate_qualification_candidate(qualification_config, manifest)
-        except BaseException:
-            _restore_resident_runtime_after_qualification(resident_handoff)
-            raise
+    memory, resident_handoff = prepare_new_launch(
+        manifest,
+        qualification_config=qualification_config,
+        qualification_existing=qualification_existing,
+        name=name,
+        api_key_file=api_key_file,
+    )
     launch = {
         "status": "admitted",
         "timestamp": dt.datetime.now().astimezone().isoformat(),
