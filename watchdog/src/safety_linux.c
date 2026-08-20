@@ -129,6 +129,22 @@ static int rotate_event_log(watchdog_safety_runtime *runtime) {
     return runtime->event_fd >= 0 ? 0 : -1;
 }
 
+static int open_event_log(watchdog_safety_runtime *runtime) {
+    if (runtime->event_fd >= 0) return 0;
+    runtime->event_fd = open(
+        runtime->event_path,
+        O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_DSYNC | O_NOFOLLOW,
+        0600
+    );
+    return runtime->event_fd >= 0 ? 0 : -1;
+}
+
+static int close_event_log(watchdog_safety_runtime *runtime, int result) {
+    if (runtime->event_fd >= 0 && close(runtime->event_fd) != 0) result = -1;
+    runtime->event_fd = -1;
+    return result;
+}
+
 static int emit_event(
     watchdog_safety_runtime *runtime,
     watchdog_safety_result *result,
@@ -160,17 +176,19 @@ static int emit_event(
         reason == NULL ? "" : reason,
         result->payload_json
     );
-    if (line_length < 0 || (size_t)line_length >= sizeof(line) || rotate_event_log(runtime) != 0) return -1;
+    if (line_length < 0 || (size_t)line_length >= sizeof(line)
+        || open_event_log(runtime) != 0
+        || rotate_event_log(runtime) != 0) return close_event_log(runtime, -1);
     size_t offset = 0u;
     while (offset < (size_t)line_length) {
         const ssize_t count = write(runtime->event_fd, line + offset, (size_t)line_length - offset);
         if (count < 0) {
             if (errno == EINTR) continue;
-            return -1;
+            return close_event_log(runtime, -1);
         }
         offset += (size_t)count;
     }
-    return fdatasync(runtime->event_fd);
+    return close_event_log(runtime, fdatasync(runtime->event_fd));
 }
 
 static int acknowledge(watchdog_safety_runtime *runtime, const watchdog_protected_engine *target) {
@@ -534,12 +552,13 @@ int watchdog_safety_open(watchdog_safety_runtime *runtime, const watchdog_safety
         || make_peer_path(runtime->trip_path, config->state_path, "protection-trip.json") != 0
         || make_peer_path(runtime->event_path, config->state_path, "safety-events.ndjson") != 0) return -1;
     runtime->config.state_path = runtime->state_path;
-    runtime->event_fd = open(
+    const int event_fd = open(
         runtime->event_path,
         O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_DSYNC | O_NOFOLLOW,
         0600
     );
-    return runtime->event_fd >= 0 ? 0 : -1;
+    if (event_fd < 0) return -1;
+    return close(event_fd);
 }
 
 void watchdog_safety_close(watchdog_safety_runtime *runtime) {
