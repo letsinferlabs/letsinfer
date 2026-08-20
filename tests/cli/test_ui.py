@@ -575,6 +575,54 @@ class TerminalTests(unittest.TestCase):
         self.assertNotIn("FAILED", rendered)
         self.assertNotIn("unit(s) need attention", rendered)
 
+    def test_runtime_status_keeps_a_saturated_verified_candidate_serving(self) -> None:
+        stream = FakeStream(tty=True)
+        payload = {
+            "service": {
+                "active": "active",
+                "engine_active": "inactive",
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+                "gateway_model_identity": True,
+                "gateway_endpoint": "http://homeai.local:8000/v1",
+                "site_active": "active",
+                "recovery_timer_active": "inactive",
+                "runtime_mode": "qualification",
+            },
+            "container": {
+                "state": "running",
+                "healthy": False,
+                "docker_health": "healthy",
+                "model_identity": True,
+                "model": "qwen3.8-27b",
+                "engine": "sglang",
+                "target": "dgx-spark",
+                "runtime_version": "0.1.0-rc.7",
+            },
+            "protection": {
+                "phase": "armed",
+                "armed": True,
+                "trip_latched": False,
+            },
+        }
+        payload["lifecycle"] = letsinfer.runtime_lifecycle(payload)
+        self.assertEqual(payload["lifecycle"]["state"], "ready")
+        self.assertTrue(payload["lifecycle"]["runtime_ready"])
+
+        ui.runtime_status(
+            payload,
+            stream=stream,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
+        )
+        rendered = stream.getvalue()
+        self.assertIn("State        ✓  SERVING", rendered)
+        self.assertIn("RUNTIME   SERVING", rendered)
+        self.assertIn("TARGET    READY", rendered)
+        self.assertNotIn("STOPPED", rendered)
+        self.assertNotIn("WAITING", rendered)
+
     def test_runtime_status_labels_an_intentionally_stopped_candidate(self) -> None:
         stream = FakeStream(tty=True)
         payload = {
