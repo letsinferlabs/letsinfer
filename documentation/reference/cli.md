@@ -194,6 +194,13 @@ letsinfer uninstall
 starting the protected runtime. The same distinction applies to one-member,
 replicated, and distributed placements.
 
+The active runtime owns all four lifecycle commands. For an explicit
+qualification candidate, `stop` preserves its exact stopped container and
+immutable candidate receipt; `start`, `restart`, and `recover` operate on that
+same candidate instead of falling through to the resident boot selection. A
+later candidate replacement or resident activation is the separate retirement
+boundary that removes the candidate slot.
+
 `status --json` includes one derived `lifecycle` object. Its state is one of
 `starting`, `ready`, `stopping`, `stopped`, `blocked`, `degraded`, or `failed`,
 with a stable machine reason and the observed ready-service count. Transitional
@@ -203,14 +210,23 @@ engine runs health checks, protection arms after readiness, and the remaining
 unit is described as activating. A protection trip always takes precedence and
 renders `BLOCKED`; terminal engine or Docker health failures render `FAILED`.
 API reachability and authentication come from live gateway probes even when
-immutable runtime metadata is incompatible. In that case the API can be shown
-as `Ready` while a separate `RUNTIME Incompatible` row explains why the
-overall lifecycle remains `degraded`.
-The interactive card reads the coordinator's normalized local aggregate over
-its existing mutual-TLS controller channel. A missing measurement is rendered
-as unavailable rather than inferred. `status --json` remains the stable
-machine health contract and is not decorated by this interactive telemetry
-lookup.
+runtime metadata is incompatible; the version row names that incompatibility
+while the overall lifecycle remains degraded. Interactive `letsinfer status` is a live,
+one-second dashboard and runs until `Ctrl-C`; `--json` and redirected output
+remain one-shot machine interfaces. The dashboard uses the authenticated site
+telemetry feed for scheduler, throughput, history, and system readings.
+
+Host memory pressure is a degraded admission state, not an API-process crash.
+Model discovery remains available, the dashboard names the available-memory
+and runtime-floor values, and new inference waits in the normal bounded queue
+until headroom returns. If the queue timeout expires, the request receives a
+structured `memory_pressure` 503; the healthy runtime is not stopped. Exact
+token counting happens before that pressure wait when the adapter declares the
+capability, so a chat that cannot fit any qualified placement receives an
+immediate `context_length_exceeded` 400 and is never dispatched. Watchdog
+contains only a hard emergency-floor or observed cgroup limit/OOM event. Such
+a protection trip remains a hard failure and still requires `letsinfer recover`.
+A missing measurement is rendered as unavailable rather than inferred.
 
 `releases` lists installed runtime manifests, not test fixtures or a bundled
 model catalog.

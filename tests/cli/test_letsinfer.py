@@ -173,14 +173,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.17")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.18")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.17"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.18"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -1286,6 +1286,108 @@ class CommandTests(unittest.TestCase):
             letsinfer.LetsInferError, "resident engine service to be stopped"
         ):
             letsinfer._activate_qualification_candidate({}, {})
+
+    def test_candidate_stop_preserves_the_slot_and_container(self) -> None:
+        config = {
+            "qualification_mode": True,
+            "name": "letsinfer-sglang",
+            "engine_port": 18000,
+            "manifest_sha256": "a" * 64,
+        }
+        manifest = {"container": {}}
+        inspection = {"State": {"Running": True}}
+        with (
+            mock.patch.object(
+                letsinfer, "configured_release", return_value=(pathlib.Path("/release"), manifest)
+            ),
+            mock.patch.object(letsinfer, "container_inspect", return_value=inspection),
+            mock.patch.object(letsinfer, "require_matching_container") as matching,
+            mock.patch.object(letsinfer, "require_systemd_restart_authority") as authority,
+            mock.patch.object(letsinfer, "disarm_protection") as disarm,
+            mock.patch.object(letsinfer, "run") as run,
+            mock.patch.object(letsinfer, "update_service_placement") as placement,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(
+                letsinfer._qualification_candidate_lifecycle(config, "stop"), 0
+            )
+        matching.assert_called_once()
+        authority.assert_called_once_with(inspection)
+        disarm.assert_called_once_with(config, wait_for_ack=False)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                ["docker", "update", "--restart", "no", "letsinfer-sglang"],
+                ["docker", "stop", "--time", "120", "letsinfer-sglang"],
+            ],
+        )
+        placement.assert_called_once_with(config, manifest, "stopped")
+
+    def test_candidate_recover_clears_trip_and_rearms_exact_container(self) -> None:
+        config = {
+            "qualification_mode": True,
+            "name": "letsinfer-sglang",
+            "engine_port": 18000,
+            "manifest_sha256": "a" * 64,
+            "tls_cert_file": "/tls.crt",
+            "engine_api_key_file": "/engine-key",
+        }
+        manifest = {"container": {"startup_timeout_seconds": 60}}
+        stopped = {"State": {"Running": False}}
+        running = {"State": {"Running": True}}
+        with (
+            mock.patch.object(
+                letsinfer, "configured_release", return_value=(pathlib.Path("/release"), manifest)
+            ),
+            mock.patch.object(
+                letsinfer, "container_inspect", side_effect=[stopped, running, running]
+            ),
+            mock.patch.object(letsinfer, "require_matching_container"),
+            mock.patch.object(letsinfer, "require_systemd_restart_authority"),
+            mock.patch.object(letsinfer, "clear_protection_trip", return_value=True) as clear,
+            mock.patch.object(letsinfer, "write_watchdog_public_state"),
+            mock.patch.object(letsinfer, "update_service_placement") as placement,
+            mock.patch.object(letsinfer.secrets, "token_hex", return_value="b" * 32),
+            mock.patch.object(letsinfer, "publish_protection_state") as protection,
+            mock.patch.object(letsinfer, "require_memory_reserve"),
+            mock.patch.object(letsinfer, "run") as run,
+            mock.patch.object(letsinfer, "wait_for_ready"),
+            mock.patch.object(letsinfer, "model_identity_ready", return_value=True),
+            mock.patch.object(letsinfer, "prewarm"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(
+                letsinfer._qualification_candidate_lifecycle(config, "recover"), 0
+            )
+        clear.assert_called_once_with(config)
+        run.assert_called_once_with(["docker", "start", "letsinfer-sglang"])
+        self.assertEqual(
+            [call.args[1] for call in protection.call_args_list],
+            ["b" * 32, "b" * 32, "b" * 32],
+        )
+        self.assertEqual(
+            [call.args[2] for call in placement.call_args_list],
+            ["starting", "running"],
+        )
+
+    def test_lifecycle_commands_prefer_the_active_candidate(self) -> None:
+        arguments = argparse.Namespace(config=None, model=None)
+        candidate_path = mock.Mock()
+        candidate_path.is_file.return_value = True
+        candidate = {"qualification_mode": True, "model": "qwen3.8-27b"}
+        with (
+            mock.patch.object(
+                letsinfer, "qualification_service_config_path", return_value=candidate_path
+            ),
+            mock.patch.object(letsinfer, "read_service_config", return_value=candidate),
+            mock.patch.object(
+                letsinfer, "_qualification_candidate_lifecycle", return_value=0
+            ) as lifecycle,
+            mock.patch.object(letsinfer, "_engine_group_lifecycle") as group,
+        ):
+            self.assertEqual(letsinfer.restart_service(arguments), 0)
+        lifecycle.assert_called_once_with(candidate, "restart")
+        group.assert_not_called()
 
     def test_stop_with_explicit_name_does_not_stop_resident_service(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

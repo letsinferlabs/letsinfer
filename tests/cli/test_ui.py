@@ -229,12 +229,15 @@ class TerminalTests(unittest.TestCase):
         )
         rendered = stream.getvalue()
         self.assertIn("LET'S INFER", rendered)
-        self.assertIn("ONLINE", rendered)
+        self.assertIn("SERVING", rendered)
         self.assertIn("deepseek-v4-flash", rendered)
-        self.assertIn("DwarfStar · dgx-spark · 0.11.0-rc.3", rendered)
-        self.assertIn("557K context · 128 active", rendered)
-        self.assertIn("http://homeai.local:8000/v1", rendered)
-        self.assertIn("19.0 MiB / 30.0 MiB", rendered)
+        self.assertIn("DwarfStar", rendered)
+        self.assertIn("dgx-spark", rendered)
+        self.assertIn("0.11.0-rc.3", rendered)
+        self.assertIn("557K context", rendered)
+        self.assertIn("homeai.local:8000/v1", rendered)
+        self.assertIn("19.0 MiB", rendered)
+        self.assertIn("30.0 MiB limit", rendered)
         self.assertIn("Request path", rendered)
         self.assertIn("Scheduler", rendered)
         self.assertIn("Performance", rendered)
@@ -320,13 +323,10 @@ class TerminalTests(unittest.TestCase):
         )
         rendered = stream.getvalue()
         self.assertIn("STARTING", rendered)
-        self.assertIn("Waiting", rendered)
         self.assertIn("Starting", rendered)
         self.assertIn("Arming", rendered)
-        self.assertIn("engine unit activating", rendered)
         self.assertNotIn("ATTENTION", rendered)
         self.assertNotIn("Unavailable", rendered)
-        self.assertNotIn("protection needs attention", rendered)
 
     def test_runtime_status_labels_a_healthy_candidate_without_false_service_failures(self) -> None:
         stream = FakeStream(tty=True)
@@ -371,14 +371,114 @@ class TerminalTests(unittest.TestCase):
             environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
         )
         rendered = stream.getvalue()
-        self.assertIn("UNQUALIFIED", rendered)
-        self.assertIn("QUALIFICATION · SGLang · dgx-spark · 0.1.0-rc.5", rendered)
-        self.assertIn("262K context · 8 active", rendered)
-        self.assertIn("3/3", rendered)
+        self.assertIn("SERVING", rendered)
+        self.assertIn("SGLang", rendered)
+        self.assertIn("dgx-spark", rendered)
+        self.assertIn("0.1.0-rc.5", rendered)
+        self.assertIn("262K context", rendered)
+        self.assertIn("3 / 3 active", rendered)
         self.assertIn("candidate control plane active", rendered)
-        self.assertIn("API       Ready", rendered)
+        self.assertIn("API          Ready", rendered)
         self.assertNotIn("FAILED", rendered)
         self.assertNotIn("unit(s) need attention", rendered)
+
+    def test_runtime_status_names_memory_pressure_without_hiding_the_runtime(self) -> None:
+        stream = FakeStream(tty=True)
+        payload = {
+            "service": {
+                "active": "active",
+                "engine_active": "inactive",
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+                "gateway_model_identity": True,
+                "gateway_endpoint": "http://homeai.local:8000/v1",
+                "site_active": "active",
+                "recovery_timer_active": "inactive",
+                "runtime_mode": "qualification",
+                "memory_pressure": True,
+                "memory_available_bytes": 3_800_000_000,
+                "memory_pressure_floor_bytes": 4 * 1024**3,
+                "memory_current_bytes": 19 * 1024 * 1024,
+                "memory_limit_bytes": 30 * 1024 * 1024,
+            },
+            "container": {
+                "state": "running",
+                "healthy": True,
+                "docker_health": "healthy",
+                "model_identity": True,
+                "model": "qwen3.8-27b",
+                "engine": "sglang",
+                "target": "dgx-spark",
+                "runtime_version": "0.1.0-rc.5",
+                "capacity": {
+                    "max_connections": 128,
+                    "max_active_requests": 10,
+                    "max_context_tokens": 262144,
+                },
+            },
+            "protection": {"armed": True, "trip_latched": False},
+        }
+        payload["lifecycle"] = letsinfer.runtime_lifecycle(payload)
+        self.assertEqual(payload["lifecycle"]["reason"], "memory-pressure")
+        ui.runtime_status(
+            payload,
+            stream=stream,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
+        )
+        rendered = stream.getvalue()
+        self.assertIn("PRESSURE", rendered)
+        self.assertIn("API          Paused", rendered)
+        self.assertIn("3.5 GiB available", rendered)
+        self.assertIn("4.0 GiB floor", rendered)
+        self.assertIn("RUNTIME   SERVING", rendered)
+        self.assertNotIn("✓ API ready", rendered)
+        self.assertNotIn("✓ Runtime serving", rendered)
+        self.assertNotIn("✓ Protection armed", rendered)
+
+    def test_live_runtime_status_refreshes_until_control_c(self) -> None:
+        stream = FakeStream(tty=True)
+        payload = {
+            "service": {
+                "active": "active",
+                "engine_active": "active",
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+                "gateway_model_identity": True,
+                "site_active": "active",
+                "recovery_timer_active": "active",
+                "memory_current_bytes": 19 * 1024 * 1024,
+                "memory_limit_bytes": 30 * 1024 * 1024,
+            },
+            "container": {
+                "state": "running",
+                "healthy": True,
+                "docker_health": "healthy",
+                "model_identity": True,
+                "model": "fixture-model",
+                "engine": "sglang",
+                "target": "dgx-spark",
+                "runtime_version": "1.0.0",
+            },
+            "protection": {"armed": True, "trip_latched": False},
+            "lifecycle": {
+                "state": "ready",
+                "ready_services": 5,
+                "total_services": 5,
+            },
+        }
+        with (
+            mock.patch.object(ui.sys, "stdout", stream),
+            mock.patch.object(ui.time, "sleep", side_effect=KeyboardInterrupt),
+        ):
+            self.assertEqual(ui.live_runtime_status(lambda: payload), 0)
+        rendered = stream.getvalue()
+        self.assertIn("\033[?25l", rendered)
+        self.assertIn("\033[?25h", rendered)
+        self.assertIn("fixture-model", rendered)
 
     def test_runtime_status_does_not_call_a_reachable_api_unavailable(self) -> None:
         stream = FakeStream(tty=True)
@@ -418,9 +518,9 @@ class TerminalTests(unittest.TestCase):
             environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
         )
         rendered = stream.getvalue()
-        self.assertIn("API       Ready", rendered)
-        self.assertIn("RUNTIME   Incompatible", rendered)
-        self.assertNotIn("API       Unavailable", rendered)
+        self.assertIn("API          Ready", rendered)
+        self.assertIn("ATTENTION", rendered)
+        self.assertNotIn("API          Unavailable", rendered)
 
     def test_site_status_is_branded_without_claiming_a_runtime(self) -> None:
         stream = FakeStream(tty=True)
@@ -492,8 +592,8 @@ class TerminalTests(unittest.TestCase):
         rendered = stream.getvalue()
         plain = re.sub(r"\x1b\[[0-9;]*m", "", rendered)
         self.assertTrue(all(len(line) <= 80 for line in plain.splitlines()))
-        self.assertIn("SERVICES", plain)
-        self.assertIn("all five units active", plain)
+        self.assertIn("Services", plain)
+        self.assertIn("5 / 5 active", plain)
 
 
 class HelpTests(unittest.TestCase):

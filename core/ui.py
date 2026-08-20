@@ -164,294 +164,6 @@ def _mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _mib(value: object) -> str:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        return "unavailable"
-    return f"{value / (1024 * 1024):.1f} MiB"
-
-
-def _context(value: object) -> str:
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        return "unknown context"
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}M context"
-    if value >= 1_000:
-        return f"{value / 1_000:.0f}K context"
-    return f"{value} context"
-
-
-def _rate(value: object) -> str:
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
-        return "—"
-    return f"{value:.1f} tok/s"
-
-
-def runtime_status(
-    payload: Mapping[str, Any],
-    *,
-    stream: TextIO | None = None,
-    environ: Mapping[str, str] | None = None,
-) -> None:
-    """Render one compact interactive runtime-health card."""
-    target = sys.stdout if stream is None else stream
-    terminal = Terminal(target, environ=environ)
-    service = _mapping(payload.get("service"))
-    container = _mapping(payload.get("container"))
-    protection = _mapping(payload.get("protection"))
-    lifecycle = _mapping(payload.get("lifecycle"))
-    capacity = _mapping(container.get("capacity"))
-    telemetry = _mapping(payload.get("telemetry"))
-    rates = _mapping(telemetry.get("rates"))
-
-    engine_ready = (
-        container.get("state") == "running"
-        and container.get("healthy") is True
-        and container.get("docker_health") == "healthy"
-        and container.get("model_identity") is True
-    )
-    api_ready = (
-        service.get("gateway_active") == "active"
-        and service.get("gateway_health") is True
-        and service.get("gateway_auth_required") is True
-        and service.get("gateway_authenticated") is True
-    )
-    runtime_metadata_ready = service.get("runtime_metadata_ready") is not False
-    route_ready = service.get("gateway_model_identity") is True
-    safety_ready = (
-        protection.get("armed") is True
-        and protection.get("trip_latched") is False
-    )
-    qualification_mode = service.get("runtime_mode") == "qualification"
-    services_ready = lifecycle.get("ready_services")
-    services_total = lifecycle.get("total_services")
-    if not isinstance(services_ready, int) or not isinstance(services_total, int):
-        service_states = (
-            service.get("active") == "active",
-            service.get("engine_active") == "active",
-            service.get("gateway_active") == "active",
-            service.get("site_active") == "active",
-            service.get("recovery_timer_active") == "active",
-        )
-        services_ready = sum(service_states)
-        services_total = len(service_states)
-    ready = (
-        engine_ready
-        and api_ready
-        and route_ready
-        and runtime_metadata_ready
-        and safety_ready
-        and services_ready == services_total
-    )
-
-    model = str(container.get("model") or "No model")
-    engine = str(container.get("engine") or "unknown")
-    engine_name = {
-        "dwarfstar": "DwarfStar",
-        "llama.cpp": "llama.cpp",
-        "sglang": "SGLang",
-        "vllm": "vLLM",
-    }.get(engine, engine)
-    target_name = str(container.get("target") or "unknown target")
-    version = str(container.get("runtime_version") or "unknown version")
-
-    target.write(f"{terminal.logo()}\n\n")
-    lifecycle_state = str(lifecycle.get("state") or ("ready" if ready else "degraded"))
-    state_color = {
-        "ready": GREEN,
-        "starting": CYAN,
-        "stopping": CYAN,
-        "stopped": YELLOW,
-        "blocked": RED,
-        "failed": RED,
-        "degraded": YELLOW,
-    }.get(lifecycle_state, YELLOW)
-    state_mark = "●" if terminal.unicode else "*"
-    state = {
-        "ready": "ONLINE",
-        "starting": "STARTING",
-        "stopping": "STOPPING",
-        "stopped": "STOPPED",
-        "blocked": "BLOCKED",
-        "failed": "FAILED",
-        "degraded": "ATTENTION",
-    }.get(lifecycle_state, "ATTENTION")
-    if qualification_mode and lifecycle_state == "ready":
-        state = "UNQUALIFIED"
-        state_color = YELLOW
-    state_prefix_width = len(state_mark) + 1 + len(state) + 2
-    model = terminal.clip(model, terminal.width - state_prefix_width)
-    target.write(
-        f"{terminal.paint(state_mark, BOLD, state_color)} "
-        f"{terminal.paint(state, BOLD, state_color)}  "
-        f"{terminal.paint(model, BOLD)}\n"
-    )
-    runtime_identity = terminal.clip(
-        (
-            f"QUALIFICATION · {engine_name} · {target_name} · {version}"
-            if qualification_mode
-            else f"{engine_name} · {target_name} · {version}"
-        ),
-        terminal.width - 2,
-    )
-    target.write(
-        f"  {terminal.paint(runtime_identity, DIM)}\n\n"
-    )
-
-    def row(
-        label: str,
-        ok: bool,
-        state_text: str,
-        detail: str,
-        *,
-        pending: bool = False,
-    ) -> None:
-        color = CYAN if pending else GREEN if ok else RED
-        label_text = terminal.clip(label.upper(), 10).ljust(10)
-        state_value = terminal.clip(state_text, 12).ljust(12)
-        detail = terminal.clip(detail, terminal.width - 24)
-        target.write(
-            f"  {terminal.paint(label_text, DIM)}"
-            f"{terminal.paint(state_value, BOLD, color)}"
-            f"{terminal.paint(detail, DIM)}\n"
-        )
-
-    endpoint = str(service.get("gateway_endpoint") or "LAN HTTP · API key")
-    starting = lifecycle_state == "starting"
-    row(
-        "API",
-        api_ready and route_ready,
-        (
-            "Ready"
-            if api_ready and route_ready
-            else "Waiting"
-            if starting
-            else "Unavailable"
-        ),
-        (
-            f"model route pending · {endpoint}"
-            if starting and service.get("gateway_health") is True
-            else endpoint
-        ),
-        pending=starting and not api_ready,
-    )
-    if not runtime_metadata_ready:
-        row(
-            "Runtime",
-            False,
-            "Incompatible",
-            "install a runtime compatible with this core",
-        )
-    context = _context(capacity.get("max_context_tokens"))
-    active = capacity.get("max_active_requests")
-    active_detail = f" · {active} active" if isinstance(active, int) else ""
-    engine_state = (
-        "Healthy"
-        if engine_ready
-        else "Starting"
-        if starting
-        else str(container.get("state") or "Unknown").title()
-    )
-    engine_detail = (
-        f"health checks running · Docker {container.get('docker_health') or 'unknown'}"
-        if starting
-        else f"{context}{active_detail}"
-    )
-    row(
-        "Engine",
-        engine_ready,
-        engine_state,
-        engine_detail,
-        pending=starting and not engine_ready,
-    )
-    row(
-        "Safety",
-        safety_ready,
-        "Armed" if safety_ready else "Arming" if starting else "Blocked",
-        (
-            "no trip · candidate guarded"
-            if safety_ready and qualification_mode
-            else "no trip · recovery ready"
-            if safety_ready
-            else "protection will arm when startup completes"
-            if starting
-            else "protection needs attention"
-        ),
-        pending=starting and not safety_ready,
-    )
-    row(
-        "Services",
-        services_ready == services_total,
-        "Starting" if starting else f"{services_ready}/{services_total}",
-        "candidate control plane active"
-        if qualification_mode and services_ready == services_total
-        else "all five units active"
-        if services_ready == services_total
-        else f"engine unit {service.get('engine_active')} · {services_ready}/5 ready"
-        if starting and not qualification_mode
-        else f"{services_total - services_ready} unit(s) need attention",
-        pending=starting and services_ready != services_total,
-    )
-    memory = _mib(service.get("memory_current_bytes"))
-    memory_limit = _mib(service.get("memory_limit_bytes"))
-    within_limit = service.get("within_memory_limit") is True
-    row(
-        "Watchdog",
-        within_limit,
-        "Normal" if within_limit else "High",
-        f"{memory} / {memory_limit}",
-    )
-    target.write(f"\n  {terminal.paint('Request path', BOLD)}\n")
-    route = (
-        ("CLIENT", True, "OpenAI-compatible"),
-        ("GATEWAY", api_ready, endpoint),
-        ("RUNTIME", engine_ready, f"{model} · {engine_name}"),
-        ("TARGET", engine_ready, target_name),
-    )
-    for index, (name, node_ready, detail) in enumerate(route):
-        mark = "●" if terminal.unicode and node_ready else "○" if terminal.unicode else "*"
-        color = GREEN if node_ready else RED
-        target.write(
-            f"  {terminal.paint(mark, BOLD, color)}  "
-            f"{terminal.paint(name.ljust(10), BOLD)}"
-            f"{terminal.paint(terminal.clip(detail, terminal.width - 16), DIM)}\n"
-        )
-        if index != len(route) - 1:
-            target.write(f"  {terminal.paint('│', DIM)}\n")
-
-    active_now = telemetry.get("active_requests")
-    queued_now = telemetry.get("queued_requests")
-    active_limit = capacity.get("max_active_requests")
-    target.write(f"\n  {terminal.paint('Scheduler', BOLD)}\n")
-    row(
-        "Active",
-        True,
-        str(active_now) if isinstance(active_now, int) else "—",
-        f"{active_limit} max" if isinstance(active_limit, int) else "runtime capacity",
-    )
-    row(
-        "Queue",
-        True,
-        str(queued_now) if isinstance(queued_now, int) else "—",
-        "dynamic admission",
-    )
-    if telemetry:
-        target.write(f"\n  {terminal.paint('Performance', BOLD)}\n")
-        row(
-            "Tokens",
-            True,
-            _rate(
-                rates.get("aggregate_tokens_per_second")
-                if rates.get("aggregate_tokens_per_second") is not None
-                else rates.get("output_tokens_per_second")
-            ),
-            (
-                f"{_rate(rates.get('decode_tokens_per_second'))} decode · "
-                f"{_rate(rates.get('prefill_tokens_per_second'))} prefill"
-            ),
-        )
-    target.flush()
-
-
 def site_status(
     payload: Mapping[str, Any],
     *,
@@ -839,3 +551,63 @@ def fatal(message: str, *, stream: TextIO | None = None) -> None:
     else:
         target.write(f"FATAL: {message}\n")
     target.flush()
+
+
+def runtime_status(
+    payload: Mapping[str, Any],
+    *,
+    stream: TextIO | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Render one preview-derived status snapshot."""
+    from .status_ui import dashboard_lines
+
+    target = sys.stdout if stream is None else stream
+    terminal = Terminal(target, environ=environ)
+    target.write("\n".join(dashboard_lines(payload, terminal)) + "\n")
+    target.flush()
+
+
+def live_runtime_status(snapshot: Callable[[], Mapping[str, Any]]) -> int:
+    """Refresh the interactive dashboard until the user presses Ctrl-C."""
+    from .status_ui import dashboard_lines
+
+    terminal = Terminal(sys.stdout)
+    history: dict[str, list[float]] = {
+        "gpu": [],
+        "memory": [],
+        "cpu": [],
+        "nvme": [],
+    }
+    first = True
+    try:
+        sys.stdout.write("\033[?25l")
+        while True:
+            payload = snapshot()
+            if "service" not in payload:
+                sys.stdout.write("\033[H\033[J" if not first else "\033[2J\033[H")
+                site_status(payload)
+                return int(payload.get("exit_code") or 0)
+            telemetry = _mapping(payload.get("telemetry"))
+            system = _mapping(telemetry.get("system"))
+            for name, field in (
+                ("gpu", "gpu_percent"),
+                ("memory", "memory_percent"),
+                ("cpu", "cpu_percent"),
+                ("nvme", "disk_percent"),
+            ):
+                value = system.get(field)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    history[name].append(max(0.0, float(value)))
+                    del history[name][:-300]
+            lines = dashboard_lines(payload, terminal, session_history=history)
+            sys.stdout.write("\033[2J\033[H" if first else "\033[H\033[J")
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
+            first = False
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        sys.stdout.write("\033[?25h\n")
+        sys.stdout.flush()

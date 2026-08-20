@@ -14,12 +14,16 @@ It monitors Spark's unified-memory availability, swap, memory PSI, and cgroup
 OOM/limit events.
 
 Every runtime manifest must declare its target-specific warning,
-graceful-stop, emergency-kill, swap, PSI, and containment thresholds. Core
+graceful-reserve, emergency-kill, swap, PSI, and containment thresholds. Core
 requires the warning floor to cover the runtime admission reserve and requires
 strictly ordered warning, graceful, and emergency floors; it does not infer a
 missing runtime threshold. The native executable likewise has no threshold
 defaults and refuses to start unless all manifest-derived memory, swap, PSI,
-state-failure, and containment values are supplied. A trip is durably latched. Automatic recovery
+state-failure, and containment values are supplied. Warning, graceful-reserve,
+swap, and PSI observations pause gateway admission and emit telemetry; they do
+not stop a healthy engine. New requests remain in the bounded gateway queue
+until headroom returns. Watchdog contains the engine only at the hard emergency
+floor or after an observed cgroup limit/OOM event. A trip is durably latched. Automatic recovery
 handles ordinary crashes and unhealthy containers but refuses an OOM or safety
 trip until an operator inspects it and runs `letsinfer recover`. `start` and
 `restart` never clear a trip. `recover` explicitly clears the safety latch and

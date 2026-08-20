@@ -45,18 +45,26 @@ void test_safety_decision_precedence(void) {
     input.cgroup_oom_group_kill_delta = 0u;
     input.psi_some_delta_us = 150000u;
     result = watchdog_safety_decide(&limits, &input);
-    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_STOP);
-    TEST_ASSERT(strcmp(result.reason, "host_memory_some_psi") == 0);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
 
-    input.available_bytes = UINT64_C(80) << 30u;
+    input.available_bytes = UINT64_C(11) << 30u;
+    input.psi_some_delta_us = 0u;
+    input.psi_full_delta_us = 50000u;
     result = watchdog_safety_decide(&limits, &input);
     TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
 
+    input.available_bytes = UINT64_C(80) << 30u;
+    input.psi_full_delta_us = 0u;
     input.psi_some_delta_us = 0u;
     input.swap_used_bytes = UINT64_C(1) << 30u;
     result = watchdog_safety_decide(&limits, &input);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
+
+    input.swap_used_bytes = 0u;
+    input.cgroup_max_delta = 1u;
+    result = watchdog_safety_decide(&limits, &input);
     TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_STOP);
-    TEST_ASSERT(strcmp(result.reason, "host_swap_growth") == 0);
+    TEST_ASSERT(strcmp(result.reason, "cgroup_memory_limit") == 0);
 }
 
 void test_safety_thresholds_and_descriptor(void) {

@@ -36,20 +36,13 @@ watchdog_safety_decision watchdog_safety_decide(
         || input->cgroup_oom_group_kill_delta != 0) {
         return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_KILL, "cgroup_oom_kill"};
     }
-    if (input->available_bytes <= thresholds->graceful_available_bytes) {
-        return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_STOP, "host_memory_below_graceful_floor"};
-    }
-    if (input->swap_used_bytes >= thresholds->swap_stop_bytes) {
-        return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_STOP, "host_swap_growth"};
-    }
-    if (input->available_bytes <= thresholds->warning_available_bytes) {
-        if (input->psi_full_delta_us >= thresholds->psi_full_us) {
-            return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_STOP, "host_memory_full_psi"};
-        }
-        if (input->psi_some_delta_us >= thresholds->psi_some_us) {
-            return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_STOP, "host_memory_some_psi"};
-        }
-    }
+    /*
+     * Available-memory, swap, and PSI thresholds are admission signals.  The
+     * site agent publishes them and the gateway stops dispatching new work
+     * until headroom returns.  They must not turn ordinary KV-cache pressure
+     * into a destructive engine lifecycle event.  Containment is reserved for
+     * the hard emergency floor and observed cgroup limit/OOM events below.
+     */
     if (input->cgroup_oom_delta != 0 || input->cgroup_max_delta != 0) {
         return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_STOP, "cgroup_memory_limit"};
     }
