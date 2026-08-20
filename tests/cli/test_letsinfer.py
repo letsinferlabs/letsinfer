@@ -173,14 +173,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.27")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.28")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.27"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.28"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -4371,14 +4371,17 @@ class RuntimeCommandTests(unittest.TestCase):
     def test_benchmark_cli_delegates_without_engine_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            runner = root / "benchmarks/runtime_matrix.py"
-            executable = root / "bin/letsinfer"
+            composite = root / "current-control"
+            runner = composite / "benchmarks/runtime_matrix.py"
+            executable = composite / "bin/letsinfer"
             runner.parent.mkdir(parents=True)
             executable.parent.mkdir(parents=True)
             runner.write_text("# runner\n", encoding="utf-8")
             executable.write_text("#!/bin/sh\n", encoding="utf-8")
             service_config = root / "service.json"
             service_config.write_text("{}\n", encoding="utf-8")
+            current_core = root / "current-core"
+            current_core.mkdir()
             (root / "runtime.json").write_text(
                 '{"benchmark":{}}\n', encoding="utf-8"
             )
@@ -4404,6 +4407,17 @@ class RuntimeCommandTests(unittest.TestCase):
                 mock.patch.object(
                     letsinfer, "manifest_source_root", return_value=root
                 ),
+                mock.patch.object(
+                    letsinfer, "source_root", return_value=current_core
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "install_control_bundle",
+                    return_value=(
+                        composite,
+                        composite / "releases/release.json",
+                    ),
+                ) as install_bundle,
                 mock.patch.object(letsinfer, "verify_release_sources"),
                 mock.patch.object(
                     letsinfer,
@@ -4463,11 +4477,16 @@ class RuntimeCommandTests(unittest.TestCase):
             ):
                 self.assertEqual(letsinfer.benchmark_runtime(arguments), 0)
 
+        install_bundle.assert_called_once_with(
+            root / "releases/release.json",
+            {},
+            artifact_roots=(root, current_core),
+        )
         command = run.call_args.args[0]
         self.assertEqual(command[:2], [sys.executable, str(runner.resolve())])
         self.assertEqual(
             command[command.index("--runtime") + 1],
-            "fixture-paired-model/dwarfstar/fixture-unified",
+            str(composite / "releases/release.json"),
         )
         self.assertEqual(
             command[command.index("--letsinfer-bin") + 1], str(executable.resolve())
@@ -4645,7 +4664,7 @@ class RuntimeCommandTests(unittest.TestCase):
                 )
         unit_state.assert_not_called()
 
-    def test_benchmark_retires_preserved_candidate_in_temporary_slot(self) -> None:
+    def test_benchmark_restores_serving_candidate_after_cleanup(self) -> None:
         command = ["runner", "--c1"]
         cleanup = ["letsinfer", "stop", "--name", "letsinfer-benchmark"]
         resident = {"protection_root": "/watchdog/protected/resident"}
@@ -4675,8 +4694,16 @@ class RuntimeCommandTests(unittest.TestCase):
                     letsinfer, "protection_trip_latched", return_value=False
                 ),
                 mock.patch.object(
+                    letsinfer,
+                    "container_inspect",
+                    return_value={"State": {"Running": True}},
+                ),
+                mock.patch.object(
                     letsinfer, "_retire_qualification_candidate"
                 ) as retire,
+                mock.patch.object(
+                    letsinfer, "_qualification_candidate_lifecycle", return_value=0
+                ) as lifecycle,
                 mock.patch.object(letsinfer, "run_passthrough") as run_passthrough,
                 mock.patch.object(
                     letsinfer,
@@ -4690,8 +4717,84 @@ class RuntimeCommandTests(unittest.TestCase):
                     cleanup_command=cleanup,
                 )
 
-        retire.assert_called_once_with(remove_container=True)
+        retire.assert_not_called()
+        lifecycle.assert_called_once_with(candidate, "start")
         run_passthrough.assert_called_once_with(command)
+
+    def test_benchmark_retires_temporary_candidate_before_resident_restore(self) -> None:
+        command = ["runner", "--c1"]
+        cleanup = ["letsinfer", "stop", "--name", "letsinfer-benchmark"]
+        resident = {"protection_root": "/watchdog/protected/resident"}
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path = pathlib.Path(directory) / "qualification.json"
+
+            def execute(actual: list[str]) -> None:
+                if actual == command:
+                    candidate_path.write_text("{}\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(
+                    letsinfer,
+                    "_unit_enabled_active",
+                    side_effect=[("static", "active"), ("enabled", "inactive")],
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "qualification_service_config_path",
+                    return_value=candidate_path,
+                ),
+                mock.patch.object(
+                    letsinfer, "protection_trip_latched", return_value=False
+                ),
+                mock.patch.object(
+                    letsinfer, "disarm_before_planned_stop"
+                ),
+                mock.patch.object(
+                    letsinfer, "_retire_qualification_candidate"
+                ) as retire,
+                mock.patch.object(
+                    letsinfer, "run_passthrough", side_effect=execute
+                ) as run_passthrough,
+                mock.patch.object(
+                    letsinfer,
+                    "run",
+                    return_value=subprocess.CompletedProcess(cleanup, 0, "", ""),
+                ),
+            ):
+                letsinfer._run_benchmark_with_service_isolation(
+                    command,
+                    protection_config=resident,
+                    cleanup_command=cleanup,
+                )
+
+        retire.assert_called_once_with(remove_container=True)
+        self.assertEqual(
+            [call.args[0] for call in run_passthrough.call_args_list],
+            [
+                ["systemctl", "--user", "stop", letsinfer.ENGINE_SERVICE_NAME],
+                command,
+                ["systemctl", "--user", "start", letsinfer.ENGINE_SERVICE_NAME],
+            ],
+        )
+
+    def test_benchmark_stop_waits_for_runtime_restoration(self) -> None:
+        state = {"pid": 42}
+        with (
+            mock.patch.object(
+                letsinfer.benchmark_jobs, "request_stop", return_value=state
+            ),
+            mock.patch.object(
+                letsinfer, "_benchmark_stop_timeout_seconds", return_value=900
+            ),
+            mock.patch.object(
+                letsinfer.benchmark_jobs, "wait_for_exit", return_value=True
+            ) as wait,
+            mock.patch.object(letsinfer.ui, "progress"),
+            mock.patch.object(letsinfer.ui.Terminal, "success"),
+        ):
+            self.assertEqual(letsinfer._benchmark_stop(), 0)
+
+        wait.assert_called_once_with(42, timeout_seconds=900)
 
     def test_benchmark_cli_list_does_not_create_an_output_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4716,6 +4819,11 @@ class RuntimeCommandTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     letsinfer, "manifest_source_root", return_value=root
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "install_control_bundle",
+                    return_value=(root, root / "releases/release.json"),
                 ),
                 mock.patch.object(letsinfer, "verify_release_sources"),
                 mock.patch.object(
