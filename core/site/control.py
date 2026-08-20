@@ -1470,7 +1470,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 
 class SiteControlServer(http.server.HTTPServer):
-    allow_reuse_address = False
+    allow_reuse_address = True
     request_queue_size = 8
 
     def __init__(
