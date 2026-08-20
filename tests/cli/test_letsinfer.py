@@ -173,14 +173,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.22")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.23")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.22"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.23"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -2951,6 +2951,68 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(payload["container"]["capacity"]["max_context_tokens"], 262144)
             self.assertEqual(payload["container"]["capacity"]["max_active_requests"], 8)
             self.assertTrue(payload["service"]["gateway_model_identity"])
+
+    def test_doctor_defaults_to_the_active_runtime_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            candidate_path = root / "qualification.json"
+            candidate_path.write_text("{}\n", encoding="utf-8")
+            arguments = argparse.Namespace(
+                config=None,
+                model=None,
+                json=True,
+                require_stable=False,
+            )
+            with (
+                mock.patch.object(
+                    letsinfer, "site_identity_path", return_value=root / "missing-site.json"
+                ),
+                mock.patch.object(
+                    letsinfer, "active_service_config_path", return_value=candidate_path
+                ) as active_path,
+                mock.patch.object(
+                    letsinfer,
+                    "read_service_config",
+                    side_effect=RuntimeError("stop after path resolution"),
+                ) as read_config,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "path resolution"):
+                    letsinfer.doctor(arguments)
+            active_path.assert_called_once_with()
+            read_config.assert_called_once_with(candidate_path)
+
+    def test_doctor_treats_resident_units_as_quiesced_for_a_candidate(self) -> None:
+        candidate = letsinfer._doctor_runtime_unit_checks(
+            qualification_mode=True,
+            engine_enabled="static",
+            engine_active="inactive",
+            recovery_enabled="enabled",
+            recovery_active="inactive",
+        )
+        self.assertEqual(
+            candidate,
+            (
+                ("resident-engine-quiesced", True, "inactive"),
+                ("resident-recovery-quiesced", True, "inactive"),
+            ),
+        )
+        production = letsinfer._doctor_runtime_unit_checks(
+            qualification_mode=False,
+            engine_enabled="static",
+            engine_active="active",
+            recovery_enabled="enabled",
+            recovery_active="active",
+        )
+        self.assertTrue(all(passed for _name, passed, _detail in production))
+        self.assertEqual(
+            [name for name, _passed, _detail in production],
+            [
+                "engine-service-loaded",
+                "engine-service-active",
+                "recovery-enabled",
+                "recovery-active",
+            ],
+        )
 
     def test_model_identity_uses_the_public_alias_not_upstream_repository(self) -> None:
         manifest = {

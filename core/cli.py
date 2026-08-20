@@ -6072,15 +6072,8 @@ WantedBy=default.target
 """
 
 
-def install_core_gateway_service(
-    *,
-    executable_root: pathlib.Path | None = None,
-    replace_active: bool = False,
-) -> dict[str, Any]:
-    """Install the stable site gateway before any placement is active."""
-    root = executable_root or source_root()
-    config_path = site_config_root() / "gateway.json"
-    config = {
+def core_gateway_config() -> dict[str, Any]:
+    return {
         "schema_version": 2,
         "gateway_listen": "0.0.0.0",
         "gateway_protocol": "http",
@@ -6089,6 +6082,42 @@ def install_core_gateway_service(
         "gateway_queue_timeout_seconds": 0,
         "gateway_telemetry_file": str(default_gateway_telemetry_path()),
     }
+
+
+def verify_active_core_gateway() -> pathlib.Path:
+    config_path = site_config_root() / "gateway.json"
+    expected_config = core_gateway_config()
+    unit = pathlib.Path.home() / ".config/systemd/user" / GATEWAY_SERVICE_NAME
+    try:
+        details = unit.stat()
+        actual_config = read_json(config_path)
+        valid = (
+            not unit.is_symlink()
+            and stat.S_ISREG(details.st_mode)
+            and details.st_uid == os.getuid()
+            and stat.S_IMODE(details.st_mode) == 0o644
+            and actual_config == expected_config
+            and unit.read_text(encoding="utf-8")
+            == render_gateway_service(config_path, expected_config, source_root())
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise LetsInferError(f"cannot verify the active core gateway: {error}") from error
+    if not valid:
+        raise LetsInferError("the active gateway does not match this core build")
+    if _unit_enabled_active(GATEWAY_SERVICE_NAME)[1] != "active":
+        raise LetsInferError("the resident core gateway is not active")
+    return unit
+
+
+def install_core_gateway_service(
+    *,
+    executable_root: pathlib.Path | None = None,
+    replace_active: bool = False,
+) -> dict[str, Any]:
+    """Install the stable site gateway before any placement is active."""
+    root = executable_root or source_root()
+    config_path = site_config_root() / "gateway.json"
+    config = core_gateway_config()
     ensure_private_directory(config_path.parent)
     ensure_private_directory(default_gateway_telemetry_path().parent)
     if platform.system() == "Darwin":
@@ -9401,6 +9430,39 @@ def _doctor_engine_groups(
     return 0 if operational_ready else 1
 
 
+def _doctor_runtime_unit_checks(
+    *,
+    qualification_mode: bool,
+    engine_enabled: str,
+    engine_active: str,
+    recovery_enabled: str,
+    recovery_active: str,
+) -> tuple[tuple[str, bool, str], ...]:
+    if qualification_mode:
+        return (
+            (
+                "resident-engine-quiesced",
+                engine_active in {"inactive", "failed", "not-found"},
+                engine_active,
+            ),
+            (
+                "resident-recovery-quiesced",
+                recovery_active in {"inactive", "failed", "not-found"},
+                recovery_active,
+            ),
+        )
+    return (
+        (
+            "engine-service-loaded",
+            engine_enabled in {"static", "disabled"},
+            engine_enabled,
+        ),
+        ("engine-service-active", engine_active == "active", engine_active),
+        ("recovery-enabled", recovery_enabled == "enabled", recovery_enabled),
+        ("recovery-active", recovery_active == "active", recovery_active),
+    )
+
+
 def doctor(arguments: argparse.Namespace) -> int:
     checks: list[dict[str, Any]] = []
 
@@ -9423,9 +9485,10 @@ def doctor(arguments: argparse.Namespace) -> int:
             )
 
     config_path = absolute_user_path(
-        arguments.config or default_service_config_path()
+        arguments.config or active_service_config_path()
     )
     config = read_service_config(config_path)
+    qualification_mode = config.get("qualification_mode") is True
     _, manifest = configured_release(config)
     adapter = adapter_for(manifest)
     record(
@@ -9478,21 +9541,27 @@ def doctor(arguments: argparse.Namespace) -> int:
         f"core=sha256:{core_identity} root={control_root}",
     )
     unit_root = pathlib.Path.home() / ".config/systemd/user"
-    expected_units = {
-        ENGINE_SERVICE_NAME: render_engine_service(
-            config_path,
-            manifest["container"]["startup_timeout_seconds"],
-            control_root,
-        ),
-        GATEWAY_SERVICE_NAME: render_gateway_service(
-            config_path, config, control_root
-        ),
-        SERVICE_NAME: render_user_service(config, manifest),
-        RECOVERY_SERVICE_NAME: render_recovery_service(
-            config["name"], expanded_path(config["protection_root"]), control_root
-        ),
-        RECOVERY_TIMER_NAME: render_recovery_timer(),
-    }
+    expected_units = (
+        {}
+        if qualification_mode
+        else {
+            ENGINE_SERVICE_NAME: render_engine_service(
+                config_path,
+                manifest["container"]["startup_timeout_seconds"],
+                control_root,
+            ),
+            GATEWAY_SERVICE_NAME: render_gateway_service(
+                config_path, config, control_root
+            ),
+            SERVICE_NAME: render_user_service(config, manifest),
+            RECOVERY_SERVICE_NAME: render_recovery_service(
+                config["name"],
+                expanded_path(config["protection_root"]),
+                control_root,
+            ),
+            RECOVERY_TIMER_NAME: render_recovery_timer(),
+        }
+    )
     for unit_name, expected_contents in expected_units.items():
         unit_path = unit_root / unit_name
         try:
@@ -9507,6 +9576,18 @@ def doctor(arguments: argparse.Namespace) -> int:
             record(f"unit-{unit_name}", passed, str(unit_path))
         except OSError as error:
             record(f"unit-{unit_name}", False, str(error))
+    if qualification_mode:
+        try:
+            gateway_unit = verify_active_core_gateway()
+            record(f"unit-{GATEWAY_SERVICE_NAME}", True, str(gateway_unit))
+        except LetsInferError as error:
+            record(f"unit-{GATEWAY_SERVICE_NAME}", False, str(error))
+        try:
+            verify_active_core_watchdog()
+            watchdog_unit = pathlib.Path.home() / ".config/systemd/user" / SERVICE_NAME
+            record(f"unit-{SERVICE_NAME}", True, str(watchdog_unit))
+        except LetsInferError as error:
+            record(f"unit-{SERVICE_NAME}", False, str(error))
 
     try:
         actual_image = verify_installed_release(
@@ -9543,14 +9624,21 @@ def doctor(arguments: argparse.Namespace) -> int:
         record("tls-certificate", False, str(error))
 
     try:
-        binary, digest = verify_watchdog_runtime(
-            expanded_path(config["watchdog_binary_path"]).parent,
-            config["watchdog_source_sha256"],
-        )
+        if qualification_mode:
+            binary, digest = verify_active_core_watchdog()
+            watchdog_identity = binary.is_file() and SHA256_RE.fullmatch(digest) is not None
+        else:
+            binary, digest = verify_watchdog_runtime(
+                expanded_path(config["watchdog_binary_path"]).parent,
+                config["watchdog_source_sha256"],
+            )
+            watchdog_identity = (
+                binary == expanded_path(config["watchdog_binary_path"])
+                and digest == config["watchdog_binary_sha256"]
+            )
         record(
             "watchdog-runtime-identity",
-            binary == expanded_path(config["watchdog_binary_path"])
-            and digest == config["watchdog_binary_sha256"],
+            watchdog_identity,
             f"{binary} sha256={digest}",
         )
     except LetsInferError as error:
@@ -9641,8 +9729,6 @@ def doctor(arguments: argparse.Namespace) -> int:
         f"current={memory_bytes} limit<{CONTROL_PLANE_MEMORY_LIMIT_BYTES}",
     )
     engine_enabled, engine_active = _unit_enabled_active(ENGINE_SERVICE_NAME)
-    record("engine-service-loaded", engine_enabled in {"static", "disabled"}, engine_enabled)
-    record("engine-service-active", engine_active == "active", engine_active)
     site_enabled, site_active, site_memory_bytes = _service_state(SITE_SERVICE_NAME)
     record("site-service-enabled", site_enabled == "enabled", site_enabled)
     record("site-service-active", site_active == "active", site_active)
@@ -9662,8 +9748,14 @@ def doctor(arguments: argparse.Namespace) -> int:
         f"current={gateway_memory_bytes}",
     )
     recovery_enabled, recovery_active = _unit_enabled_active(RECOVERY_TIMER_NAME)
-    record("recovery-enabled", recovery_enabled == "enabled", recovery_enabled)
-    record("recovery-active", recovery_active == "active", recovery_active)
+    for name, passed, detail in _doctor_runtime_unit_checks(
+        qualification_mode=qualification_mode,
+        engine_enabled=engine_enabled,
+        engine_active=engine_active,
+        recovery_enabled=recovery_enabled,
+        recovery_active=recovery_active,
+    ):
+        record(name, passed, detail)
     lingering = user_lingering_enabled()
     record("user-lingering", lingering, "yes" if lingering else "no")
 
@@ -9767,6 +9859,7 @@ def doctor(arguments: argparse.Namespace) -> int:
     payload = {
         "operational_ready": operational_ready,
         "publication_ready": publication_ready,
+        "runtime_mode": "qualification" if qualification_mode else "production",
         "release": manifest["release"],
         "engine": adapter.name,
         "checks": checks,
