@@ -6565,6 +6565,58 @@ def install_core_plane_services(
     return runtime_state
 
 
+def wait_for_core_plane_ready(
+    *,
+    include_gateway: bool,
+    timeout_seconds: float = 90.0,
+    poll_seconds: float = 0.5,
+    stable_polls: int = 5,
+) -> None:
+    """Wait until a rebound Linux control plane is stable, not merely started.
+
+    systemd considers a simple service active as soon as its process is spawned.
+    A listener can still fail immediately afterwards, notably while migrating
+    from an older core whose sockets were not reusable. Keep the update's
+    rebind step active through that bounded migration window and require the
+    public gateway health endpoint plus several consecutive healthy samples.
+    """
+    if platform.system() != "Linux":
+        return
+    if timeout_seconds <= 0 or poll_seconds <= 0 or stable_polls <= 0:
+        raise LetsInferError("invalid core-plane readiness bounds")
+    expected = [SITE_SERVICE_NAME, SERVICE_NAME]
+    if include_gateway:
+        expected.append(GATEWAY_SERVICE_NAME)
+    deadline = time.monotonic() + timeout_seconds
+    consecutive = 0
+    last_states: dict[str, str] = {}
+    gateway_ready = not include_gateway
+    while time.monotonic() < deadline:
+        last_states = {
+            name: _unit_enabled_active(name)[1]
+            for name in expected
+        }
+        gateway_ready = not include_gateway or api_status(
+            8000, "/health", None
+        ) == 200
+        if all(state == "active" for state in last_states.values()) and gateway_ready:
+            consecutive += 1
+            if consecutive >= stable_polls:
+                return
+        else:
+            consecutive = 0
+        time.sleep(poll_seconds)
+    detail = ", ".join(
+        f"{name}={state}" for name, state in last_states.items()
+    )
+    if include_gateway:
+        detail += f", gateway_health={'ready' if gateway_ready else 'unavailable'}"
+    raise LetsInferError(
+        f"rebound core services did not become stable within {timeout_seconds:g}s: "
+        f"{detail}"
+    )
+
+
 def render_recovery_service(
     name: str,
     protection_root: pathlib.Path,
@@ -11127,9 +11179,11 @@ def rebind_core_services(_: argparse.Namespace) -> int:
     ):
         print(f"CORE {PRODUCT_VERSION} services=none runtimes=unchanged")
         return 0
+    include_gateway = identity.role == "coordinator"
     runtime_state = install_core_plane_services(
-        identity, include_gateway=identity.role == "coordinator"
+        identity, include_gateway=include_gateway
     )
+    wait_for_core_plane_ready(include_gateway=include_gateway)
     runtime = f" runtime={model}" if isinstance(model, str) else ""
     if runtime_state["configured"] and not runtime_state["compatible"]:
         runtime += " runtime_state=incompatible-stopped"
