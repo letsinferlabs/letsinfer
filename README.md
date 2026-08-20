@@ -165,6 +165,12 @@ when the resident core service is replaced. If the selected runtime is not
 compatible with the new core API, the update succeeds but leaves inference and
 automatic recovery stopped and reports `runtime_state=incompatible-stopped`;
 it never runs an unverifiable old control bundle under a new core.
+`letsinfer update check` refreshes both core and the currently selected runtime.
+The persistent site agent checks periodically and transactionally records the
+last verified result in one node-local update database. Every interactive CLI
+command can therefore show a compact update notice without performing network
+I/O. Applying a core update never changes a runtime, and applying a runtime
+upgrade never changes core.
 
 Let's Infer maps targets by capabilities, not hostnames. `letsinfer hardware` probes
 platform, NVIDIA compute capability, GPU count and partitioning, memory
@@ -624,6 +630,7 @@ letsinfer benchmark <runtime> [--c1|--c2|--c4|--c8|--c16] [--32k|--64k|--128k|--
 letsinfer benchmark [--json]
 letsinfer benchmark stop
 letsinfer update [--version <version>]
+letsinfer update check [--json]
 letsinfer engines
 letsinfer releases
 letsinfer verify <model> [--engine vllm|sglang|llama.cpp|dwarfstar]
@@ -691,7 +698,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.29`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.30`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its
