@@ -154,9 +154,10 @@ not a remotely trusted catalog. The ordinary user chooses only the model;
 Existing runtime installations remain locked to immutable content until the
 user runs `letsinfer upgrade`. Core updates are independent:
 `letsinfer update` installs a signed core release, safely drains and restores
-active inference around the core-service handoff, and does not rebind the
-runtime's immutable control bundle or change runtime selections, models,
-caches, or evidence. On an interactive terminal, one three-stage display owns
+active inference around the core-service handoff, and composes the unchanged
+runtime artifacts with the new core into one immutable active control bundle.
+It does not change runtime selections, pack identities, models, caches, or
+evidence. On an interactive terminal, one three-stage display owns
 download/install, service rebinding, and verification; sudo authentication is
 completed before animation begins. Redirected output retains the plain command
 contract. A compatible runtime's exact Watchdog safety policy is preserved
@@ -690,7 +691,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.27`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.28`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its

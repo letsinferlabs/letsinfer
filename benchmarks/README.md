@@ -65,8 +65,11 @@ mismatch between a CLI sampling override and the declared contract.
 
 On a service host, the worker temporarily stops the recovery timer and active
 engine unit before inference. The resident Watchdog stays active. Let's Infer
-restores the exact prior engine and timer state after success or failure, so
-operators do not manually stop or restart production around a benchmark.
+restores the exact prior engine and timer state after success, failure, or
+explicit cancellation. When an active qualification candidate owned the
+inference slot, the worker instead rearms the final isolated candidate before
+it exits. A host that had no active inference returns to that state. Operators
+therefore do not manually stop or restart inference around a benchmark.
 
 An installed hash-addressed control bundle is a verified source identity. A
 developer checkout must be clean and match the measured commit, or provide a

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import pathlib
 import subprocess
 import tempfile
@@ -238,6 +239,16 @@ class CoreUpdateTests(unittest.TestCase):
                     letsinfer, "configured_release", return_value=(config_path, manifest)
                 ),
                 mock.patch.object(
+                    letsinfer,
+                    "bind_config_to_control_bundle",
+                    side_effect=lambda config: dict(config),
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "_install_runtime_control_binding",
+                    return_value={},
+                ),
+                mock.patch.object(
                     letsinfer, "_unit_enabled_active", return_value=("enabled", "active")
                 ),
                 mock.patch.object(
@@ -366,6 +377,16 @@ class CoreUpdateTests(unittest.TestCase):
                 mock.patch.object(letsinfer, "configured_release", side_effect=configured),
                 mock.patch.object(
                     letsinfer,
+                    "bind_config_to_control_bundle",
+                    side_effect=lambda config: dict(config),
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "_install_runtime_control_binding",
+                    return_value={},
+                ),
+                mock.patch.object(
+                    letsinfer,
                     "_unit_enabled_active",
                     return_value=("enabled", "inactive"),
                 ),
@@ -383,6 +404,67 @@ class CoreUpdateTests(unittest.TestCase):
         install_watchdog.assert_called_once_with(
             identity, replace_active=True, runtime_manifest=candidate_manifest
         )
+
+    def test_candidate_control_binding_moves_to_the_new_core_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = pathlib.Path(directory) / "qualification.json"
+            old = {
+                "qualification_mode": True,
+                "source_root": "/old/control",
+            }
+            new = {
+                "qualification_mode": True,
+                "source_root": "/new/control",
+            }
+            config_path.write_text(json.dumps(old) + "\n", encoding="utf-8")
+            snapshots = letsinfer._install_runtime_control_binding(
+                config_path, new, {}
+            )
+            self.assertEqual(
+                json.loads(config_path.read_text(encoding="utf-8")), new
+            )
+            self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
+            letsinfer._restore_runtime_control_binding(snapshots)
+            self.assertEqual(
+                json.loads(config_path.read_text(encoding="utf-8")), old
+            )
+
+    def test_resident_control_binding_regenerates_lifecycle_units(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config_path = root / "service.json"
+            unit_root = root / ".config/systemd/user"
+            unit_root.mkdir(parents=True)
+            engine_unit = unit_root / letsinfer.ENGINE_SERVICE_NAME
+            recovery_unit = unit_root / letsinfer.RECOVERY_SERVICE_NAME
+            config_path.write_text('{"source_root":"/old/control"}\n', encoding="utf-8")
+            engine_unit.write_text("old engine\n", encoding="utf-8")
+            recovery_unit.write_text("old recovery\n", encoding="utf-8")
+            config = {
+                "source_root": "/new/control",
+                "name": "engine",
+                "protection_root": "/protection",
+            }
+            manifest = {"container": {"startup_timeout_seconds": 120}}
+            with (
+                mock.patch.object(letsinfer.pathlib.Path, "home", return_value=root),
+                mock.patch.object(letsinfer, "run") as run,
+            ):
+                snapshots = letsinfer._install_runtime_control_binding(
+                    config_path, config, manifest
+                )
+                self.assertIn("/new/control/bin/letsinfer", engine_unit.read_text())
+                self.assertIn(
+                    "/new/control/bin/letsinfer-recovery",
+                    recovery_unit.read_text(),
+                )
+                letsinfer._restore_runtime_control_binding(snapshots)
+            self.assertEqual(engine_unit.read_text(encoding="utf-8"), "old engine\n")
+            self.assertEqual(
+                recovery_unit.read_text(encoding="utf-8"), "old recovery\n"
+            )
+            self.assertEqual(run.call_count, 2)
+            run.assert_called_with(["systemctl", "--user", "daemon-reload"])
 
     def test_parser_exposes_only_the_public_update_command(self) -> None:
         parsed = letsinfer.parser().parse_args(["update", "--version", "1.2.3"])

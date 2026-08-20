@@ -155,9 +155,11 @@ named by `--version`, and rebinds the core-owned services to it. When inference
 is active, the handoff stops recovery, drains the engine while the existing
 Watchdog is still armed, replaces the site/Watchdog/gateway services, and then
 queues engine restoration and restores the recovery timer without waiting for
-model load. Engine launch state remains visible through `status`. The runtime's own immutable control
-bundle is not rebound. `update` never resolves, downloads, upgrades, rolls
-back, or changes a runtime. Installed runtime
+model load. Engine launch state remains visible through `status`. The selected
+runtime's unchanged artifacts are composed with the new core into one
+hash-addressed active control bundle; service lifecycle and benchmark workers
+therefore cannot continue through an older core after an update. `update`
+never resolves, downloads, upgrades, rolls back, or changes a runtime. Installed runtime
 receipts, model snapshots, caches, evidence, API keys, and service placement
 remain unchanged. The replacement resident Watchdog keeps the compatible
 selected runtime's exact protection thresholds. An incompatible selected
@@ -274,8 +276,11 @@ snapshot. `letsinfer benchmark --json` remains a one-shot machine-readable
 snapshot. Once no job is active, `letsinfer benchmark` shows the most recent
 terminal result. `letsinfer benchmark stop` is the explicit cancellation path. A second
 benchmark is rejected until the active worker finishes or is stopped. The
-worker owns temporary-container cleanup and restoration of the prior engine
-and recovery-timer state.
+worker owns temporary-container cleanup and restoration of inference-slot
+intent: it restores the prior resident engine and recovery-timer state, or
+rearms the final isolated candidate when a candidate was serving before the
+benchmark. Cancellation waits for that restoration instead of leaving status
+at `STOPPED`.
 
 The public JSON includes a cryptographic benchmark ID and per-workload
 aggregate/decode TPS, TTFT, prefix-cache state, maximum GPU/CPU temperature,
