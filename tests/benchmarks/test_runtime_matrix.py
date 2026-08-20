@@ -544,16 +544,19 @@ class RuntimeMatrixTests(unittest.TestCase):
         self.assertEqual(resolved, manifest_path.resolve())
         self.assertEqual(selector, "example-model/example-engine/example-target")
 
-    def test_cold_result_rejects_cache_reuse(self) -> None:
+    def test_isolated_result_records_same_cell_cache_reuse(self) -> None:
         cell = {
             "name": "64k-c1",
             "fixtures": [{"expected_prompt_tokens": 65_536}],
         }
-        runtime_matrix.validate_cold_result(
+        runtime_matrix.validate_isolated_cache_evidence(
             cell, {"requests": [{"cached_prompt_tokens": 0}]}
         )
-        runtime_matrix.validate_cold_result(
+        runtime_matrix.validate_isolated_cache_evidence(
             cell, {"requests": [{"cached_prompt_tokens": None}]}
+        )
+        runtime_matrix.validate_isolated_cache_evidence(
+            cell, {"requests": [{"cached_prompt_tokens": 64}]}
         )
         summary = runtime_matrix.summarize(
             cell,
@@ -573,13 +576,13 @@ class RuntimeMatrixTests(unittest.TestCase):
             },
         )
         self.assertEqual(summary["cached_prompt_tokens"]["max"], 0.0)
-        with self.assertRaisesRegex(runtime_matrix.RuntimeMatrixError, "not cold"):
-            runtime_matrix.validate_cold_result(
-                cell, {"requests": [{"cached_prompt_tokens": 65_536}]}
-            )
-        with self.assertRaisesRegex(runtime_matrix.RuntimeMatrixError, "not cold"):
-            runtime_matrix.validate_cold_result(
+        with self.assertRaisesRegex(runtime_matrix.RuntimeMatrixError, "invalid cache"):
+            runtime_matrix.validate_isolated_cache_evidence(
                 cell, {"requests": [{"cached_prompt_tokens": False}]}
+            )
+        with self.assertRaisesRegex(runtime_matrix.RuntimeMatrixError, "invalid cache"):
+            runtime_matrix.validate_isolated_cache_evidence(
+                cell, {"requests": [{"cached_prompt_tokens": -1}]}
             )
 
     def test_failure_log_capture_preserves_both_docker_streams(self) -> None:

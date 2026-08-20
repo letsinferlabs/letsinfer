@@ -5690,11 +5690,15 @@ def _retire_qualification_candidate(*, remove_container: bool) -> None:
     if config.get("qualification_mode") is not True:
         raise LetsInferError("qualification slot has an invalid lifecycle mode")
     _, manifest = configured_release(config)
-    # A candidate can be stopped only after the resident Watchdog has observed
-    # the disarmed generation. Otherwise the planned PID exit is
-    # indistinguishable from an engine crash and can create a false trip.
-    disarm_before_planned_stop(config)
-    if remove_container and container_inspect(config["name"]) is not None:
+    inspection = container_inspect(config["name"])
+    # A running candidate can be stopped only after the resident Watchdog has
+    # observed the disarmed generation. An absent or already-stopped container
+    # has no live process to protect; requiring a new acknowledgement there is
+    # both unnecessary and can deadlock retirement after the Watchdog has
+    # already restored its resident projection.
+    if inspection is not None and inspection.get("State", {}).get("Running") is True:
+        disarm_before_planned_stop(config)
+    if remove_container and inspection is not None:
         _stop_managed_container(
             config["name"], expanded_path(config["engine_api_key_file"])
         )

@@ -155,6 +155,7 @@ void test_safety_supervisor_discovers_private_targets(void) {
     };
     watchdog_safety_supervisor supervisor;
     TEST_ASSERT(watchdog_safety_supervisor_open(&supervisor, &config) == 0);
+    TEST_ASSERT(supervisor.slots[0].runtime.event_fd == -1);
     TEST_ASSERT(watchdog_safety_supervisor_primary(&supervisor) != NULL);
     TEST_ASSERT(watchdog_safety_supervisor_active(&supervisor) == 0u);
     TEST_ASSERT(!watchdog_safety_supervisor_armed(&supervisor));

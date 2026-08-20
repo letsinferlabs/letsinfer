@@ -173,14 +173,14 @@ class ManifestTests(unittest.TestCase):
 
 
     def test_release_identity_is_shared_by_core_and_watchdog(self) -> None:
-        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.25")
+        self.assertEqual(letsinfer.PRODUCT_VERSION, "0.11.0-rc.26")
         watchdog_main = (
             REPOSITORY_ROOT / "watchdog/src/main_linux.c"
         ).read_text(encoding="utf-8")
         watchdog_build = (
             REPOSITORY_ROOT / "watchdog/CMakeLists.txt"
         ).read_text(encoding="utf-8")
-        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.25"', watchdog_main)
+        self.assertIn('#define WATCHDOG_VERSION "0.11.0-rc.26"', watchdog_main)
         self.assertIn("project(letsinfer_watchdog VERSION 0.11.0 LANGUAGES C)", watchdog_build)
 
     def test_native_tuning_lives_only_in_runtime_owned_engine_fields(self) -> None:
@@ -1520,7 +1520,7 @@ class CommandTests(unittest.TestCase):
         run.assert_not_called()
         placement.assert_not_called()
 
-    def test_candidate_retirement_never_exits_before_watchdog_disarm_ack(self) -> None:
+    def test_live_candidate_retirement_never_exits_before_watchdog_disarm_ack(self) -> None:
         state_path = mock.Mock()
         state_path.is_file.return_value = True
         config = {
@@ -1545,16 +1545,58 @@ class CommandTests(unittest.TestCase):
                 "disarm_protection",
                 side_effect=letsinfer.LetsInferError("Watchdog did not acknowledge"),
             ),
-            mock.patch.object(letsinfer, "container_inspect") as inspect,
+            mock.patch.object(
+                letsinfer,
+                "container_inspect",
+                return_value={"State": {"Running": True}},
+            ) as inspect,
             mock.patch.object(letsinfer, "_stop_managed_container") as stop,
         ):
             with self.assertRaisesRegex(
                 letsinfer.LetsInferError, "Watchdog did not acknowledge"
             ):
                 letsinfer._retire_qualification_candidate(remove_container=True)
-        inspect.assert_not_called()
+        inspect.assert_called_once_with("letsinfer-sglang")
         stop.assert_not_called()
         placement.assert_not_called()
+
+    def test_stopped_candidate_retirement_does_not_wait_for_disarm_ack(self) -> None:
+        state_path = mock.Mock()
+        state_path.is_file.return_value = True
+        config = {
+            "qualification_mode": True,
+            "name": "letsinfer-benchmark",
+            "engine_api_key_file": "/engine-key",
+        }
+        with (
+            mock.patch.object(
+                letsinfer,
+                "qualification_service_config_path",
+                return_value=state_path,
+            ),
+            mock.patch.object(letsinfer, "read_service_config", return_value=config),
+            mock.patch.object(
+                letsinfer,
+                "configured_release",
+                return_value=(pathlib.Path("/release"), {"model": {}}),
+            ),
+            mock.patch.object(
+                letsinfer,
+                "container_inspect",
+                return_value={"State": {"Running": False}},
+            ),
+            mock.patch.object(letsinfer, "disarm_before_planned_stop") as disarm,
+            mock.patch.object(letsinfer, "_stop_managed_container") as stop,
+            mock.patch.object(letsinfer, "update_service_placement"),
+            mock.patch.object(letsinfer, "protection_trip_latched", return_value=False),
+            mock.patch.object(letsinfer, "_fsync_path"),
+            mock.patch.object(letsinfer, "_restore_resident_watchdog_projection"),
+        ):
+            letsinfer._retire_qualification_candidate(remove_container=True)
+
+        disarm.assert_not_called()
+        stop.assert_called_once_with("letsinfer-benchmark", pathlib.Path("/engine-key"))
+        state_path.unlink.assert_called_once_with()
 
     def test_candidate_recover_clears_trip_and_rearms_exact_container(self) -> None:
         config = {

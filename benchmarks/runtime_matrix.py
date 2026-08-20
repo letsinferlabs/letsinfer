@@ -1111,25 +1111,38 @@ def print_summary(summary: dict[str, Any]) -> None:
     print(message, flush=True)
 
 
-def validate_cold_result(cell: dict[str, Any], result: dict[str, Any]) -> None:
+def validate_isolated_cache_evidence(cell: dict[str, Any], result: dict[str, Any]) -> None:
+    """Validate cache evidence without rejecting same-cell prefix sharing.
+
+    Every matrix cell already receives a fresh engine process and store.  A
+    positive cache count can therefore only be reuse admitted among requests
+    in this cell, which is legitimate engine behavior and is retained in the
+    public ``is_prefix_cached`` field.
+    """
     requests = result.get("requests")
     if not isinstance(requests, list) or len(requests) != len(cell["fixtures"]):
         raise RuntimeMatrixError(
             f"{cell['name']} returned an invalid request count"
         )
-    reused = [
+    invalid = [
         index
         for index, row in enumerate(requests)
         if (
             not isinstance(row, dict)
-            or row.get("cached_prompt_tokens") not in (None, 0)
-            or isinstance(row.get("cached_prompt_tokens"), bool)
+            or (
+                row.get("cached_prompt_tokens") is not None
+                and (
+                    not isinstance(row.get("cached_prompt_tokens"), int)
+                    or isinstance(row.get("cached_prompt_tokens"), bool)
+                    or row["cached_prompt_tokens"] < 0
+                )
+            )
         )
     ]
-    if reused:
+    if invalid:
         raise RuntimeMatrixError(
-            f"{cell['name']} is not cold; cache reuse reported by request(s) "
-            + ", ".join(str(index) for index in reused)
+            f"{cell['name']} returned invalid cache evidence for request(s) "
+            + ", ".join(str(index) for index in invalid)
         )
 
 
@@ -1798,7 +1811,7 @@ def main() -> int:
                     stream_directory=raw / f"{cell['name']}-streams",
                 )
                 measurement_ended_unix_ms = time.time_ns() // 1_000_000
-                validate_cold_result(cell, result)
+                validate_isolated_cache_evidence(cell, result)
                 if monitor.errors:
                     raise RuntimeMatrixError(monitor.errors[0])
                 summary = summarize(cell, result)
