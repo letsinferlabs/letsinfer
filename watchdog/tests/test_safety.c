@@ -60,11 +60,27 @@ void test_safety_decision_precedence(void) {
     result = watchdog_safety_decide(&limits, &input);
     TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
 
+    input.available_bytes = (UINT64_C(8) << 30u) + 1u;
+    input.swap_used_bytes = UINT64_C(8) << 30u;
+    input.psi_some_delta_us = 1000000u;
+    input.psi_full_delta_us = 1000000u;
+    result = watchdog_safety_decide(&limits, &input);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
+
     input.swap_used_bytes = 0u;
+    input.psi_some_delta_us = 0u;
+    input.psi_full_delta_us = 0u;
+    input.available_bytes = UINT64_C(80) << 30u;
     input.cgroup_max_delta = 1u;
     result = watchdog_safety_decide(&limits, &input);
     TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_STOP);
     TEST_ASSERT(strcmp(result.reason, "cgroup_memory_limit") == 0);
+
+    input.cgroup_max_delta = 0u;
+    input.cgroup_oom_kill_delta = 1u;
+    result = watchdog_safety_decide(&limits, &input);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_KILL);
+    TEST_ASSERT(strcmp(result.reason, "cgroup_oom_kill") == 0);
 }
 
 void test_safety_thresholds_and_descriptor(void) {

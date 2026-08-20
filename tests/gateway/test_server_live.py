@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 import pathlib
+import socket
 import tempfile
 import threading
 import time
@@ -188,6 +189,30 @@ class LiveGatewayTests(unittest.TestCase):
             backend.close()
         self.environment.stop()
         self.temporary.cleanup()
+
+    def test_listener_allows_immediate_managed_restart(self) -> None:
+        self.assertNotEqual(
+            self.gateway.socket.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR),
+            0,
+        )
+        with urllib.request.urlopen(self.base_url + "/health", timeout=2) as response:
+            self.assertEqual(response.status, 200)
+        port = self.gateway.server_port
+        self.gateway.shutdown()
+        self.gateway.server_close()
+        self.gateway_worker.join(timeout=2)
+        self.gateway = server.GatewayServer(
+            ("127.0.0.1", port),
+            identity=self.identity,
+            telemetry_file=self.root / "gateway.metrics",
+            queue_timeout_seconds=1,
+            max_connections=16,
+        )
+        self.gateway_worker = threading.Thread(
+            target=self.gateway.serve_forever, daemon=True
+        )
+        self.gateway_worker.start()
+        self.assertEqual(self.gateway.server_port, port)
 
     def _placement(self, backends: list[_Backend]) -> dict:
         members = [f"{index + 1:032x}" for index in range(len(backends))]

@@ -326,10 +326,13 @@ bind the exact managed container process by container ID, PID, process start
 time, host boot ID, and cgroup. Watchdog then holds a Linux pidfd, so a safety
 action cannot drift to a replacement process or a different engine. It records
 and flushes the current flight data before containment. The release manifest
-sets target-specific warning, graceful-stop, and emergency-kill floors, plus
-the swap ceiling, PSI stall limits, and cgroup OOM/limit-event actions. The
-ordered thresholds are mandatory; core does not supply an implicit runtime
-default.
+sets target-specific warning, graceful-reserve, and hard emergency floors,
+plus swap and PSI pressure thresholds and cgroup OOM/limit-event actions.
+Warning, graceful-reserve, swap, and PSI signals pause new gateway admission
+and leave the healthy engine running. A durable trip is reserved for an
+unexpected protected-process exit, an unavailable protection identity, a
+cgroup OOM/limit event, or the hard host-memory emergency floor. The ordered
+thresholds are mandatory; core does not supply an implicit runtime default.
 A trip is durably latched; automatic recovery, `start`, and `restart` refuse to
 recreate the engine until an operator inspects the record and runs
 `letsinfer recover`. Recovery is the only lifecycle action that acknowledges a
@@ -671,7 +674,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.19`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.20`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its
