@@ -15,9 +15,13 @@ from typing import Any
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 WORKLOAD_RE = re.compile(r"pp[1-9][0-9]*,tg[1-9][0-9]*,c[1-9][0-9]*")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 RESULT_FIELDS = {
     "workload",
+    "prompt_domain",
+    "prompt_suite",
+    "prompt_set_sha256",
+    "actual_prompt_tokens",
     "aggregate_tps",
     "decode_tps",
     "ttft_seconds",
@@ -381,7 +385,7 @@ def validate_record(value: Any) -> dict[str, Any]:
     actual_results_sha = results_sha256(results)
     if value.get("results_sha256") != actual_results_sha:
         raise BenchmarkRecordError("benchmark record results_sha256 does not match results")
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for index, result in enumerate(results):
         where = f"results[{index}]"
         if not isinstance(result, dict) or set(result) != RESULT_FIELDS:
@@ -391,9 +395,36 @@ def validate_record(value: Any) -> dict[str, Any]:
         workload = result.get("workload")
         if not isinstance(workload, str) or not WORKLOAD_RE.fullmatch(workload):
             raise BenchmarkRecordError(f"{where}.workload is invalid")
-        if workload in seen:
-            raise BenchmarkRecordError(f"duplicate benchmark workload: {workload}")
-        seen.add(workload)
+        domain = result.get("prompt_domain")
+        if domain not in {"code", "prose"}:
+            raise BenchmarkRecordError(f"{where}.prompt_domain must be code or prose")
+        suite = result.get("prompt_suite")
+        if suite != "letsinfer-code-prose-v1":
+            raise BenchmarkRecordError(f"{where}.prompt_suite is unsupported")
+        prompt_set = result.get("prompt_set_sha256")
+        if not isinstance(prompt_set, str) or not SHA256_RE.fullmatch(prompt_set):
+            raise BenchmarkRecordError(f"{where}.prompt_set_sha256 must be a SHA-256")
+        actual_prompt_tokens = result.get("actual_prompt_tokens")
+        concurrency = int(workload.rsplit(",c", 1)[1])
+        if (
+            not isinstance(actual_prompt_tokens, list)
+            or len(actual_prompt_tokens) != concurrency
+            or any(
+                not isinstance(item, int)
+                or isinstance(item, bool)
+                or item <= 0
+                for item in actual_prompt_tokens
+            )
+        ):
+            raise BenchmarkRecordError(
+                f"{where}.actual_prompt_tokens must contain one positive integer per stream"
+            )
+        identity = (workload, domain)
+        if identity in seen:
+            raise BenchmarkRecordError(
+                f"duplicate benchmark workload/domain: {workload} {domain}"
+            )
+        seen.add(identity)
         _number(result.get("aggregate_tps"), f"{where}.aggregate_tps")
         _number(result.get("decode_tps"), f"{where}.decode_tps", nullable=True)
         ttft = _number(result.get("ttft_seconds"), f"{where}.ttft_seconds")

@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Materialize Let's Infer's deterministic, model-neutral benchmark prompts.
+"""Materialize Let's Infer's fixed, model-neutral code/prose prompts.
 
-Runtime packs declare only a versioned workload contract.  The selected engine
-adapter supplies an exact rendered-chat token counter backed by the runtime's
-actual model/tokenizer.  Generated prompts and their complete identity record
-live in benchmark evidence, never in the runtime pack.
+The generator owns prompt bytes. Runtime tokenizers only count the complete
+rendered requests after generation; they never resize or rewrite a prompt.
+That makes every suite/version/context/domain/stream byte-identical across
+models while retaining exact per-model token evidence.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import pathlib
 import sys
 from collections.abc import Callable, Iterable
@@ -35,31 +34,13 @@ from core.runtime_packs import (  # noqa: E402
 
 
 PROMPTS = pathlib.Path(__file__).resolve().parent / "prompts"
-TEMPLATES = {
-    1: PROMPTS / "context.md",
-    2: PROMPTS / "concurrency.md",
-    4: PROMPTS / "concurrency.md",
-    8: PROMPTS / "concurrency.md",
-    16: PROMPTS / "concurrency.md",
-}
-SOURCE_WORDS = (
-    "analysis",
-    "archive",
-    "boundary",
-    "context",
-    "detail",
-    "evidence",
-    "inference",
-    "marker",
-    "observation",
-    "record",
-    "reference",
-    "sequence",
-    "signal",
-    "summary",
-    "verification",
-    "window",
-)
+DOMAINS = ("code", "prose")
+TEMPLATES = {domain: PROMPTS / f"{domain}.md" for domain in DOMAINS}
+NODES = ("amber", "blue", "calm", "green", "north", "plain", "silver", "west")
+ITEMS = ("batch", "event", "item", "key", "record", "signal", "task", "value")
+STATES = ("clean", "final", "open", "ready", "safe", "stable", "valid", "warm")
+ACTIONS = ("checked", "joined", "kept", "moved", "read", "saved", "sorted", "wrote")
+CHECKS = ("boundary", "order", "range", "retry", "state", "time", "type", "value")
 
 
 class PromptGenerationError(ValueError):
@@ -70,24 +51,45 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _source_text(seed: int, minimum_chars: int) -> str:
-    """Return a stable synthetic document with no model-specific content."""
+def prompt_set_sha256(rows: list[dict[str, Any]]) -> str:
+    """Hash a prompt set by stable relative path and content hash."""
+    digest = hashlib.sha256()
+    for row in sorted(rows, key=lambda item: item["relative_path"]):
+        digest.update(row["relative_path"].encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(row["sha256"].encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _next(state: int) -> int:
+    state ^= (state << 13) & 0xFFFFFFFF
+    state ^= state >> 17
+    state ^= (state << 5) & 0xFFFFFFFF
+    return state & 0xFFFFFFFF
+
+
+def _source_text(seed: int, target_prompt_tokens: int) -> str:
+    """Create the canonical event ledger without consulting a tokenizer."""
+    word_budget = max(256, int(target_prompt_tokens * 0.96))
     state = (seed & 0xFFFFFFFF) or 0x9E3779B9
-    parts: list[str] = []
-    length = 0
-    sentence = 0
-    while length < minimum_chars:
-        words: list[str] = []
-        for _ in range(18):
-            state ^= (state << 13) & 0xFFFFFFFF
-            state ^= state >> 17
-            state ^= (state << 5) & 0xFFFFFFFF
-            words.append(SOURCE_WORDS[state % len(SOURCE_WORDS)])
-        line = " ".join(words).capitalize() + f" ({sentence:06d}).\n"
-        parts.append(line)
-        length += len(line)
-        sentence += 1
-    return "".join(parts)
+    words: list[str] = []
+    while len(words) < word_budget:
+        chosen: list[str] = []
+        for values in (NODES, ITEMS, STATES, ACTIONS, CHECKS, NODES, ITEMS, STATES):
+            state = _next(state)
+            chosen.append(values[state % len(values)])
+        sentence = (
+            "The {0} node {3} the {1} after the {4} check and kept the "
+            "{6} in the {7} state while the {5} node recorded the result."
+        ).format(*chosen).split()
+        remaining = word_budget - len(words)
+        words.extend(sentence[:remaining])
+    lines = [
+        " ".join(words[index : index + 24])
+        for index in range(0, len(words), 24)
+    ]
+    return ".\n".join(lines) + ".\n"
 
 
 def _render(
@@ -109,100 +111,24 @@ def _render(
     return rendered
 
 
-def _calibrate(
-    *,
-    template: str,
-    fixture_id: str,
-    marker: str,
-    slot: int,
-    target: int,
-    seed: int,
-    count_tokens: Callable[[str], int],
-) -> tuple[str, int]:
-    """Calibrate one prompt to an exact rendered-chat count or fail closed."""
-    if target <= 0:
-        raise PromptGenerationError("target prompt tokens must be positive")
-    source = _source_text(seed, max(4096, target * 12))
-
-    def candidate(characters: int, filler: str = "") -> str:
-        return _render(
-            template,
-            fixture_id=fixture_id,
-            marker=marker,
-            slot=slot,
-            body=source[:characters] + filler,
-        )
-
-    low = 0
-    high = min(len(source), max(4096, target * 6))
-    high_count = count_tokens(candidate(high))
-    while high_count < target and high < len(source):
-        high = min(len(source), high * 2)
-        high_count = count_tokens(candidate(high))
-    if high_count < target:
-        raise PromptGenerationError(
-            f"synthetic source cannot reach {target} rendered tokens"
-        )
-
-    closest_text = candidate(high)
-    closest_count = high_count
-    while low <= high:
-        middle = (low + high) // 2
-        text = candidate(middle)
-        observed = count_tokens(text)
-        if abs(observed - target) < abs(closest_count - target):
-            closest_text, closest_count = text, observed
-        if observed == target:
-            return text, observed
-        if observed < target:
-            low = middle + 1
-        else:
-            high = middle - 1
-
-    # Boundary merges can skip the target at a raw character boundary.  Try a
-    # small deterministic suffix vocabulary; this is still exact calibration,
-    # and failure never falls back to an approximate count.
-    base_chars = max(0, high)
-    base_text = candidate(base_chars)
-    base_count = count_tokens(base_text)
-    if base_count == target:
-        return base_text, base_count
-    if base_count < target:
-        missing = target - base_count
-        for atom in (" x", " 0", " .", "\nrecord"):
-            left, right = 0, missing * 4 + 16
-            while left <= right:
-                amount = (left + right) // 2
-                text = candidate(base_chars, atom * amount)
-                observed = count_tokens(text)
-                if observed == target:
-                    return text, observed
-                if observed < target:
-                    left = amount + 1
-                else:
-                    right = amount - 1
-
-    raise PromptGenerationError(
-        f"cannot calibrate {fixture_id} to exactly {target} rendered tokens; "
-        f"closest observation was {closest_count}"
-    )
-
-
 def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Return cell metadata without materializing prompt bytes."""
+    """Return both standard prompt domains for every declared matrix cell."""
     validate_benchmark_contract(contract)
     request = contract["request"]
     cells: dict[str, dict[str, Any]] = {}
     for case in contract["cases"]:
         for concurrency in case["concurrencies"]:
-            name = f"{case['id']}-c{concurrency}"
-            cells[name] = {
-                "name": name,
-                "context": case["id"],
-                "concurrency": concurrency,
-                "prompt_tokens": case["prompt_tokens"],
-                "max_tokens": request["output_tokens"],
-            }
+            for domain in DOMAINS:
+                name = f"{case['id']}-{domain}-c{concurrency}"
+                cells[name] = {
+                    "name": name,
+                    "context": case["id"],
+                    "prompt_domain": domain,
+                    "prompt_suite": BENCHMARK_SUITE,
+                    "target_prompt_tokens": case["prompt_tokens"],
+                    "concurrency": concurrency,
+                    "max_tokens": request["output_tokens"],
+                }
     return cells
 
 
@@ -215,90 +141,108 @@ def materialize(
     model_revision: str,
     selected_cells: Iterable[str] | None = None,
 ) -> pathlib.Path:
-    """Write an exact prompt plan and return its path."""
+    """Write canonical prompt bytes and their exact per-model token counts."""
     validate_benchmark_contract(contract)
     output = output.resolve(strict=False)
     if output.exists():
         raise PromptGenerationError(f"refusing existing materialization: {output}")
-    selected = set(selected_cells or contract_cells(contract))
-    known = set(contract_cells(contract))
-    unknown = sorted(selected - known)
+    all_cells = contract_cells(contract)
+    selected = set(selected_cells or all_cells)
+    unknown = sorted(selected - set(all_cells))
     if unknown:
-        raise PromptGenerationError(
-            "unknown benchmark cell(s): " + ", ".join(unknown)
-        )
+        raise PromptGenerationError("unknown benchmark cell(s): " + ", ".join(unknown))
     if not selected:
         raise PromptGenerationError("no benchmark cells selected")
+
     output.mkdir(parents=True)
     prompt_root = output / "prompts"
     prompt_root.mkdir()
-
     fixtures: list[dict[str, Any]] = []
+    fixture_rows: dict[tuple[str, str, int], dict[str, Any]] = {}
     contexts: list[dict[str, Any]] = []
     request = contract["request"]
+
     for case in contract["cases"]:
         cell_map: dict[str, list[str]] = {}
-        for concurrency in case["concurrencies"]:
-            cell_name = f"{case['id']}-c{concurrency}"
-            if cell_name not in selected:
+        selected_for_case = [
+            all_cells[name]
+            for name in selected
+            if all_cells[name]["context"] == case["id"]
+        ]
+        if not selected_for_case:
+            continue
+        for domain in DOMAINS:
+            domain_cells = [
+                row for row in selected_for_case if row["prompt_domain"] == domain
+            ]
+            if not domain_cells:
                 continue
-            template_path = TEMPLATES.get(concurrency, PROMPTS / "concurrency.md")
-            template = template_path.read_text(encoding="utf-8")
-            names: list[str] = []
-            for slot in range(concurrency):
-                fixture_id = f"{cell_name}-s{slot:02d}"
-                marker_digest = sha256_bytes(
-                    f"{case['seed']}\0{fixture_id}".encode("utf-8")
-                )[:24]
-                marker = f"LETSINFER-{marker_digest.upper()}"
-                text, observed = _calibrate(
-                    template=template,
+            template = TEMPLATES[domain].read_text(encoding="utf-8")
+            maximum = max(row["concurrency"] for row in domain_cells)
+            for slot in range(maximum):
+                fixture_id = f"{case['id']}-{domain}-s{slot:02d}"
+                seed_material = (
+                    f"{BENCHMARK_SUITE}\0{case['id']}\0{slot}".encode("utf-8")
+                )
+                seed = int.from_bytes(
+                    hashlib.sha256(seed_material).digest()[:4], "big"
+                )
+                marker = (
+                    "LETSINFER-"
+                    + hashlib.sha256(seed_material).hexdigest()[:24].upper()
+                )
+                text = _render(
+                    template,
                     fixture_id=fixture_id,
                     marker=marker,
                     slot=slot,
-                    target=case["prompt_tokens"],
-                    seed=case["seed"] + slot + concurrency * 1009,
-                    count_tokens=count_tokens,
+                    body=_source_text(seed, case["prompt_tokens"]),
                 )
+                observed = count_tokens(text)
+                if (
+                    not isinstance(observed, int)
+                    or isinstance(observed, bool)
+                    or observed <= 0
+                ):
+                    raise PromptGenerationError(
+                        f"token counter returned an invalid count for {fixture_id}"
+                    )
                 path = prompt_root / f"{fixture_id}.md"
                 path.write_text(text, encoding="utf-8")
-                relative = path.relative_to(output).as_posix()
-                fixtures.append(
-                    {
-                        "name": fixture_id,
-                        "path": relative,
-                        "sha256": sha256_file(path),
-                        "expected_prompt_tokens": observed,
-                    }
-                )
-                names.append(fixture_id)
-            cell_map[f"c{concurrency}"] = names
-        if cell_map:
-            contexts.append(
-                {"name": case["id"], "cells": cell_map, "sealed_c1": None}
-            )
+                row = {
+                    "name": fixture_id,
+                    "path": path.relative_to(output).as_posix(),
+                    "sha256": sha256_file(path),
+                    "expected_prompt_tokens": observed,
+                    "prompt_domain": domain,
+                }
+                fixtures.append(row)
+                fixture_rows[(case["id"], domain, slot)] = row
+            for cell in sorted(domain_cells, key=lambda row: row["concurrency"]):
+                rows = [
+                    fixture_rows[(case["id"], domain, slot)]
+                    for slot in range(cell["concurrency"])
+                ]
+                cell_map[f"{domain}-c{cell['concurrency']}"] = [
+                    row["name"] for row in rows
+                ]
+        contexts.append(
+            {
+                "name": case["id"],
+                "target_prompt_tokens": case["prompt_tokens"],
+                "cells": cell_map,
+                "sealed_c1": None,
+            }
+        )
 
     public_rows = [
-        {
-            "relative_path": row["path"],
-            "sha256": row["sha256"],
-            "expected_prompt_tokens": row["expected_prompt_tokens"],
-        }
+        {"relative_path": row["path"], "sha256": row["sha256"]}
         for row in fixtures
     ]
-    digest = hashlib.sha256()
-    for row in sorted(public_rows, key=lambda item: item["relative_path"]):
-        digest.update(row["relative_path"].encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(row["sha256"].encode("ascii"))
-        digest.update(b"\n")
-    prompt_set = digest.hexdigest()
-    template_hashes = {
-        path.name: sha256_file(path)
-        for path in sorted(set(TEMPLATES.values()), key=lambda item: item.name)
-    }
+    prompt_set = prompt_set_sha256(public_rows)
+    template_hashes = {domain: sha256_file(TEMPLATES[domain]) for domain in DOMAINS}
     identity = {
-        "schema_version": 1,
+        "schema_version": 2,
         "suite": BENCHMARK_SUITE,
         "generator": {
             "id": BENCHMARK_GENERATOR,
@@ -312,7 +256,8 @@ def materialize(
         "prompt_set_sha256": prompt_set,
     }
     plan = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "prompt_suite": BENCHMARK_SUITE,
         "model_id": model_id,
         "model_revision": model_revision,
         "tokenizer_identity": contract["tokenizer"],

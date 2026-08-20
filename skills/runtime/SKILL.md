@@ -30,11 +30,18 @@ Keep only the implementation closure there:
 
 Do not vendor Let's Infer's CLI, Watchdog, gateway, benchmark runners, prompts,
 plans, evidence, or engine-neutral prefix store. Declare the standard suite,
-cases, request settings, seeds, and tokenizer/render identity under
+cases, request settings, and tokenizer/render identity under
 `runtime.json.benchmark`; never add runtime-provided benchmark commands. Keep
 only small engine-native shims needed to implement Let's Infer's versioned cache or
 exact rendered-chat token-count capability. Keep the validated public result
 record at the standalone runtime target root as `benchmark.json`.
+
+Run the complete standard code/prose matrix through `letsinfer benchmark`.
+Never modify or replace core's canonical prompt bytes for a runtime. Confirm
+that every result contains `prompt_domain`, `prompt_suite`,
+`prompt_set_sha256`, and one `actual_prompt_tokens` entry per stream, then run
+`python3 benchmarks/benchmark_record.py <runtime-root>/benchmark.json` before
+sealing or publishing it.
 
 Pin every external image by digest. Build containers offline at runtime, read-only, non-root where the engine allows it, and without package installation after launch. Runtime authors may name build-input directories freely; only `image/Dockerfile` is special. The final manifest must pin the exact resulting image digest or immutable local image ID.
 

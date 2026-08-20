@@ -106,8 +106,8 @@ class RuntimePackTests(unittest.TestCase):
     def _benchmark(self) -> dict[str, object]:
         return {
             "schema_version": runtime_packs.BENCHMARK_SCHEMA_VERSION,
-            "suite": "letsinfer-standard-context-v1",
-            "generator": {"id": "letsinfer-synthetic-document", "version": 1},
+            "suite": "letsinfer-code-prose-v1",
+            "generator": {"id": "letsinfer-code-prose", "version": 1},
             "tokenizer": {
                 "capability": "engine-rendered-chat-count-v1",
                 "model_sha256": "1" * 64,
@@ -125,10 +125,8 @@ class RuntimePackTests(unittest.TestCase):
             "cases": [
                 {
                     "id": "32k",
-                    "workload": "context-summary-v1",
                     "prompt_tokens": 32768,
                     "concurrencies": [1, 2, 4, 8, 16],
-                    "seed": 90,
                 }
             ],
         }

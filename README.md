@@ -187,14 +187,17 @@ closure. Generic benchmark runners, workload templates and generators,
 operational scripts, Watchdog, gateways, and Let's Infer's engine-neutral
 cache/store belong to Let's Infer core and must not be copied into each runtime.
 `runtime.json` declares the standard benchmark suite, cases, request settings,
-seeds, and exact tokenizer/render identity. Let's Infer generates exact prompts
-into evidence through the selected engine adapter; prompt files, plans, and
+and exact tokenizer/render identity. Let's Infer generates the same fixed
+code/prose prompt bytes for every model; the selected adapter records exact
+per-model rendered counts without resizing them. Prompt files, plans, and
 benchmark code never enter the runtime pack. A runtime may retain a small
 engine-specific cache or tokenizer shim when it must expose native state, but
 Let's Infer supplies the common interface and implementation.
 
 Sealed results live beside `runtime.json` as validated `benchmark.json`, not
-prose. Every row names a neutral `ppN,tgN,cN` workload and records aggregate
+prose. Code and prose are flat sibling rows sharing a neutral `ppN,tgN,cN`
+workload. Each row records its domain, suite, exact prompt-set hash,
+per-stream actual prompt counts, aggregate
 and decode TPS, TTFT, prefix-cache state, utilization/temperature maxima, CPU,
 GPU, VRAM, and system-RAM clocks and maxima, and a compact timeline from
 Watchdog's independent one-second ring. Unavailable clocks are `-1`. Install receipts
@@ -687,7 +690,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.23`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.24`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its

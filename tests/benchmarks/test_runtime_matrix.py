@@ -160,8 +160,12 @@ class RuntimeMatrixTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.cells = {
-            f"{context}-c{concurrency}": {
-                "name": f"{context}-c{concurrency}",
+            f"{context}-{domain}-c{concurrency}": {
+                "name": f"{context}-{domain}-c{concurrency}",
+                "prompt_domain": domain,
+                "prompt_suite": "letsinfer-code-prose-v1",
+                "prompt_set_sha256": "3" * 64,
+                "target_prompt_tokens": 262_144,
                 "fixtures": [
                     {"expected_prompt_tokens": 262_144}
                     for _ in range(concurrency)
@@ -169,6 +173,7 @@ class RuntimeMatrixTests(unittest.TestCase):
                 "max_tokens": 128,
             }
             for context in runtime_matrix.CONTEXTS
+            for domain in runtime_matrix.prompt_generator.DOMAINS
             for concurrency in runtime_matrix.CONCURRENCIES
         }
 
@@ -206,7 +211,16 @@ class RuntimeMatrixTests(unittest.TestCase):
         )
         self.assertEqual(
             [cell["name"] for cell in selected],
-            ["64k-c1", "128k-c1", "64k-c8", "128k-c8"],
+            [
+                "64k-code-c1",
+                "64k-prose-c1",
+                "128k-code-c1",
+                "128k-prose-c1",
+                "64k-code-c8",
+                "64k-prose-c8",
+                "128k-code-c8",
+                "128k-prose-c8",
+            ],
         )
 
     def test_generated_partial_plan_validates_only_materialized_cells(self) -> None:
@@ -221,19 +235,20 @@ class RuntimeMatrixTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            prompt = root / "prompts/64k-c1-s00.md"
+            prompt = root / "prompts/64k-code-s00.md"
             prompt.parent.mkdir()
             prompt.write_text("fixture prompt\n", encoding="utf-8")
             prompt_sha = hashlib.sha256(prompt.read_bytes()).hexdigest()
             public = [
                 {
-                    "relative_path": "prompts/64k-c1-s00.md",
+                    "relative_path": "prompts/64k-code-s00.md",
                     "sha256": prompt_sha,
                     "expected_prompt_tokens": 65536,
                 }
             ]
             plan = {
-                "schema_version": 1,
+                "schema_version": 2,
+                "prompt_suite": "letsinfer-code-prose-v1",
                 "model_id": "fixture-model",
                 "model_revision": "a" * 40,
                 "tokenizer_identity": {"capability": "exact"},
@@ -248,16 +263,18 @@ class RuntimeMatrixTests(unittest.TestCase):
                 "prompt_set_sha256": runtime_matrix.prompt_set_sha256(public),
                 "fixtures": [
                     {
-                        "name": "64k-c1-s00",
-                        "path": "prompts/64k-c1-s00.md",
+                        "name": "64k-code-s00",
+                        "path": "prompts/64k-code-s00.md",
                         "sha256": prompt_sha,
                         "expected_prompt_tokens": 65536,
+                        "prompt_domain": "code",
                     }
                 ],
                 "contexts": [
                     {
                         "name": "64k",
-                        "cells": {"c1": ["64k-c1-s00"]},
+                        "target_prompt_tokens": 65536,
+                        "cells": {"code-c1": ["64k-code-s00"]},
                         "sealed_c1": None,
                     }
                 ],
@@ -266,14 +283,17 @@ class RuntimeMatrixTests(unittest.TestCase):
             path.write_text(json.dumps(plan), encoding="utf-8")
             _, cells = runtime_matrix.load_prompt_plan(path, manifest)
 
-        self.assertEqual(list(cells), ["64k-c1"])
+        self.assertEqual(list(cells), ["64k-code-c1"])
 
     def test_partial_plan_rejects_unmaterialized_selection(self) -> None:
         with self.assertRaisesRegex(
             runtime_matrix.RuntimeMatrixError, "does not define selected cell"
         ):
             runtime_matrix.select_cells(
-                {"64k-c1": self.cells["64k-c1"]}, [1, 4], ["64k"]
+                {"64k-code-c1": self.cells["64k-code-c1"]},
+                [1, 4],
+                ["64k"],
+                "code",
             )
 
     def test_prompt_set_hash_binds_paths_and_content_hashes(self) -> None:
@@ -446,7 +466,7 @@ class RuntimeMatrixTests(unittest.TestCase):
             list(runtime_matrix.CONTEXTS),
         )
         capacity = runtime_matrix.validate_capacity(manifest, selected)
-        self.assertEqual(len(selected), 20)
+        self.assertEqual(len(selected), 40)
         self.assertEqual(capacity["selected_max_concurrency"], 16)
         self.assertEqual(capacity["runtime_max_active_requests"], 10)
 
@@ -475,10 +495,13 @@ class RuntimeMatrixTests(unittest.TestCase):
             ],
         }
         cells = runtime_matrix.contract_cells(contract)
-        self.assertEqual(sorted(cells), ["32k-c1", "32k-c4"])
-        self.assertEqual(len(cells["32k-c4"]["fixtures"]), 4)
         self.assertEqual(
-            cells["32k-c1"]["fixtures"][0]["expected_prompt_tokens"], 32768
+            sorted(cells),
+            ["32k-code-c1", "32k-code-c4", "32k-prose-c1", "32k-prose-c4"],
+        )
+        self.assertEqual(len(cells["32k-code-c4"]["fixtures"]), 4)
+        self.assertEqual(
+            cells["32k-code-c1"]["fixtures"][0]["expected_prompt_tokens"], 32768
         )
 
     def test_expected_duration_scales_with_selected_prompt_volume(self) -> None:
@@ -629,8 +652,24 @@ class RuntimeMatrixTests(unittest.TestCase):
                 watchdog_controller_key_file=root / "local-controller.key",
             )
             cells = [
-                {"name": "32k-c1", "fixtures": [{}], "max_tokens": 128},
-                {"name": "64k-c1", "fixtures": [{}], "max_tokens": 128},
+                {
+                    "name": "32k-code-c1",
+                    "prompt_domain": "code",
+                    "prompt_suite": "letsinfer-code-prose-v1",
+                    "prompt_set_sha256": "3" * 64,
+                    "target_prompt_tokens": 32_768,
+                    "fixtures": [{}],
+                    "max_tokens": 128,
+                },
+                {
+                    "name": "32k-prose-c1",
+                    "prompt_domain": "prose",
+                    "prompt_suite": "letsinfer-code-prose-v1",
+                    "prompt_set_sha256": "4" * 64,
+                    "target_prompt_tokens": 32_768,
+                    "fixtures": [{}],
+                    "max_tokens": 128,
+                },
             ]
             process_number = 0
 
@@ -648,7 +687,8 @@ class RuntimeMatrixTests(unittest.TestCase):
                 result_root = pathlib.Path(
                     command[command.index("--output-directory") + 1]
                 )
-                cell = "32k-c1" if "--32k" in command else "64k-c1"
+                domain = command[command.index("--prompt-domain") + 1]
+                cell = f"32k-{domain}-c1"
                 runtime_matrix.common.write_json_atomic(
                     result_root / "results.json",
                     {
@@ -660,7 +700,7 @@ class RuntimeMatrixTests(unittest.TestCase):
                                 "cell": cell,
                                 "concurrency": 1,
                                 "prompt_tokens": [
-                                    32_768 if cell == "32k-c1" else 65_536
+                                    32_711 if domain == "code" else 32_719
                                 ],
                                 "decode_tokens_per_second": {"mean": 24.5},
                                 "ttft_ms": {
@@ -761,6 +801,10 @@ class RuntimeMatrixTests(unittest.TestCase):
             self.assertEqual(
                 [row["is_prefix_cached"] for row in public["results"]],
                 [False, False],
+            )
+            self.assertEqual(
+                [row["prompt_domain"] for row in public["results"]],
+                ["code", "prose"],
             )
 
 

@@ -118,8 +118,9 @@ one engine-neutral evidence contract.
 An adapter may also expose Let's Infer's internal
 `engine-rendered-chat-count-v1` capability. It accepts the standard chat
 request and returns only the exact rendered prompt-token count and served model
-identity. Let's Infer uses it to calibrate generated benchmark prompts against the
-runtime's actual tokenizer and chat renderer. The operation must cross the
+identity. Let's Infer uses it to record exact rendered counts for fixed
+model-neutral benchmark prompts; it never uses the count to resize prompt
+bytes. The operation must cross the
 same authenticated boundary as inference and must not run inference, return
 token IDs, or mutate cache state. Runtimes without the capability fail closed
 for generated-suite execution; Let's Infer never substitutes an approximate

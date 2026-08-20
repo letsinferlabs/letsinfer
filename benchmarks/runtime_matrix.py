@@ -3,8 +3,8 @@
 """Benchmark a sealed Let's Infer runtime across context and concurrency cells.
 
 The runtime manifest owns every engine and serving setting. The installed
-runtime declares a standard workload; this runner materializes deterministic
-prompts through the exact adapter tokenizer, starts simultaneous OpenAI
+runtime declares a standard workload; this runner materializes fixed canonical
+code/prose prompts and records exact adapter token counts, starts simultaneous OpenAI
 requests, and records results and safety telemetry. It deliberately has no
 engine-argument surface.
 """
@@ -51,7 +51,9 @@ from core.runtime_packs import (  # pylint: disable=wrong-import-position
 
 CONCURRENCIES = (1, 2, 4, 8, 16)
 CONTEXTS = ("32k", "64k", "128k", "256k")
-SAFE_CELL = re.compile(r"(?:32k|64k|128k|256k)-c(?:1|2|4|8|16)")
+SAFE_CELL = re.compile(
+    r"(?:32k|64k|128k|256k)-(?:code|prose)-c(?:1|2|4|8|16)"
+)
 _PROGRESS_FILE: pathlib.Path | None = None
 _PROGRESS_STARTED_UNIX_NS: int | None = None
 _EXPECTED_MINUTES: tuple[int, int] | None = None
@@ -272,6 +274,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--active-container", action="store_true", help=argparse.SUPPRESS
     )
+    parser.add_argument(
+        "--prompt-domain", choices=prompt_generator.DOMAINS, help=argparse.SUPPRESS
+    )
     return parser.parse_args()
 
 
@@ -382,15 +387,19 @@ def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
     cells: dict[str, dict[str, Any]] = {}
     for case in contract["cases"]:
         for concurrency in case["concurrencies"]:
-            name = f"{case['id']}-c{concurrency}"
-            cells[name] = {
-                "name": name,
-                "fixtures": [
-                    {"expected_prompt_tokens": case["prompt_tokens"]}
-                    for _ in range(concurrency)
-                ],
-                "max_tokens": request["output_tokens"],
-            }
+            for domain in prompt_generator.DOMAINS:
+                name = f"{case['id']}-{domain}-c{concurrency}"
+                cells[name] = {
+                    "name": name,
+                    "prompt_domain": domain,
+                    "prompt_suite": prompt_generator.BENCHMARK_SUITE,
+                    "target_prompt_tokens": case["prompt_tokens"],
+                    "fixtures": [
+                        {"expected_prompt_tokens": case["prompt_tokens"]}
+                        for _ in range(concurrency)
+                    ],
+                    "max_tokens": request["output_tokens"],
+                }
     return cells
 
 
@@ -547,8 +556,11 @@ def load_prompt_plan(
     path: pathlib.Path, manifest: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     plan = common.read_json_object(path, "runtime matrix prompt plan")
-    if type(plan.get("schema_version")) is not int or plan.get("schema_version") != 1:
-        raise RuntimeMatrixError("runtime matrix schema_version must be 1")
+    if type(plan.get("schema_version")) is not int or plan.get("schema_version") != 2:
+        raise RuntimeMatrixError("runtime matrix schema_version must be 2")
+    prompt_suite = plan.get("prompt_suite")
+    if prompt_suite != prompt_generator.BENCHMARK_SUITE:
+        raise RuntimeMatrixError("prompt plan suite is unsupported")
     expected_identity = {
         "model_id": common._manifest_value(manifest, "model.id"),
         "model_revision": common.model_revision(manifest),
@@ -598,12 +610,16 @@ def load_prompt_plan(
         expected_tokens = common.require_positive_int(
             row, "expected_prompt_tokens", where
         )
+        prompt_domain = common.require_string(row, "prompt_domain", where)
+        if prompt_domain not in prompt_generator.DOMAINS:
+            raise RuntimeMatrixError(f"{where}.prompt_domain is unsupported")
         fixtures[name] = {
             "name": name,
             "sha256": public["sha256"],
             "messages": [message],
             "message_files": [public],
             "expected_prompt_tokens": expected_tokens,
+            "prompt_domain": prompt_domain,
         }
         public_files.append(
             {
@@ -643,10 +659,17 @@ def load_prompt_plan(
                 "prompt plan contexts must be unique and in standard order"
             )
         previous_context_index = context_index
+        target_prompt_tokens = common.require_positive_int(
+            row, "target_prompt_tokens", where
+        )
         mappings = row.get("cells")
         if not isinstance(mappings, dict) or not mappings:
             raise RuntimeMatrixError(f"{where}.cells must be a non-empty object")
-        known_keys = {f"c{concurrency}" for concurrency in CONCURRENCIES}
+        known_keys = {
+            f"{domain}-c{concurrency}"
+            for domain in prompt_generator.DOMAINS
+            for concurrency in CONCURRENCIES
+        }
         unknown_keys = sorted(set(mappings) - known_keys)
         if unknown_keys:
             raise RuntimeMatrixError(
@@ -654,42 +677,53 @@ def load_prompt_plan(
             )
         public_cells: dict[str, list[str]] = {}
         for concurrency in CONCURRENCIES:
-            key = f"c{concurrency}"
-            if key not in mappings:
-                continue
-            names = mappings.get(key)
-            if (
-                not isinstance(names, list)
-                or len(names) != concurrency
-                or not all(isinstance(name, str) and name for name in names)
-            ):
-                raise RuntimeMatrixError(
-                    f"{where}.cells.{key} must contain {concurrency} fixture names"
-                )
-            if len(names) != len(set(names)):
-                raise RuntimeMatrixError(f"{where}.cells.{key} contains duplicates")
-            missing = sorted(set(names) - fixtures.keys())
-            if missing:
-                raise RuntimeMatrixError(
-                    f"{where}.cells.{key} names unknown fixtures: {', '.join(missing)}"
-                )
-            reused = sorted(set(names).intersection(allocated))
-            if reused:
-                raise RuntimeMatrixError(
-                    "matrix cells must use distinct prompt bytes: " + ", ".join(reused)
-                )
-            allocated.update(names)
-            cell_name = f"{context}-{key}"
-            cells[cell_name] = {
-                "name": cell_name,
-                "fixtures": [fixtures[name] for name in names],
-                "max_tokens": max_tokens,
-                "min_completion_tokens": minimum,
-                "require_natural_stop": natural_stop,
-                "request_options": options,
-                "temperature": temperature,
-            }
-            public_cells[key] = names
+            for domain in prompt_generator.DOMAINS:
+                key = f"{domain}-c{concurrency}"
+                if key not in mappings:
+                    continue
+                names = mappings.get(key)
+                if (
+                    not isinstance(names, list)
+                    or len(names) != concurrency
+                    or not all(isinstance(name, str) and name for name in names)
+                ):
+                    raise RuntimeMatrixError(
+                        f"{where}.cells.{key} must contain {concurrency} fixture names"
+                    )
+                if len(names) != len(set(names)):
+                    raise RuntimeMatrixError(f"{where}.cells.{key} contains duplicates")
+                missing = sorted(set(names) - fixtures.keys())
+                if missing:
+                    raise RuntimeMatrixError(
+                        f"{where}.cells.{key} names unknown fixtures: {', '.join(missing)}"
+                    )
+                if any(fixtures[name]["prompt_domain"] != domain for name in names):
+                    raise RuntimeMatrixError(
+                        f"{where}.cells.{key} mixes prompt domains"
+                    )
+                allocated.update(names)
+                cell_name = f"{context}-{key}"
+                selected_rows = [
+                    {
+                        "relative_path": fixtures[name]["message_files"][0]["path"],
+                        "sha256": fixtures[name]["sha256"],
+                    }
+                    for name in names
+                ]
+                cells[cell_name] = {
+                    "name": cell_name,
+                    "prompt_domain": domain,
+                    "prompt_suite": prompt_suite,
+                    "prompt_set_sha256": prompt_set_sha256(selected_rows),
+                    "target_prompt_tokens": target_prompt_tokens,
+                    "fixtures": [fixtures[name] for name in names],
+                    "max_tokens": max_tokens,
+                    "min_completion_tokens": minimum,
+                    "require_natural_stop": natural_stop,
+                    "request_options": options,
+                    "temperature": temperature,
+                }
+                public_cells[key] = names
         sealed = row.get("sealed_c1")
         if sealed is not None:
             if not isinstance(sealed, dict):
@@ -707,13 +741,19 @@ def load_prompt_plan(
                 ),
             }
         public_contexts.append(
-            {"name": context, "cells": public_cells, "sealed_c1": sealed}
+            {
+                "name": context,
+                "target_prompt_tokens": target_prompt_tokens,
+                "cells": public_cells,
+                "sealed_c1": sealed,
+            }
         )
     if set(fixtures) != allocated:
         unused = sorted(set(fixtures) - allocated)
         raise RuntimeMatrixError("prompt plan has unused fixtures: " + ", ".join(unused))
     public_plan = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "prompt_suite": prompt_suite,
         "model_id": plan["model_id"],
         "model_revision": plan["model_revision"],
         "tokenizer_identity": tokenizer,
@@ -737,14 +777,19 @@ def load_prompt_plan(
 
 
 def select_cells(
-    cells: dict[str, dict[str, Any]], concurrencies: list[int], contexts: list[str]
+    cells: dict[str, dict[str, Any]],
+    concurrencies: list[int],
+    contexts: list[str],
+    prompt_domain: str | None = None,
 ) -> list[dict[str, Any]]:
     # C1 is intentionally completed before higher concurrency so sealed parity
     # is known before the expensive load cells begin.
     names = [
-        f"{context}-c{concurrency}"
+        f"{context}-{domain}-c{concurrency}"
         for concurrency in concurrencies
         for context in contexts
+        for domain in prompt_generator.DOMAINS
+        if prompt_domain is None or domain == prompt_domain
     ]
     missing = [name for name in names if name not in cells]
     if missing:
@@ -839,7 +884,7 @@ def summarize(cell: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     return {
         "cell": cell["name"],
         "concurrency": len(requests),
-        "prompt_tokens": sorted({row["prompt_tokens"] for row in requests}),
+        "prompt_tokens": [row["prompt_tokens"] for row in requests],
         "completion_tokens": sum(row["completion_tokens"] for row in requests),
         "decode_tokens_per_second": load.metric_summary(
             values("decode_tokens_per_second")
@@ -869,9 +914,11 @@ def public_benchmark_result(
     concurrency = summary.get("concurrency")
     if (
         not isinstance(prompt_tokens, list)
-        or len(prompt_tokens) != 1
-        or not isinstance(prompt_tokens[0], int)
-        or isinstance(prompt_tokens[0], bool)
+        or not prompt_tokens
+        or any(
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0
+            for value in prompt_tokens
+        )
         or not isinstance(concurrency, int)
         or isinstance(concurrency, bool)
         or concurrency <= 0
@@ -910,8 +957,12 @@ def public_benchmark_result(
         raise RuntimeMatrixError(str(error)) from error
     result = {
         "workload": (
-            f"pp{prompt_tokens[0]},tg{cell['max_tokens']},c{concurrency}"
+            f"pp{cell['target_prompt_tokens']},tg{cell['max_tokens']},c{concurrency}"
         ),
+        "prompt_domain": cell["prompt_domain"],
+        "prompt_suite": cell["prompt_suite"],
+        "prompt_set_sha256": cell["prompt_set_sha256"],
+        "actual_prompt_tokens": prompt_tokens,
         "aggregate_tps": summary["aggregate_completion_tokens_per_second"],
         "decode_tps": decode_mean,
         "ttft_seconds": float(ttft_ms) / 1000.0,
@@ -1101,7 +1152,8 @@ def _worker_command(
     cell: dict[str, Any],
     output: pathlib.Path,
 ) -> list[str]:
-    context, concurrency = cell["name"].split("-c", 1)
+    context, domain, concurrency_value = cell["name"].split("-", 2)
+    concurrency = concurrency_value.removeprefix("c")
     worker_api_key = (
         getattr(arguments, "token_count_api_key_file", None) or arguments.api_key_file
     )
@@ -1132,6 +1184,8 @@ def _worker_command(
         str(arguments.sample_interval_seconds),
         f"--{context}",
         f"--c{concurrency}",
+        "--prompt-domain",
+        domain,
         "--active-container",
     ]
     if arguments.source_attestation is not None:
@@ -1230,12 +1284,12 @@ def run_isolated_matrix(
             raise RuntimeMatrixError(
                 "isolated benchmark requires the private engine token-count endpoint"
             )
-        calibration_store = stores_root / "materialization"
-        calibration_launch = launches_root / "materialization"
-        calibration_started = False
-        calibration_error: BaseException | None = None
+        materialization_store = stores_root / "materialization"
+        materialization_launch = launches_root / "materialization"
+        materialization_started = False
+        materialization_error: BaseException | None = None
         try:
-            calibration_started = True
+            materialization_started = True
             with benchmark_activity(
                 "Preparing prompts · loading tokenizer runtime",
                 done="Tokenizer runtime ready",
@@ -1245,8 +1299,8 @@ def run_isolated_matrix(
                     _serve_command(
                         arguments,
                         runtime_selector,
-                        calibration_store,
-                        calibration_launch,
+                        materialization_store,
+                        materialization_launch,
                     ),
                     "launching benchmark prompt materializer",
                 )
@@ -1274,8 +1328,8 @@ def run_isolated_matrix(
                 timeout=arguments.timeout,
             )
             with benchmark_activity(
-                "Preparing prompts · matching exact token counts",
-                done="Exact prompts ready",
+                "Preparing canonical code/prose prompts · counting rendered tokens",
+                done="Canonical prompts ready",
                 phase="materializing-prompts",
             ):
                 plan_path = prompt_generator.materialize(
@@ -1287,9 +1341,9 @@ def run_isolated_matrix(
                     selected_cells=(cell["name"] for cell in selected),
                 )
         except BaseException as error:
-            calibration_error = error
+            materialization_error = error
         stop_error: BaseException | None = None
-        if calibration_started:
+        if materialization_started:
             try:
                 stop_output = _command_output(
                     [
@@ -1305,18 +1359,19 @@ def run_isolated_matrix(
                     print(stop_output.strip(), flush=True)
             except BaseException as error:
                 stop_error = error
-        if calibration_error is not None:
+        if materialization_error is not None:
             if stop_error is not None:
                 raise RuntimeMatrixError(
-                    f"{calibration_error}; materializer cleanup also failed: {stop_error}"
-                ) from calibration_error
-            raise calibration_error
+                    f"{materialization_error}; materializer cleanup also failed: {stop_error}"
+                ) from materialization_error
+            raise materialization_error
         if stop_error is not None:
             raise stop_error
         assert plan_path is not None
         _, materialized_cells = load_prompt_plan(plan_path, manifest)
         requested_names = [cell["name"] for cell in selected]
         selected = [materialized_cells[name] for name in requested_names]
+        validate_capacity(manifest, selected)
 
     if plan_path is None:
         raise RuntimeMatrixError("benchmark prompt plan was not materialized")
@@ -1612,7 +1667,9 @@ def main() -> int:
             },
         )
     concurrencies, contexts = selected_axes(arguments)
-    selected = select_cells(cells, concurrencies, contexts)
+    selected = select_cells(
+        cells, concurrencies, contexts, arguments.prompt_domain
+    )
     capacity = validate_capacity(manifest, selected)
     if arguments.list:
         for cell in selected:

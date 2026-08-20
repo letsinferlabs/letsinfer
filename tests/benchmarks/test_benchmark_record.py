@@ -20,6 +20,10 @@ class BenchmarkRecordTests(unittest.TestCase):
         results = [
             {
                 "workload": "pp32768,tg128,c1",
+                "prompt_domain": "code",
+                "prompt_suite": "letsinfer-code-prose-v1",
+                "prompt_set_sha256": "3" * 64,
+                "actual_prompt_tokens": [32711],
                 "aggregate_tps": 3.5,
                 "decode_tps": 28.5,
                 "ttft_seconds": 31.8,
@@ -89,16 +93,31 @@ class BenchmarkRecordTests(unittest.TestCase):
         value = self.record()
         value["schema_version"] = 1
         with self.assertRaisesRegex(
-            benchmark_record.BenchmarkRecordError, "schema_version must be 2"
+            benchmark_record.BenchmarkRecordError, "schema_version must be 3"
         ):
             benchmark_record.validate_record(value)
 
         value = self.record()
         value["schema_version"] = True
         with self.assertRaisesRegex(
-            benchmark_record.BenchmarkRecordError, "schema_version must be 2"
+            benchmark_record.BenchmarkRecordError, "schema_version must be 3"
         ):
             benchmark_record.validate_record(value)
+
+    def test_code_and_prose_rows_share_a_workload_identity(self) -> None:
+        value = self.record()
+        prose = dict(value["results"][0])
+        prose["prompt_domain"] = "prose"
+        prose["prompt_set_sha256"] = "4" * 64
+        value["results"].append(prose)
+        value["results_sha256"] = benchmark_record.results_sha256(value["results"])
+        value["id"] = benchmark_record.benchmark_id(
+            value["installation_id"],
+            value["timestamp_unix_ns"],
+            value["benchmark_contract_sha256"],
+            value["results_sha256"],
+        )
+        self.assertIs(benchmark_record.validate_record(value), value)
 
     def test_watchdog_summary_includes_timeline_and_matching_maxima(self) -> None:
         samples = [
