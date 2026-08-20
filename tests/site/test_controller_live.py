@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 import pathlib
+import socket
 import ssl
 import subprocess
 import tempfile
@@ -114,6 +115,12 @@ class LiveControllerTests(unittest.TestCase):
         self.state.close()
         self.environment.stop()
         self.temporary.cleanup()
+
+    def test_listener_allows_immediate_managed_restart(self) -> None:
+        self.assertNotEqual(
+            self.server.socket.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR),
+            0,
+        )
 
     def _certificate_authority(self) -> tuple[pathlib.Path, pathlib.Path]:
         certificate = self.root / "ca.crt"

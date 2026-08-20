@@ -947,7 +947,10 @@ class UsageWriter:
 
 class GatewayServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = False
+    # systemd is the sole process owner and may immediately replace this exact
+    # listener during a verified core update. Reuse only the local address;
+    # the old socket is already closed before the new unit starts.
+    allow_reuse_address = True
     request_queue_size = 128
 
     def __init__(

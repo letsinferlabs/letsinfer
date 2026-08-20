@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest import mock
 
-from core.site import control, state, telemetry
+from core.site import control, controller, state, telemetry
 
 
 def facts(member_id: str) -> dict:
@@ -110,6 +110,10 @@ class SiteControlTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_listener_allows_immediate_managed_restart(self) -> None:
+        self.assertTrue(control.SiteControlServer.allow_reuse_address)
+        self.assertTrue(controller.ControllerServer.allow_reuse_address)
 
     def test_enrollment_contract_provisions_only_member_credentials(self) -> None:
         with mock.patch.dict(os.environ, self.coordinator_environment):

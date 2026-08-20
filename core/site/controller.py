@@ -737,7 +737,7 @@ def tls_context(
 
 
 class ControllerServer(http.server.HTTPServer):
-    allow_reuse_address = False
+    allow_reuse_address = True
     request_queue_size = 4
 
     def __init__(
