@@ -11,7 +11,9 @@ import json
 import pathlib
 import queue
 import re
+import socketserver
 import ssl
+import sys
 import threading
 import urllib.parse
 import uuid
@@ -29,6 +31,7 @@ MAX_REQUEST_BYTES = 4096
 MAX_ACTION_RESULTS = 32
 MAX_PENDING_ACTIONS = 4
 REQUEST_TIMEOUT_SECONDS = 15
+MAX_CONCURRENT_REQUESTS = 8
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 MODEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 OPERATOR_ACTIONS = {"start", "stop", "restart", "recover"}
@@ -736,9 +739,12 @@ def tls_context(
     return context
 
 
-class ControllerServer(http.server.HTTPServer):
+class ControllerServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    """Small bounded controller listener; one slow client cannot stall peers."""
+
     allow_reuse_address = True
-    request_queue_size = 4
+    request_queue_size = MAX_CONCURRENT_REQUESTS
+    daemon_threads = True
 
     def __init__(
         self,
@@ -747,9 +753,14 @@ class ControllerServer(http.server.HTTPServer):
         *,
         context: ssl.SSLContext,
     ) -> None:
+        self._request_slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
         super().__init__(address, _Handler, bind_and_activate=False)
         self.controller_state = state
-        self.socket = context.wrap_socket(self.socket, server_side=True)
+        self.socket = context.wrap_socket(
+            self.socket,
+            server_side=True,
+            do_handshake_on_connect=False,
+        )
         self.server_bind()
         self.server_activate()
 
@@ -757,3 +768,25 @@ class ControllerServer(http.server.HTTPServer):
         connection, address = super().get_request()
         connection.settimeout(REQUEST_TIMEOUT_SECONDS)
         return connection, address
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionError, TimeoutError, ssl.SSLError)):
+            return
+        super().handle_error(request, client_address)

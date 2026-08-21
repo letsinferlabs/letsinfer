@@ -8977,6 +8977,8 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def _local_controller_telemetry(
     config: Mapping[str, Any] | None = None,
+    *,
+    preferred_member_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Read the site agent's live aggregate without consuming a Watchdog slot."""
 
@@ -9007,7 +9009,7 @@ def _local_controller_telemetry(
         connection = http.client.HTTPSConnection(
             "127.0.0.1", CONTROLLER_CONTROL_PORT, timeout=1, context=context
         )
-        connection.request("GET", "/control/v1/telemetry?history=300")
+        connection.request("GET", "/control/v1/telemetry?history=0")
         response = connection.getresponse()
         body = response.read(1024 * 1024 + 1)
         if response.status != 200 or len(body) > 1024 * 1024:
@@ -9019,24 +9021,36 @@ def _local_controller_telemetry(
             return None
         result = dict(aggregate)
         result["updated_unix_ms"] = telemetry.get("unix_ms")
+        result["fresh"] = False
         members = telemetry.get("members")
         if isinstance(members, list):
-            fresh = next(
-                (
-                    row
-                    for row in members
-                    if isinstance(row, dict)
-                    and row.get("stale") is False
-                    and isinstance(row.get("sample"), dict)
-                ),
-                None,
+            fresh_rows = [
+                row
+                for row in members
+                if isinstance(row, dict)
+                and row.get("stale") is False
+                and isinstance(row.get("sample"), dict)
+            ]
+            fresh = (
+                next(
+                    (
+                        row
+                        for row in fresh_rows
+                        if row["sample"].get("member_id") == preferred_member_id
+                    ),
+                    None,
+                )
+                if preferred_member_id is not None
+                else next(iter(fresh_rows), None)
             )
             if fresh is not None:
                 sample = fresh["sample"]
+                result["fresh"] = True
+                result["sample_member_id"] = sample.get("member_id")
+                result["sample_sequence"] = sample.get("sequence")
+                result["sample_unix_ms"] = sample.get("unix_ms")
                 result["system"] = sample.get("system")
                 result["workload"] = sample.get("workload")
-        history = value.get("history")
-        result["history"] = history if isinstance(history, list) else []
         return result
     except (OSError, ssl.SSLError, http.client.HTTPException, json.JSONDecodeError):
         return None
@@ -9372,8 +9386,10 @@ def status(arguments: argparse.Namespace) -> int:
         "protection": protection_status(config, inspection) if config else None,
         "config": str(config_path) if config else None,
     }
+    local_member_id: str | None = None
     try:
         identity = read_site_identity()
+        local_member_id = identity.member_id
         site_summary: dict[str, Any] = {
             **identity_json(identity),
             "hostname": identity.coordinator_address or socket.gethostname(),
@@ -9400,7 +9416,10 @@ def status(arguments: argparse.Namespace) -> int:
     except (OSError, SiteError, StopIteration):
         payload["site"] = None
     payload["lifecycle"] = runtime_lifecycle(payload)
-    payload["telemetry"] = _local_controller_telemetry(config)
+    payload["telemetry"] = _local_controller_telemetry(
+        config,
+        preferred_member_id=local_member_id,
+    )
     if arguments.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     elif ui.Terminal(sys.stdout).interactive:
@@ -13598,6 +13617,7 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
         controller_thread.start()
     stopped = threading.Event()
     publisher_failed: list[bool] = []
+    telemetry_failed: list[str] = []
     orchestration_failed: list[str] = []
     link_monitor_failed: list[str] = []
     update_poller = UpdatePoller(_update_manager(), stop=stopped)
@@ -13654,6 +13674,13 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
                 publisher_failed.append(True)
                 server.shutdown()
                 return
+            if not telemetry_publisher.alive():
+                telemetry_failed.append(
+                    telemetry_publisher.last_error
+                    or "telemetry publisher exited unexpectedly"
+                )
+                server.shutdown()
+                return
 
     monitor = threading.Thread(target=monitor_publisher, daemon=True)
     monitor.start()
@@ -13686,6 +13713,11 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
         member_agent.close()
     if publisher_failed:
         raise LetsInferError("DNS-SD publisher exited while the site agent was active")
+    if telemetry_failed:
+        raise LetsInferError(
+            "Watchdog telemetry publisher exited while the site agent was active: "
+            + telemetry_failed[-1]
+        )
     if orchestration_failed:
         raise LetsInferError(
             "engine-group health monitor failed: " + orchestration_failed[-1]
