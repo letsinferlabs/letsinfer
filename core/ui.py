@@ -43,6 +43,8 @@ HISTORY_CHART_COLORS = (
 )
 CLEAR_LINE = "\r\033[2K"
 ANSI = re.compile(r"\033\[[0-9;]*m")
+LIVE_STATUS_REFRESH_SECONDS = 1.0
+LIVE_STATUS_TELEMETRY_GRACE_SECONDS = 3.0
 _activity = threading.local()
 
 
@@ -647,44 +649,106 @@ def live_runtime_status(snapshot: Callable[[], Mapping[str, Any]]) -> int:
         "nvme_temp": [],
     }
     first = True
+    alternate_screen = False
+    last_telemetry: dict[str, Any] | None = None
+    last_telemetry_at: float | None = None
+    last_history_sequence: int | None = None
+    next_refresh = time.monotonic()
     try:
-        sys.stdout.write("\033[?25l")
         while True:
-            payload = snapshot()
+            payload = dict(snapshot())
             if "service" not in payload:
                 sys.stdout.write("\033[H\033[J" if not first else "\033[2J\033[H")
                 site_status(payload)
                 return int(payload.get("exit_code") or 0)
-            telemetry = _mapping(payload.get("telemetry"))
-            system = _mapping(telemetry.get("system"))
-            for name, fields, divisor in (
-                ("gpu", ("gpu_percent",), 1.0),
-                ("memory", ("memory_percent",), 1.0),
-                ("cpu", ("cpu_percent",), 1.0),
-                ("nvme", ("disk_percent",), 1.0),
-                ("power", ("power_deci_w",), 10.0),
-                ("network", ("network_rx_kib_s", "network_tx_kib_s"), 1.0),
-                ("gpu_temp", ("gpu_temp_deci_c",), 10.0),
-                ("cpu_temp", ("system_temp_deci_c",), 10.0),
-                ("nvme_temp", ("nvme_temp_deci_c",), 10.0),
+            now = time.monotonic()
+            current_telemetry = payload.get("telemetry")
+            telemetry = (
+                dict(current_telemetry)
+                if isinstance(current_telemetry, Mapping)
+                else {}
+            )
+            telemetry.pop("display_state", None)
+            telemetry.pop("display_age_seconds", None)
+            current_sample_fresh = (
+                isinstance(current_telemetry, Mapping)
+                and current_telemetry.get("fresh") is not False
+            )
+            if current_sample_fresh:
+                last_telemetry = dict(telemetry)
+                last_telemetry_at = now
+            elif (
+                last_telemetry is not None
+                and last_telemetry_at is not None
+                and now - last_telemetry_at <= LIVE_STATUS_TELEMETRY_GRACE_SECONDS
             ):
-                values = [system.get(field) for field in fields]
-                if all(
-                    isinstance(value, (int, float)) and not isinstance(value, bool)
-                    for value in values
+                # Keep current site-wide counters, but retain the last verified
+                # local sample while that member's stream reconnects.
+                for field in (
+                    "sample_member_id",
+                    "sample_sequence",
+                    "sample_unix_ms",
+                    "system",
+                    "workload",
                 ):
-                    history[name].append(
-                        max(0.0, sum(float(value) for value in values) / divisor)
-                    )
-                    del history[name][:-300]
+                    if field in last_telemetry:
+                        telemetry[field] = last_telemetry[field]
+                telemetry["display_state"] = "reconnecting"
+                telemetry["display_age_seconds"] = max(0.0, now - last_telemetry_at)
+            else:
+                telemetry["display_state"] = "unavailable"
+            payload["telemetry"] = telemetry
+            system = _mapping(telemetry.get("system"))
+            sample_sequence = telemetry.get("sample_sequence")
+            sequence = (
+                sample_sequence
+                if isinstance(sample_sequence, int)
+                and not isinstance(sample_sequence, bool)
+                else None
+            )
+            record_history = (
+                telemetry.get("display_state") != "reconnecting"
+                and (sequence is None or sequence != last_history_sequence)
+            )
+            if record_history:
+                for name, fields, divisor in (
+                    ("gpu", ("gpu_percent",), 1.0),
+                    ("memory", ("memory_percent",), 1.0),
+                    ("cpu", ("cpu_percent",), 1.0),
+                    ("nvme", ("disk_percent",), 1.0),
+                    ("power", ("power_deci_w",), 10.0),
+                    ("network", ("network_rx_kib_s", "network_tx_kib_s"), 1.0),
+                    ("gpu_temp", ("gpu_temp_deci_c",), 10.0),
+                    ("cpu_temp", ("system_temp_deci_c",), 10.0),
+                    ("nvme_temp", ("nvme_temp_deci_c",), 10.0),
+                ):
+                    values = [system.get(field) for field in fields]
+                    if all(
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and float(value) >= 0
+                        for value in values
+                    ):
+                        history[name].append(
+                            sum(float(value) for value in values) / divisor
+                        )
+                        del history[name][:-300]
+                if sequence is not None:
+                    last_history_sequence = sequence
             lines = dashboard_lines(payload, terminal, session_history=history)
-            sys.stdout.write("\033[2J\033[H" if first else "\033[H\033[J")
-            sys.stdout.write("\n".join(lines) + "\n")
+            prefix = "\033[?1049h\033[?25l\033[H" if first else "\033[H"
+            alternate_screen = True
+            sys.stdout.write(prefix + "\n".join(lines) + "\n\033[J")
             sys.stdout.flush()
             first = False
-            time.sleep(1.0)
+            next_refresh += LIVE_STATUS_REFRESH_SECONDS
+            now = time.monotonic()
+            if next_refresh <= now:
+                next_refresh = now + LIVE_STATUS_REFRESH_SECONDS
+            time.sleep(next_refresh - now)
     except KeyboardInterrupt:
         return 0
     finally:
-        sys.stdout.write("\033[?25h\n")
-        sys.stdout.flush()
+        if alternate_screen:
+            sys.stdout.write("\033[?25h\033[?1049l\n")
+            sys.stdout.flush()

@@ -874,6 +874,11 @@ class TelemetryPublisher:
     def start(self) -> None:
         self.thread.start()
 
+    def alive(self) -> bool:
+        """Return whether the single telemetry worker is still supervised."""
+
+        return self.thread.is_alive()
+
     def _run(self) -> None:
         while not self.stop_event.is_set():
             try:

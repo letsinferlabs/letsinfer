@@ -70,7 +70,7 @@ typedef struct watchdog_client {
     short read_want;
     short write_want;
     uint64_t handshake_deadline_ms;
-    uint64_t last_request_ms;
+    uint64_t last_activity_ms;
     char controller_certificate_sha256[65u];
     uint8_t input[WATCHDOG_FRAME_STORAGE];
     size_t input_length;
@@ -534,7 +534,7 @@ static int process_input(watchdog_server *server, watchdog_client *client) {
         const size_t frame_length = (size_t)payload_length + 4u;
         if (client->input_length < frame_length) return 0;
         if (handle_request(server, client, client->input + 4u, payload_length) != 0) return -1;
-        client->last_request_ms = clock_ms(CLOCK_MONOTONIC);
+        client->last_activity_ms = clock_ms(CLOCK_MONOTONIC);
         const size_t remaining = client->input_length - frame_length;
         memmove(client->input, client->input + frame_length, remaining);
         client->input_length = remaining;
@@ -750,7 +750,7 @@ static int advance_handshake(watchdog_server *server, watchdog_client *client) {
         }
         X509_free(peer);
         client->state = CLIENT_READY;
-        client->last_request_ms = clock_ms(CLOCK_MONOTONIC);
+        client->last_activity_ms = clock_ms(CLOCK_MONOTONIC);
         client->read_want = POLLIN;
         client->write_want = POLLOUT;
         return 0;
@@ -784,6 +784,7 @@ static int write_client(watchdog_client *client) {
         &count);
     if (result == 1) {
         if (count == 0) return -1;
+        client->last_activity_ms = clock_ms(CLOCK_MONOTONIC);
         client->output_offset += count;
         client->write_want = POLLOUT;
         if (client->output_offset == client->output_length) {
@@ -1013,7 +1014,7 @@ static int run_loop(watchdog_server *server) {
                 events = client->handshake_want;
                 if (before_poll >= client->handshake_deadline_ms) client_reset(client);
             } else if (client->state == CLIENT_READY) {
-                if (before_poll - client->last_request_ms >= WATCHDOG_CLIENT_IDLE_TIMEOUT_MS) {
+                if (before_poll - client->last_activity_ms >= WATCHDOG_CLIENT_IDLE_TIMEOUT_MS) {
                     client_reset(client);
                     descriptors[index + 1u] = (struct pollfd){.fd = -1, .events = 0};
                     continue;
@@ -1068,7 +1069,10 @@ static int run_loop(watchdog_server *server) {
                 perror("watchdog: sample");
                 server->last_sample_error_ms = now;
             }
-            server->next_sample_ms = now + server->config.sample_interval_ms;
+            server->next_sample_ms += server->config.sample_interval_ms;
+            if (server->next_sample_ms <= now) {
+                server->next_sample_ms = now + server->config.sample_interval_ms;
+            }
         }
         if (now >= server->next_flush_ms) {
             if (flush_storage(server) != 0) return -1;
