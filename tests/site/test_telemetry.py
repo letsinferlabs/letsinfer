@@ -103,12 +103,25 @@ class TelemetryTests(unittest.TestCase):
         site.update(samples[0])
         clock[0] = samples[1]["unix_ms"] / 1000
         expected = site.update(samples[1])["aggregate"]
+        other_member = {
+            **samples[1],
+            "member_id": "0" * 32,
+            "system": {**samples[1]["system"], "gpu_percent": 1},
+        }
 
         class Response:
             status = 200
 
             def read(self, _: int) -> bytes:
-                return json.dumps({"telemetry": {"aggregate": expected}}).encode()
+                return json.dumps({
+                    "telemetry": {
+                        "aggregate": expected,
+                        "members": [
+                            {"stale": False, "sample": other_member},
+                            {"stale": False, "sample": samples[1]},
+                        ],
+                    }
+                }).encode()
 
         connection = mock.Mock()
         connection.getresponse.return_value = Response()
@@ -128,17 +141,24 @@ class TelemetryTests(unittest.TestCase):
                 ),
                 mock.patch.object(letsinfer.http.client, "HTTPSConnection", return_value=connection),
             ):
-                aggregate = letsinfer._local_controller_telemetry({
-                    "watchdog_controller_ca_file": str(paths[0]),
-                    "watchdog_local_controller_cert_file": str(paths[1]),
-                    "watchdog_local_controller_key_file": str(paths[2]),
-                })
+                aggregate = letsinfer._local_controller_telemetry(
+                    {
+                        "watchdog_controller_ca_file": str(paths[0]),
+                        "watchdog_local_controller_cert_file": str(paths[1]),
+                        "watchdog_local_controller_key_file": str(paths[2]),
+                    },
+                    preferred_member_id=MEMBER,
+                )
         context_factory.assert_called_once_with(cafile=str(paths[0].resolve()))
         connection.request.assert_called_once_with(
-            "GET", "/control/v1/telemetry?history=300"
+            "GET", "/control/v1/telemetry?history=0"
         )
         self.assertEqual(aggregate["active_requests"], 1)
         self.assertEqual(aggregate["rates"]["output_tokens_per_second"], 11.0)
+        self.assertTrue(aggregate["fresh"])
+        self.assertEqual(aggregate["sample_member_id"], MEMBER)
+        self.assertEqual(aggregate["sample_sequence"], 8)
+        self.assertEqual(aggregate["system"]["gpu_percent"], 60)
 
     def test_native_live_sample_decodes_before_durable_ring_flush(self) -> None:
         sample = decode_watchdog_protocol_sample(
@@ -179,7 +199,9 @@ class TelemetryTests(unittest.TestCase):
             deadline = time.monotonic() + 1
             while len(accepted) < 2 and time.monotonic() < deadline:
                 time.sleep(0.01)
+            self.assertTrue(publisher.alive())
             publisher.close()
+            self.assertFalse(publisher.alive())
         self.assertEqual(
             [row["inference"]["active_requests"] for row in accepted], [1, 0]
         )

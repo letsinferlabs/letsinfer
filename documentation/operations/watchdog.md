@@ -73,9 +73,11 @@ owner-only active projection. Watchdog reloads that projection for each typed
 status request, so a runtime switch updates model, engine, version, and capacity
 without restarting the resident protector. The installation identity must
 remain unchanged, and Watchdog remains authoritative for engine, trip,
-container, and protection state. A ready controller
-must complete a valid request at least every 30 seconds, so a half-open or
-partial-frame connection cannot retain a bounded controller slot indefinitely.
+container, and protection state. A ready non-subscribed controller must
+complete a valid request at least every 30 seconds. A live subscription
+refreshes that activity deadline on each successful telemetry write; healthy
+listeners therefore stay connected while stalled, half-open, and partial-frame
+peers still expire without retaining a bounded slot indefinitely.
 
 Every one-second sample also carries the complete engine-neutral inference
 counter contract: active/queued requests; received, admitted, completed,
@@ -96,8 +98,14 @@ model. It never estimates token counts from response text.
 The site agent feeds the coordinator from one authenticated native Watchdog
 live subscription, so the ten-second durable-ring flush remains a crash/history
 boundary rather than a live-visibility gate. The local CLI reads the site
-agent's private aggregate instead of consuming another Watchdog stream. The
-Mac keeps a newer direct sample when a delayed controller aggregate arrives.
+agent's current private aggregate instead of consuming another Watchdog stream
+or transferring unused history on every refresh. That controller listener has
+eight bounded concurrent request workers, and a slow TLS peer cannot block
+other monitoring clients. The live terminal keeps one last verified aggregate
+for at most three seconds during a transient reconnect, labels longer outages
+as unavailable, records each Watchdog sequence once, and draws complete frames
+without a clear-before-draw blank. The Mac keeps a newer direct sample when a
+delayed controller aggregate arrives.
 
 Each installation has a random 256-bit installation ID and an owner-only
 controller registry. Watchdog accepts a certificate only when both normal CA

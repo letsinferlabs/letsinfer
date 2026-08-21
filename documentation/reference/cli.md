@@ -242,7 +242,11 @@ absent, exited, unhealthy, or identity-mismatched runtime is shown as stopped
 or failed. Interactive `letsinfer status` is a live, one-second dashboard and
 runs until `Ctrl-C`; `--json` and redirected output remain one-shot machine
 interfaces. The dashboard uses the authenticated site telemetry feed for
-scheduler, throughput, history, and system readings.
+scheduler, throughput, history, and system readings. A single transient
+controller read retains the last verified telemetry for no more than three
+seconds and shows a reconnecting label; longer loss is explicitly unavailable
+rather than rendered as zero. Interactive frames are replaced atomically, and
+history advances only when the native Watchdog sequence advances.
 
 Host available memory is telemetry, not an availability or admission signal.
 Loaded engines commonly reserve weights, KV cache, and graph workspaces before

@@ -122,6 +122,22 @@ class LiveControllerTests(unittest.TestCase):
             0,
         )
 
+    def test_slow_tls_peer_does_not_block_other_controller_requests(self) -> None:
+        blocker = socket.create_connection(
+            ("127.0.0.1", self.server.server_port), timeout=1
+        )
+        try:
+            time.sleep(0.05)
+            started = time.monotonic()
+            status, body, _ = self._call(
+                self.viewer_tls, "GET", "/control/v1/site"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body["controller"]["role"], "viewer")
+            self.assertLess(time.monotonic() - started, 1.0)
+        finally:
+            blocker.close()
+
     def _certificate_authority(self) -> tuple[pathlib.Path, pathlib.Path]:
         certificate = self.root / "ca.crt"
         key = self.root / "ca.key"

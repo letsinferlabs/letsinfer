@@ -801,7 +801,120 @@ class TerminalTests(unittest.TestCase):
         rendered = stream.getvalue()
         self.assertIn("\033[?25l", rendered)
         self.assertIn("\033[?25h", rendered)
+        self.assertIn("\033[?1049h", rendered)
+        self.assertIn("\033[?1049l", rendered)
+        self.assertNotIn("\033[H\033[J", rendered)
         self.assertIn("fixture-model", rendered)
+
+    def test_live_runtime_status_keeps_last_good_telemetry_during_reconnect(self) -> None:
+        stream = FakeStream(tty=True)
+        base = {
+            "service": {
+                "active": "active",
+                "engine_active": "active",
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+                "gateway_model_identity": True,
+                "site_active": "active",
+                "recovery_timer_active": "active",
+                "memory_current_bytes": 19 * 1024 * 1024,
+                "memory_limit_bytes": 30 * 1024 * 1024,
+            },
+            "container": {
+                "state": "running",
+                "healthy": True,
+                "docker_health": "healthy",
+                "model_identity": True,
+                "model": "fixture-model",
+                "engine": "sglang",
+                "target": "dgx-spark",
+                "runtime_version": "1.0.0",
+            },
+            "protection": {"armed": True, "trip_latched": False},
+            "lifecycle": {"state": "ready", "runtime_ready": True},
+        }
+        payloads = [
+            {
+                **base,
+                "telemetry": {
+                    "active_requests": 1,
+                    "queued_requests": 0,
+                    "sample_sequence": 7,
+                    "system": {"gpu_percent": 73},
+                },
+            },
+            {**base, "telemetry": None},
+        ]
+        with (
+            mock.patch.object(ui.sys, "stdout", stream),
+            mock.patch.object(ui.time, "sleep", side_effect=[None, KeyboardInterrupt]),
+        ):
+            self.assertEqual(ui.live_runtime_status(lambda: payloads.pop(0)), 0)
+        rendered = stream.getvalue()
+        self.assertGreaterEqual(rendered.count("73%"), 2)
+        self.assertIn("reconnecting · last good", rendered)
+        self.assertNotIn("\033[H\033[J", rendered)
+
+    def test_live_runtime_status_keeps_local_sample_when_site_member_is_stale(self) -> None:
+        stream = FakeStream(tty=True)
+        base = {
+            "service": {
+                "memory_current_bytes": 19 * 1024 * 1024,
+                "memory_limit_bytes": 30 * 1024 * 1024,
+            },
+            "container": {"model": "fixture-model"},
+            "lifecycle": {"state": "ready", "runtime_ready": True},
+        }
+        payloads = [
+            {
+                **base,
+                "telemetry": {
+                    "fresh": True,
+                    "active_requests": 1,
+                    "queued_requests": 0,
+                    "sample_sequence": 7,
+                    "system": {"gpu_percent": 73},
+                },
+            },
+            {
+                **base,
+                "telemetry": {
+                    "fresh": False,
+                    "active_requests": 2,
+                    "queued_requests": 1,
+                },
+            },
+        ]
+        with (
+            mock.patch.object(ui.sys, "stdout", stream),
+            mock.patch.object(ui.time, "sleep", side_effect=[None, KeyboardInterrupt]),
+        ):
+            self.assertEqual(ui.live_runtime_status(lambda: payloads.pop(0)), 0)
+        rendered = stream.getvalue()
+        self.assertGreaterEqual(rendered.count("73%"), 2)
+        self.assertIn("2 active · 1 queued", rendered)
+        self.assertIn("reconnecting · last good", rendered)
+
+    def test_runtime_status_labels_missing_telemetry_without_fake_zeroes(self) -> None:
+        stream = FakeStream(tty=True)
+        ui.runtime_status(
+            {
+                "service": {
+                    "memory_current_bytes": 19 * 1024 * 1024,
+                    "memory_limit_bytes": 30 * 1024 * 1024,
+                },
+                "telemetry": {"display_state": "unavailable"},
+            },
+            stream=stream,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
+        )
+        rendered = stream.getvalue()
+        self.assertIn("telemetry unavailable", rendered)
+        self.assertRegex(rendered, r"Requests\s+—")
+        self.assertRegex(rendered, r"Network\s+—")
+        self.assertNotIn("0K/s", rendered)
 
     def test_runtime_status_does_not_call_a_reachable_api_unavailable(self) -> None:
         stream = FakeStream(tty=True)

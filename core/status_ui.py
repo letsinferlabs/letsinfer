@@ -450,10 +450,24 @@ def dashboard_lines(
             f"Scheduler  {terminal.paint(f'{scheduler_capacity} max · dynamic admission', ui.DIM)}",
         )
     )
-    active_value = active or 0
-    queued_value = queued or 0
-    lines.append(_row(terminal, "Active", f"{active_value} requests", width=width))
-    lines.append(_row(terminal, "Queue", f"{queued_value} waiting", width=width))
+    active_value = active if active is not None else None
+    queued_value = queued if queued is not None else None
+    lines.append(
+        _row(
+            terminal,
+            "Active",
+            "—" if active_value is None else f"{active_value} requests",
+            width=width,
+        )
+    )
+    lines.append(
+        _row(
+            terminal,
+            "Queue",
+            "—" if queued_value is None else f"{queued_value} waiting",
+            width=width,
+        )
+    )
     lines.append(
         _row(
             terminal,
@@ -480,6 +494,14 @@ def dashboard_lines(
         if min(watchdog_current, watchdog_limit) < 0
         else f"{watchdog_current / 1024**2:.1f} / {watchdog_limit / 1024**2:.0f} MiB"
     )
+    telemetry_display_state = str(telemetry.get("display_state") or "live")
+    telemetry_detail = (
+        f"reconnecting · last good {_number(telemetry.get('display_age_seconds'), 0):.0f}s ago"
+        if telemetry_display_state == "reconnecting"
+        else "telemetry unavailable"
+        if telemetry_display_state == "unavailable"
+        else ""
+    )
     lines.extend(("", "Performance"))
     lines.append(_row(terminal, "Tokens", f"{_rate(aggregate_rate)} tok/s", f"{_rate(decode_rate)} decode · {_rate(prefill_rate)} prefill", width=width))
     lines.append(_row(terminal, "Latency", "—" if ttft < 0 else f"{ttft / 1000:.2f}s TTFT", "— prefix hit" if prefix < 0 else f"{prefix * 100:.0f}% prefix hit", width=width))
@@ -488,11 +510,24 @@ def dashboard_lines(
         _row(
             terminal,
             "Requests",
-            f"{active_value} active · {queued_value} queued",
+            (
+                "—"
+                if active_value is None or queued_value is None
+                else f"{active_value} active · {queued_value} queued"
+            ),
             width=width,
         )
     )
-    lines.append(_row(terminal, "Watchdog", watchdog_usage, width=width))
+    lines.append(
+        _row(
+            terminal,
+            "Watchdog",
+            watchdog_usage,
+            telemetry_detail,
+            color=(ui.YELLOW if telemetry_display_state == "reconnecting" else None),
+            width=width,
+        )
+    )
 
     memory_used = _number(system.get("memory_used_mib"))
     memory_total = _number(system.get("memory_total_mib"))
@@ -508,14 +543,19 @@ def dashboard_lines(
     if cpu_clock >= 0:
         cpu_value += f" {cpu_clock / 1000:.2f}G"
     nvme_value = _percent(system.get("disk_percent"))
-    disk_read = _number(system.get("disk_read_kib_s"), 0)
-    disk_write = _number(system.get("disk_write_kib_s"), 0)
-    nvme_value += f" R{disk_read:.0f}/W{disk_write:.0f}"
+    disk_read = _number(system.get("disk_read_kib_s"))
+    disk_write = _number(system.get("disk_write_kib_s"))
+    if min(disk_read, disk_write) >= 0:
+        nvme_value += f" R{disk_read:.0f}/W{disk_write:.0f}"
     power_watts = _number(system.get("power_deci_w"))
     power_value = "—" if power_watts < 0 else f"{power_watts / 10:.0f} W"
-    rx = _number(system.get("network_rx_kib_s"), 0)
-    tx = _number(system.get("network_tx_kib_s"), 0)
-    network_value = f"{rx + tx:.0f}K/s ↓{rx:.0f} ↑{tx:.0f}"
+    rx = _number(system.get("network_rx_kib_s"))
+    tx = _number(system.get("network_tx_kib_s"))
+    network_value = (
+        "—"
+        if min(rx, tx) < 0
+        else f"{rx + tx:.0f}K/s ↓{rx:.0f} ↑{tx:.0f}"
+    )
 
     system_rows = (
         ("GPU", "gpu", gpu_value, 100.0),
