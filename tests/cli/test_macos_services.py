@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import plistlib
 import subprocess
@@ -15,6 +16,7 @@ from core.platform.macos import (
     LaunchAgent,
     MacOSServiceError,
     install_launch_agent,
+    remove_launch_agent,
     render_launch_agent,
 )
 
@@ -79,4 +81,24 @@ class MacOSServiceTests(unittest.TestCase):
         with self.assertRaises(MacOSServiceError):
             render_launch_agent(
                 LaunchAgent(label=SITE_LABEL, arguments=("sh", "-c", "echo unsafe"))
+            )
+
+    def test_remove_boots_out_and_deletes_only_the_named_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            runner = FakeRunner()
+            agent = LaunchAgent(
+                label=GATEWAY_LABEL,
+                arguments=("/opt/letsinfer/bin/letsinfer", "gateway", "--port", "8000"),
+            )
+            install_launch_agent(agent, home=home, runner=runner)
+            path = home / "Library/LaunchAgents/ai.letsinfer.gateway.plist"
+            self.assertTrue(path.is_file())
+
+            remove_launch_agent(GATEWAY_LABEL, home=home, runner=runner)
+
+            self.assertFalse(path.exists())
+            self.assertIn(
+                ("launchctl", "bootout", f"gui/{os.getuid()}/{GATEWAY_LABEL}"),
+                runner.commands,
             )

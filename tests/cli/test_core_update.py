@@ -18,6 +18,39 @@ from core import cli as letsinfer
 
 
 class CoreUpdateTests(unittest.TestCase):
+    def test_failed_rebind_never_prunes_the_previous_core(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            installer = root / "install.sh"
+            installer.write_text("#!/bin/sh\n", encoding="utf-8")
+            launcher = root / "letsinfer"
+            launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+            commands: list[list[str]] = []
+
+            def passthrough(command: list[str]) -> None:
+                commands.append(list(command))
+                if command == [str(launcher), "core-rebind"]:
+                    raise letsinfer.LetsInferError("rebind failed")
+
+            with (
+                mock.patch.object(letsinfer.benchmark_jobs, "active_state", return_value=None),
+                mock.patch.object(
+                    letsinfer,
+                    "_installed_core_layout",
+                    return_value=(root, installer, launcher),
+                ),
+                mock.patch.object(letsinfer, "run_passthrough", side_effect=passthrough),
+                mock.patch.object(
+                    letsinfer.ui,
+                    "Terminal",
+                    return_value=SimpleNamespace(interactive=False),
+                ),
+                self.assertRaisesRegex(letsinfer.LetsInferError, "rebind failed"),
+            ):
+                letsinfer.update_core(argparse.Namespace(version=None))
+
+        self.assertNotIn([str(launcher), "core-prune", "--quiet"], commands)
+
     def test_interactive_update_preflights_sudo_then_owns_three_steps(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -80,6 +113,7 @@ class CoreUpdateTests(unittest.TestCase):
         self.assertEqual(events.count("progress:advance"), 3)
         self.assertIn(("run", [str(launcher), "core-rebind"]), events)
         self.assertIn(("run", [str(launcher), "--help"]), events)
+        self.assertIn(("run", [str(launcher), "core-prune", "--quiet"]), events)
         self.assertEqual(events[-1], ("success", "Core updated"))
 
     def _installed_tree(self, root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
@@ -118,6 +152,8 @@ class CoreUpdateTests(unittest.TestCase):
                         "1.2.4-rc.1",
                     ],
                     [str(launcher), "core-rebind"],
+                    [str(launcher), "--help"],
+                    [str(launcher), "core-prune", "--quiet"],
                 ],
             )
 
@@ -221,6 +257,42 @@ class CoreUpdateTests(unittest.TestCase):
                 timeout_seconds=1,
                 poll_seconds=0.1,
             )
+
+    def test_artifact_prune_plan_preserves_every_active_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            control = root / "control"
+            watchdog = root / "watchdog"
+            active_control = control / ("a" * 64)
+            stale_control = control / ("b" * 64)
+            for path in (active_control, stale_control):
+                releases = path / "releases"
+                releases.mkdir(parents=True)
+                (releases / "release.json").write_text("{}\n", encoding="utf-8")
+            active_watchdog = watchdog / ("c" * 64)
+            stale_watchdog = watchdog / ("d" * 64)
+            active_watchdog.mkdir(parents=True)
+            stale_watchdog.mkdir()
+            with (
+                mock.patch.object(letsinfer, "default_control_parent", return_value=control),
+                mock.patch.object(
+                    letsinfer, "default_watchdog_runtime_parent", return_value=watchdog
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "_core_artifact_references",
+                    return_value=({active_control.resolve()}, {active_watchdog.name}),
+                ),
+                mock.patch.object(letsinfer, "sha256_file", return_value="e" * 64),
+                mock.patch.object(letsinfer, "validate_control_bundle") as validate,
+                mock.patch.object(letsinfer, "verify_watchdog_runtime") as verify,
+            ):
+                result = letsinfer._core_user_artifact_prune_plan()
+
+        self.assertEqual(result["control_bundles"], [stale_control])
+        self.assertEqual(result["watchdog_runtimes"], [stale_watchdog])
+        validate.assert_called_once()
+        verify.assert_called_once_with(stale_watchdog, stale_watchdog.name)
 
     def test_core_plane_handoff_quiesces_and_restores_runtime_services(self) -> None:
         commands: list[list[str]] = []

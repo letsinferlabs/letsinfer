@@ -28,6 +28,7 @@ from collections.abc import Iterator, Sequence
 from typing import Any
 
 from core.orchestration import OrchestrationError, validate_orchestration_contract
+from core.paths import config_root, runtime_root
 
 
 RUNTIME_CONFIG = "runtime.json"
@@ -1215,12 +1216,7 @@ def materialize(source: str | os.PathLike[str]) -> Iterator[RuntimePack]:
 
 
 def default_runtime_home() -> pathlib.Path:
-    override = os.environ.get("LETSINFER_RUNTIME_HOME")
-    if override:
-        return pathlib.Path(override).expanduser()
-    data_override = os.environ.get("LETSINFER_DATA_HOME")
-    root = pathlib.Path(data_override).expanduser() if data_override else pathlib.Path.home() / ".local/share/letsinfer"
-    return root / "runtimes"
+    return runtime_root()
 
 
 def _private_directory(path: pathlib.Path) -> None:
@@ -1448,13 +1444,7 @@ def _catalog_public_key(explicit: str | None) -> pathlib.Path | None:
     configured = explicit or os.environ.get("LETSINFER_CATALOG_PUBLIC_KEY")
     if configured:
         return pathlib.Path(configured).expanduser()
-    config_override = os.environ.get("LETSINFER_CONFIG_HOME")
-    root = (
-        pathlib.Path(config_override).expanduser()
-        if config_override
-        else pathlib.Path.home() / ".config/letsinfer"
-    )
-    default = root / "catalog-public-key.pem"
+    default = config_root() / "catalog-public-key.pem"
     return default if default.is_file() else BUILTIN_CATALOG_PUBLIC_KEY
 
 
@@ -1772,9 +1762,7 @@ def resolved_catalog_location(explicit: str | None = None) -> str | None:
     configured = os.environ.get("LETSINFER_CATALOG")
     if configured:
         return configured
-    config_override = os.environ.get("LETSINFER_CONFIG_HOME")
-    root = pathlib.Path(config_override).expanduser() if config_override else pathlib.Path.home() / ".config/letsinfer"
-    default = root / "catalog.json"
+    default = config_root() / "catalog.json"
     return str(default) if default.is_file() else DEFAULT_CATALOG_URL
 
 

@@ -145,7 +145,8 @@ pins an owner/repository and exact 40-hex revision. A `gguf-file` additionally
 pins one contained `.gguf` filename and lowercase SHA-256, with an optional
 positive byte length. Cache directory names are derived rather than repeated
 in the manifest. Acquisition uses the digest-pinned helper image and the
-shared Hugging Face store, so equal repository objects deduplicate naturally.
+Hugging Face-format model store under `$LETSINFER_HOME/models`, so equal
+repository objects deduplicate naturally.
 Every declared artifact is verified before launch, and the shared hub is
 mounted read-only.
 
@@ -184,7 +185,7 @@ example `"5-9,15-19"`. The value must use ascending, non-overlapping canonical
 Docker CPU-set ranges and is emitted directly as `--cpuset-cpus`. Omitting it
 leaves CPU placement to the host; core never guesses an affinity mask.
 
-Installed objects live below `~/.local/share/letsinfer/runtimes/objects/` by
+Installed objects live below `$LETSINFER_HOME/runtimes/objects/` by
 runtime digest. Private selection receipts record the chosen model/engine/target,
 version, digest, canonical target-contract SHA-256, immutable core bundle,
 source policy, install timestamp, hashed hardware fingerprint, cryptographic
@@ -269,5 +270,5 @@ hardware. The selected target contract's canonical SHA-256 is verified against
 the runtime manifest and retained in the installation receipt.
 Core uses the signed production catalog and bundled public trust key by
 default. Set `LETSINFER_CATALOG`, install
-`~/.config/letsinfer/catalog.json`, or pass `--catalog` explicitly only to
+`$LETSINFER_HOME/config/catalog.json`, or pass `--catalog` explicitly only to
 override that production source.

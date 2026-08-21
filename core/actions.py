@@ -83,7 +83,13 @@ ACTIONS = {
         _action("restart", CommandScope.COORDINATOR, MutationClass.SITE, AuditPolicy.ALWAYS),
         _action("recover", CommandScope.COORDINATOR, MutationClass.SITE, AuditPolicy.ALWAYS),
         _action("stop", CommandScope.COORDINATOR, MutationClass.SITE, AuditPolicy.ALWAYS),
-        _action("uninstall", CommandScope.COORDINATOR, MutationClass.SITE, AuditPolicy.ALWAYS),
+        _action(
+            "uninstall",
+            CommandScope.COORDINATOR,
+            MutationClass.SITE,
+            AuditPolicy.ALWAYS,
+            requires_site=False,
+        ),
         _action("exposure.status", CommandScope.COORDINATOR, MutationClass.READ, AuditPolicy.NONE),
         _action("expose", CommandScope.COORDINATOR, MutationClass.SITE, AuditPolicy.ALWAYS),
         _action("unexpose", CommandScope.COORDINATOR, MutationClass.SITE, AuditPolicy.ALWAYS),
@@ -117,6 +123,7 @@ ACTIONS = {
         _action("gateway", CommandScope.COORDINATOR, MutationClass.INTERNAL, AuditPolicy.NONE),
         _action("site-agent", CommandScope.ALL, MutationClass.INTERNAL, AuditPolicy.NONE),
         _action("core-rebind", CommandScope.ALL, MutationClass.INTERNAL, AuditPolicy.NONE, requires_site=False),
+        _action("core-prune", CommandScope.ALL, MutationClass.INTERNAL, AuditPolicy.NONE, requires_site=False),
     )
 }
 

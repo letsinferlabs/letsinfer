@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 
+from ..paths import logs_root as canonical_logs_root
 
 LABEL_PREFIX = "ai.letsinfer."
 SITE_LABEL = f"{LABEL_PREFIX}site"
@@ -48,7 +49,9 @@ def launch_agents_root(home: pathlib.Path | None = None) -> pathlib.Path:
 
 
 def logs_root(home: pathlib.Path | None = None) -> pathlib.Path:
-    return (home or pathlib.Path.home()) / "Library" / "Logs" / "LetsInfer"
+    if home is not None:
+        return home / ".local" / "share" / "letsinfer" / "logs"
+    return canonical_logs_root()
 
 
 def launch_agent_path(label: str, home: pathlib.Path | None = None) -> pathlib.Path:
@@ -218,3 +221,24 @@ def install_launch_agent(
         raise MacOSServiceError(
             f"launchd activation failed; previous service restored: {failure}"
         ) from failure
+
+
+def remove_launch_agent(
+    label: str,
+    *,
+    home: pathlib.Path | None = None,
+    runner: Runner = _default_runner,
+) -> None:
+    """Unload and remove one user-owned Let's Infer launch agent."""
+
+    path = launch_agent_path(label, home)
+    snapshot = _snapshot(path)
+    target = domain_target(label)
+    if runner(("launchctl", "print", target)).returncode == 0:
+        _run(
+            runner,
+            ("launchctl", "bootout", target),
+            expected=frozenset({0, 3}),
+        )
+    if snapshot is not None:
+        path.unlink()

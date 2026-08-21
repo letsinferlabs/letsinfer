@@ -20,6 +20,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from core.paths import data_root
 from core.runtime_packs import RuntimePackError, catalog_release, load_catalog
 
 
@@ -148,13 +149,7 @@ def compare_versions(left: str, right: str) -> int:
 
 
 def default_database_path() -> pathlib.Path:
-    override = os.environ.get("LETSINFER_DATA_HOME")
-    root = (
-        pathlib.Path(override).expanduser()
-        if override
-        else pathlib.Path.home() / ".local/share/letsinfer"
-    )
-    return root / "updates.sqlite3"
+    return data_root() / "updates.sqlite3"
 
 
 def _safe_error_code(error: BaseException) -> str:

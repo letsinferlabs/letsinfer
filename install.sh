@@ -98,6 +98,19 @@ done
 allow_insecure=$(printenv LETSINFER_ALLOW_INSECURE_RELEASE_URL 2>/dev/null || true)
 signers_override=$(printenv LETSINFER_RELEASE_ALLOWED_SIGNERS_PATH 2>/dev/null || true)
 current_path=$(printenv PATH 2>/dev/null || true)
+if [ -n "${LETSINFER_HOME:-}" ]; then
+    letsinfer_home=$LETSINFER_HOME
+else
+    letsinfer_home="$HOME/.local/share/letsinfer"
+    LETSINFER_HOME_DEFAULTED=1
+    export LETSINFER_HOME_DEFAULTED
+fi
+case "$letsinfer_home" in
+    /*) ;;
+    *) fail "LETSINFER_HOME must be an absolute path" ;;
+esac
+LETSINFER_HOME=$letsinfer_home
+export LETSINFER_HOME
 case "${TERM:-}" in
     ""|dumb) ;;
     *)
@@ -140,6 +153,9 @@ PY
 fi
 
 umask 077
+[ ! -L "$LETSINFER_HOME" ] || fail "LETSINFER_HOME cannot be a symlink"
+mkdir -p "$LETSINFER_HOME"
+chmod 0700 "$LETSINFER_HOME"
 temporary=$(mktemp -d "/tmp/letsinfer-install.XXXXXXXX")
 cleanup() {
     clear_progress
