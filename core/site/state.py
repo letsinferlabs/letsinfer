@@ -28,6 +28,8 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, TypeVar
 
+from core.paths import config_root as canonical_config_root
+from core.paths import data_root as canonical_data_root
 from core.orchestration import OrchestrationError, validate_group_document
 from core.token_count import TOKEN_COUNT_PROTOCOLS
 
@@ -67,13 +69,11 @@ class SiteIdentity:
 
 
 def config_root() -> pathlib.Path:
-    override = os.environ.get("LETSINFER_CONFIG_HOME")
-    return pathlib.Path(override).expanduser() if override else pathlib.Path.home() / ".config/letsinfer"
+    return canonical_config_root()
 
 
 def data_root() -> pathlib.Path:
-    override = os.environ.get("LETSINFER_DATA_HOME")
-    return pathlib.Path(override).expanduser() if override else pathlib.Path.home() / ".local/share/letsinfer"
+    return canonical_data_root()
 
 
 def identity_path() -> pathlib.Path:

@@ -20,6 +20,7 @@ from typing import Any
 
 from .contracts import OrchestrationError, validate_group_document
 from .credentials import GroupCredentialError, credential_sha256
+from ..paths import data_root
 
 
 PROTOCOL = "letsinfer-engine-group-job-v1"
@@ -55,9 +56,7 @@ def canonical_bytes(value: Any) -> bytes:
 
 
 def default_job_store_path() -> pathlib.Path:
-    override = os.environ.get("LETSINFER_DATA_HOME")
-    root = pathlib.Path(override).expanduser() if override else pathlib.Path.home() / ".local/share/letsinfer"
-    return root / "member-jobs.sqlite3"
+    return data_root() / "member-jobs.sqlite3"
 
 
 def _private_directory(path: pathlib.Path) -> None:

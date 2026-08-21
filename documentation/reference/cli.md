@@ -113,7 +113,7 @@ from service activation until its serving gate is qualified.
 
 Remote catalogs require HTTPS and an exact-byte Ed25519 signature at
 `<catalog-url>.sig`. The production catalog and its public trust key are
-built-in defaults; `~/.config/letsinfer/catalog-public-key.pem` and
+built-in defaults; `$LETSINFER_HOME/config/catalog-public-key.pem` and
 `LETSINFER_CATALOG_PUBLIC_KEY` override the trust root. A signature binds the
 catalog SHA-256 and trusted public-key fingerprint. An explicitly selected
 unsigned local catalog is supported only as a development trust boundary.
@@ -194,6 +194,7 @@ letsinfer acquire MODEL [--engine ENGINE] [--target TARGET]
 letsinfer benchmark RUNTIME [--c1|--c2|--c4|--c8|--c16] [--32k|--64k|--128k|--256k]
 letsinfer benchmark [--json]
 letsinfer benchmark stop
+letsinfer benchmark clean [--yes]
 letsinfer verify MODEL [--engine ENGINE] [--target TARGET] [--source-only]
 letsinfer serve MODEL [--engine ENGINE] [--target TARGET] [--dry-run]
 letsinfer status [--json]
@@ -206,7 +207,7 @@ letsinfer pair [--timeout SECONDS] [--role viewer|operator|administrator]
 letsinfer controllers list [--json]
 letsinfer controllers forget NAME_OR_ID
 letsinfer stop
-letsinfer uninstall
+letsinfer uninstall [--keep-models]
 ```
 
 `start` and `restart` fail closed while Watchdog has a durable protection trip.
@@ -284,7 +285,7 @@ capability records the rendered count without resizing them. Prompts, their
 derived plan, identity hashes, and a validated `benchmark.json` are written
 into evidence. Every measured domain/cell uses a fresh
 managed container and an empty prefix store. The output directory defaults to
-a timestamped path under `~/.cache/letsinfer/benchmarks/`. `--list` validates the
+a timestamped path under `$LETSINFER_HOME/benchmarks/`. `--list` validates the
 declarative contract and prints selected cells without starting inference.
 
 The benchmark is one durable node job. The launch command attaches to a live
@@ -302,6 +303,17 @@ intent: it restores the prior resident engine and recovery-timer state, or
 rearms the final isolated candidate when a candidate was serving before the
 benchmark. Cancellation waits for that restoration instead of leaving status
 at `STOPPED`.
+
+`benchmark clean` removes locally generated benchmark results, telemetry, job
+logs, and completed job state after confirmation. `--yes` is available for
+automation. It never removes the sealed `benchmark.json` inside an installed
+runtime object.
+
+`uninstall` requires interactive confirmation, removes the services, managed
+containers and images, installed core, credentials, runtime objects, caches,
+logs, and local evidence, and then removes `LETSINFER_HOME`. With
+`--keep-models`, the home remains with only its `models/` directory. There is
+no non-interactive confirmation bypass for full uninstall.
 
 The public JSON includes a cryptographic benchmark ID and per-workload
 aggregate/decode TPS, TTFT, prefix-cache state, maximum GPU/CPU temperature,

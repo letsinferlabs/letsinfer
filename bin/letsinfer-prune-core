@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only
 set -euo pipefail
-if [[ -z ${LETSINFER_HOME:-} ]]; then
-    LETSINFER_HOME=$HOME/.local/share/letsinfer
-    export LETSINFER_HOME_DEFAULTED=1
-fi
-export LETSINFER_HOME
-LETSINFER_LAUNCHER_DIR=$(CDPATH= cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-export LETSINFER_LAUNCHER_DIR
 SCRIPT_PATH=${BASH_SOURCE[0]}
 while [ -L "$SCRIPT_PATH" ]; do
     SCRIPT_DIR=$(CDPATH= cd -P -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
@@ -25,5 +18,5 @@ import runpy
 import sys
 
 sys.path.insert(0, sys.argv.pop(1))
-runpy.run_module("core.cli", run_name="__main__")
+runpy.run_module("tools.prune_core", run_name="__main__")
 ' "$PROJECT_ROOT" "$@"

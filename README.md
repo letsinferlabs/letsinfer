@@ -145,7 +145,7 @@ A trusted schema-3 catalog declares each hardware target once and recommends
 one qualified engine independently for each model and target. Let's Infer uses
 the signed `letsinferlabs/catalog` catalog and its built-in public trust key by
 default. Remote catalogs must ship an exact-byte Ed25519 sidecar at
-`<catalog-url>.sig`; `~/.config/letsinfer/catalog-public-key.pem` and
+`<catalog-url>.sig`; `$LETSINFER_HOME/config/catalog-public-key.pem` and
 `LETSINFER_CATALOG_PUBLIC_KEY` are explicit trust-root overrides. Signature
 verification happens before parsing any target or runtime choice.
 An explicitly selected unsigned local file is a development trust boundary,
@@ -157,7 +157,10 @@ user runs `letsinfer upgrade`. Core updates are independent:
 active inference around the core-service handoff, and composes the unchanged
 runtime artifacts with the new core into one immutable active control bundle.
 It does not change runtime selections, pack identities, models, caches, or
-evidence. On an interactive terminal, one three-stage display owns
+evidence. After the new service binding and launcher pass verification, the
+update removes superseded validated core identities, unreferenced control
+bundles, and old Watchdog builds; failures retain the previous core bytes.
+On an interactive terminal, one three-stage display owns
 download/install, service rebinding, and verification; sudo authentication is
 completed before animation begins. Redirected output retains the plain command
 contract. A compatible runtime's exact Watchdog safety policy is preserved
@@ -429,10 +432,10 @@ model artifacts or registry image layers a fail-closed error. `acquire`
 remains available for explicit model prefetch without requiring a qualified
 serving recipe.
 
-Dependencies stay in their native shared content stores: model revisions and
-blobs use the Hugging Face cache, runtime packs use Let's Infer's immutable object
+Dependencies stay in digest-addressed content stores: model revisions and
+blobs use `$LETSINFER_HOME/models`, runtime packs use Let's Infer's immutable object
 store, verified native integration artifacts use
-`~/.local/share/letsinfer/artifacts/sha256`, and image layers use Docker's
+`$LETSINFER_HOME/state/artifacts/sha256`, and image layers use Docker's
 content store. Python, system, CUDA, and other engine packages remain inside
 the immutable runtime image and never pollute host package managers. Another
 runtime referencing the same exact content verifies and reuses it instead of
@@ -453,7 +456,7 @@ private service configuration, builds and tests the core-release Watchdog,
 and enables the user systemd services. The
 complete core source manifest and exact runtime manifest are independently
 validated and atomically staged under a service-bundle identity derived from
-both digests in `~/.local/share/letsinfer/control/`; runtime plugins are staged
+both digests in `$LETSINFER_HOME/state/control/`; runtime plugins are staged
 under a release-and-manifest-specific path. The systemd units execute that
 immutable bundle rather than the development checkout.
 Python bytecode generation is disabled in both the controller and service unit,
@@ -493,18 +496,17 @@ container and are excluded from Let's Infer's 30 MiB resident watchdog budget.
 
 ### Inference API access
 
-Installation creates these credentials with private permissions:
+Installation creates these credentials with private permissions under
+`$LETSINFER_HOME/config`:
 
-- `~/.config/letsinfer/api-key`
-- `~/.config/letsinfer/tls/server.key`
-- `~/.config/letsinfer/tls/server.crt`
-- `~/.config/letsinfer/watchdog/server.crt` and `server.key`
-- `~/.config/letsinfer/watchdog/controller-ca.crt` and `controller-ca.key`
-- `~/.config/letsinfer/watchdog/local-controller.crt` and `local-controller.key`
-- `~/.config/letsinfer/watchdog/controllers.allow`
-- `~/.config/letsinfer/site/identity.json` and the coordinator's private
-  SQLite authority
-- `~/.config/letsinfer/installation.json`
+- `api-key`
+- `tls/server.key` and `tls/server.crt`
+- `watchdog/server.crt` and `watchdog/server.key`
+- `watchdog/controller-ca.crt` and `watchdog/controller-ca.key`
+- `watchdog/local-controller.crt` and `watchdog/local-controller.key`
+- `watchdog/controllers.allow`
+- `site.json`, the site/member keys and certificates, and the coordinator's
+  private SQLite authority under `$LETSINFER_HOME/state`
 
 The inference gateway is immediately reachable on the local network at the
 coordinator's `.local` name. It uses HTTP on the LAN so OpenAI-compatible
@@ -513,7 +515,7 @@ and engine traffic continue to use TLS or mutual TLS. For example:
 
 ```bash
 curl \
-  -H "Authorization: Bearer $(<~/.config/letsinfer/api-key)" \
+  -H "Authorization: Bearer $(<"$LETSINFER_HOME/config/api-key")" \
   http://homeai.local:8000/v1/models
 ```
 
@@ -584,10 +586,9 @@ trip acknowledgement and recovery action.
 `stop --name <container>` removes only that managed qualification container
 and leaves the resident Watchdog running, while `stop` without a name stops
 the configured service lifecycle.
-uninstall preserves models, prefix state, runtime caches, evidence, and
-control bundles unless an explicit purge option is given. Use
-`uninstall --purge-control-bundle` only when the configured release no longer
-needs to be retained for rollback.
+`uninstall` requires confirmation and removes the services, managed containers
+and images, core, credentials, runtimes, caches, logs, and local evidence.
+`uninstall --keep-models` preserves only `$LETSINFER_HOME/models`.
 
 Release qualification has a separate, explicit launch mode:
 
@@ -630,6 +631,7 @@ letsinfer acquire <model> [--engine vllm|sglang|llama.cpp|dwarfstar]
 letsinfer benchmark <runtime> [--c1|--c2|--c4|--c8|--c16] [--32k|--64k|--128k|--256k]
 letsinfer benchmark [--json]
 letsinfer benchmark stop
+letsinfer benchmark clean
 letsinfer update [--version <version>]
 letsinfer update check [--json]
 letsinfer engines
@@ -643,7 +645,7 @@ letsinfer start
 letsinfer restart
 letsinfer recover
 letsinfer stop
-letsinfer uninstall
+letsinfer uninstall [--keep-models]
 ```
 
 ## Documentation
@@ -699,7 +701,7 @@ catalog and installs the immutable runtime and engine-image identities.
 
 ## Project status
 
-The current source is `0.11.0-rc.31`. The logical-site, gateway, membership,
+The current source is `0.11.0-rc.32`. The logical-site, gateway, membership,
 orchestration, benchmark, Watchdog, and native Mac source suites pass on their
 applicable platforms. Core ships no model runtime. DeepSeek V4 Flash with
 DwarfStar is the first external, publicly installable DGX Spark runtime; its

@@ -16,7 +16,7 @@ registry or catalog cannot delay inference administration. The notice tells
 the user what can move; it never applies an update automatically. The core
 installer still verifies checksums and the release signature before applying.
 The advisory snapshot is the private node-local database
-`~/.local/share/letsinfer/updates.sqlite3`; it contains component identities,
+`$LETSINFER_HOME/state/updates.sqlite3`; it contains component identities,
 versions, immutable sources, and verification timestamps, never credentials.
 
 Update core without changing runtime selection:
@@ -24,6 +24,14 @@ Update core without changing runtime selection:
 ```bash
 letsinfer update
 ```
+
+Core update installs the new immutable identity beside the active one, rebinds
+the existing services and runtime, and verifies the new launcher. Only after
+those checks pass does it remove superseded validated core identities, stale
+unreferenced control bundles, and old Watchdog builds. A failed handoff keeps
+the previous core bytes available for recovery. Runtime objects, models,
+benchmark evidence, and runtime rollback history are never part of core
+garbage collection.
 
 Upgrade follows the policy recorded at installation:
 

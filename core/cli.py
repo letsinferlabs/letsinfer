@@ -41,6 +41,16 @@ from typing import Any, Iterable, Mapping, Sequence
 sys.dont_write_bytecode = True
 
 from . import PRODUCT_VERSION
+from .paths import (
+    PathContractError,
+    benchmarks_root,
+    cache_root,
+    ensure_home as ensure_letsinfer_home,
+    evidence_root,
+    home_root as letsinfer_home_root,
+    managed_roots,
+    models_root,
+)
 from .cache_plugins import (
     CachePluginError,
     install_sglang_plugin,
@@ -447,12 +457,22 @@ def default_plugin_root(
 
 
 def default_store_root(manifest: dict[str, Any]) -> pathlib.Path:
-    return pathlib.Path.home() / ".cache/letsinfer/prefix-store" / manifest["release"]
+    return cache_root() / "prefix-store" / manifest["release"]
 
 
 def default_runtime_cache_root(manifest: dict[str, Any]) -> pathlib.Path:
     image_id = manifest["image"]["immutable_id"].removeprefix("sha256:")
-    return pathlib.Path.home() / ".cache/letsinfer/runtime" / image_id
+    return cache_root() / "runtime" / image_id
+
+
+def default_model_cache_root() -> pathlib.Path:
+    return models_root()
+
+
+def requested_model_cache(
+    explicit: str | os.PathLike[str] | None,
+) -> pathlib.Path:
+    return expanded_path(explicit) if explicit else default_model_cache_root()
 
 
 def default_api_key_path() -> pathlib.Path:
@@ -4945,7 +4965,7 @@ def prewarm(
 
 def default_evidence_dir(manifest: dict[str, Any]) -> pathlib.Path:
     stamp = dt.datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
-    return pathlib.Path.home() / ".cache/letsinfer/results/launches" / (
+    return evidence_root() / "launches" / (
         f"{manifest['release']}-{stamp}"
     )
 
@@ -5070,7 +5090,7 @@ def serve(
             port = 8000
     else:
         port = requested_port
-    model_cache = expanded_path(arguments.model_cache or manifest["container"]["model_cache"])
+    model_cache = requested_model_cache(arguments.model_cache)
     plugin_root = (
         expanded_path(arguments.plugin_root)
         if arguments.plugin_root
@@ -8510,9 +8530,8 @@ def install(arguments: argparse.Namespace) -> int:
     if not serving["qualified"]:
         if prepared_receipt is not None:
             manifest_sha = sha256_file(manifest_path)
-            model_cache = expanded_path(
+            model_cache = requested_model_cache(
                 getattr(arguments, "model_cache", None)
-                or manifest["container"]["model_cache"]
             )
             plugin_root_value = getattr(arguments, "plugin_root", None)
             plugin_root = (
@@ -8626,7 +8645,7 @@ def install(arguments: argparse.Namespace) -> int:
         ):
             previous_config = candidate
 
-    model_cache = expanded_path(arguments.model_cache or manifest["container"]["model_cache"])
+    model_cache = requested_model_cache(arguments.model_cache)
     plugin_root = (
         expanded_path(arguments.plugin_root)
         if arguments.plugin_root
@@ -8846,7 +8865,7 @@ def _stop_managed_container(
         raise LetsInferError(f"container {name} is not managed by Let's Infer; refusing to remove it")
 
     stamp = dt.datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
-    evidence = pathlib.Path.home() / ".cache/letsinfer/results/stops" / f"{name}-{stamp}"
+    evidence = evidence_root() / "stops" / f"{name}-{stamp}"
     evidence.mkdir(parents=True, exist_ok=False)
     atomic_json(evidence / "container-inspect.json", inspection)
     logs = run(["docker", "logs", "--tail", "1000", name], check=False)
@@ -10138,37 +10157,124 @@ def doctor(arguments: argparse.Namespace) -> int:
     return 0 if operational_ready else 1
 
 
-def uninstall(arguments: argparse.Namespace) -> int:
-    config_path = absolute_user_path(
-        arguments.config or default_service_config_path()
+def _uninstall_service_config(explicit: str | None) -> tuple[pathlib.Path | None, dict[str, Any] | None]:
+    if explicit is not None:
+        path = absolute_user_path(explicit)
+        if not path.is_file() or path.is_symlink():
+            raise LetsInferError(f"service configuration is unavailable: {path}")
+        return path, read_service_config(path)
+    candidates = (
+        default_service_config_path(),
+        pathlib.Path.home() / ".config/letsinfer/service.json",
     )
-    config = read_service_config(config_path)
-    _remove_all_engine_groups()
-    _retire_qualification_candidate(remove_container=True)
-    active = run(["systemctl", "--user", "is-active", SERVICE_NAME], check=False)
-    if active.returncode == 0:
-        disarm_before_planned_stop(config)
-        run_passthrough(["systemctl", "--user", "stop", SERVICE_NAME])
-    else:
+    for path in candidates:
+        if path.is_symlink():
+            raise LetsInferError(f"service configuration cannot be a symlink: {path}")
+        if path.is_file():
+            return path, read_service_config(path)
+    return None, None
+
+
+def _installed_runtime_image_references() -> set[str]:
+    objects = default_runtime_home() / "objects"
+    if not objects.exists():
+        return set()
+    if objects.is_symlink() or not objects.is_dir():
+        raise LetsInferError(f"runtime object storage is unsafe: {objects}")
+    references: set[str] = set()
+    for descriptor_path in sorted(objects.glob(f"*/{RUNTIME_CONFIG}")):
+        if descriptor_path.is_symlink() or not descriptor_path.is_file():
+            continue
+        try:
+            descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+            release_name = descriptor["release_manifest"]
+            if not isinstance(release_name, str):
+                continue
+            relative = pathlib.PurePosixPath(release_name)
+            if (
+                relative.is_absolute()
+                or not relative.parts
+                or any(part in {"", ".", ".."} for part in relative.parts)
+            ):
+                continue
+            manifest_path = descriptor_path.parent.joinpath(*relative.parts)
+            if manifest_path.is_symlink() or not manifest_path.is_file():
+                continue
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            validate_manifest(manifest)
+        except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError, LetsInferError):
+            # Corrupt local metadata is deleted with the runtime object, but must
+            # never be trusted to select a Docker image for removal.
+            continue
+        image = manifest["image"]
+        references.update((image["reference"], image["immutable_id"], image["base"]))
+        references.add(manifest["model"]["acquisition_image"])
+        plugins = manifest.get("runtime_plugins") or {}
+        for builder_name in ("wheel_builder", "native_builder"):
+            builder = plugins.get(builder_name)
+            if isinstance(builder, dict) and isinstance(builder.get("image"), str):
+                references.add(builder["image"])
+    return references
+
+
+def _remove_managed_containers(
+    runtime_images: Iterable[str] = (),
+) -> tuple[int, int]:
+    if shutil.which("docker") is None:
+        return 0, 0
+    listing = run(
+        ["docker", "ps", "-aq", "--filter", f"label={MANAGED_LABEL}=true"],
+        check=False,
+    )
+    if listing.returncode != 0:
+        return 0, 0
+    images = set(runtime_images)
+    containers = 0
+    for identifier in listing.stdout.split():
+        inspection = container_inspect(identifier)
+        if inspection is None:
+            continue
+        labels = inspection.get("Config", {}).get("Labels") or {}
+        if labels.get(MANAGED_LABEL) != "true":
+            raise LetsInferError(
+                f"container {identifier} lost its Let's Infer ownership label"
+            )
+        image = inspection.get("Config", {}).get("Image")
+        if isinstance(image, str) and image:
+            images.add(image)
+        run(["docker", "rm", "-f", identifier])
+        containers += 1
+    # Remove runtime references before immutable IDs and shared dependency
+    # digests. Docker itself refuses removal while another container needs an
+    # image, so uninstall cannot invalidate an unrelated running workload.
+    ordered_images = sorted(images, key=lambda image: image.startswith("sha256:"))
+    removed_images = sum(
+        run(["docker", "image", "rm", image], check=False).returncode == 0
+        for image in ordered_images
+    )
+    return containers, removed_images
+
+
+def _remove_linux_services(config: dict[str, Any] | None) -> None:
+    if config is not None:
+        active = run(
+            ["systemctl", "--user", "is-active", SERVICE_NAME], check=False
+        )
         inspection = container_inspect(config["name"])
+        if active.returncode == 0 and inspection is not None:
+            disarm_before_planned_stop(config)
         if inspection is not None:
             _stop_managed_container(
                 config["name"], expanded_path(config["engine_api_key_file"])
             )
-
-    run(
-        ["systemctl", "--user", "disable", "--now", RECOVERY_TIMER_NAME],
-        check=False,
-    )
-    run(
-        ["systemctl", "--user", "disable", "--now", GATEWAY_SERVICE_NAME],
-        check=False,
-    )
-    run(
-        ["systemctl", "--user", "disable", "--now", SITE_SERVICE_NAME],
-        check=False,
-    )
-    run(["systemctl", "--user", "disable", SERVICE_NAME], check=False)
+    for name in (
+        RECOVERY_TIMER_NAME,
+        ENGINE_SERVICE_NAME,
+        GATEWAY_SERVICE_NAME,
+        SITE_SERVICE_NAME,
+        SERVICE_NAME,
+    ):
+        run(["systemctl", "--user", "disable", "--now", name], check=False)
     unit_dir = pathlib.Path.home() / ".config/systemd/user"
     for name in (
         SERVICE_NAME,
@@ -10183,62 +10289,175 @@ def uninstall(arguments: argparse.Namespace) -> int:
             raise LetsInferError(f"refusing to remove symlinked unit: {path}")
         if path.is_file():
             path.unlink()
-    run(["systemctl", "--user", "daemon-reload"])
-
-    if arguments.purge_runtime_plugins:
-        plugin_root = expanded_path(config["plugin_root"])
-        _, manifest = configured_release(config)
-        if adapter_for(manifest).requires_runtime_plugins:
-            verify_artifacts(plugin_root, manifest["runtime_plugins"]["artifacts"])
-            shutil.rmtree(plugin_root)
-        elif requires_core_cache_plugin(manifest):
-            try:
-                verify_sglang_plugin(
-                    plugin_root,
-                    source_root=source_root(),
-                    core_version=PRODUCT_VERSION,
-                )
-            except CachePluginError as error:
-                raise LetsInferError(str(error)) from error
-            shutil.rmtree(plugin_root)
-    if arguments.purge_credentials:
-        for key in (
-            "engine_api_key_file",
-            "gateway_api_key_file",
-            "tls_cert_file",
-            "tls_key_file",
-            "watchdog_cert_file",
-            "watchdog_key_file",
-            "watchdog_controller_ca_file",
-            "watchdog_controller_ca_key_file",
-            "watchdog_local_controller_cert_file",
-            "watchdog_local_controller_key_file",
-            "watchdog_controller_allowlist_file",
-        ):
-            value = config.get(key)
-            if not isinstance(value, str):
-                continue
-            path = expanded_path(value)
-            if path.is_symlink():
-                raise LetsInferError(f"refusing to remove symlinked credential: {path}")
-            if path.is_file():
-                path.unlink()
-        installation_identity = default_installation_identity_path()
-        if installation_identity.is_symlink():
-            raise LetsInferError(
-                f"refusing to remove symlinked installation identity: "
-                f"{installation_identity}"
-            )
-        if installation_identity.is_file():
-            installation_identity.unlink()
-    if arguments.purge_control_bundle:
-        purge_control_bundle(config)
-    if arguments.purge_watchdog_runtime:
-        purge_watchdog_runtime(config)
-    config_path.unlink()
-    print(
-        "UNINSTALLED service; model data, prefix cache, runtime cache, and evidence preserved"
+    run(["systemctl", "--user", "daemon-reload"], check=False)
+    timer_stamp = (
+        pathlib.Path.home()
+        / ".local/share/systemd/timers"
+        / f"stamp-{RECOVERY_TIMER_NAME}"
     )
+    if timer_stamp.is_symlink():
+        raise LetsInferError(f"refusing to remove symlinked timer stamp: {timer_stamp}")
+    timer_stamp.unlink(missing_ok=True)
+
+
+def _remove_macos_services() -> None:
+    for label in (macos_services.GATEWAY_LABEL, macos_services.SITE_LABEL):
+        try:
+            macos_services.remove_launch_agent(label)
+        except macos_services.MacOSServiceError as error:
+            raise LetsInferError(f"cannot remove macOS service: {error}") from error
+
+
+def _remove_public_exposure() -> None:
+    if not site_identity_path().is_file():
+        return
+    with _site_store() as store:
+        exposure = store.exposure()
+    if exposure is None or exposure["state"] != "enabled":
+        return
+    if exposure["provider"] != "tailscale-funnel":
+        raise LetsInferError(
+            f"cannot remove unsupported public exposure: {exposure['provider']}"
+        )
+    try:
+        disable_tailscale(exposure["configuration_sha256"])
+    except ExposureError as error:
+        raise LetsInferError(
+            "public inference exposure could not be disabled; uninstall aborted"
+        ) from error
+
+
+def _remove_managed_home(
+    *,
+    keep_models: bool,
+    configured_model_cache: pathlib.Path | None,
+) -> None:
+    home = letsinfer_home_root()
+    model_roots = {models_root()}
+    if configured_model_cache is not None:
+        model_roots.add(configured_model_cache)
+    external = {
+        *managed_roots(),
+        *model_roots,
+        pathlib.Path.home() / ".config/letsinfer",
+        pathlib.Path.home() / ".cache/letsinfer",
+        pathlib.Path.home() / ".local/share/letsinfer",
+        pathlib.Path.home() / "Library/Logs/LetsInfer",
+    }
+    for path in sorted(external, key=lambda item: len(item.parts), reverse=True):
+        if path == home or path.is_relative_to(home):
+            continue
+        if keep_models and path in model_roots:
+            continue
+        _remove_user_tree(path, label="Let's Infer data")
+    if not home.exists() and not home.is_symlink():
+        return
+    if home.is_symlink() or not home.is_dir():
+        raise LetsInferError(f"refusing to remove unsafe LETSINFER_HOME: {home}")
+    if not keep_models:
+        _remove_user_tree(home, label="LETSINFER_HOME")
+        return
+    preserved = models_root()
+    if not preserved.is_relative_to(home):
+        _remove_user_tree(home, label="LETSINFER_HOME")
+        return
+    first = preserved.relative_to(home).parts[0]
+    for child in home.iterdir():
+        if child.name == first:
+            continue
+        if child.is_symlink() or child.is_file():
+            child.unlink()
+        else:
+            _remove_user_tree(child, label="Let's Infer data")
+
+
+def _remove_installed_core() -> bool:
+    root = source_root().resolve(strict=True)
+    if not (root / CORE_SOURCE_MANIFEST).is_file():
+        return False
+    helper = root / "bin/letsinfer-uninstall-core"
+    if not helper.is_file() or helper.is_symlink():
+        raise LetsInferError("installed core uninstaller is unavailable")
+    launcher_directory = pathlib.Path(
+        os.environ.get("LETSINFER_LAUNCHER_DIR", str(root / "bin"))
+    )
+    store = root.parents[1]
+    command = [
+        str(helper),
+        "--source",
+        str(root),
+        "--launcher-directory",
+        str(launcher_directory),
+        "--operator-home",
+        str(pathlib.Path.home()),
+        "--quiet",
+    ]
+    if not os.access(store.parent, os.W_OK):
+        command.insert(0, "sudo")
+    run_passthrough(command)
+    return True
+
+
+def uninstall(arguments: argparse.Namespace) -> int:
+    config_path, config = _uninstall_service_config(arguments.config)
+    models = (
+        expanded_path(config["model_cache"])
+        if config is not None and isinstance(config.get("model_cache"), str)
+        else None
+    )
+    description = (
+        "Remove Let's Infer, its runtimes, credentials, caches, and benchmark data"
+        + (", while keeping downloaded models?" if arguments.keep_models else ", including downloaded models?")
+    )
+    if not _confirmed(
+        description,
+        assume_yes=False,
+        noninteractive_flag=None,
+    ):
+        print("Uninstall cancelled")
+        return 0
+
+    runtime_images = _installed_runtime_image_references()
+    try:
+        active_benchmark = benchmark_jobs.active_state()
+    except benchmark_jobs.BenchmarkJobError as error:
+        raise LetsInferError(str(error)) from error
+    if active_benchmark is not None:
+        state = benchmark_jobs.request_stop()
+        if not benchmark_jobs.wait_for_exit(
+            state["pid"],
+            timeout_seconds=_benchmark_stop_timeout_seconds(),
+        ):
+            raise LetsInferError("active benchmark did not stop; uninstall aborted")
+
+    _remove_public_exposure()
+    if site_identity_path().is_file() and config is not None:
+        _remove_all_engine_groups()
+    _retire_qualification_candidate(remove_container=True)
+    system = platform.system()
+    if system == "Linux":
+        _remove_linux_services(config)
+    elif system == "Darwin":
+        _remove_macos_services()
+    else:
+        raise LetsInferError(f"unsupported uninstall platform: {system}")
+    containers, images = _remove_managed_containers(runtime_images)
+
+    def finalize() -> int:
+        _remove_managed_home(
+            keep_models=arguments.keep_models,
+            configured_model_cache=models,
+        )
+        core_removed = _remove_installed_core()
+        print(
+            "UNINSTALLED Let's Infer "
+            f"core_removed={str(core_removed).lower()} "
+            f"containers={containers} images={images} "
+            f"models={'preserved' if arguments.keep_models else 'removed'}"
+        )
+        return 0
+
+    arguments.after_audit = finalize
     return 0
 
 
@@ -10715,7 +10934,7 @@ def verify(arguments: argparse.Namespace) -> int:
     )
     verify_release_sources(manifest, manifest_source_root(manifest_path))
     if not arguments.source_only:
-        model_cache = expanded_path(arguments.model_cache or manifest["container"]["model_cache"])
+        model_cache = requested_model_cache(arguments.model_cache)
         plugin_root = (
             expanded_path(arguments.plugin_root)
             if arguments.plugin_root
@@ -10743,9 +10962,7 @@ def acquire(arguments: argparse.Namespace) -> int:
         arguments.model, arguments.engine, target=getattr(arguments, "target", None)
     )
     verify_release_sources(manifest, manifest_source_root(manifest_path))
-    model_cache = expanded_path(
-        arguments.model_cache or manifest["container"]["model_cache"]
-    )
+    model_cache = requested_model_cache(arguments.model_cache)
     try:
         snapshot = verify_model_snapshot(manifest, model_cache)
         existing = True
@@ -10987,6 +11204,66 @@ def _benchmark_stop() -> int:
     return 0
 
 
+def _confirmed(
+    message: str,
+    *,
+    assume_yes: bool,
+    noninteractive_flag: str | None = "--yes",
+) -> bool:
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        suffix = (
+            f"; rerun with {noninteractive_flag}"
+            if noninteractive_flag is not None
+            else ""
+        )
+        raise LetsInferError(f"interactive confirmation is required{suffix}")
+    try:
+        response = input(f"{message} [y/N] ").strip().lower()
+    except EOFError:
+        return False
+    return response in {"y", "yes"}
+
+
+def _remove_user_tree(path: pathlib.Path, *, label: str) -> bool:
+    if not path.exists() and not path.is_symlink():
+        return False
+    if path.resolve(strict=False) in {
+        pathlib.Path("/"),
+        pathlib.Path.home().resolve(strict=False),
+    }:
+        raise LetsInferError(f"refusing to remove overly broad {label}: {path}")
+    if path.is_symlink() or not path.is_dir():
+        raise LetsInferError(f"refusing to remove unsafe {label}: {path}")
+    details = path.stat()
+    if details.st_uid != os.getuid():
+        raise LetsInferError(f"refusing to remove {label} not owned by this user: {path}")
+    shutil.rmtree(path)
+    return True
+
+
+def _benchmark_clean(*, assume_yes: bool) -> int:
+    try:
+        active = benchmark_jobs.active_state()
+    except benchmark_jobs.BenchmarkJobError as error:
+        raise LetsInferError(str(error)) from error
+    if active is not None:
+        raise LetsInferError(
+            f"benchmark {active['job_id']} is active; run `letsinfer benchmark stop` first"
+        )
+    if not _confirmed(
+        "Delete all locally generated benchmark results and job logs?",
+        assume_yes=assume_yes,
+    ):
+        print("Benchmark cleanup cancelled")
+        return 0
+    removed = int(_remove_user_tree(benchmarks_root(), label="benchmark evidence"))
+    removed += int(_remove_user_tree(benchmark_jobs.root(), label="benchmark job state"))
+    print(f"CLEANED local benchmark data roots={removed}; sealed runtime results preserved")
+    return 0
+
+
 def _benchmark_stop_timeout_seconds() -> int:
     """Allow a cancelled benchmark to reload the runtime it displaced."""
 
@@ -11054,7 +11331,13 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         for context in ("32k", "64k", "128k", "256k")
     )
     if arguments.runtime is None:
-        if selectors or arguments.list or arguments.detach or arguments.job_worker:
+        if (
+            selectors
+            or arguments.list
+            or arguments.detach
+            or arguments.job_worker
+            or arguments.yes
+        ):
             raise LetsInferError(
                 "benchmark workload options require a runtime name"
             )
@@ -11069,9 +11352,15 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
             return 0
         return _benchmark_job_snapshot()
     if arguments.runtime == "stop":
-        if selectors or arguments.list or arguments.detach or arguments.json:
+        if selectors or arguments.list or arguments.detach or arguments.json or arguments.yes:
             raise LetsInferError("benchmark stop does not accept workload options")
         return _benchmark_stop()
+    if arguments.runtime == "clean":
+        if selectors or arguments.list or arguments.detach or arguments.json:
+            raise LetsInferError("benchmark clean does not accept workload options")
+        return _benchmark_clean(assume_yes=arguments.yes)
+    if arguments.yes:
+        raise LetsInferError("--yes is available only for benchmark clean")
     if arguments.json:
         raise LetsInferError("--json is available only for benchmark status")
     if arguments.list and arguments.detach:
@@ -11226,7 +11515,7 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         if not runtime_name:
             runtime_name = "runtime"
         stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        output = pathlib.Path.home() / ".cache/letsinfer/benchmarks" / f"{runtime_name}-{stamp}"
+        output = benchmarks_root() / f"{runtime_name}-{stamp}"
         command.extend(["--output-directory", str(output)])
     if arguments.job_worker:
         command.extend(["--progress-file", str(benchmark_jobs.progress_path())])
@@ -11518,6 +11807,8 @@ def update_core(arguments: argparse.Namespace) -> int:
         elif not launcher.is_file():
             raise LetsInferError(f"updated core launcher is unavailable: {launcher}")
         run_passthrough([str(launcher), "core-rebind"])
+        run_passthrough([str(launcher), "--help"])
+        run_passthrough([str(launcher), "core-prune", "--quiet"])
         return 0
 
     # Authenticate before the progress owner starts. This keeps sudo's prompt
@@ -11548,6 +11839,7 @@ def update_core(arguments: argparse.Namespace) -> int:
         run([str(launcher), "core-rebind"])
         progress.advance()
         run([str(launcher), "--help"])
+        run([str(launcher), "core-prune", "--quiet"])
         progress.advance()
     terminal.success("Core updated")
     return 0
@@ -11660,6 +11952,143 @@ def rebind_core_services(_: argparse.Namespace) -> int:
     return 0
 
 
+def _core_artifact_references() -> tuple[set[pathlib.Path], set[str]]:
+    control_parent = default_control_parent().resolve(strict=False)
+    control_roots: set[pathlib.Path] = set()
+    watchdog_identities = {core_watchdog_source_identity()}
+    config_paths = [
+        default_service_config_path(),
+        qualification_service_config_path(),
+    ]
+    group_root = default_engine_group_root()
+    if group_root.is_dir() and not group_root.is_symlink():
+        config_paths.extend(sorted(group_root.glob("*/config.json")))
+    for path in config_paths:
+        if path.is_symlink() or not path.is_file():
+            continue
+        config = read_json(path)
+        source_value = config.get("source_root") or config.get("control_root")
+        if isinstance(source_value, str):
+            source = pathlib.Path(source_value).expanduser().resolve(strict=False)
+            try:
+                source.relative_to(control_parent)
+            except ValueError:
+                pass
+            else:
+                control_roots.add(source)
+    return control_roots, watchdog_identities
+
+
+def _core_user_artifact_prune_plan() -> dict[str, list[pathlib.Path]]:
+    active_controls, active_manifests = _core_artifact_references()
+    stale_controls: list[pathlib.Path] = []
+    control_parent = default_control_parent()
+    if control_parent.exists():
+        if control_parent.is_symlink() or not control_parent.is_dir():
+            raise LetsInferError(f"control bundle storage is unsafe: {control_parent}")
+        for candidate in sorted(control_parent.iterdir()):
+            resolved_candidate = candidate.resolve(strict=False)
+            if resolved_candidate in active_controls or candidate.name.startswith("."):
+                continue
+            if candidate.is_symlink() or not candidate.is_dir():
+                raise LetsInferError(f"control bundle entry is unsafe: {candidate}")
+            if not SHA256_RE.fullmatch(candidate.name):
+                continue
+            releases = sorted((candidate / "releases").glob("*.json"))
+            if len(releases) != 1:
+                raise LetsInferError(
+                    f"stale control bundle has an invalid release set: {candidate}"
+                )
+            manifest_sha = sha256_file(releases[0])
+            validate_control_bundle(candidate, releases[0], manifest_sha)
+            stale_controls.append(candidate)
+
+    stale_watchdogs: list[pathlib.Path] = []
+    watchdog_parent = default_watchdog_runtime_parent()
+    if watchdog_parent.exists():
+        if watchdog_parent.is_symlink() or not watchdog_parent.is_dir():
+            raise LetsInferError(f"Watchdog runtime storage is unsafe: {watchdog_parent}")
+        for candidate in sorted(watchdog_parent.iterdir()):
+            if candidate.name in active_manifests or candidate.name.startswith("."):
+                continue
+            if candidate.is_symlink() or not candidate.is_dir():
+                raise LetsInferError(f"Watchdog runtime entry is unsafe: {candidate}")
+            if not SHA256_RE.fullmatch(candidate.name):
+                continue
+            verify_watchdog_runtime(candidate, candidate.name)
+            stale_watchdogs.append(candidate)
+    return {
+        "control_bundles": stale_controls,
+        "watchdog_runtimes": stale_watchdogs,
+    }
+
+
+def _prune_core_user_artifacts(*, dry_run: bool) -> dict[str, list[str]]:
+    plan = _core_user_artifact_prune_plan()
+    if not dry_run:
+        for paths in plan.values():
+            for path in paths:
+                shutil.rmtree(path)
+    return {
+        name: [str(path) for path in paths]
+        for name, paths in plan.items()
+    }
+
+
+def prune_core_command(arguments: argparse.Namespace) -> int:
+    """Remove only superseded, fully validated core identities and bundles."""
+
+    root = source_root().resolve(strict=True)
+    if not (root / CORE_SOURCE_MANIFEST).is_file():
+        raise LetsInferError("core pruning must run from an immutable installation")
+    helper = root / "bin/letsinfer-prune-core"
+    if helper.is_symlink() or not helper.is_file():
+        raise LetsInferError("installed core pruning helper is unavailable")
+    product_root = root.parents[1]
+    base_command = [
+        str(helper),
+        "--active-source",
+        str(root),
+        "--operator-home",
+        str(pathlib.Path.home()),
+    ]
+    plan_command = [*base_command, "--dry-run"]
+    planned = run(plan_command)
+    try:
+        core_plan = json.loads(planned.stdout)
+    except json.JSONDecodeError as error:
+        raise LetsInferError("core pruning helper returned invalid data") from error
+    user_plan = _prune_core_user_artifacts(dry_run=True)
+    if not arguments.dry_run:
+        _prune_core_user_artifacts(dry_run=False)
+        command = [*base_command, "--quiet"]
+        if not os.access(product_root, os.W_OK):
+            command.insert(0, "sudo")
+        run_passthrough(command)
+    payload = {
+        "schema_version": 1,
+        "dry_run": arguments.dry_run,
+        "active_source": str(root),
+        "core_identities": core_plan["remove"],
+        **user_plan,
+    }
+    if not arguments.quiet:
+        if arguments.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            total = sum(
+                len(payload[name])
+                for name in (
+                    "core_identities",
+                    "control_bundles",
+                    "watchdog_runtimes",
+                )
+            )
+            action = "WOULD PRUNE" if arguments.dry_run else "PRUNED"
+            print(f"{action} superseded core artifacts={total}")
+    return 0
+
+
 def ensure_core_watchdog_tls() -> None:
     ensure_watchdog_tls_material(
         default_watchdog_cert_path(),
@@ -11672,6 +12101,10 @@ def ensure_core_watchdog_tls() -> None:
 
 
 def setup_command(arguments: argparse.Namespace) -> int:
+    try:
+        ensure_letsinfer_home()
+    except PathContractError as error:
+        raise LetsInferError(str(error)) from error
     if not arguments.no_service:
         system = platform.system().lower()
         if system not in {"linux", "darwin"}:
@@ -12472,7 +12905,7 @@ class LocalEngineGroupExecutor:
                 or len(group["members"]) != placement["member_count"]
             ):
                 raise LetsInferError("engine-group plan differs from the release target")
-            model_cache = expanded_path(manifest["container"]["model_cache"])
+            model_cache = default_model_cache_root()
             plugin_root = default_plugin_root(manifest, job["manifest_sha256"])
             ensure_install_dependencies(
                 manifest,
@@ -14249,7 +14682,10 @@ def parser() -> argparse.ArgumentParser:
     benchmarking.add_argument(
         "runtime",
         nargs="?",
-        help="installed runtime, or `stop` to cancel the active benchmark",
+        help=(
+            "installed runtime, `stop` to cancel the active benchmark, or "
+            "`clean` to remove local benchmark data"
+        ),
     )
     benchmarking.add_argument("--base-url")
     benchmarking.add_argument("--output-directory", type=pathlib.Path)
@@ -14278,6 +14714,9 @@ def parser() -> argparse.ArgumentParser:
     )
     benchmarking.add_argument(
         "--json", action="store_true", help="emit machine-readable benchmark status"
+    )
+    benchmarking.add_argument(
+        "--yes", action="store_true", help="confirm deletion for benchmark clean"
     )
     benchmarking.add_argument("--job-worker", action="store_true", help=argparse.SUPPRESS)
     benchmarking.add_argument("--job-id", help=argparse.SUPPRESS)
@@ -14578,13 +15017,14 @@ def parser() -> argparse.ArgumentParser:
     stopping.set_defaults(action=stop, action_id="stop")
 
     uninstalling = subcommands.add_parser(
-        "uninstall", help="remove the service while preserving model and cache data"
+        "uninstall", help="remove Let's Infer and all locally managed data"
     )
     uninstalling.add_argument("--config")
-    uninstalling.add_argument("--purge-runtime-plugins", action="store_true")
-    uninstalling.add_argument("--purge-credentials", action="store_true")
-    uninstalling.add_argument("--purge-control-bundle", action="store_true")
-    uninstalling.add_argument("--purge-watchdog-runtime", action="store_true")
+    uninstalling.add_argument(
+        "--keep-models",
+        action="store_true",
+        help="preserve the models directory while removing everything else",
+    )
     uninstalling.set_defaults(action=uninstall, action_id="uninstall")
 
     service_start = subcommands.add_parser(
@@ -14611,6 +15051,12 @@ def parser() -> argparse.ArgumentParser:
     site_agent.set_defaults(action=site_agent_command, action_id="site-agent")
     core_rebind = subcommands.add_parser("core-rebind", help=argparse.SUPPRESS)
     core_rebind.set_defaults(action=rebind_core_services, action_id="core-rebind")
+
+    core_prune = subcommands.add_parser("core-prune", help=argparse.SUPPRESS)
+    core_prune.add_argument("--dry-run", action="store_true")
+    core_prune.add_argument("--json", action="store_true")
+    core_prune.add_argument("--quiet", action="store_true")
+    core_prune.set_defaults(action=prune_core_command, action_id="core-prune")
     internal_commands = {
         "service-start",
         "service-stop",
@@ -14635,6 +15081,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     metadata = None
     identity = None
     audit_sequence = None
+    audit_recorded = False
     try:
         raw_arguments = list(argv) if argv is not None else sys.argv[1:]
         if (
@@ -14701,7 +15148,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 enabled=(
                     not machine_output
                     and not lightweight
-                    and metadata.name != "update"
+                    and metadata.name not in {"update", "uninstall"}
                 ),
             )
             with activity, ui.protect_stdout(activity):
@@ -14712,9 +15159,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             outcome="success",
             after_sequence=audit_sequence,
         )
+        audit_recorded = True
+        after_audit = getattr(arguments, "after_audit", None)
+        if after_audit is not None:
+            return after_audit()
         return result
-    except (LetsInferError, RuntimePackError, SiteError) as error:
-        if metadata is not None:
+    except (LetsInferError, PathContractError, RuntimePackError, SiteError) as error:
+        if metadata is not None and not audit_recorded:
             _audit_command_result(
                 metadata,
                 identity,

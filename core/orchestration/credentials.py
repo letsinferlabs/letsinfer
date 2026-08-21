@@ -14,6 +14,7 @@ import secrets
 import stat
 import tempfile
 
+from ..paths import config_root
 
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 MASTER_BYTES = 32
@@ -24,9 +25,7 @@ class GroupCredentialError(RuntimeError):
 
 
 def default_master_path() -> pathlib.Path:
-    override = os.environ.get("LETSINFER_CONFIG_HOME")
-    root = pathlib.Path(override).expanduser() if override else pathlib.Path.home() / ".config/letsinfer"
-    return root / "group-credential.key"
+    return config_root() / "group-credential.key"
 
 
 def _private_directory(path: pathlib.Path) -> None:

@@ -47,6 +47,10 @@ class CoreInstallTests(unittest.TestCase):
                 "letsinfer",
             )
             self.assertEqual(source.stat().st_mode & 0o777, 0o555)
+            self.assertTrue((source / "bin/letsinfer-uninstall-core").is_file())
+            self.assertTrue((source / "bin/letsinfer-prune-core").is_file())
+            self.assertTrue((source / "tools/uninstall_core.py").is_file())
+            self.assertTrue((source / "tools/prune_core.py").is_file())
             self.assertFalse((source / "AGENTS.md").exists())
             self.assertFalse((source / "letsinfer.md").exists())
             self.assertFalse((source / "context").exists())
