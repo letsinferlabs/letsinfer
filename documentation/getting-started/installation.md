@@ -14,6 +14,30 @@ Linux/macOS and x86_64/arm64 release asset, installs immutable files under
 `/opt/letsinfer`, creates `/usr/local/bin/letsinfer`, and then runs
 `letsinfer setup` as the invoking user. Administrator access is used only for
 the system paths and, on Linux when needed, enabling user-service lingering.
+The installer also creates one private user-owned home at
+`~/.local/share/letsinfer`, exports that path as `LETSINFER_HOME` for every CLI
+and managed service process, and creates its structured storage during setup.
+Set an absolute `LETSINFER_HOME` before running the installer to relocate the
+complete user-owned installation state.
+
+The default home contains:
+
+```text
+~/.local/share/letsinfer/
+├── config/       credentials and private configuration
+├── state/        site databases and live control state
+├── runtimes/     immutable runtime objects and selections
+├── models/       Hugging Face-format model blobs and snapshots
+├── benchmarks/   locally generated benchmark evidence
+├── evidence/     launch and stop evidence
+├── cache/        rebuildable prefix and image-scoped runtime caches
+└── logs/         managed service logs
+```
+
+Operating-system integration remains in its required native locations:
+immutable system core files under `/opt/letsinfer`, the command launcher under
+`/usr/local/bin`, Linux user units under `~/.config/systemd/user`, macOS launch
+agents under `~/Library/LaunchAgents`, and OCI layers in Docker's content store.
 
 NVIDIA DGX Spark is the first implemented inference qualification target. Its
 Linux setup requires Docker, systemd-logind, CMake, CTest, a C17 compiler, and
@@ -71,7 +95,7 @@ letsinfer install deepseek-v4-flash
 
 The default catalog is fetched over HTTPS from `letsinferlabs/catalog` and
 verified with the public key shipped in core. A custom remote catalog can
-override that trust root at `~/.config/letsinfer/catalog-public-key.pem` or
+override that trust root at `$LETSINFER_HOME/config/catalog-public-key.pem` or
 with `LETSINFER_CATALOG_PUBLIC_KEY`. The publisher must place the exact-byte
 signature document at `<catalog-url>.sig`; Let's Infer verifies the signature,
 catalog SHA-256, and trust-key fingerprint before target selection. An
@@ -91,7 +115,7 @@ letsinfer install \
 ```
 
 Installation automatically resolves missing dependencies for qualified and
-candidate runtimes. Exact model revisions use the shared Hugging Face cache, runtime
+candidate runtimes. Exact model revisions use the content-addressed model store, runtime
 objects and native integration artifacts use Let's Infer's content-addressed
 stores, and OCI image layers use Docker's content store. Existing content
 under the same immutable identity is verified and reused without rebuilding.
@@ -127,7 +151,7 @@ a clean host. Test it explicitly and preserve evidence:
 letsinfer serve example-model \
   --engine vllm \
   --qualification-mode \
-  --evidence-dir ~/.cache/letsinfer/results/my-candidate
+  --evidence-dir "$LETSINFER_HOME/evidence/my-candidate"
 ```
 
 Normal installation verifies the exact model, image, integration artifacts,

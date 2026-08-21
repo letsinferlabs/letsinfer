@@ -64,7 +64,7 @@ Release automation should publish that payload to an OCI registry; it does not
 belong in the runtime source tree. A project may attach the same file to a Git
 hosting release for convenience, but Let's Infer's production identity is the OCI
 digest, not a release-page URL. Installation copies verified contents into
-`~/.local/share/letsinfer/runtimes/objects/<runtime-digest>`.
+`$LETSINFER_HOME/runtimes/objects/<runtime-digest>`.
 
 Each variant has one qualified serving recipe with a declared connection,
 active-request, and context envelope. There are no user-facing profiles.
