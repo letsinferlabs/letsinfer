@@ -2798,13 +2798,10 @@ def ensure_watchdog_tls_material(
             "watchdog controller credentials exist without server credentials"
         )
     paths = (*server_paths, *controller_paths)
-    parents = {path.parent for path in paths}
-    if len(parents) != 1:
-        raise LetsInferError("generated watchdog mTLS credentials must share a directory")
-    credential_root = parents.pop()
-    ensure_private_directory(credential_root)
+    for parent in {path.parent for path in paths}:
+        ensure_private_directory(parent)
     staging = pathlib.Path(
-        tempfile.mkdtemp(prefix=".watchdog-tls-", dir=credential_root)
+        tempfile.mkdtemp(prefix=".watchdog-tls-", dir=key_path.parent)
     )
     staging.chmod(0o700)
     try:

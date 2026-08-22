@@ -45,6 +45,40 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             self.assertEqual(private_key.stat().st_mode & 0o777, 0o600)
             self.assertEqual(certificate.stat().st_mode & 0o777, 0o644)
 
+    def test_watchdog_tls_generation_supports_split_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = root / "config" / "watchdog"
+            secrets = root / "secrets" / "watchdog"
+            paths = (
+                config / "server.crt",
+                secrets / "server.key",
+                config / "controller-ca.crt",
+                secrets / "controller-ca.key",
+                config / "local-controller.crt",
+                secrets / "local-controller.key",
+            )
+
+            def generate(command: list[str], **_: object) -> mock.Mock:
+                for option in ("-out", "-keyout"):
+                    if option in command:
+                        pathlib.Path(command[command.index(option) + 1]).write_text(
+                            option, encoding="ascii"
+                        )
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(cli, "run", side_effect=generate),
+                mock.patch.object(cli, "validate_watchdog_tls_material"),
+                mock.patch.object(cli, "_validate_watchdog_controller_material"),
+                mock.patch.object(cli, "_certificate_names", return_value=["localhost"]),
+            ):
+                cli.ensure_watchdog_tls_material(*paths)
+
+            for path in paths:
+                self.assertTrue(path.is_file())
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
     def test_legacy_commands_are_not_registered(self) -> None:
         parser = cli.parser()
         for command in ("derive", "engines", "releases"):
