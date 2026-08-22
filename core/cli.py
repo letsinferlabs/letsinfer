@@ -4981,12 +4981,11 @@ def _qualification_config(
 ) -> dict[str, Any]:
     """Bind an explicit qualification launch to the site's one candidate slot."""
     resident_path = default_service_config_path()
-    if not resident_path.is_file():
-        raise LetsInferError(
-            "qualification requires an installed Let's Infer service for gateway, "
-            "Watchdog, and site identity"
-        )
-    resident = read_service_config(resident_path)
+    resident = (
+        read_service_config(resident_path)
+        if resident_path.is_file()
+        else _qualification_core_plane_config()
+    )
     control_root, installed_manifest_path = install_control_bundle(
         manifest_path,
         manifest,
@@ -5043,6 +5042,46 @@ def _qualification_config(
         / f"{manifest_sha256}.state"
     )
     return candidate
+
+
+def _qualification_core_plane_config() -> dict[str, Any]:
+    """Describe setup-owned services when no qualified runtime is resident yet."""
+    watchdog_binary, watchdog_binary_sha256 = verify_active_core_watchdog()
+    gateway = core_gateway_config()
+    identity = ensure_installation_identity()
+    return {
+        **gateway,
+        "gateway_api_key_file": str(default_api_key_path()),
+        "tls_cert_file": str(default_tls_cert_path()),
+        "tls_key_file": str(default_tls_key_path()),
+        "watchdog_binary_path": str(watchdog_binary),
+        "watchdog_binary_sha256": watchdog_binary_sha256,
+        "watchdog_source_sha256": core_watchdog_source_identity(),
+        "watchdog_data_root": str(default_watchdog_data_root()),
+        "watchdog_listen": "0.0.0.0",
+        "watchdog_port": 9768,
+        "watchdog_cert_file": str(default_watchdog_cert_path()),
+        "watchdog_key_file": str(default_watchdog_key_path()),
+        "watchdog_controller_ca_file": str(default_watchdog_controller_ca_path()),
+        "watchdog_controller_ca_key_file": str(
+            default_watchdog_controller_ca_key_path()
+        ),
+        "watchdog_local_controller_cert_file": str(
+            default_watchdog_local_controller_cert_path()
+        ),
+        "watchdog_local_controller_key_file": str(
+            default_watchdog_local_controller_key_path()
+        ),
+        "installation_id": identity["installation_id"],
+        "watchdog_controller_allowlist_file": str(
+            default_controller_allowlist_path()
+        ),
+        "watchdog_public_state_file": str(
+            default_watchdog_data_root()
+            / WATCHDOG_PUBLIC_STATE_DIRECTORY
+            / "site.state"
+        ),
+    }
 
 
 def _restore_resident_watchdog_projection() -> None:
@@ -10516,11 +10555,21 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         command.append("--list")
     else:
         config_path = default_service_config_path()
-        if not config_path.is_file():
-            raise LetsInferError(
-                "benchmark requires an installed Let's Infer service for Watchdog telemetry"
+        if config_path.is_file():
+            config = read_service_config(config_path)
+        else:
+            config = _qualification_core_plane_config()
+            placement = resolve_service_placement(manifest, sha256_file(manifest_path))
+            config.update(
+                {
+                    "engine_port": 18000,
+                    "protection_root": str(
+                        default_watchdog_data_root()
+                        / PROTECTION_ROOT_NAME
+                        / placement["placement_id"]
+                    ),
+                }
             )
-        config = read_service_config(config_path)
         _, watchdog_state = _unit_enabled_active(SERVICE_NAME)
         if watchdog_state != "active":
             raise LetsInferError(

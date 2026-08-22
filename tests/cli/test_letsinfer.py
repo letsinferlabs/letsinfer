@@ -79,6 +79,73 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 self.assertTrue(path.is_file())
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_first_runtime_can_create_a_qualification_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            manifest_path = root / "runtime.json"
+            manifest_path.write_text("{}\n", encoding="ascii")
+            runtime = runtime_candidate()
+            manifest = cli.runtime_execution_manifest(runtime)
+            receipt = {
+                "name": runtime["id"],
+                "candidate_id": runtime["id"],
+                "version": runtime["version"],
+                "digest": "5" * 64,
+                "policy": "local",
+            }
+            with (
+                mock.patch.object(
+                    cli, "default_service_config_path", return_value=root / "missing.json"
+                ),
+                mock.patch.object(
+                    cli,
+                    "_qualification_core_plane_config",
+                    return_value={"watchdog_data_root": str(root / "watchdog")},
+                ),
+                mock.patch.object(
+                    cli,
+                    "install_control_bundle",
+                    return_value=(root / "control", manifest_path),
+                ),
+                mock.patch.object(
+                    cli,
+                    "resolve_service_placement",
+                    return_value={
+                        "placement_id": "6" * 32,
+                        "placement_strategy": "single",
+                        "placement_members": ["7" * 32],
+                        "topology_sha256": "8" * 64,
+                    },
+                ),
+            ):
+                config = cli._qualification_config(
+                    manifest_path=manifest_path,
+                    manifest=manifest,
+                    release_root=root,
+                    manifest_sha256="9" * 64,
+                    name="letsinfer-example",
+                    port=18000,
+                    model_cache=root / "models",
+                    store_root=root / "store",
+                    runtime_cache_root=root / "cache",
+                    api_key_file=root / "engine.key",
+                    tls_cert_file=root / "server.crt",
+                    tls_key_file=root / "server.key",
+                    evidence_dir=root / "evidence",
+                    runtime_receipt=receipt,
+                )
+
+            self.assertTrue(config["qualification_mode"])
+            self.assertEqual(config["runtime_name"], runtime["id"])
+            self.assertEqual(
+                config["protection_root"],
+                str(
+                    (root / "watchdog").resolve()
+                    / cli.PROTECTION_ROOT_NAME
+                    / ("6" * 32)
+                ),
+            )
+
     def test_legacy_commands_are_not_registered(self) -> None:
         parser = cli.parser()
         for command in ("derive", "engines", "releases"):
