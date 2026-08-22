@@ -37,6 +37,7 @@ service.json
 .cache/
 results/
 *.log
+SOURCE-MANIFEST.json
 
 # Local agent working context
 context/

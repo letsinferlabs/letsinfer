@@ -129,7 +129,7 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             mock.patch.object(cli, "authorize_serving_launch"),
             mock.patch.object(cli, "verify_host_target"),
             mock.patch.object(cli, "ensure_image"),
-            mock.patch.object(cli, "verify_installed_release"),
+            mock.patch.object(cli, "verify_installed_runtime"),
             mock.patch.object(cli, "require_memory_reserve"),
             mock.patch.object(cli, "docker_command", return_value=["docker", "run"]) as command,
             mock.patch.object(cli, "container_inspect", side_effect=[None, inspection, inspection]),

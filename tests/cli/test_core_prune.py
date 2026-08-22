@@ -41,9 +41,13 @@ class CorePruneTests(unittest.TestCase):
     def test_installed_cli_dry_run_then_prunes_after_confirmation_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             operator = pathlib.Path(temporary) / "operator"
-            prefix = operator / ".local"
-            installed = install(REPOSITORY_ROOT, prefix)
-            old = _identity(prefix / "lib/letsinfer/0.10.0", "old")
+            home = operator / "letsinfer-home"
+            installed = install(
+                REPOSITORY_ROOT,
+                home,
+                launcher_root=operator / ".local/bin",
+            )
+            old = _identity(home / "core/versions/0.10.0", "old")
             completed = subprocess.run(
                 [installed["command"], "core-prune", "--dry-run", "--json"],
                 check=False,
@@ -52,7 +56,7 @@ class CorePruneTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "HOME": str(operator),
-                    "LETSINFER_HOME": str(operator / "letsinfer-home"),
+                    "LETSINFER_HOME": str(home),
                 },
             )
 
@@ -70,7 +74,7 @@ class CorePruneTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "HOME": str(operator),
-                    "LETSINFER_HOME": str(operator / "letsinfer-home"),
+                    "LETSINFER_HOME": str(home),
                 },
             )
             self.assertEqual(applied.returncode, 0, applied.stderr)
@@ -79,12 +83,13 @@ class CorePruneTests(unittest.TestCase):
 
     def test_dry_run_lists_old_identities_without_deleting(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            operator = pathlib.Path(temporary) / "operator"
-            product = operator / ".local/lib/letsinfer"
+            home = pathlib.Path(temporary) / "letsinfer-home"
+            product = home / "core/versions"
             old = _identity(product / "1.0.0", "old")
             active = _identity(product / "1.1.0", "active")
+            (home / "core/current").symlink_to(active)
 
-            result = prune(active, operator_home=operator, dry_run=True)
+            result = prune(active, letsinfer_home=home, dry_run=True)
 
             self.assertEqual(result["remove"], [str(old.resolve())])
             self.assertEqual(result["removed"], [])
@@ -93,13 +98,14 @@ class CorePruneTests(unittest.TestCase):
 
     def test_prune_removes_old_identities_and_empty_versions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            operator = pathlib.Path(temporary) / "operator"
-            product = operator / ".local/lib/letsinfer"
+            home = pathlib.Path(temporary) / "letsinfer-home"
+            product = home / "core/versions"
             old_version = product / "1.0.0"
             old = _identity(old_version, "old")
             active = _identity(product / "1.1.0", "active")
+            (home / "core/current").symlink_to(active)
 
-            result = prune(active, operator_home=operator)
+            result = prune(active, letsinfer_home=home)
 
             self.assertEqual(result["removed"], [str(old.resolve(strict=False))])
             self.assertFalse(old.exists())
@@ -108,13 +114,14 @@ class CorePruneTests(unittest.TestCase):
 
     def test_plan_fails_closed_on_unexpected_store_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            operator = pathlib.Path(temporary) / "operator"
-            product = operator / ".local/lib/letsinfer"
+            home = pathlib.Path(temporary) / "letsinfer-home"
+            product = home / "core/versions"
             active = _identity(product / "1.1.0", "active")
+            (home / "core/current").symlink_to(active)
             (product / "manual-backup").mkdir()
 
             with self.assertRaisesRegex(CorePruneError, "unexpected core version"):
-                plan(active, operator_home=operator)
+                plan(active, letsinfer_home=home)
 
 
 if __name__ == "__main__":

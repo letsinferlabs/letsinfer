@@ -30,8 +30,9 @@ from typing import Any, TypeVar
 
 from core.paths import config_root as canonical_config_root
 from core.paths import data_root as canonical_data_root
+from core.paths import secrets_root as canonical_secrets_root
 from core.orchestration import OrchestrationError, validate_group_document
-from core.token_count import TOKEN_COUNT_PROTOCOLS
+from core.exact_tokens import TOKEN_COUNT_PROTOCOLS
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -76,12 +77,16 @@ def data_root() -> pathlib.Path:
     return canonical_data_root()
 
 
+def secrets_root() -> pathlib.Path:
+    return canonical_secrets_root()
+
+
 def identity_path() -> pathlib.Path:
     return config_root() / "site.json"
 
 
 def site_key_path() -> pathlib.Path:
-    return config_root() / "site.key"
+    return secrets_root() / "site.key"
 
 
 def site_public_key_path() -> pathlib.Path:
@@ -93,7 +98,7 @@ def site_ca_certificate_path() -> pathlib.Path:
 
 
 def member_key_path() -> pathlib.Path:
-    return config_root() / "member.key"
+    return secrets_root() / "member.key"
 
 
 def member_public_key_path() -> pathlib.Path:

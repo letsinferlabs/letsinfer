@@ -20,10 +20,7 @@ class SiteStateTests(unittest.TestCase):
         root = pathlib.Path(self.temporary.name)
         self.environment = mock.patch.dict(
             os.environ,
-            {
-                "LETSINFER_CONFIG_HOME": str(root / "config"),
-                "LETSINFER_DATA_HOME": str(root / "data"),
-            },
+            {"LETSINFER_HOME": str(root)},
             clear=False,
         )
         self.environment.start()
@@ -456,20 +453,18 @@ class SiteStateTests(unittest.TestCase):
             self.assertEqual(store.verify_audit()["events"], before + 1)
 
     def test_membership_invite_is_one_use_and_site_key_never_moves(self) -> None:
-        coordinator_config = pathlib.Path(self.temporary.name) / "coordinator-config"
-        coordinator_data = pathlib.Path(self.temporary.name) / "coordinator-data"
-        candidate_config = pathlib.Path(self.temporary.name) / "candidate-config"
-        candidate_data = pathlib.Path(self.temporary.name) / "candidate-data"
+        coordinator_home = pathlib.Path(self.temporary.name) / "coordinator"
+        candidate_home = pathlib.Path(self.temporary.name) / "candidate"
         with mock.patch.dict(
             os.environ,
-            {"LETSINFER_CONFIG_HOME": str(coordinator_config), "LETSINFER_DATA_HOME": str(coordinator_data)},
+            {"LETSINFER_HOME": str(coordinator_home)},
         ):
             coordinator = state.setup_site("Home", "coordinator.local")
             with state.SiteStore(identity=coordinator) as store:
                 invite = store.create_invite("lan")
         with mock.patch.dict(
             os.environ,
-            {"LETSINFER_CONFIG_HOME": str(candidate_config), "LETSINFER_DATA_HOME": str(candidate_data)},
+            {"LETSINFER_HOME": str(candidate_home)},
         ):
             candidate = state.prepare_member_identity()
             transcript = {
@@ -487,7 +482,7 @@ class SiteStateTests(unittest.TestCase):
             proof = state.member_proof(transcript)
         with mock.patch.dict(
             os.environ,
-            {"LETSINFER_CONFIG_HOME": str(coordinator_config), "LETSINFER_DATA_HOME": str(coordinator_data)},
+            {"LETSINFER_HOME": str(coordinator_home)},
         ):
             with state.SiteStore(identity=state.read_identity()) as store:
                 incorrect = "00000000" if invite["code"] != "00000000" else "99999999"
@@ -522,7 +517,7 @@ class SiteStateTests(unittest.TestCase):
                     )
         with mock.patch.dict(
             os.environ,
-            {"LETSINFER_CONFIG_HOME": str(candidate_config), "LETSINFER_DATA_HOME": str(candidate_data)},
+            {"LETSINFER_HOME": str(candidate_home)},
         ):
             joined = state.install_member_identity(
                 enrolled["document"],
@@ -536,24 +531,16 @@ class SiteStateTests(unittest.TestCase):
             self.assertTrue(state.member_certificate_path().exists())
 
     def test_expired_and_unapproved_enrollment_is_denied_and_audited(self) -> None:
-        coordinator_config = pathlib.Path(self.temporary.name) / "denial-coordinator-config"
-        coordinator_data = pathlib.Path(self.temporary.name) / "denial-coordinator-data"
-        candidate_config = pathlib.Path(self.temporary.name) / "denial-candidate-config"
-        candidate_data = pathlib.Path(self.temporary.name) / "denial-candidate-data"
+        coordinator_home = pathlib.Path(self.temporary.name) / "denial-coordinator"
+        candidate_home = pathlib.Path(self.temporary.name) / "denial-candidate"
         with mock.patch.dict(
             os.environ,
-            {
-                "LETSINFER_CONFIG_HOME": str(candidate_config),
-                "LETSINFER_DATA_HOME": str(candidate_data),
-            },
+            {"LETSINFER_HOME": str(candidate_home)},
         ):
             candidate = state.prepare_member_identity()
         with mock.patch.dict(
             os.environ,
-            {
-                "LETSINFER_CONFIG_HOME": str(coordinator_config),
-                "LETSINFER_DATA_HOME": str(coordinator_data),
-            },
+            {"LETSINFER_HOME": str(coordinator_home)},
         ):
             coordinator = state.setup_site("Home", "coordinator.local")
             with state.SiteStore(identity=coordinator) as store:
@@ -586,18 +573,12 @@ class SiteStateTests(unittest.TestCase):
         }
         with mock.patch.dict(
             os.environ,
-            {
-                "LETSINFER_CONFIG_HOME": str(candidate_config),
-                "LETSINFER_DATA_HOME": str(candidate_data),
-            },
+            {"LETSINFER_HOME": str(candidate_home)},
         ):
             proof = state.member_proof(transcript)
         with mock.patch.dict(
             os.environ,
-            {
-                "LETSINFER_CONFIG_HOME": str(coordinator_config),
-                "LETSINFER_DATA_HOME": str(coordinator_data),
-            },
+            {"LETSINFER_HOME": str(coordinator_home)},
         ):
             with state.SiteStore(identity=coordinator) as store:
                 with self.assertRaisesRegex(state.SiteError, "approved ConnectX"):

@@ -33,6 +33,9 @@ from core.updates.manager import (
 RUNTIME_DIGEST = "1" * 64
 NEXT_RUNTIME_DIGEST = "2" * 64
 TARGET_DIGEST = "3" * 64
+CANDIDATE = "sglang--radixark--qwen3.8-27b-nvfp4--dgx-spark"
+ENGINE_DIGEST = "4" * 64
+BENCHMARK_ID = "5" * 64
 
 
 def components(*, core_identity: str = "core-a", runtime_policy: str = "recommended"):
@@ -45,6 +48,7 @@ def components(*, core_identity: str = "core-a", runtime_policy: str = "recommen
             RUNTIME_DIGEST,
             policy=runtime_policy,
             model="qwen3.8-27b",
+            runtime=CANDIDATE,
             engine="sglang",
             target="dgx-spark",
             target_contract_sha256=target_contract_sha256(
@@ -58,7 +62,7 @@ def components(*, core_identity: str = "core-a", runtime_policy: str = "recommen
 
 def catalog(version: str = "0.1.0-rc.11", digest: str = NEXT_RUNTIME_DIGEST):
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "targets": {
             "dgx-spark": {
                 "match": {
@@ -89,12 +93,22 @@ def catalog(version: str = "0.1.0-rc.11", digest: str = NEXT_RUNTIME_DIGEST):
             "qwen3.8-27b": {
                 "targets": {
                     "dgx-spark": {
-                        "recommended": "sglang",
-                        "engines": {
-                            "sglang": {
+                        "recommended": CANDIDATE,
+                        "candidates": {
+                            CANDIDATE: {
                                 "version": version,
                                 "source": "ghcr.io/letsinferlabs/runtimes/qwen"
                                 f"@sha256:{digest}",
+                                "qualified": True,
+                                "engine": "sglang",
+                                "engine_oci": "ghcr.io/letsinferlabs/engines/sglang"
+                                f"@sha256:{ENGINE_DIGEST}",
+                                "model_uri": "hf://RadixArk/Qwen3.8-27B-NVFP4",
+                                "benchmark": {
+                                    "id": BENCHMARK_ID,
+                                    "suite": "letsinfer-code-prose-v1",
+                                    "score": 1.0,
+                                },
                             }
                         },
                     }

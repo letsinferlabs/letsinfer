@@ -1,160 +1,120 @@
-# Installation
+# Install Let's Infer
 
 [Back to documentation](../README.md)
 
-Install and initialize the latest stable Let's Infer core on Linux or macOS:
+## Install core
+
+On Linux or macOS:
 
 ```bash
 curl -fsSL https://letsinfer.ai/install.sh | sh
 ```
 
-The bootstrap verifies the Ed25519-signed checksum, archive SHA-256, and
-embedded source manifest before running repository code. It selects the exact
-Linux/macOS and x86_64/arm64 release asset, installs immutable files under
-`/opt/letsinfer`, creates `/usr/local/bin/letsinfer`, and then runs
-`letsinfer setup` as the invoking user. Administrator access is used only for
-the system paths and, on Linux when needed, enabling user-service lingering.
-The installer also creates one private user-owned home at
-`~/.local/share/letsinfer`, exports that path as `LETSINFER_HOME` for every CLI
-and managed service process, and creates its structured storage during setup.
-Set an absolute `LETSINFER_HOME` before running the installer to relocate the
-complete user-owned installation state.
+The installer detects your OS and architecture, downloads the signed release,
+verifies its checksum and complete source manifest, installs immutable core
+files below `$LETSINFER_HOME/core`, exposes `letsinfer` in
+`/usr/local/bin`, and runs `letsinfer setup`.
 
-The default home contains:
+Run the installer as the account that will operate Let's Infer, not as root.
+The default install asks for sudo only to create the launcher. It does not put
+runtime data or secrets in a system directory.
 
-```text
-~/.local/share/letsinfer/
-├── config/       credentials and private configuration
-├── state/        site databases and live control state
-├── runtimes/     immutable runtime objects and selections
-├── models/       Hugging Face-format model blobs and snapshots
-├── benchmarks/   locally generated benchmark evidence
-├── evidence/     launch and stop evidence
-├── cache/        rebuildable prefix and image-scoped runtime caches
-└── logs/         managed service logs
-```
-
-Operating-system integration remains in its required native locations:
-immutable system core files under `/opt/letsinfer`, the command launcher under
-`/usr/local/bin`, Linux user units under `~/.config/systemd/user`, macOS launch
-agents under `~/Library/LaunchAgents`, and OCI layers in Docker's content store.
-
-NVIDIA DGX Spark is the first implemented inference qualification target. Its
-Linux setup requires Docker, systemd-logind, CMake, CTest, a C17 compiler, and
-OpenSSL 3 development headers. The installer checks the command-line
-prerequisites before installing files. macOS setup uses per-user launchd
-agents for the site and unified gateway; the native Linux/NVIDIA Watchdog and
-local inference placement are not claimed on macOS.
-
-For an unprivileged install under `~/.local`, or to install files without
-creating a site:
+For an install without administrator access:
 
 ```bash
 curl -fsSL https://letsinfer.ai/install.sh | sh -s -- --user
-curl -fsSL https://letsinfer.ai/install.sh | sh -s -- --no-setup
 ```
 
-To install from an unpacked verified source tree instead:
+This exposes the command from `~/.local/bin`. Add that directory to `PATH` if
+your shell does not already include it.
+
+Useful installer options:
+
+```text
+--version VERSION
+--user
+--prefix ABSOLUTE_PATH
+--no-setup
+--no-progress
+```
+
+Use `--no-setup` only when you want to install files without initializing a
+site.
+
+## Choose the data directory
+
+By default, all Let's Infer data lives in:
+
+```text
+~/.local/share/letsinfer
+```
+
+Set an absolute path before installation if you want another location:
 
 ```bash
-bin/letsinfer-install
-~/.local/bin/letsinfer --help
+export LETSINFER_HOME=/data/letsinfer
+curl -fsSL https://letsinfer.ai/install.sh | sh
 ```
 
-Add `~/.local/bin` to `PATH` after `--user` if it is not already present. A
-child process cannot edit its parent shell, so the default system installation
-uses the already conventional `/usr/local/bin` instead. Re-running the
-installer verifies and reuses the same immutable source identity. It refuses
-to replace a user-created regular file at either launcher path.
+Keep the same value in future shells and services. The directory must be owned
+by your account and cannot be a symlink, `/`, or your home directory itself.
 
-The default installer already creates the first logical site. To do that
-manually after `--no-setup`:
+## Install a model
+
+After setup:
 
 ```bash
-letsinfer setup --name Home
-letsinfer site status
+letsinfer install qwen3.8-27b
 ```
 
-The first setup creates the coordinator, site identity, local controller,
-private TLS material, default local inference key, resident Watchdog, site
-service, and unified gateway. A later machine joins as a member rather than
-creating a second authority. The Mac app provides the normal **Add to Home**
-flow for a pristine Spark on direct ConnectX and the setup-code flow for LAN or
-remote machines. See [Sites, members, and trust](../concepts/sites.md).
+You only provide the logical model name. Let's Infer detects your hardware,
+chooses the best qualified runtime from the signed catalog, downloads its exact
+model revision and Engine OCI, verifies them, and starts the service.
 
-The coordinator advertises its inference endpoint over mDNS. On the local
-network, standard OpenAI clients use `http://<hostname>.local:8000/v1` and a
-site API key; they do not install a certificate. Private control and engine
-connections remain TLS-protected.
-
-Install a qualified model runtime from the built-in signed production catalog:
+To install one exact candidate:
 
 ```bash
-letsinfer install deepseek-v4-flash
+letsinfer install qwen3.8-27b \
+  --runtime sglang--radixark--qwen3.8-27b-nvfp4--dgx-spark
 ```
 
-The default catalog is fetched over HTTPS from `letsinferlabs/catalog` and
-verified with the public key shipped in core. A custom remote catalog can
-override that trust root at `$LETSINFER_HOME/config/catalog-public-key.pem` or
-with `LETSINFER_CATALOG_PUBLIC_KEY`. The publisher must place the exact-byte
-signature document at `<catalog-url>.sig`; Let's Infer verifies the signature,
-catalog SHA-256, and trust-key fingerprint before target selection. An
-explicitly selected unsigned local catalog is a development input only.
-
-Install a runtime repository during development:
+## Check your service
 
 ```bash
-letsinfer install ./my-runtime
+letsinfer status
+letsinfer doctor
+letsinfer key create
 ```
 
-Install a published OCI artifact by immutable digest:
+Your coordinator advertises its LAN endpoint with mDNS:
+
+```text
+http://<hostname>.local:8000/v1
+```
+
+Use the API key returned by `letsinfer key create` as a bearer token. Key
+material is shown once.
+
+## Updates
 
 ```bash
-letsinfer install \
-  ghcr.io/example/example-model-runtime@sha256:0123456789abcdef...
+letsinfer update check
+letsinfer update
+letsinfer upgrade qwen3.8-27b
 ```
 
-Installation automatically resolves missing dependencies for qualified and
-candidate runtimes. Exact model revisions use the content-addressed model store, runtime
-objects and native integration artifacts use Let's Infer's content-addressed
-stores, and OCI image layers use Docker's content store. Existing content
-under the same immutable identity is verified and reused without rebuilding.
-Engine packages remain inside the runtime image. Use
-`--no-download` only when the exact model and registry image content must
-already be available locally.
+Core and runtime updates are independent. Updating core does not change your
+runtime or models. Upgrading a runtime does not change core.
 
-The container runtime home is image-scoped by default. Installing or upgrading
-to a different immutable image creates and mounts that image's own runtime
-cache directory; Let's Infer preserves the predecessor directory but never mounts
-it implicitly. Pass `--runtime-cache-root` only when deliberately selecting an
-explicit compatible location.
-
-Every managed container is also labeled with the exact release-manifest
-SHA-256 and installed runtime-object digest. Boot recovery may restart an
-existing stopped container only when both identities still match the active
-service configuration. A missing or different identity fails closed, so an
-upgrade cannot adopt a predecessor container or its integration mount.
-
-Public OCI runtime packs are pulled and digest-verified by Let's Infer without
-an external client. Private or otherwise authenticated registries can use an
-installed `oras` companion for their credential flow. Mutable tags are
-rejected. A local directory is explicit developer input; production
-installations should come from a trusted catalog or an exact OCI digest.
-Let's Infer core contains no built-in model releases.
-
-An unqualified candidate can be imported with all exact dependencies, but
-Let's Infer will not make it the boot service or launch it. The import creates
-private local API/TLS material so the explicit qualification command works on
-a clean host. Test it explicitly and preserve evidence:
+## Remove Let's Infer
 
 ```bash
-letsinfer serve example-model \
-  --engine vllm \
-  --qualification-mode \
-  --evidence-dir "$LETSINFER_HOME/evidence/my-candidate"
+letsinfer uninstall
 ```
 
-Normal installation verifies the exact model, image, integration artifacts,
-selected site topology, memory envelope, API credentials, TLS material, and Watchdog
-binary before transactionally replacing the service. Activation failure
-restores the previous configuration, units, immutable bundle, and service.
+The command shows what it will remove and asks for confirmation. To preserve
+downloaded models:
+
+```bash
+letsinfer uninstall --keep-models
+```

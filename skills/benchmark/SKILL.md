@@ -32,7 +32,7 @@ engine queues overflow because memory cannot safely run every request at once.
 
 Use `letsinfer benchmark` for the sealed C1/C2/C4/C8/C16 production
 matrix at 32K, 64K, 128K, and 256K when those contexts fit the runtime. Pass
-the installed `model/engine/target` runtime; it is the only serving
+the installed immutable runtime candidate; it is the only serving
 configuration. The command has no engine-argument surface because the runtime
 owns the command, environment, scheduler, cache, and safety recipe.
 
@@ -62,7 +62,7 @@ and any other gates declared by the release.
 ## Seal inputs before measurement
 
 1. Start from a clean named Git commit. Record its full commit and tree.
-2. Bind the exact release manifest, runtime descriptor/archive, image, model and tokenizer revisions, command/environment, benchmark contract, generator/templates, materialized prompt set and plan, runners, and cache namespace.
+2. Bind the exact runtime configuration, generated private execution view, runtime descriptor/archive, Engine OCI, model and tokenizer revisions, command/environment, benchmark contract, generator/templates, materialized prompt set and plan, runners, and cache namespace.
 3. Preserve the best accepted pre-Let's Infer or predecessor result for each exactly comparable row. Reject comparisons with different prompts, roles, output limits, sampling, cache state, engine recipe, or hardware.
 4. Use a new immutable evidence directory. Never overwrite, splice, or combine evidence from different identities or lifecycles.
 

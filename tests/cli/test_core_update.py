@@ -23,7 +23,8 @@ class CoreUpdateTests(unittest.TestCase):
             root = pathlib.Path(directory)
             installer = root / "install.sh"
             installer.write_text("#!/bin/sh\n", encoding="utf-8")
-            launcher = root / "letsinfer"
+            launcher = root / "bin/letsinfer"
+            launcher.parent.mkdir()
             launcher.write_text("#!/bin/sh\n", encoding="utf-8")
             commands: list[list[str]] = []
 
@@ -51,12 +52,13 @@ class CoreUpdateTests(unittest.TestCase):
 
         self.assertNotIn([str(launcher), "core-prune", "--quiet"], commands)
 
-    def test_interactive_update_preflights_sudo_then_owns_three_steps(self) -> None:
+    def test_interactive_user_update_owns_three_steps(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             installer = root / "install.sh"
             installer.write_text("#!/bin/sh\n", encoding="utf-8")
-            launcher = root / "letsinfer"
+            launcher = root / "bin/letsinfer"
+            launcher.parent.mkdir()
             launcher.write_text("#!/bin/sh\n", encoding="utf-8")
             events: list[object] = []
 
@@ -101,12 +103,12 @@ class CoreUpdateTests(unittest.TestCase):
                 self.assertEqual(
                     letsinfer.update_core(argparse.Namespace(version="0.11.0-rc.16")), 0
                 )
-        self.assertEqual(events[0], ("passthrough", ["sudo", "-v"]))
-        self.assertEqual(events[1], "progress:start")
+        self.assertEqual(events[0], "progress:start")
         self.assertEqual(
-            events[2],
+            events[1],
             ("run", [
                 "/bin/sh", str(installer), "--no-setup", "--no-progress",
+                "--prefix", str(root),
                 "--version", "0.11.0-rc.16",
             ]),
         )
@@ -116,21 +118,28 @@ class CoreUpdateTests(unittest.TestCase):
         self.assertIn(("run", [str(launcher), "core-prune", "--quiet"]), events)
         self.assertEqual(events[-1], ("success", "Core updated"))
 
-    def _installed_tree(self, root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
-        source = root / "prefix/lib/letsinfer/1.2.3/abc123"
+    def _installed_tree(
+        self, root: pathlib.Path
+    ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+        source = root / "letsinfer-home/core/versions/1.2.3/abc123"
         source.mkdir(parents=True)
-        (source / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        installer = source / "install.sh"
+        installer.write_text("#!/bin/sh\n", encoding="utf-8")
         launcher = root / "prefix/bin/letsinfer"
         launcher.parent.mkdir(parents=True)
         launcher.write_text("#!/bin/sh\n", encoding="utf-8")
-        return source.resolve(), launcher.resolve()
+        return source.resolve(), installer.resolve(), launcher.resolve()
 
     def test_update_installs_core_then_rebinds_without_runtime_operations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            source, launcher = self._installed_tree(pathlib.Path(directory))
+            source, installer, launcher = self._installed_tree(pathlib.Path(directory))
             commands: list[list[str]] = []
             with (
-                mock.patch.object(letsinfer, "source_root", return_value=source),
+                mock.patch.object(
+                    letsinfer,
+                    "_installed_core_layout",
+                    return_value=(source.parents[3], installer, launcher),
+                ),
                 mock.patch.object(letsinfer.benchmark_jobs, "active_state", return_value=None),
                 mock.patch.object(
                     letsinfer, "run_passthrough", side_effect=lambda value: commands.append(list(value))
@@ -143,11 +152,11 @@ class CoreUpdateTests(unittest.TestCase):
                 [
                     [
                         "/bin/sh",
-                        str(source / "install.sh"),
+                        str(installer),
                         "--no-setup",
                         "--no-progress",
                         "--prefix",
-                        str(source.parents[3]),
+                        str(launcher.parent.parent),
                         "--version",
                         "1.2.4-rc.1",
                     ],

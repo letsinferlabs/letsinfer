@@ -79,6 +79,7 @@ class CoreServiceTests(unittest.TestCase):
             mock.patch.object(cli.platform, "system", return_value="Linux"),
             mock.patch.object(cli, "user_lingering_enabled", return_value=True),
             mock.patch.object(cli, "setup_site", return_value=identity),
+            mock.patch.object(cli, "ensure_letsinfer_home"),
             mock.patch.object(cli, "ensure_core_watchdog_tls") as tls,
             mock.patch.object(cli, "refresh_local_member_facts"),
             mock.patch.object(cli, "install_core_plane_services") as install_services,

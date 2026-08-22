@@ -1,107 +1,110 @@
 ---
 name: runtime
-description: Create, port, fork, or update a production Let's Infer runtime pack for a specific model, inference engine, and hardware target. Use for runtime repositories, runtime.json or release.json manifests, engine patches, kernels, image recipes, target compatibility, deterministic packaging, or runtime qualification work.
+description: Create, port, optimize, qualify, or publish a Let's Infer runtime candidate with runtime.json, exact model artifacts, a digest-pinned Engine OCI, target-specific kernels or patches, and benchmark evidence.
 ---
 
-# Create a Let's Infer runtime
+# Build a Let's Infer runtime
 
-Build one immutable `model/engine/target` implementation without moving engine-specific behavior into Let's Infer core.
+Create one immutable candidate without moving model- or engine-specific
+behavior into core.
 
-## Establish the contract
+## Read the contracts
 
-1. Read `documentation/concepts/runtime-packs.md`,
-   `documentation/reference/runtime-format.md`, the closest release and runtime
-   target, and any local repository policy supplied by the runtime author.
-2. Read [`../benchmark/SKILL.md`](../benchmark/SKILL.md) in full before creating fixtures, measuring performance, or claiming qualification.
-3. Recover the exact prior production setup and best comparable evidence. Record model revision, tokenizer/chat template, engine revision, image, command, environment, cache format, context envelope, hardware, prompts, and measurement method. Do not compare unmatched workloads.
-4. Define the stable target by capabilities: platform, accelerator architecture/count/partitioning, memory topology, and minimum capacity. Do not key compatibility to hostname.
+Read:
 
-## Build the target source
+1. `documentation/reference/runtime-format.md`;
+2. `documentation/concepts/runtime-packs.md`;
+3. `documentation/concepts/engine-adapters.md`; and
+4. [the benchmark skill](../benchmark/SKILL.md) before measuring or claiming
+   qualification.
 
-Use `runtimes/<model>/<engine>/targets/<target>/` when several targets share a development repository. The target root must contain `runtime.json`, its declared release manifest, and the public `benchmark.json` once results are sealed.
+Recover the exact prior setup before changing it: model and tokenizer revision,
+Engine OCI, upstream engine version, image, arguments, environment, target,
+context and capacity envelope, prompts, cache state, and measurement method.
 
-Keep only the implementation closure there:
+## Create the flat candidate
 
-- exact model and tokenizer revisions;
-- exact engine source, target-specific patches, plugins, or kernels;
-- build-time verifiers for every patch;
-- `image/Dockerfile` and arbitrary sibling inputs when custom packages or engine changes are needed;
-- concise provenance and license metadata.
+Use:
 
-Do not vendor Let's Infer's CLI, Watchdog, gateway, benchmark runners, prompts,
-plans, evidence, or engine-neutral prefix store. Declare the standard suite,
-cases, request settings, and tokenizer/render identity under
-`runtime.json.benchmark`; never add runtime-provided benchmark commands. Keep
-only small engine-native shims needed to implement Let's Infer's versioned cache or
-exact rendered-chat token-count capability. Keep the validated public result
-record at the standalone runtime target root as `benchmark.json`.
+```text
+<engine>--<lowercase-hf-owner>--<lowercase-hf-model>--<target>/
+```
 
-Run the complete standard code/prose matrix through `letsinfer benchmark`.
-Never modify or replace core's canonical prompt bytes for a runtime. Confirm
-that every result contains `prompt_domain`, `prompt_suite`,
-`prompt_set_sha256`, and one `actual_prompt_tokens` entry per stream, then run
-`python3 benchmarks/benchmark_record.py <runtime-root>/benchmark.json` before
-sealing or publishing it.
+The directory ID and `runtime.id` must match. Put `runtime.json` at its root.
+You may add `adapter/`, `engine/`, `image/`, `kernels/`, `patches/`,
+`scripts/`, `tests/`, provenance, and licenses as needed.
 
-Pin every external image by digest. Build containers offline at runtime, read-only, non-root where the engine allows it, and without package installation after launch. Runtime authors may name build-input directories freely; only `image/Dockerfile` is special. The final manifest must pin the exact resulting image digest or immutable local image ID.
+Do not add nested candidate hierarchies. Do not author a second
+execution manifest. Do not copy core's CLI, gateway, Watchdog, benchmark
+runners, prompts, site orchestration, or generic state plane.
 
-Declare every required artifact so `letsinfer install` can resolve a qualified
-runtime completely. Models belong in the shared Hugging Face blob/snapshot
-cache, runtime packs in Let's Infer's immutable object store, OCI layers in
-Docker's content store, and language/system/CUDA packages inside the immutable
-image. Do not create a runtime-specific download cache or install packages into
-the host. Exact identities provide cross-runtime deduplication; missing
-dependencies download by default and `--no-download` makes their absence an
-error.
+## Pin the model
 
-Use the closed named-artifact contract: `model.artifact` selects the primary
-served model, while top-level `artifacts` lists the primary first and every
-additional exact dependency in deterministic name order. Give each dependency
-a runtime-defined portable name and immutable Hugging Face revision; GGUF
-entries also pin the contained filename and SHA-256. Bind non-primary artifacts
-to native engine options only with whole-token `${artifact:name}` values in
-`engine.arguments`. Do not add semantic fields such as `drafter` to `model` or
-teach core what an artifact role means.
+Declare the primary `hf://owner/repository` and exact 40-hex revision in
+`model` and `artifacts`. Put the primary artifact first and sort additional
+artifacts by name. For GGUF, pin the exact filename and SHA-256.
 
-Scrub nested Git metadata, credentials, private prompts, machine paths, generated evidence, weights, caches, and unrelated upstream documentation. Preserve all source and licenses necessary to modify and rebuild the customized engine.
+The runtime downloads every declared artifact. Do not require an operator to
+preinstall weights or invent a runtime-specific model cache.
 
-## Define one production recipe
+Use complete-token `${artifact:name}` references for additional artifacts.
+Core assigns no semantics to those names.
 
-Expose one qualified recipe per manifest, not selectable profiles. Declare the maximum context, accepted connections, active requests, scheduler capacity, cache limits, admission floors, and safety envelope actually measured together.
+## Pin the Engine OCI
 
-Let Let's Infer's adapter own model paths, listeners, TLS, authentication, and mandatory safety arguments. Put model/target-specific engine settings in the runtime manifest or engine source. A user who only changes upstream flags should use `letsinfer derive`; a user changing packages, kernels, engine code, plugins, or cache ABI should fork the runtime.
+The Engine OCI contains one upstream engine version and the matching adapter.
+Its adapter must implement Engine protocol 1. Pin both the OCI manifest digest
+and image configuration digest.
 
-Put native upstream options in the release manifest's flat
-`engine.arguments` array. Let's Infer replaces matching non-protected options
-and appends unknown options without owning their schema. Put non-core engine
-variables in `engine.environment`; never encode model parsers, chat defaults,
-generation policy, speculative configuration, or performance tuning in core.
+Keep tokenizer logic, exact token counting, native cache integration,
+normalized engine telemetry, parsers, upstream flags, engine patches, and
+compiled kernels in the Engine OCI or candidate source—not core.
 
-Never silently fall back to another model, engine, image, kernel, quantization, attention backend, cache format, or recipe.
+Put native upstream options in `engine.arguments` and non-protocol environment
+in `engine.environment`. Never use a `LETSINFER_*` name. Core owns listeners,
+model mounts, authentication, protocol endpoints, admission, and safety.
 
-## Verify and package
+Changing the Engine OCI invalidates prior qualification.
 
-1. Run source-only manifest verification and every patch/build verifier.
-2. Build the image twice under the exact Let's Infer `SOURCE_DATE_EPOCH=0` contract and require identical final image IDs and important binary hashes.
-3. Run `letsinfer pack` twice and require identical descriptor and archive SHA-256 values.
-4. If `benchmark.json` is present, run `python3 benchmarks/benchmark_record.py <runtime-root>/benchmark.json`; packaging must independently validate it.
-5. Import the candidate without activation. Verify descriptor, source revision, image identity, target compatibility, resolved argv, protected arguments, and privacy/license scans.
-6. Start only through explicit qualification mode with a new evidence directory. Keep Watchdog and all admission gates active.
+## Define one measured recipe
 
-## Qualify and promote
+Publish one recipe per candidate. Declare the target capability contract,
+container bounds, maximum connections, active requests, context, cache
+behavior, safety floor, and benchmark matrix that were measured together.
 
-Follow [`../benchmark/SKILL.md`](../benchmark/SKILL.md) completely. The final
-single recipe must pass historical performance parity, the official prompt
-suite, cold/hot/restart cache proof, connection capacity, pressure, crash/OOM,
-reboot persistence, and every additional gate explicitly declared by the
-release. Do not invent a soak requirement when the release contract does not
-have one. A comparable row passes only when throughput matches or beats the
-best accepted prior result and TTFT matches or beats it. Treat measurement
-noise honestly; do not lower gates, change prompts, or select favorable runs.
+Never silently fall back to another checkpoint, quantization, engine, kernel,
+attention backend, cache format, or recipe.
 
-Write the structured public results to the standalone runtime target's
-`benchmark.json`, validate it, and keep the immutable evidence identity and
-complete audit in Let's Infer's durable technical record. Mark the release qualified only after
-every declared gate passes on the exact source, artifact, image, model
-revision, target, command, and cache format. Publishing additionally requires
-a pullable registry digest; local image identity is not a public release.
+## Validate and package
+
+1. Validate runtime schema 3 and the generated root manifest.
+2. Run `engine-adapter verify --protocol 1` in the exact Engine OCI.
+3. Run every patch, kernel, model, and target-specific test.
+4. Verify every external image and model reference is immutable.
+5. Run `letsinfer pack` twice and require byte-identical archives.
+6. Verify the OCI plan matches the exact candidate source digest.
+7. Import the candidate without activation and verify model, engine, target,
+   arguments, mounts, and receipts.
+8. Launch an unqualified candidate only in qualification mode with new
+   evidence.
+
+## Qualify
+
+Run the standard code/prose benchmark through `letsinfer benchmark` without
+changing core prompts or selecting favorable runs. Verify API, exact token
+counting, telemetry, scheduler capacity, queuing, pressure, too-large requests,
+crash/OOM protection, recovery, restart, reboot persistence, cache behavior,
+and any declared target-specific gate.
+
+Store the validated public results in `benchmark.json` and bind its path,
+SHA-256, and ID in `runtime.json`. Mark the candidate qualified only when every
+gate passes on the exact model, Engine OCI, runtime bytes, target, and recipe.
+
+## Publish
+
+Engine or adapter changes first publish a new immutable Engine OCI and update
+the candidate pin, which resets qualification. After qualification, release
+automation publishes the deterministic runtime OCI, regenerates schema-4
+recommendations, signs the catalog, and verifies the public trust root.
+
+Do not manually edit the root `manifest.json` or production catalog.

@@ -24,26 +24,26 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from typing import Any
 
 from core.orchestration import OrchestrationError, validate_orchestration_contract
-from core.paths import config_root, runtime_root
+from core.paths import config_root, data_root, runtime_root
 
 
 RUNTIME_CONFIG = "runtime.json"
 RUNTIME_DESCRIPTOR = "letsinfer-runtime.json"
-RUNTIME_SCHEMA_VERSION = 2
-CORE_COMPATIBILITY_API = 2
-ARTIFACT_SCHEMA_VERSION = 2
-CATALOG_SCHEMA_VERSION = 3
+RUNTIME_SCHEMA_VERSION = 3
+ENGINE_PROTOCOL_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 3
+CATALOG_SCHEMA_VERSION = 4
 DEFAULT_CATALOG_URL = (
     "https://raw.githubusercontent.com/letsinferlabs/catalog/main/catalog.json"
 )
 BUILTIN_CATALOG_PUBLIC_KEY = (
     pathlib.Path(__file__).resolve().parent / "trust" / "catalog-public-key.pem"
 )
-PACK_MEDIA_TYPE = "application/vnd.letsinfer.runtime.v2+tar"
+PACK_MEDIA_TYPE = "application/vnd.letsinfer.runtime.v3+tar"
 REGISTRY_DIGEST_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
@@ -60,11 +60,11 @@ BENCHMARK_GENERATOR = "letsinfer-code-prose"
 BENCHMARK_GENERATOR_VERSION = 2
 BENCHMARK_TOKENIZER_CAPABILITY = "engine-rendered-chat-count-v1"
 BENCHMARK_RENDER_CONTRACT = "openai-chat-user-v1"
-SELECTION_SCHEMA_VERSION = 1
+SELECTION_SCHEMA_VERSION = 2
 SELECTION_FIELDS = {
     "schema_version",
-    "name",
-    "model",
+    "candidate_id",
+    "logical_model",
     "engine",
     "target",
     "target_contract_sha256",
@@ -95,11 +95,12 @@ class _OciAuthenticationRequired(RuntimePackError):
 class RuntimePack:
     root: pathlib.Path
     descriptor: dict[str, Any]
+    runtime: dict[str, Any]
     digest: str
 
     @property
-    def release_path(self) -> pathlib.Path:
-        return self.root / self.descriptor["release_manifest"]
+    def runtime_path(self) -> pathlib.Path:
+        return self.root / RUNTIME_CONFIG
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -491,99 +492,311 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
     return value
 
 
-def _metadata(value: dict[str, Any], *, descriptor: bool) -> dict[str, Any]:
-    schema_version = value.get("schema_version")
-    if type(schema_version) is not int or schema_version != RUNTIME_SCHEMA_VERSION:
-        raise RuntimePackError("unsupported runtime schema_version")
+def normalize_hf_uri(value: Any, where: str = "model URI") -> tuple[str, str, str]:
+    """Validate an exact Hugging Face URI and return owner, repository, and disk slug."""
+
+    if not isinstance(value, str):
+        raise RuntimePackError(f"{where} must be an hf://owner/repository URI")
+    match = re.fullmatch(r"hf://([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)", value)
+    if match is None:
+        raise RuntimePackError(f"{where} must be an hf://owner/repository URI")
+    owner, repository = match.groups()
+    return owner, repository, f"{owner.lower()}--{repository.lower()}"
+
+
+def candidate_id(engine: str, model_uri: str, target: str) -> str:
+    if not isinstance(engine, str) or not SAFE_NAME_RE.fullmatch(engine):
+        raise RuntimePackError("runtime.engine.id must be a lowercase safe name")
+    owner, repository, _slug = normalize_hf_uri(model_uri, "runtime.model.uri")
+    if not isinstance(target, str) or not SAFE_NAME_RE.fullmatch(target):
+        raise RuntimePackError("runtime.target.id must be a lowercase safe name")
+    return "--".join((engine, owner.lower(), repository.lower(), target))
+
+
+def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
     fields = {
         "schema_version",
-        "name",
+        "id",
         "version",
-        "model",
-        "engine",
-        "target",
+        "logical_model",
         "status",
-        "release_manifest",
-        "core_compatibility",
+        "target",
+        "engine",
+        "model",
+        "artifacts",
+        "container",
+        "cache",
+        "serving",
         "benchmark",
         "orchestration",
-        "parent",
     }
-    if descriptor:
-        fields.update({"artifact_schema_version", "media_type", "files"})
+    if type(value.get("schema_version")) is not int or value.get("schema_version") != RUNTIME_SCHEMA_VERSION:
+        raise RuntimePackError("unsupported runtime schema_version")
     unknown = set(value) - fields
     if unknown:
-        kind = "descriptor" if descriptor else "source"
         raise RuntimePackError(
-            f"runtime {kind} has unsupported fields: {', '.join(sorted(unknown))}"
+            f"runtime source has unsupported fields: {', '.join(sorted(unknown))}"
         )
-    for key in ("name", "version", "model", "engine", "status", "release_manifest"):
+    for key in ("id", "version", "logical_model", "status"):
         if not isinstance(value.get(key), str) or not value[key]:
             raise RuntimePackError(f"runtime.{key} must be a non-empty string")
-    for key in ("model", "engine"):
-        if not SAFE_NAME_RE.fullmatch(value[key]):
-            raise RuntimePackError(f"runtime.{key} must be a lowercase safe name")
-    target = value.get("target")
-    if not isinstance(target, str) or not SAFE_NAME_RE.fullmatch(target):
-        raise RuntimePackError("runtime.target must be a lowercase safe name")
-    expected_name = f"{value['model']}/{value['engine']}/{target}"
-    if value["name"] != expected_name:
-        raise RuntimePackError("runtime.name must equal model/engine/target")
+    if not SAFE_NAME_RE.fullmatch(value["logical_model"]):
+        raise RuntimePackError("runtime.logical_model must be a lowercase safe name")
     if not VERSION_RE.fullmatch(value["version"]):
         raise RuntimePackError("runtime.version must be semantic version syntax")
-    if value["status"] not in {"candidate", "stable"}:
-        raise RuntimePackError("runtime.status must be candidate or stable")
-    _relative_path(value["release_manifest"], "runtime.release_manifest")
-    compatibility = value.get("core_compatibility")
-    if not isinstance(compatibility, dict):
-        raise RuntimePackError("runtime.core_compatibility must be an object")
-    if (
-        set(compatibility) != {"api"}
-        or type(compatibility.get("api")) is not int
-        or compatibility.get("api") != CORE_COMPATIBILITY_API
+    if value["status"] not in {"candidate", "qualified"}:
+        raise RuntimePackError("runtime.status must be candidate or qualified")
+
+    target = validate_target_contract(value.get("target"), "runtime.target")
+    engine = value.get("engine")
+    required_engine = {
+        "id",
+        "protocol",
+        "oci",
+        "model_format",
+        "cache_provider",
+        "arguments",
+        "environment",
+    }
+    if not isinstance(engine, dict) or set(engine) != required_engine:
+        raise RuntimePackError(
+            "runtime.engine must contain exactly id, protocol, oci, model_format, "
+            "cache_provider, arguments, and environment"
+        )
+    engine_id = engine.get("id")
+    if not isinstance(engine_id, str) or not SAFE_NAME_RE.fullmatch(engine_id):
+        raise RuntimePackError("runtime.engine.id must be a lowercase safe name")
+    protocol = engine.get("protocol")
+    if not isinstance(protocol, dict) or set(protocol) != {"version"}:
+        raise RuntimePackError("runtime.engine.protocol must contain exactly version")
+    if type(protocol.get("version")) is not int or protocol["version"] != ENGINE_PROTOCOL_VERSION:
+        raise RuntimePackError(
+            f"runtime.engine.protocol.version must be {ENGINE_PROTOCOL_VERSION}"
+        )
+    oci = engine.get("oci")
+    if not isinstance(oci, dict) or set(oci) not in (
+        {"reference", "immutable_id"},
+        {"reference", "immutable_id", "base"},
+    ):
+        raise RuntimePackError("runtime.engine.oci has invalid fields")
+    if not REGISTRY_DIGEST_RE.fullmatch(oci.get("reference", "")):
+        raise RuntimePackError("runtime.engine.oci.reference must be digest-pinned")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", oci.get("immutable_id", "")):
+        raise RuntimePackError("runtime.engine.oci.immutable_id must be a SHA-256 image ID")
+    if "base" in oci and not REGISTRY_DIGEST_RE.fullmatch(oci.get("base", "")):
+        raise RuntimePackError("runtime.engine.oci.base must be digest-pinned")
+    for key in ("model_format", "cache_provider"):
+        if not isinstance(engine.get(key), str) or not SAFE_NAME_RE.fullmatch(engine[key]):
+            raise RuntimePackError(f"runtime.engine.{key} must be a lowercase safe name")
+    if not isinstance(engine.get("arguments"), list) or any(
+        not isinstance(item, str) or not item for item in engine["arguments"]
+    ):
+        raise RuntimePackError("runtime.engine.arguments must contain non-empty strings")
+    if not isinstance(engine.get("environment"), dict) or any(
+        not isinstance(key, str)
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None
+        or key.startswith("LETSINFER_")
+        or not isinstance(item, str)
+        for key, item in engine["environment"].items()
     ):
         raise RuntimePackError(
-            f"runtime.core_compatibility.api must be {CORE_COMPATIBILITY_API}"
+            "runtime.engine.environment must be a portable string map without LETSINFER_ names"
         )
-    if "benchmark" in value:
-        validate_benchmark_contract(value["benchmark"])
+
+    model = value.get("model")
+    if not isinstance(model, dict) or set(model) != {"uri", "artifact", "acquisition"}:
+        raise RuntimePackError("runtime.model must contain exactly uri, artifact, and acquisition")
+    normalize_hf_uri(model.get("uri"), "runtime.model.uri")
+    acquisition = model.get("acquisition")
+    if not isinstance(acquisition, dict) or set(acquisition) != {"image"} or not REGISTRY_DIGEST_RE.fullmatch(acquisition.get("image", "")):
+        raise RuntimePackError("runtime.model.acquisition.image must be digest-pinned")
+
+    artifacts = value.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise RuntimePackError("runtime.artifacts must be a non-empty list")
+    names: set[str] = set()
+    primary_uri: str | None = None
+    for index, artifact in enumerate(artifacts):
+        where = f"runtime.artifacts[{index}]"
+        if not isinstance(artifact, dict):
+            raise RuntimePackError(f"{where} must be an object")
+        name = artifact.get("name")
+        if not isinstance(name, str) or not SAFE_NAME_RE.fullmatch(name) or name in names:
+            raise RuntimePackError(f"{where}.name must be a unique lowercase safe name")
+        names.add(name)
+        normalize_hf_uri(artifact.get("uri"), f"{where}.uri")
+        artifact_format = artifact.get("format")
+        common_fields = {"name", "uri", "format", "revision"}
+        if artifact_format == "huggingface-snapshot":
+            expected_fields = common_fields
+        elif artifact_format == "gguf-file":
+            expected_fields = common_fields | {"filename", "sha256"}
+            if "bytes" in artifact:
+                expected_fields.add("bytes")
+        else:
+            raise RuntimePackError(
+                f"{where}.format must be huggingface-snapshot or gguf-file"
+            )
+        if set(artifact) != expected_fields:
+            raise RuntimePackError(
+                f"{where} must contain exactly {', '.join(sorted(expected_fields))}"
+            )
+        revision = artifact.get("revision")
+        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise RuntimePackError(f"{where}.revision must be a full commit SHA")
+        if name == model.get("artifact"):
+            primary_uri = artifact["uri"]
+        if artifact_format == "gguf-file":
+            filename = artifact.get("filename")
+            if (
+                not isinstance(filename, str)
+                or not filename.endswith(".gguf")
+                or "/" in filename
+                or "\\" in filename
+            ):
+                raise RuntimePackError(f"{where}.filename must name one contained .gguf file")
+            if not isinstance(artifact.get("sha256"), str) or not SHA256_RE.fullmatch(
+                artifact["sha256"]
+            ):
+                raise RuntimePackError(f"{where}.sha256 must be a SHA-256")
+            if "bytes" in artifact and (
+                not isinstance(artifact["bytes"], int)
+                or isinstance(artifact["bytes"], bool)
+                or artifact["bytes"] <= 0
+            ):
+                raise RuntimePackError(f"{where}.bytes must be positive")
+    if primary_uri is None:
+        raise RuntimePackError("runtime.model.artifact must identify one runtime artifact")
+    if primary_uri != model["uri"]:
+        raise RuntimePackError("runtime.model.uri must equal the primary artifact URI")
+    ordered_names = [artifact["name"] for artifact in artifacts]
+    if ordered_names[0] != model["artifact"] or ordered_names[1:] != sorted(ordered_names[1:]):
+        raise RuntimePackError(
+            "runtime.artifacts must put the primary artifact first and sort the rest by name"
+        )
+    primary_format = next(
+        artifact["format"] for artifact in artifacts if artifact["name"] == model["artifact"]
+    )
+    if primary_format != engine["model_format"]:
+        raise RuntimePackError(
+            "runtime primary artifact format must match runtime.engine.model_format"
+        )
+
+    cache = value.get("cache")
+    if not isinstance(cache, dict) or set(cache) != {
+        "provider", "persistent", "prewarm", "replay_output_policy", "config"
+    }:
+        raise RuntimePackError(
+            "runtime.cache must contain exactly provider, persistent, prewarm, "
+            "replay_output_policy, and config"
+        )
+    if cache.get("provider") != engine["cache_provider"]:
+        raise RuntimePackError("runtime.cache.provider must match engine.cache_provider")
+    if not isinstance(cache.get("persistent"), bool) or not isinstance(cache.get("prewarm"), bool):
+        raise RuntimePackError("runtime.cache persistent and prewarm must be boolean")
+    if not isinstance(cache.get("config"), dict):
+        raise RuntimePackError("runtime.cache.config must be an object")
+    if cache["persistent"]:
+        if cache.get("replay_output_policy") not in {
+            "all-phases-exact", "restored-repeat-exact"
+        }:
+            raise RuntimePackError(
+                "persistent runtime.cache requires an exact replay_output_policy"
+            )
+    elif cache.get("replay_output_policy") is not None:
+        raise RuntimePackError(
+            "non-persistent runtime.cache.replay_output_policy must be null"
+        )
+
+    container = value.get("container")
+    if not isinstance(container, dict) or "model_cache" in container:
+        raise RuntimePackError(
+            "runtime.container must be an object and cannot override the model store"
+        )
+
+    serving = value.get("serving")
+    if not isinstance(serving, dict) or serving.get("qualified") is not (
+        value["status"] == "qualified"
+    ):
+        raise RuntimePackError(
+            "runtime.serving.qualified must agree with runtime.status"
+        )
+
+    expected_id = candidate_id(engine_id, model["uri"], target["id"])
+    if value["id"] != expected_id:
+        raise RuntimePackError(
+            "runtime.id must equal <engine>--<hf-owner>--<hf-model>--<target>"
+        )
+
+    benchmark = value.get("benchmark")
+    if not isinstance(benchmark, dict) or set(benchmark) != {"contract", "record"}:
+        raise RuntimePackError("runtime.benchmark must contain exactly contract and record")
+    contract = benchmark.get("contract")
+    if not isinstance(contract, dict):
+        raise RuntimePackError("runtime.benchmark.contract must be an object")
+    if contract.get("schema_version") == BENCHMARK_SCHEMA_VERSION:
+        validate_benchmark_contract(contract)
+    record = benchmark.get("record")
+    if record is None:
+        if value["status"] == "qualified":
+            raise RuntimePackError(
+                "qualified runtime.benchmark.record cannot be null"
+            )
+    else:
+        if not isinstance(record, dict) or set(record) != {"path", "sha256", "id"}:
+            raise RuntimePackError(
+                "runtime.benchmark.record must be null or contain exactly "
+                "path, sha256, and id"
+            )
+        _relative_path(record.get("path"), "runtime.benchmark.record.path")
+        for key in ("sha256", "id"):
+            if not isinstance(record.get(key), str) or not SHA256_RE.fullmatch(
+                record[key]
+            ):
+                raise RuntimePackError(
+                    f"runtime.benchmark.record.{key} must be a SHA-256"
+                )
     if "orchestration" in value:
         try:
             validate_orchestration_contract(value["orchestration"])
         except OrchestrationError as error:
             raise RuntimePackError(str(error)) from error
-    if "parent" in value:
-        parent = value["parent"]
-        if not isinstance(parent, dict) or set(parent) != {
-            "release",
-            "manifest_sha256",
-        }:
-            raise RuntimePackError(
-                "runtime.parent must contain exactly release and manifest_sha256"
-            )
-        if not isinstance(parent.get("release"), str) or not parent["release"]:
-            raise RuntimePackError("runtime.parent.release must be non-empty")
-        if not isinstance(parent.get("manifest_sha256"), str) or not SHA256_RE.fullmatch(
-            parent["manifest_sha256"]
-        ):
-            raise RuntimePackError("runtime.parent.manifest_sha256 must be a SHA-256")
-    if descriptor:
-        files = value.get("files")
-        if not isinstance(files, list) or not files:
-            raise RuntimePackError("runtime.files must be a non-empty list")
-        artifact_schema = value.get("artifact_schema_version")
-        if type(artifact_schema) is not int or artifact_schema != ARTIFACT_SCHEMA_VERSION:
-            raise RuntimePackError("unsupported runtime artifact_schema_version")
-        if value.get("media_type") != PACK_MEDIA_TYPE:
-            raise RuntimePackError(
-                f"runtime.media_type must be {PACK_MEDIA_TYPE}"
-            )
-    elif any(
-        key in value for key in ("artifact_schema_version", "media_type", "files")
-    ):
-        raise RuntimePackError(
-            "source runtime.json cannot contain built artifact fields"
-        )
+    return value
+
+
+def validate_runtime_config(value: dict[str, Any]) -> dict[str, Any]:
+    """Validate one authoritative schema-v3 runtime configuration in memory."""
+
+    return _runtime_metadata(value)
+
+
+def _descriptor_metadata(value: dict[str, Any]) -> dict[str, Any]:
+    fields = {
+        "artifact_schema_version",
+        "media_type",
+        "runtime_sha256",
+        "candidate",
+        "files",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise RuntimePackError("runtime artifact descriptor fields are invalid")
+    if type(value.get("artifact_schema_version")) is not int or value["artifact_schema_version"] != ARTIFACT_SCHEMA_VERSION:
+        raise RuntimePackError("unsupported runtime artifact_schema_version")
+    if value.get("media_type") != PACK_MEDIA_TYPE:
+        raise RuntimePackError(f"runtime.media_type must be {PACK_MEDIA_TYPE}")
+    if not isinstance(value.get("runtime_sha256"), str) or not SHA256_RE.fullmatch(value["runtime_sha256"]):
+        raise RuntimePackError("runtime.runtime_sha256 must be a SHA-256")
+    candidate = value.get("candidate")
+    if not isinstance(candidate, dict) or set(candidate) != {
+        "id", "version", "logical_model", "engine", "target", "status"
+    }:
+        raise RuntimePackError("runtime candidate summary is invalid")
+    for key in ("id", "version", "logical_model", "engine", "target", "status"):
+        if not isinstance(candidate.get(key), str) or not candidate[key]:
+            raise RuntimePackError(f"runtime candidate {key} is invalid")
+    files = value.get("files")
+    if not isinstance(files, list) or not files:
+        raise RuntimePackError("runtime.files must be a non-empty list")
     return value
 
 
@@ -616,15 +829,19 @@ def _source_files(root: pathlib.Path) -> list[pathlib.Path]:
 
 def describe_source(root: pathlib.Path) -> RuntimePack:
     root = root.expanduser().resolve(strict=True)
-    config = _metadata(_read_object(root / RUNTIME_CONFIG, "runtime config"), descriptor=False)
+    config = _runtime_metadata(_read_object(root / RUNTIME_CONFIG, "runtime config"))
     files = _source_files(root)
     relative_names = {path.relative_to(root).as_posix() for path in files}
     if RUNTIME_CONFIG not in relative_names:
         raise RuntimePackError(f"runtime source is missing {RUNTIME_CONFIG}")
-    if config["release_manifest"] not in relative_names:
-        raise RuntimePackError(
-            f"runtime source is missing release manifest {config['release_manifest']}"
-        )
+    benchmark_record = config["benchmark"]["record"]
+    if benchmark_record is not None:
+        benchmark_path = benchmark_record["path"]
+        if benchmark_path not in relative_names:
+            raise RuntimePackError(
+                f"runtime source is missing benchmark record {benchmark_path}"
+            )
+        _verify_benchmark_record(root, config)
     if len(files) > MAX_PACK_FILES:
         raise RuntimePackError(f"runtime source exceeds {MAX_PACK_FILES} files")
     records = []
@@ -642,19 +859,34 @@ def describe_source(root: pathlib.Path) -> RuntimePack:
                 "sha256": sha256_file(path),
             }
         )
-    descriptor = dict(config)
-    descriptor["artifact_schema_version"] = ARTIFACT_SCHEMA_VERSION
-    descriptor["media_type"] = PACK_MEDIA_TYPE
-    descriptor["files"] = records
+    runtime_sha256 = sha256_file(root / RUNTIME_CONFIG)
+    if runtime_sha256 != next(
+        record["sha256"] for record in records if record["path"] == RUNTIME_CONFIG
+    ):
+        raise RuntimePackError("runtime.json identity changed while describing source")
+    descriptor = {
+        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        "media_type": PACK_MEDIA_TYPE,
+        "runtime_sha256": runtime_sha256,
+        "candidate": {
+            "id": config["id"],
+            "version": config["version"],
+            "logical_model": config["logical_model"],
+            "engine": config["engine"]["id"],
+            "target": config["target"]["id"],
+            "status": config["status"],
+        },
+        "files": records,
+    }
     digest = hashlib.sha256(canonical_bytes(descriptor)).hexdigest()
-    return RuntimePack(root=root, descriptor=descriptor, digest=digest)
+    return RuntimePack(root=root, descriptor=descriptor, runtime=config, digest=digest)
 
 
 def verify_descriptor(root: pathlib.Path) -> RuntimePack:
     root = root.expanduser().resolve(strict=True)
     descriptor_path = root / RUNTIME_DESCRIPTOR
-    descriptor = _metadata(
-        _read_object(descriptor_path, "runtime descriptor"), descriptor=True
+    descriptor = _descriptor_metadata(
+        _read_object(descriptor_path, "runtime descriptor")
     )
     seen: set[str] = set()
     expected_files: set[str] = set()
@@ -710,29 +942,56 @@ def verify_descriptor(root: pathlib.Path) -> RuntimePack:
         raise RuntimePackError(
             f"runtime artifact file set mismatch (missing={missing}, extra={extra})"
         )
-    if descriptor["release_manifest"] not in expected_files:
-        raise RuntimePackError("runtime release manifest is not pinned in runtime.files")
+    if RUNTIME_CONFIG not in expected_files:
+        raise RuntimePackError("runtime.json is not pinned in runtime.files")
+    runtime_path = root / RUNTIME_CONFIG
+    if sha256_file(runtime_path) != descriptor["runtime_sha256"]:
+        raise RuntimePackError("runtime.json differs from the artifact descriptor")
+    runtime = _runtime_metadata(_read_object(runtime_path, "runtime config"))
+    _verify_benchmark_record(root, runtime)
+    expected_candidate = {
+        "id": runtime["id"],
+        "version": runtime["version"],
+        "logical_model": runtime["logical_model"],
+        "engine": runtime["engine"]["id"],
+        "target": runtime["target"]["id"],
+        "status": runtime["status"],
+    }
+    if descriptor["candidate"] != expected_candidate:
+        raise RuntimePackError("runtime candidate summary differs from runtime.json")
     digest = hashlib.sha256(canonical_bytes(descriptor)).hexdigest()
-    return RuntimePack(root=root, descriptor=descriptor, digest=digest)
+    return RuntimePack(root=root, descriptor=descriptor, runtime=runtime, digest=digest)
+
+
+def _verify_benchmark_record(root: pathlib.Path, runtime: dict[str, Any]) -> None:
+    reference = runtime["benchmark"]["record"]
+    if reference is None:
+        return
+    path = root / reference["path"]
+    if path.is_symlink() or not path.is_file():
+        raise RuntimePackError(f"runtime benchmark record is unavailable: {path}")
+    if sha256_file(path) != reference["sha256"]:
+        raise RuntimePackError("runtime benchmark record SHA-256 differs from runtime.json")
+    validator = pathlib.Path(__file__).resolve().parents[1] / "benchmarks/benchmark_record.py"
+    result = subprocess.run(
+        [sys.executable, str(validator), str(path)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or "unknown validation error"
+        raise RuntimePackError(f"invalid runtime benchmark record: {detail}")
+    record = _read_object(path, "benchmark record")
+    if record.get("id") != reference["id"]:
+        raise RuntimePackError("runtime benchmark record identity differs from runtime.json")
 
 
 def build_archive(source: pathlib.Path, output: pathlib.Path) -> RuntimePack:
     source = source.expanduser().resolve(strict=True)
     if (source / "benchmark.md").exists():
         raise RuntimePackError("runtime benchmark results must use benchmark.json")
-    benchmark_path = source / "benchmark.json"
-    if benchmark_path.exists():
-        validator = pathlib.Path(__file__).resolve().parents[1] / "benchmarks/benchmark_record.py"
-        result = subprocess.run(
-            [sys.executable, str(validator), str(benchmark_path)],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip() or "unknown validation error"
-            raise RuntimePackError(f"invalid runtime benchmark.json: {detail}")
     pack = describe_source(source)
     output = output.expanduser().resolve(strict=False)
     try:
@@ -1228,7 +1487,7 @@ def _private_directory(path: pathlib.Path) -> None:
 
 def store_pack(pack: RuntimePack, home: pathlib.Path | None = None) -> pathlib.Path:
     runtime_home = (home or default_runtime_home()).expanduser()
-    objects = runtime_home / "objects"
+    objects = runtime_home / ".objects"
     _private_directory(objects)
     destination = objects / pack.digest
     if destination.exists():
@@ -1259,8 +1518,10 @@ def store_pack(pack: RuntimePack, home: pathlib.Path | None = None) -> pathlib.P
     return destination
 
 
-def selection_key(name: str, engine: str) -> str:
-    return hashlib.sha256(f"{name}\0{engine}".encode()).hexdigest()
+def selection_key(logical_model: str) -> str:
+    if not isinstance(logical_model, str) or not SAFE_NAME_RE.fullmatch(logical_model):
+        raise RuntimePackError("logical model selection key is invalid")
+    return logical_model
 
 
 def installation_identity(
@@ -1321,10 +1582,17 @@ def _validate_selection(value: dict[str, Any], label: str) -> None:
         value["target"]
     ):
         raise RuntimePackError(f"invalid runtime selection target: {label}")
+    for key in ("candidate_id", "logical_model", "engine"):
+        if not isinstance(value.get(key), str) or not SAFE_NAME_RE.fullmatch(value[key]):
+            raise RuntimePackError(f"invalid runtime selection {key}: {label}")
 
 
 def selections(home: pathlib.Path | None = None) -> list[dict[str, Any]]:
-    root = (home or default_runtime_home()).expanduser() / "selections"
+    root = (
+        home.expanduser() / "selections"
+        if home is not None
+        else data_root() / "active"
+    )
     if not root.exists():
         return []
     if root.is_symlink() or not root.is_dir():
@@ -1333,20 +1601,80 @@ def selections(home: pathlib.Path | None = None) -> list[dict[str, Any]]:
     for path in sorted(root.glob("*.json")):
         value = _read_object(path, "runtime selection")
         _validate_selection(value, str(path))
-        expected_name = f"{selection_key(value['name'], value['engine'])}.json"
+        expected_name = f"{selection_key(value['logical_model'])}.json"
         if path.name != expected_name:
             raise RuntimePackError(f"runtime selection filename mismatch: {path}")
         values.append(value)
     return values
 
 
+def _publish_candidate_view(receipt: dict[str, Any], runtime_home: pathlib.Path) -> None:
+    """Atomically expose the active runtime at runtimes/<candidate-id>."""
+
+    source = pathlib.Path(receipt["object_root"]).expanduser().resolve(strict=True)
+    installed = verify_descriptor(source)
+    if installed.digest != receipt["digest"] or installed.runtime["id"] != receipt["candidate_id"]:
+        raise RuntimePackError("candidate view source differs from its selection receipt")
+    destination = runtime_home / receipt["candidate_id"]
+    staging = pathlib.Path(
+        tempfile.mkdtemp(prefix=f".{receipt['candidate_id']}.incoming-", dir=runtime_home)
+    )
+    staging.chmod(0o700)
+    previous: pathlib.Path | None = None
+    try:
+        for path in sorted(source.rglob("*")):
+            relative = path.relative_to(source)
+            target = staging / relative
+            if path.is_dir():
+                target.mkdir(mode=0o700)
+            elif path.is_file() and not path.is_symlink():
+                try:
+                    os.link(path, target)
+                except OSError:
+                    shutil.copy2(path, target)
+            else:
+                raise RuntimePackError(f"runtime candidate view contains unsafe entry: {relative}")
+        verify_descriptor(staging)
+        if destination.exists():
+            if destination.is_symlink() or not destination.is_dir():
+                raise RuntimePackError(f"runtime candidate path is unsafe: {destination}")
+            previous = runtime_home / f".{receipt['candidate_id']}.previous-{os.getpid()}"
+            destination.replace(previous)
+        staging.replace(destination)
+        if previous is not None:
+            shutil.rmtree(previous)
+    except BaseException:
+        if staging.exists():
+            shutil.rmtree(staging)
+        if previous is not None and previous.exists() and not destination.exists():
+            previous.replace(destination)
+        raise
+
+
+def _prune_runtime_objects(runtime_home: pathlib.Path) -> None:
+    objects = runtime_home / ".objects"
+    if not objects.is_dir() or objects.is_symlink():
+        return
+    retained: set[str] = set()
+    for receipt in selections():
+        retained.add(receipt["digest"])
+        retained.update(
+            item["digest"]
+            for item in receipt["history"]
+            if isinstance(item, dict) and isinstance(item.get("digest"), str)
+        )
+    for path in objects.iterdir():
+        if path.is_dir() and not path.is_symlink() and SHA256_RE.fullmatch(path.name) and path.name not in retained:
+            shutil.rmtree(path)
+
+
 def write_selection(
     receipt: dict[str, Any], home: pathlib.Path | None = None
 ) -> pathlib.Path:
     runtime_home = (home or default_runtime_home()).expanduser()
-    root = runtime_home / "selections"
+    root = runtime_home / "selections" if home is not None else data_root() / "active"
     _private_directory(root)
-    path = root / f"{selection_key(receipt['name'], receipt['engine'])}.json"
+    path = root / f"{selection_key(receipt['logical_model'])}.json"
     previous: dict[str, Any] | None = None
     if path.is_file():
         previous = _read_object(path, "runtime selection")
@@ -1361,8 +1689,8 @@ def write_selection(
             {
                 key: previous[key]
                 for key in (
-                    "name",
-                    "model",
+                    "candidate_id",
+                    "logical_model",
                     "engine",
                     "target",
                     "target_contract_sha256",
@@ -1383,7 +1711,7 @@ def write_selection(
         )
     value = dict(receipt)
     value["schema_version"] = SELECTION_SCHEMA_VERSION
-    value["history"] = history[-20:]
+    value["history"] = history[-1:]
     _validate_selection(value, "new receipt")
     data = canonical_bytes(value)
     with tempfile.NamedTemporaryFile(
@@ -1395,6 +1723,10 @@ def write_selection(
         os.fsync(handle.fileno())
     temporary.chmod(0o600)
     temporary.replace(path)
+    _private_directory(runtime_home)
+    _publish_candidate_view(value, runtime_home)
+    if home is None:
+        _prune_runtime_objects(runtime_home)
     return path
 
 
@@ -1417,12 +1749,12 @@ def new_receipt(
     )
     return {
         "schema_version": SELECTION_SCHEMA_VERSION,
-        "name": pack.descriptor["name"],
-        "model": pack.descriptor["model"],
-        "engine": pack.descriptor["engine"],
-        "target": pack.descriptor["target"],
+        "candidate_id": pack.runtime["id"],
+        "logical_model": pack.runtime["logical_model"],
+        "engine": pack.runtime["engine"]["id"],
+        "target": pack.runtime["target"]["id"],
         "target_contract_sha256": target_contract_sha256,
-        "version": pack.descriptor["version"],
+        "version": pack.runtime["version"],
         "digest": pack.digest,
         "object_root": str(object_root),
         "manifest_path": str(manifest_path),
@@ -1643,42 +1975,101 @@ def load_catalog(
                 )
             if (
                 not isinstance(target_record, dict)
-                or set(target_record) != {"recommended", "engines"}
+                or set(target_record) != {"recommended", "candidates"}
             ):
                 raise RuntimePackError(f"catalog target {model}/{target_id} is invalid")
             recommended = target_record.get("recommended")
-            engines = target_record.get("engines")
+            candidates = target_record.get("candidates")
             if (
-                not isinstance(recommended, str)
-                or not SAFE_NAME_RE.fullmatch(recommended)
-                or not isinstance(engines, dict)
-                or not engines
+                (recommended is not None and (
+                    not isinstance(recommended, str)
+                    or not SAFE_NAME_RE.fullmatch(recommended)
+                ))
+                or not isinstance(candidates, dict)
+                or not candidates
             ):
                 raise RuntimePackError(
                     f"catalog target {model}/{target_id} is missing recommendation data"
                 )
-            if recommended not in engines:
+            if recommended is not None and recommended not in candidates:
                 raise RuntimePackError(
-                    f"catalog recommendation for {model}/{target_id} is not an engine variant"
+                    f"catalog recommendation for {model}/{target_id} is not a runtime candidate"
                 )
-            for engine, release in engines.items():
+            if recommended is not None and candidates[recommended].get("qualified") is not True:
+                raise RuntimePackError(
+                    f"catalog recommendation for {model}/{target_id} is not qualified"
+                )
+            for candidate, release in candidates.items():
                 if (
-                    not isinstance(engine, str)
-                    or not SAFE_NAME_RE.fullmatch(engine)
+                    not isinstance(candidate, str)
+                    or not SAFE_NAME_RE.fullmatch(candidate)
                     or not isinstance(release, dict)
-                    or set(release) != {"version", "source"}
+                    or set(release) != {
+                        "version",
+                        "source",
+                        "qualified",
+                        "engine",
+                        "engine_oci",
+                        "model_uri",
+                        "benchmark",
+                    }
                 ):
                     raise RuntimePackError(
-                        f"catalog engine entry for {model}/{engine}/{target_id} is invalid"
+                        f"catalog candidate entry for {model}/{candidate}/{target_id} is invalid"
                     )
                 if not VERSION_RE.fullmatch(release.get("version", "")):
                     raise RuntimePackError(
-                        f"catalog version for {model}/{engine}/{target_id} is invalid"
+                        f"catalog version for {model}/{candidate}/{target_id} is invalid"
                     )
                 if not REGISTRY_DIGEST_RE.fullmatch(release.get("source", "")):
                     raise RuntimePackError(
-                        f"catalog source for {model}/{engine}/{target_id} must be digest-pinned OCI"
+                        f"catalog source for {model}/{candidate}/{target_id} must be digest-pinned OCI"
                     )
+                if type(release.get("qualified")) is not bool:
+                    raise RuntimePackError(
+                        f"catalog qualification for {model}/{candidate}/{target_id} must be boolean"
+                    )
+                engine = release.get("engine")
+                if not isinstance(engine, str) or not SAFE_NAME_RE.fullmatch(engine):
+                    raise RuntimePackError(
+                        f"catalog engine for {model}/{candidate}/{target_id} is invalid"
+                    )
+                if not REGISTRY_DIGEST_RE.fullmatch(release.get("engine_oci", "")):
+                    raise RuntimePackError(
+                        f"catalog Engine OCI for {model}/{candidate}/{target_id} must be digest-pinned"
+                    )
+                normalize_hf_uri(
+                    release.get("model_uri"),
+                    f"catalog model URI for {model}/{candidate}/{target_id}",
+                )
+                expected_candidate = candidate_id(engine, release["model_uri"], target_id)
+                if candidate != expected_candidate:
+                    raise RuntimePackError(
+                        f"catalog candidate key {candidate} differs from its exact identities"
+                    )
+                benchmark = release.get("benchmark")
+                if benchmark is None:
+                    if release["qualified"]:
+                        raise RuntimePackError(
+                            f"qualified catalog candidate {model}/{candidate}/{target_id} "
+                            "has no benchmark"
+                        )
+                    continue
+                if not isinstance(benchmark, dict) or set(benchmark) != {
+                    "id",
+                    "suite",
+                    "score",
+                }:
+                    raise RuntimePackError(
+                        f"catalog benchmark for {model}/{candidate}/{target_id} is invalid"
+                    )
+                if not isinstance(benchmark.get("id"), str) or not SHA256_RE.fullmatch(benchmark["id"]):
+                    raise RuntimePackError("catalog benchmark id must be a SHA-256")
+                if not isinstance(benchmark.get("suite"), str) or not benchmark["suite"]:
+                    raise RuntimePackError("catalog benchmark suite must be non-empty")
+                score = benchmark.get("score")
+                if not isinstance(score, (int, float)) or isinstance(score, bool) or not math.isfinite(score) or score <= 0:
+                    raise RuntimePackError("catalog benchmark score must be positive and finite")
     return value
 
 
@@ -1704,7 +2095,7 @@ def compatible_catalog_targets(
 def catalog_release(
     catalog: dict[str, Any],
     model: str,
-    engine: str | None,
+    runtime: str | None,
     target: str | None = None,
     device: dict[str, Any] | None = None,
 ) -> tuple[str, str, str, str, str]:
@@ -1741,16 +2132,20 @@ def catalog_release(
             )
         selected_target, target_record = matches[0]
         contract = catalog_target_contract(catalog, selected_target)
-    selected_engine = engine or target_record["recommended"]
-    release = target_record["engines"].get(selected_engine)
+    selected_runtime = runtime or target_record["recommended"]
+    if selected_runtime is None:
+        raise RuntimePackError(
+            f"runtime catalog has no qualified candidate for {model}/{selected_target}; use --runtime to select an unqualified candidate explicitly"
+        )
+    release = target_record["candidates"].get(selected_runtime)
     if not isinstance(release, dict):
         raise RuntimePackError(
-            f"runtime catalog has no {selected_engine} variant for {model}/{selected_target}"
+            f"runtime catalog has no {selected_runtime} candidate for {model}/{selected_target}"
         )
     return (
         selected_target,
         target_contract_sha256(contract),
-        selected_engine,
+        selected_runtime,
         release["version"],
         release["source"],
     )
@@ -1764,94 +2159,3 @@ def resolved_catalog_location(explicit: str | None = None) -> str | None:
         return configured
     default = config_root() / "catalog.json"
     return str(default) if default.is_file() else DEFAULT_CATALOG_URL
-
-
-def _is_option_token(token: str) -> bool:
-    return token.startswith("--") or bool(
-        re.fullmatch(r"-[A-Za-z][A-Za-z0-9_-]*(?:=.*)?", token)
-    )
-
-
-def overlay_clauses(tokens: Sequence[str]) -> list[list[str]]:
-    """Split native options without knowing an engine's option schema."""
-    clauses: list[list[str]] = []
-    current: list[str] | None = None
-    for token in tokens:
-        if token == "--":
-            raise RuntimePackError("the engine argument list cannot contain another -- separator")
-        if _is_option_token(token):
-            current = [token]
-            clauses.append(current)
-        elif current is None:
-            raise RuntimePackError(
-                f"engine argument values must follow an option; unexpected {token!r}"
-            )
-        else:
-            current.append(token)
-    if not clauses:
-        raise RuntimePackError("no engine arguments were supplied after --")
-    return clauses
-
-
-def clause_key(clause: Sequence[str]) -> str:
-    if not clause or not _is_option_token(clause[0]) or clause[0] == "--":
-        raise RuntimePackError("engine argument clauses must begin with an option")
-    return clause[0].split("=", 1)[0]
-
-
-def apply_overlay(
-    parent: Sequence[Sequence[str]],
-    supplied: Sequence[Sequence[str]],
-    without: Sequence[str],
-) -> tuple[list[list[str]], dict[str, list[Any]]]:
-    removals = list(dict.fromkeys(without))
-    if any(
-        not _is_option_token(value) or value == "--" or "=" in value
-        for value in removals
-    ):
-        raise RuntimePackError("--without values must be exact option names")
-    supplied_groups: dict[str, list[list[str]]] = {}
-    supplied_order: list[str] = []
-    for raw_clause in supplied:
-        clause = list(raw_clause)
-        key = clause_key(clause)
-        if key in removals:
-            raise RuntimePackError(f"engine argument cannot be supplied and removed: {key}")
-        if key not in supplied_groups:
-            supplied_groups[key] = []
-            supplied_order.append(key)
-        supplied_groups[key].append(clause)
-    parent_keys = [clause_key(clause) for clause in parent]
-    resolved: list[list[str]] = []
-    emitted: set[str] = set()
-    replaced: list[Any] = []
-    removed: list[Any] = []
-    for raw_clause, key in zip(parent, parent_keys):
-        clause = list(raw_clause)
-        if key in removals:
-            removed.append(clause)
-            continue
-        if key in supplied_groups:
-            if key not in emitted:
-                resolved.extend(supplied_groups[key])
-                replaced.append({
-                    "before": [
-                        list(item)
-                        for item, item_key in zip(parent, parent_keys)
-                        if item_key == key
-                    ],
-                    "after": supplied_groups[key],
-                })
-                emitted.add(key)
-            continue
-        resolved.append(clause)
-    added: list[Any] = []
-    for key in supplied_order:
-        if key not in parent_keys:
-            resolved.extend(supplied_groups[key])
-            added.extend(supplied_groups[key])
-    return resolved, {"removed": removed, "replaced": replaced, "added": added}
-
-
-def flatten_clauses(clauses: Sequence[Sequence[str]]) -> tuple[str, ...]:
-    return tuple(token for clause in clauses for token in clause)

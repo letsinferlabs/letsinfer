@@ -76,10 +76,10 @@ def _verify_installed_tree(root: pathlib.Path, expected: dict[str, Any]) -> None
             raise CoreInstallError(f"installed source mismatch: {record['path']}")
 
 
-def _atomic_launcher(link: pathlib.Path, target: pathlib.Path) -> None:
-    link.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+def _atomic_link(link: pathlib.Path, target: pathlib.Path, *, parent_mode: int) -> None:
+    link.parent.mkdir(mode=parent_mode, parents=True, exist_ok=True)
     if link.exists() and not link.is_symlink():
-        raise CoreInstallError(f"refusing to replace a non-symlink launcher: {link}")
+        raise CoreInstallError(f"refusing to replace a non-symlink: {link}")
     temporary = link.with_name(f".{link.name}.{os.getpid()}.tmp")
     try:
         temporary.unlink(missing_ok=True)
@@ -90,16 +90,30 @@ def _atomic_launcher(link: pathlib.Path, target: pathlib.Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def install(source: pathlib.Path, prefix: pathlib.Path) -> dict[str, Any]:
+def install(
+    source: pathlib.Path,
+    home: pathlib.Path,
+    *,
+    launcher_root: pathlib.Path | None = None,
+) -> dict[str, Any]:
     source = source.resolve(strict=True)
-    prefix = prefix.expanduser().resolve(strict=False)
-    if prefix.exists() and (prefix.is_symlink() or not prefix.is_dir()):
-        raise CoreInstallError("installation prefix must be a real directory")
+    home = home.expanduser().resolve(strict=False)
+    if home in {pathlib.Path("/"), pathlib.Path.home()}:
+        raise CoreInstallError("LETSINFER_HOME is too broad")
+    if home.exists() and (home.is_symlink() or not home.is_dir()):
+        raise CoreInstallError("LETSINFER_HOME must be a real directory")
+    home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    home.chmod(0o700)
+    core = home / "core"
+    if core.exists() and (core.is_symlink() or not core.is_dir()):
+        raise CoreInstallError("core store must be a real directory")
+    core.mkdir(mode=0o700, parents=True, exist_ok=True)
+    core.chmod(0o700)
     records = public_files(source)
     manifest = source_manifest(records)
     manifest_bytes = _canonical_json(manifest)
     identity = hashlib.sha256(manifest_bytes).hexdigest()
-    versions = prefix / "lib" / "letsinfer" / PRODUCT_VERSION
+    versions = core / "versions" / PRODUCT_VERSION
     destination = versions / identity
     versions.mkdir(mode=0o755, parents=True, exist_ok=True)
     if destination.exists():
@@ -155,18 +169,22 @@ def install(source: pathlib.Path, prefix: pathlib.Path) -> dict[str, Any]:
                 shutil.rmtree(staging)
             raise
         _verify_installed_tree(destination, manifest)
-    bin_root = prefix / "bin"
+    _atomic_link(core / "current", destination, parent_mode=0o700)
+    bin_root = launcher_root.expanduser().resolve(strict=False) if launcher_root else None
     for name in LAUNCHERS:
-        target = destination / "bin" / name
-        if not target.is_file() or target.is_symlink():
+        target = core / "current" / "bin" / name
+        installed = destination / "bin" / name
+        if not installed.is_file() or installed.is_symlink():
             raise CoreInstallError(f"installed launcher is unavailable: {name}")
-        _atomic_launcher(bin_root / name, target)
+        if bin_root is not None:
+            _atomic_link(bin_root / name, target, parent_mode=0o755)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "version": PRODUCT_VERSION,
         "source_sha256": identity,
         "source_root": str(destination),
-        "command": str(bin_root / "letsinfer"),
+        "current": str(core / "current"),
+        "command": str(bin_root / "letsinfer") if bin_root else str(core / "current/bin/letsinfer"),
     }
 
 
@@ -174,11 +192,14 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="install the immutable Let's Infer CLI")
     parser.add_argument("--source", type=pathlib.Path, default=pathlib.Path("."))
     parser.add_argument(
-        "--prefix", type=pathlib.Path, default=pathlib.Path.home() / ".local"
+        "--home",
+        type=pathlib.Path,
+        default=pathlib.Path(os.environ.get("LETSINFER_HOME", "~/.local/share/letsinfer")),
     )
+    parser.add_argument("--launcher-root", type=pathlib.Path)
     parsed = parser.parse_args(arguments)
     try:
-        result = install(parsed.source, parsed.prefix)
+        result = install(parsed.source, parsed.home, launcher_root=parsed.launcher_root)
     except CoreInstallError as error:
         parser.error(str(error))
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))

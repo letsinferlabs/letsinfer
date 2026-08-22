@@ -24,7 +24,7 @@ from core.paths import data_root
 from core.runtime_packs import RuntimePackError, catalog_release, load_catalog
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 POLL_INTERVAL_SECONDS = 60 * 60
 REFRESH_LEASE_SECONDS = 2 * 60
 CORE_RELEASES_URL = (
@@ -50,6 +50,7 @@ class Component:
     installed_identity: str
     policy: str = "recommended"
     model: str | None = None
+    runtime: str | None = None
     engine: str | None = None
     target: str | None = None
     target_contract_sha256: str | None = None
@@ -62,7 +63,7 @@ class Component:
             raise UpdateError("update component identity is incomplete")
         _version_parts(self.installed_version)
         if self.kind == "runtime":
-            if not all((self.model, self.engine, self.target)):
+            if not all((self.model, self.runtime, self.target)):
                 raise UpdateError("runtime update component is incomplete")
             if not isinstance(self.target_contract_sha256, str) or not SHA256_RE.fullmatch(
                 self.target_contract_sha256
@@ -424,11 +425,11 @@ class UpdateManager:
         component: Component,
         catalog: Mapping[str, Any],
     ) -> _Candidate:
-        selected_engine = None if component.policy == "recommended" else component.engine
-        target, target_sha, _engine, version, source = catalog_release(
+        selected_runtime = None if component.policy == "recommended" else component.runtime
+        target, target_sha, _runtime, version, source = catalog_release(
             dict(catalog),
             component.model or "",
-            selected_engine,
+            selected_runtime,
             component.target,
         )
         if target != component.target or target_sha != component.target_contract_sha256:
@@ -479,7 +480,7 @@ class UpdateManager:
             eligible = [
                 item
                 for item in runtimes
-                if item.policy in {"recommended", f"engine:{item.engine}"}
+                if item.policy in {"recommended", f"runtime:{item.runtime}"}
             ]
             if eligible:
                 location = self._catalog_location()
@@ -548,7 +549,7 @@ class UpdateManager:
                     )
                 elif component.policy not in {
                     "recommended",
-                    f"engine:{component.engine}",
+                    f"runtime:{component.runtime}",
                 } and component.kind == "runtime":
                     record = UpdateRecord(
                         component.kind,

@@ -52,14 +52,24 @@ class BenchmarkRecordTests(unittest.TestCase):
             }
         ]
         results_sha = benchmark_record.results_sha256(results)
+        subject = {
+            "candidate_id": "sglang--example--model--dgx-spark",
+            "runtime_version": "1.2.3",
+            "model_uri": "hf://example/model",
+            "model_revision": "4" * 40,
+            "engine_oci": "ghcr.io/example/engine@sha256:" + "5" * 64,
+            "target": "dgx-spark",
+            "target_contract_sha256": "6" * 64,
+        }
         return {
             "schema_version": benchmark_record.SCHEMA_VERSION,
             "id": benchmark_record.benchmark_id(
-                installation_id, timestamp_ns, contract_sha, results_sha
+                installation_id, timestamp_ns, subject, contract_sha, results_sha
             ),
             "installation_id": installation_id,
             "timestamp": timestamp_ns // 1_000_000_000,
             "timestamp_unix_ns": timestamp_ns,
+            "subject": subject,
             "benchmark_contract_sha256": contract_sha,
             "results_sha256": results_sha,
             "results": results,
@@ -73,6 +83,7 @@ class BenchmarkRecordTests(unittest.TestCase):
         value["id"] = benchmark_record.benchmark_id(
             value["installation_id"],
             value["timestamp_unix_ns"],
+            value["subject"],
             value["benchmark_contract_sha256"],
             value["results_sha256"],
         )
@@ -93,14 +104,14 @@ class BenchmarkRecordTests(unittest.TestCase):
         value = self.record()
         value["schema_version"] = 1
         with self.assertRaisesRegex(
-            benchmark_record.BenchmarkRecordError, "schema_version must be 3"
+            benchmark_record.BenchmarkRecordError, "schema_version must be 4"
         ):
             benchmark_record.validate_record(value)
 
         value = self.record()
         value["schema_version"] = True
         with self.assertRaisesRegex(
-            benchmark_record.BenchmarkRecordError, "schema_version must be 3"
+            benchmark_record.BenchmarkRecordError, "schema_version must be 4"
         ):
             benchmark_record.validate_record(value)
 
@@ -114,6 +125,7 @@ class BenchmarkRecordTests(unittest.TestCase):
         value["id"] = benchmark_record.benchmark_id(
             value["installation_id"],
             value["timestamp_unix_ns"],
+            value["subject"],
             value["benchmark_contract_sha256"],
             value["results_sha256"],
         )
@@ -203,6 +215,7 @@ class BenchmarkRecordTests(unittest.TestCase):
         value["id"] = benchmark_record.benchmark_id(
             value["installation_id"],
             value["timestamp_unix_ns"],
+            value["subject"],
             value["benchmark_contract_sha256"],
             value["results_sha256"],
         )

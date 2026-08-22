@@ -16,12 +16,10 @@ class FreshSiteAdoptionTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         root = pathlib.Path(self.temporary.name)
         self.source_environment = {
-            "LETSINFER_CONFIG_HOME": str(root / "source-config"),
-            "LETSINFER_DATA_HOME": str(root / "source-data"),
+            "LETSINFER_HOME": str(root / "source"),
         }
         self.destination_environment = {
-            "LETSINFER_CONFIG_HOME": str(root / "destination-config"),
-            "LETSINFER_DATA_HOME": str(root / "destination-data"),
+            "LETSINFER_HOME": str(root / "destination"),
         }
 
     def tearDown(self) -> None:
