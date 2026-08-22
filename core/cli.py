@@ -3400,10 +3400,9 @@ def ensure_tls_material(cert_path: pathlib.Path, key_path: pathlib.Path) -> None
         validate_tls_material(cert_path, key_path)
         return
 
-    if cert_path.parent != key_path.parent:
-        raise LetsInferError("generated TLS certificate and key must share a directory")
+    ensure_private_directory(key_path.parent)
     ensure_private_directory(cert_path.parent)
-    staging = pathlib.Path(tempfile.mkdtemp(prefix=".tls-generate-", dir=cert_path.parent))
+    staging = pathlib.Path(tempfile.mkdtemp(prefix=".tls-generate-", dir=key_path.parent))
     try:
         staged_cert = staging / "server.crt"
         staged_key = staging / "server.key"

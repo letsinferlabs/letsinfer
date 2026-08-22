@@ -18,6 +18,33 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_tls_generation_supports_split_config_and_secret_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            certificate = root / "config" / "tls" / "server.crt"
+            private_key = root / "secrets" / "tls" / "server.key"
+
+            def generate(command: list[str], **_: object) -> mock.Mock:
+                pathlib.Path(command[command.index("-out") + 1]).write_text(
+                    "certificate", encoding="ascii"
+                )
+                pathlib.Path(command[command.index("-keyout") + 1]).write_text(
+                    "private-key", encoding="ascii"
+                )
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(cli, "run", side_effect=generate),
+                mock.patch.object(cli, "validate_tls_material"),
+                mock.patch.object(cli, "_certificate_names", return_value=["localhost"]),
+            ):
+                cli.ensure_tls_material(certificate, private_key)
+
+            self.assertEqual(certificate.read_text(encoding="ascii"), "certificate")
+            self.assertEqual(private_key.read_text(encoding="ascii"), "private-key")
+            self.assertEqual(private_key.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(certificate.stat().st_mode & 0o777, 0o644)
+
     def test_legacy_commands_are_not_registered(self) -> None:
         parser = cli.parser()
         for command in ("derive", "engines", "releases"):
