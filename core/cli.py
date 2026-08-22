@@ -347,19 +347,20 @@ def _core_update_identity() -> str:
             if not manifest.is_symlink() and manifest.is_file()
             else None
         )
-        records = {
-            row["path"]: row["sha256"]
-            for row in document.get("files", [])
-            if isinstance(row, dict)
-            and isinstance(row.get("path"), str)
-            and isinstance(row.get("sha256"), str)
-        }
-        bound_paths = ("core/cli.py", "core/updates/manager.py")
-        if all(
-            records.get(relative) == sha256_file(root / relative)
-            for relative in bound_paths
-        ):
-            return sha256_file(manifest)
+        if isinstance(document, dict):
+            records = {
+                row["path"]: row["sha256"]
+                for row in document.get("files", [])
+                if isinstance(row, dict)
+                and isinstance(row.get("path"), str)
+                and isinstance(row.get("sha256"), str)
+            }
+            bound_paths = ("core/cli.py", "core/updates/manager.py")
+            if all(
+                records.get(relative) == sha256_file(root / relative)
+                for relative in bound_paths
+            ):
+                return sha256_file(manifest)
     except (OSError, KeyError, TypeError, json.JSONDecodeError):
         pass
     # Development trees do not necessarily have a freshly materialized source

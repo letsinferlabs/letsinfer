@@ -156,6 +156,22 @@ class UpdateManagerTests(unittest.TestCase):
             clock=lambda: self.now,
         )
 
+    def test_source_checkout_identity_is_stable_without_generated_manifest(self):
+        root = pathlib.Path(self.temporary.name) / "checkout"
+        for relative, content in (
+            ("core/__init__.py", "PRODUCT_VERSION = 'test'\n"),
+            ("core/cli.py", "# cli\n"),
+            ("core/updates/manager.py", "# manager\n"),
+        ):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        with mock.patch.object(cli, "source_root", return_value=root):
+            first = cli._core_update_identity()
+            second = cli._core_update_identity()
+        self.assertRegex(first, r"^[0-9a-f]{64}$")
+        self.assertEqual(first, second)
+
     def test_version_order_covers_rc_and_stable(self):
         self.assertLess(compare_versions("0.11.0-rc.9", "0.11.0-rc.10"), 0)
         self.assertLess(compare_versions("0.11.0-rc.30", "0.11.0"), 0)
