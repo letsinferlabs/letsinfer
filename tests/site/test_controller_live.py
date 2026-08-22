@@ -36,10 +36,7 @@ class LiveControllerTests(unittest.TestCase):
         self.root = pathlib.Path(self.temporary.name)
         self.environment = mock.patch.dict(
             os.environ,
-            {
-                "LETSINFER_CONFIG_HOME": str(self.root / "config"),
-                "LETSINFER_DATA_HOME": str(self.root / "data"),
-            },
+            {"LETSINFER_HOME": str(self.root)},
             clear=False,
         )
         self.environment.start()

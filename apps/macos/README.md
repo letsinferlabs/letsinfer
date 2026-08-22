@@ -16,7 +16,9 @@ distributed engine group; the app does not model a site as one DGX Spark.
   for Watchdog telemetry and the coordinator's private controller API.
 - Read topology, signed member inventory, placements, controller role, and
   bounded aggregate telemetry from the coordinator. Read one-second machine
-  telemetry from Watchdog. A paired site never invokes SSH.
+  telemetry from Watchdog. The app requests only the 30-minute window visible
+  in the UI, keeps at most 1,801 presentation points per site in memory, and
+  never writes telemetry or history to disk. A paired site never invokes SSH.
 - Preserve a newer direct Watchdog inference sample when a delayed coordinator
   aggregate arrives; a stale aggregate cannot erase active requests or rates.
 - Treat the controller's newest placement as the active inference identity.

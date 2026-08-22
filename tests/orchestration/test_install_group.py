@@ -62,7 +62,7 @@ class EngineGroupInstallTests(unittest.TestCase):
                 "prepare_runtime_install",
                 return_value=(manifest_path, manifest, control_root, receipt),
             ),
-            mock.patch.object(cli, "verify_release_sources"),
+            mock.patch.object(cli, "verify_runtime_sources"),
             mock.patch.object(cli, "user_lingering_enabled", return_value=True),
             mock.patch.object(
                 cli,
@@ -156,7 +156,11 @@ class EngineGroupInstallTests(unittest.TestCase):
         }
         runtime = types.SimpleNamespace(
             digest="5" * 64,
-            descriptor={"name": "example/runtime/target", "version": "1.0.0"},
+            runtime={
+                "id": "engine--owner--model--two-node",
+                "version": "1.0.0",
+                "orchestration": contract,
+            },
         )
         instances = []
 
@@ -215,6 +219,11 @@ class EngineGroupInstallTests(unittest.TestCase):
                 mock.patch.object(cli, "_site_store", return_value=store),
                 mock.patch.object(cli, "EngineGroupOrchestrator", Orchestrator),
                 mock.patch.object(cli, "site_config_root", return_value=pathlib.Path(directory)),
+                mock.patch.object(
+                    cli,
+                    "secrets_root",
+                    return_value=pathlib.Path(directory) / "secrets",
+                ),
                 mock.patch.object(cli, "certificate_sha256", return_value="6" * 64),
                 mock.patch.object(
                     cli,

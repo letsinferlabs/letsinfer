@@ -224,12 +224,7 @@ def dashboard_lines(
         "http://"
     )
     model = str(container.get("model") or "No model")
-    engine = {
-        "dwarfstar": "DwarfStar",
-        "llama.cpp": "llama.cpp",
-        "sglang": "SGLang",
-        "vllm": "vLLM",
-    }.get(str(container.get("engine") or "unknown"), str(container.get("engine") or "unknown"))
+    engine = str(container.get("engine") or "unknown")
     target = str(container.get("target") or "unknown target")
     version = str(container.get("runtime_version") or "unknown version")
     active = _integer(telemetry.get("active_requests"))

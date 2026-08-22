@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 import pathlib
@@ -11,7 +10,6 @@ import time
 import unittest
 from unittest import mock
 
-from core.engines import ADAPTERS
 from core.gateway import server
 from core.site import state
 from tests.gateway.helpers import (
@@ -28,10 +26,7 @@ class GatewayPolicyTests(unittest.TestCase):
         root = pathlib.Path(self.temporary.name)
         self.environment = mock.patch.dict(
             os.environ,
-            {
-                "LETSINFER_CONFIG_HOME": str(root / "config"),
-                "LETSINFER_DATA_HOME": str(root / "data"),
-            },
+            {"LETSINFER_HOME": str(root)},
             clear=False,
         )
         self.environment.start()
@@ -73,7 +68,7 @@ class GatewayPolicyTests(unittest.TestCase):
                 "url": "http://127.0.0.1:18000",
                 "credential_file": str(state.config_root() / "backend-api-key"),
                 "ca_file": None,
-                "token_count_path": "/v1/token-count",
+                "token_count_path": "/v1/letsinfer/token-count",
                 "token_count_protocol": "letsinfer-token-count-v1",
                 "max_active_requests": 1,
                 "max_context_tokens": 557056,
@@ -102,7 +97,7 @@ class GatewayPolicyTests(unittest.TestCase):
             url="http://127.0.0.1:18000",
             credential_file="/api-key",
             ca_file=None,
-            token_count_path="/v1/token-count",
+            token_count_path="/v1/letsinfer/token-count",
             token_count_protocol="letsinfer-token-count-v1",
             max_active_requests=1,
             max_context_tokens=557_056,
@@ -126,7 +121,7 @@ class GatewayPolicyTests(unittest.TestCase):
         )
         self.assertGreaterEqual(server.BACKEND_RESPONSE_TIMEOUT_SECONDS, 3600)
 
-    def test_sglang_token_count_is_translated_and_normalized(self) -> None:
+    def test_engine_protocol_token_count_is_forwarded_and_normalized(self) -> None:
         backend = server.Backend(
             placement_id="a" * 32,
             member_id="b" * 32,
@@ -134,18 +129,21 @@ class GatewayPolicyTests(unittest.TestCase):
             url="http://127.0.0.1:18000",
             credential_file="/api-key",
             ca_file=None,
-            token_count_path="/v1/messages/count_tokens",
-            token_count_protocol="sglang-anthropic-count-tokens-v1",
+            token_count_path="/v1/letsinfer/token-count",
+            token_count_protocol="letsinfer-token-count-v1",
             max_active_requests=1,
             max_context_tokens=1_000_000,
             healthy=True,
             memory_pressure=False,
             temperature_c=40.0,
             prefix_keys=set(),
-            engine="sglang",
+            engine="example-engine",
         )
         response = mock.MagicMock(status=200)
-        response.read.return_value = b'{"input_tokens":17}'
+        response.read.return_value = (
+            b'{"object":"token_count","model":"fixture-model",'
+            b'"prompt_tokens":17}'
+        )
         connection = mock.MagicMock()
         connection.getresponse.return_value = response
         handler = object.__new__(server.GatewayHandler)
@@ -166,12 +164,10 @@ class GatewayPolicyTests(unittest.TestCase):
         ):
             self.assertEqual(handler._count_tokens(backend, request), 17)
         sent = connection.request.call_args.kwargs["body"]
-        self.assertEqual(
-            json.loads(sent)["messages"],
-            [{"role": "user", "content": "hello"}],
-        )
+        self.assertEqual(sent, request)
+        self.assertEqual(connection.request.call_args.args[1], "/v1/letsinfer/token-count")
 
-    def test_sglang_reasoning_history_uses_exact_openai_tokenize_fallback(self) -> None:
+    def test_engine_protocol_forwards_reasoning_history_without_translation(self) -> None:
         backend = server.Backend(
             placement_id="a" * 32,
             member_id="b" * 32,
@@ -179,8 +175,8 @@ class GatewayPolicyTests(unittest.TestCase):
             url="http://127.0.0.1:18000",
             credential_file="/api-key",
             ca_file=None,
-            token_count_path="/v1/messages/count_tokens",
-            token_count_protocol="sglang-anthropic-count-tokens-v1",
+            token_count_path="/v1/letsinfer/token-count",
+            token_count_protocol="letsinfer-token-count-v1",
             max_active_requests=1,
             max_context_tokens=1_000_000,
             healthy=True,
@@ -189,11 +185,10 @@ class GatewayPolicyTests(unittest.TestCase):
             prefix_keys=set(),
         )
         response = mock.MagicMock(status=200)
-        response.read.side_effect = [
-            b'{"tokens":[11,12,13],"count":3,',
-            b'"max_model_len":1000000}',
-            b"",
-        ]
+        response.read.return_value = (
+            b'{"object":"token_count","model":"fixture-model",'
+            b'"prompt_tokens":3}'
+        )
         connection = mock.MagicMock()
         connection.getresponse.return_value = response
         handler = object.__new__(server.GatewayHandler)
@@ -222,11 +217,8 @@ class GatewayPolicyTests(unittest.TestCase):
         ):
             self.assertEqual(handler._count_tokens(backend, request), 3)
         call = connection.request.call_args
-        self.assertEqual(call.args[1], "/v1/tokenize")
-        self.assertEqual(
-            json.loads(call.kwargs["body"])["messages"][1]["reasoning_content"],
-            "thinking",
-        )
+        self.assertEqual(call.args[1], "/v1/letsinfer/token-count")
+        self.assertEqual(call.kwargs["body"], request)
 
     def test_metrics_health_fails_closed_when_publication_is_stale(self) -> None:
         path = pathlib.Path(self.temporary.name) / "gateway.state"
@@ -576,7 +568,7 @@ class GatewayPolicyTests(unittest.TestCase):
                 self.identity.member_id,
                 routing_facts(self.identity.member_id, memory_pressure=True),
             )
-        for engine in sorted(ADAPTERS):
+        for engine in ("example-engine", "future-engine"):
             with self.subTest(engine=engine):
                 placement = self.placement()
                 placement["runtime"] = f"fixture-model/{engine}/fixture-target"
@@ -819,7 +811,7 @@ class GatewayPolicyTests(unittest.TestCase):
             }
         }).encode()).exact)
 
-    def test_sglang_stream_instrumentation_preserves_request_fields(self) -> None:
+    def test_protocol_stream_instrumentation_preserves_request_fields(self) -> None:
         backend = server.Backend(
             placement_id="a" * 32,
             member_id="b" * 32,
@@ -827,15 +819,15 @@ class GatewayPolicyTests(unittest.TestCase):
             url="http://127.0.0.1:18000",
             credential_file="/api-key",
             ca_file=None,
-            token_count_path="/v1/messages/count_tokens",
-            token_count_protocol="sglang-anthropic-count-tokens-v1",
+            token_count_path="/v1/letsinfer/token-count",
+            token_count_protocol="letsinfer-token-count-v1",
             max_active_requests=1,
             max_context_tokens=1_000_000,
             healthy=True,
             memory_pressure=False,
             temperature_c=40.0,
             prefix_keys=set(),
-            engine="sglang",
+            engine="example-engine",
         )
         body = json.dumps({
             "model": "fixture-model",
@@ -848,17 +840,9 @@ class GatewayPolicyTests(unittest.TestCase):
         self.assertEqual(result["temperature"], 0.2)
         self.assertEqual(result["stream_options"], {
             "include_usage": True,
-            "continuous_usage_stats": True,
         })
-        self.assertEqual(
-            server._instrument_stream_usage(
-                dataclasses.replace(backend, engine="unknown"),
-                body,
-            ),
-            body,
-        )
 
-    def test_each_engine_adapter_requests_its_native_exact_stream_usage(self) -> None:
+    def test_arbitrary_engine_uses_the_same_exact_stream_usage_contract(self) -> None:
         body = json.dumps({"model": "fixture-model", "stream": True}).encode()
         base = server.Backend(
             placement_id="a" * 32,
@@ -876,18 +860,14 @@ class GatewayPolicyTests(unittest.TestCase):
             temperature_c=40.0,
             prefix_keys=set(),
         )
-        for engine in ("dwarfstar", "llama.cpp", "sglang", "vllm"):
+        for engine in ("example-engine", "future-engine"):
             with self.subTest(engine=engine):
-                value = json.loads(server._instrument_stream_usage(
-                    dataclasses.replace(base, engine=engine), body
-                ))
+                base.engine = engine
+                value = json.loads(server._instrument_stream_usage(base, body))
                 self.assertTrue(value["stream_options"]["include_usage"])
-                self.assertEqual(
-                    value["stream_options"].get("continuous_usage_stats"),
-                    True if engine in {"sglang", "vllm"} else None,
-                )
+                self.assertNotIn("continuous_usage_stats", value["stream_options"])
 
-    def test_each_engine_native_usage_reconciles_without_fabrication(self) -> None:
+    def test_exact_usage_reconciles_for_continuous_and_final_only_streams(self) -> None:
         continuous = (
             b'data: {"choices":[{"index":0}],"usage":{"prompt_tokens":8,'
             b'"completion_tokens":1}}\n\n'
@@ -898,12 +878,10 @@ class GatewayPolicyTests(unittest.TestCase):
             b'data: {"choices":[],"usage":{"prompt_tokens":8,'
             b'"completion_tokens":3}}\n\n'
         )
-        for engine in ("dwarfstar", "llama.cpp", "sglang", "vllm"):
-            with self.subTest(engine=engine):
+        for label, payload in (("continuous", continuous), ("final", final_only)):
+            with self.subTest(label=label):
                 tracker = server.StreamingUsageTracker()
-                changes = tracker.feed(
-                    continuous if engine in {"sglang", "vllm"} else final_only
-                )
+                changes = tracker.feed(payload)
                 self.assertEqual(changes["input_tokens"], 8)
                 self.assertEqual(changes["output_tokens"], 3)
                 usage, remaining = tracker.reconcile(

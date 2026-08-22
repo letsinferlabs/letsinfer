@@ -2,347 +2,159 @@
 
 [Back to documentation](../README.md)
 
-Every leaf command has an enforced execution scope. `coordinator` commands run
-only on the site's coordinator, `member` commands run only on a joined
-non-coordinator member, and `all` commands run in either role. Invalid scope is
-rejected before the command handler or any side effect. Site mutations are
-coordinator-only and audited.
+Run `letsinfer COMMAND --help` for the exact options in your installed version.
+The commands below describe the stable public workflow.
 
-Interactive terminals use the shared Let's Infer mark, type hierarchy, and
-product palette. Running `letsinfer` without a command shows the quiet
-action-first home surface; `--help` shows the complete command reference.
-Status exposes the request path, scheduler state, and normalized live aggregate,
-decode, and prefill rates when the private controller has them. Benchmark
-attachment uses the same bounded workload/progress language, and install/update
-show one truthful active step with elapsed time. Read and list results stay
-unadorned on standard output. One-time API-key secrets and all durable command
-results remain on standard output. Redirected output, `TERM=dumb`, and JSON
-modes preserve plain byte-clean contracts. `NO_COLOR` keeps the human layout
-without escape sequences. No presentation dependency is installed.
+## Set up your site
 
-## Site, membership, and policy
-
-```text
-letsinfer setup [--name NAME]
-letsinfer site status [--json]
-letsinfer member list [--json]
-letsinfer member prepare [--json]
-letsinfer member join ENDPOINT --invite ID --coordinator-certificate-sha256 SHA256
-letsinfer member invite --mode lan|remote|connectx [OPTIONS]
-letsinfer member approve MEMBER_ID COMPARISON_CODE
-letsinfer member sync [--json]
-letsinfer member drain MEMBER_ID [--json]
-letsinfer member resume MEMBER_ID [--json]
-letsinfer member remove MEMBER_ID
-letsinfer topology show [--json]
-letsinfer topology probe LEFT_MEMBER RIGHT_MEMBER --kind connectx|lan
-letsinfer topology plan MODEL --catalog LOCATION
-letsinfer alias list
-letsinfer alias set ALIAS MODEL
-letsinfer alias remove ALIAS
-letsinfer pair [--role viewer|operator|administrator]
-letsinfer controllers list [--json]
-letsinfer controllers forget NAME_OR_ID
-letsinfer key create NAME [POLICY]
-letsinfer key list [--json]
-letsinfer key show NAME_OR_ID [--json]
-letsinfer key rotate NAME_OR_ID [--json]
-letsinfer key revoke NAME_OR_ID [--json]
-letsinfer key policy NAME_OR_ID [POLICY]
-letsinfer audit list|show|verify|export
-letsinfer exposure [--json]
-letsinfer expose [--json]
-letsinfer unexpose [--json]
+```bash
+letsinfer setup
+letsinfer site status
+letsinfer hardware
 ```
 
-`setup` is the only site mutation permitted before a site exists. The first
-machine becomes coordinator and provisions the private site services and
-default local inference key. Linux installs persistent systemd services and
-the native Watchdog; macOS installs per-user launchd agents for the site and
-unified gateway without claiming Linux/NVIDIA protection or local runtime
-placement. `letsinfer status` reports a healthy control plane even before a
-model runtime is installed. A fresh direct-ConnectX machine is normally added
-through the Mac app. For direct CLI enrollment, a ConnectX invite requires
-`--candidate-endpoint`, `--candidate-fingerprint`, and `--interface`; the
-coordinator verifies the exact direct route and emits its address on that same
-link. LAN and remote invites use the eight-digit code and subsequent six-digit
-human comparison.
+The first machine becomes the coordinator. It owns the stable inference
+gateway, runtime selection, API-key registry, audit chain, and site scheduling.
 
-`member drain` is an admission operation: it immediately stops the gateway
-from assigning new requests to that member without interrupting requests
-already in flight or stopping its engine. `member resume` restores admission.
-Replica placements continue on active members. A distributed placement admits
-no new work while any required member is not active. Both operations are
-coordinator-only, idempotent, and atomically audited.
+Use `topology` and `member` to inspect or manage additional machines. Every
+command's help shows its execution scope: `coordinator`, `member`, or `all`.
 
-Key policy options are `--model` (repeatable), `--expires-at`,
-`--requests-per-minute`, `--tokens-per-minute`, `--concurrency`,
-`--max-context`, `--tenant`, and `--application`. A create or rotate secret is
-shown once. Only its salted hash is stored. All key and audit commands are
-coordinator-only.
+## Install a model
 
-`expose` publishes only the active local inference gateway through an exact,
-hash-bound Tailscale Funnel configuration. It refuses existing or ambiguous
-provider state. `unexpose` removes only the exact configuration Let's Infer
-recorded. Neither command exposes the private site, controller, Watchdog, or
-engine ports.
+```bash
+letsinfer install qwen3.8-27b
+```
 
-## Runtime distribution
+Let's Infer detects your target and installs the recommended qualified
+candidate from the signed catalog. The runtime downloads its exact model and
+Engine OCI automatically.
 
-```text
-letsinfer pack SOURCE --output ARTIFACT
-letsinfer hardware [--json] [--catalog PATH_OR_HTTPS_URL]
+To pin one exact candidate:
+
+```bash
+letsinfer install qwen3.8-27b \
+  --runtime sglang--radixark--qwen3.8-27b-nvfp4--dgx-spark
+```
+
+There is no engine selector. If you want a different engine, checkpoint,
+quantization, or recipe, choose or build a different runtime candidate.
+
+Useful development controls:
+
+- `--catalog LOCATION` uses an explicit catalog.
+- `--no-download` requires every model and OCI blob to exist already.
+- `--no-start` installs and enables services without starting inference.
+- `--no-service` skips user-service installation.
+
+## Run and inspect
+
+```bash
+letsinfer status
+letsinfer status --json
 letsinfer runtimes
-letsinfer install MODEL [--engine ENGINE] [--catalog PATH_OR_HTTPS_URL] [--no-download]
-letsinfer install DIRECTORY_OR_DIGEST [--no-download]
-letsinfer derive RUNTIME [--target TARGET] --name NAME [--without=--FLAG] -- [ENGINE_ARGS]
-letsinfer inspect RUNTIME [--target TARGET] [--command] [--diff] [--json]
-letsinfer upgrade RUNTIME [--target TARGET] [--catalog LOCATION] [--to SOURCE] [--dry-run]
-letsinfer rollback RUNTIME [--target TARGET] [--dry-run]
-letsinfer update [--version VERSION]
-letsinfer update check [--catalog LOCATION] [--json]
+letsinfer inspect qwen3.8-27b
+letsinfer verify qwen3.8-27b
+letsinfer doctor
+letsinfer logs
 ```
 
-`pack` creates a deterministic `.letsinfer` artifact. `install` accepts local
-runtime repositories, local `.letsinfer` archives, trusted catalog models, and
-digest-pinned OCI artifacts. An already installed runtime can also be selected
-by model or runtime identity. Core embeds no model runtime; its default signed
-catalog only resolves model names to external immutable OCI artifacts. An
-imported candidate remains blocked
-from service activation until its serving gate is qualified.
+Interactive `status` refreshes until you press Ctrl-C. Its API, runtime,
+admission, throughput, Watchdog, system, and temperature sections come from the
+same normalized state plane used by other consumers.
 
-Remote catalogs require HTTPS and an exact-byte Ed25519 signature at
-`<catalog-url>.sig`. The production catalog and its public trust key are
-built-in defaults; `$LETSINFER_HOME/config/catalog-public-key.pem` and
-`LETSINFER_CATALOG_PUBLIC_KEY` override the trust root. A signature binds the
-catalog SHA-256 and trusted public-key fingerprint. An explicitly selected
-unsigned local catalog is supported only as a development trust boundary.
+Lifecycle commands:
 
-For a qualified or candidate runtime, `install` automatically acquires every missing exact
-model artifact and registry image layer. The Hugging Face
-cache deduplicates model blobs and snapshots, Let's Infer's immutable object store
-deduplicates runtime packs, Let's Infer's SHA-256 artifact store deduplicates
-verified native integration artifacts, and Docker's content store deduplicates
-image layers. Engine package-manager dependencies belong inside the immutable
-image, not in a parallel Let's Infer or host package environment. `--no-download`
-requires the exact model and registry image content to exist already.
-
-If a local runtime pins a local image ID and contains
-`image/Dockerfile`, `install` builds the packed runtime-root context only when the exact
-image is absent. Importing an unqualified candidate remains non-serving even
-though its dependencies are prepared; only an explicit
-`serve --qualification-mode` launch may execute it. Build
-inputs and package choices belong to the runtime. Let's Infer requires
-digest-pinned external bases and verifies the final image ID.
-`--no-build-image` disables installation-time image builds and requires the
-exact image to exist already. Registry-distributed runtimes pull their exact
-image digest instead of rebuilding it.
-
-`hardware` prints the stable capability fingerprint used for target mapping.
-With a configured catalog it also reports all compatible target IDs and the
-selected target when the match is unique. Catalog installation selects the
-target automatically; multiple matches are rejected as a catalog ambiguity.
-The CLI retains `--target` only for explicit development and diagnostics, and
-it never disables compatibility verification.
-
-`derive` accepts Let's Infer options before `--` and unmodified upstream engine
-arguments after it. `--without=--FLAG` removes an inherited option and may be
-repeated; short options use the same form, such as `--without=-fa`.
-`inspect --command` prints shell-quoted display text, but Let's Infer
-stores and launches the command as argv rather than evaluating that text.
-
-`update` installs the latest signed stable core release, or the exact release
-named by `--version`, and rebinds the core-owned services to it. When inference
-is active, the handoff stops recovery, drains the engine while the existing
-Watchdog is still armed, replaces the site/Watchdog/gateway services, and then
-queues engine restoration and restores the recovery timer without waiting for
-model load. Engine launch state remains visible through `status`. The selected
-runtime's unchanged artifacts are composed with the new core into one
-hash-addressed active control bundle; service lifecycle and benchmark workers
-therefore cannot continue through an older core after an update. `update`
-never resolves, downloads, upgrades, rolls back, or changes a runtime. Installed runtime
-receipts, model snapshots, caches, evidence, API keys, and service placement
-remain unchanged. The replacement resident Watchdog keeps the compatible
-selected runtime's exact protection thresholds. An incompatible selected
-runtime is stopped, its recovery timer remains stopped, and the result reports
-`runtime_state=incompatible-stopped` instead of retrying an unverifiable
-runtime. An active benchmark must be stopped before updating core.
-
-`update check` synchronously refreshes availability for core and the one
-selected resident or qualification runtime. It is read-only: core remains on
-the GitHub release channel, whose installer verifies the release signature,
-while runtime availability comes from the signed catalog's target-compatible,
-digest-pinned OCI record. The command does not download or activate either
-component. Use `--json` for its versioned machine-readable result.
-
-The always-running site agent performs the same check hourly with bounded
-jitter. It writes
-one transactional node-local SQLite snapshot. Other CLI commands read that
-snapshot only and never wait on the network; when a verified update exists,
-interactive commands show one compact notice on stderr. Redirected and JSON
-output remain byte-clean. A transient network or catalog failure retains a
-previously verified update only while its installed component identity still
-matches. Changing an installed core or runtime invalidates stale advice
-immediately. Concurrent checks are collapsed by a bounded cross-process lease.
-
-## Model and service lifecycle
-
-```text
-letsinfer engines
-letsinfer releases
-letsinfer acquire MODEL [--engine ENGINE] [--target TARGET]
-letsinfer benchmark RUNTIME [--c1|--c2|--c4|--c8|--c16] [--32k|--64k|--128k|--256k]
-letsinfer benchmark [--json]
-letsinfer benchmark stop
-letsinfer benchmark clean [--yes]
-letsinfer verify MODEL [--engine ENGINE] [--target TARGET] [--source-only]
-letsinfer serve MODEL [--engine ENGINE] [--target TARGET] [--dry-run]
-letsinfer status [--json]
-letsinfer doctor [--json] [--require-stable]
-letsinfer logs [--tail N] [--follow]
-letsinfer start [MODEL]
+```bash
+letsinfer start
 letsinfer restart
-letsinfer recover [MODEL]
-letsinfer pair [--timeout SECONDS] [--role viewer|operator|administrator]
-letsinfer controllers list [--json]
-letsinfer controllers forget NAME_OR_ID
 letsinfer stop
-letsinfer uninstall [--keep-models]
+letsinfer recover
 ```
 
-`start` and `restart` fail closed while Watchdog has a durable protection trip.
-`recover` is the only lifecycle command that acknowledges that trip before
-starting the protected runtime. The same distinction applies to one-member,
-replicated, and distributed placements.
+`recover` is an explicit acknowledgement after you inspect a protection trip.
+Ordinary start or restart does not erase safety history.
 
-The active runtime owns all four lifecycle commands. For an explicit
-qualification candidate, `stop` preserves its exact stopped container and
-immutable candidate receipt; `start`, `restart`, and `recover` operate on that
-same candidate instead of falling through to the resident boot selection. A
-later candidate replacement or resident activation is the separate retirement
-boundary that removes the candidate slot.
+## API keys
 
-`status --json` includes one derived `lifecycle` object. Its state is one of
-`starting`, `ready`, `stopping`, `stopped`, `blocked`, `degraded`, or `failed`,
-with a stable machine reason and the observed ready-service count. Transitional
-states are successful status observations, not health failures. The interactive
-card renders startup as `STARTING`: the gateway waits for model identity, the
-engine runs health checks, protection arms after readiness, and the remaining
-unit is described as activating. Gateway and runtime request-path rows inherit
-that same transition, so an isolated benchmark container swap is never
-mislabelled as an unavailable API or stopped runtime while startup is active. A
-protection trip always takes precedence and
-renders `BLOCKED`; terminal engine or Docker health failures render `FAILED`.
-API reachability and authentication come from live gateway probes even when
-runtime metadata is incompatible; the version row names that incompatibility
-while the overall lifecycle remains degraded. A running, Docker-healthy
-container with a freshly verified served-model identity remains serving when a
-separate direct health probe times out under a saturated prefill; only an
-absent, exited, unhealthy, or identity-mismatched runtime is shown as stopped
-or failed. Interactive `letsinfer status` is a live, one-second dashboard and
-runs until `Ctrl-C`; `--json` and redirected output remain one-shot machine
-interfaces. The dashboard uses the authenticated site telemetry feed for
-scheduler, throughput, history, and system readings. A single transient
-controller read retains the last verified telemetry for no more than three
-seconds and shows a reconnecting label; longer loss is explicitly unavailable
-rather than rendered as zero. Interactive frames are replaced atomically, and
-history advances only when the native Watchdog sequence advances.
+```bash
+letsinfer key create
+letsinfer key list
+letsinfer key rotate KEY_ID
+letsinfer key revoke KEY_ID
+```
 
-Host available memory is telemetry, not an availability or admission signal.
-Loaded engines commonly reserve weights, KV cache, and graph workspaces before
-serving, so a static host-headroom threshold cannot safely describe remaining
-request capacity. The shared state plane uses the engine-neutral capacity
-declared by the active runtime: requests enter while `max_active_requests` has
-room and excess requests queue. This is the same contract for DwarfStar,
-llama.cpp, SGLang, vLLM, and future adapters; the core contains no engine-specific
-pressure branch.
+Key mutations are coordinator-only and enter the site audit chain. Secret key
+material is shown once. Do not place it in source, logs, benchmark evidence, or
+shell history.
 
-`doctor` resolves the same active runtime slot as `status` and lifecycle
-commands. When a qualification candidate owns that slot, it validates the
-candidate manifest, container, protection binding, gateway, and shared control
-services while requiring the resident engine and recovery loop to remain
-quiesced. Operational readiness and stable-publication readiness remain
-separate results.
+## Benchmark
 
-The default queue wait has no server-side deadline and ends only when capacity
-becomes available or the client disconnects. An explicit
-`--gateway-queue-timeout` from 1 to 3600 seconds provides a finite deployment
-policy; `0` means unlimited. Exact token counting happens before capacity
-admission when the adapter declares the capability, so a chat that cannot fit
-any qualified placement receives an immediate `context_length_exceeded` 400
-and is never dispatched. A non-fatal cgroup allocation denial does not trip or
-stop a surviving runtime. Watchdog contains only after an observed kernel
-cgroup OOM kill, an unexpected protected-process exit, or unavailable
-protection identity. Such a protection trip remains a hard failure and still
-requires `letsinfer recover`.
-A missing measurement is rendered as unavailable rather than inferred.
+```bash
+letsinfer benchmark qwen3.8-27b --c1
+letsinfer benchmark
+letsinfer benchmark stop
+letsinfer benchmark clean
+```
 
-`releases` lists installed runtime manifests, not test fixtures or a bundled
-model catalog.
+Starting a benchmark creates a durable job. Ctrl-C detaches; it does not cancel
+the job. Running `letsinfer benchmark` attaches to live progress, and
+`benchmark stop` cancels the active job. Use context and concurrency switches
+such as `--32k`, `--64k`, `--c1`, or `--c8` to select cells.
 
-`benchmark` runs the standard suite declared by the installed immutable
-runtime without accepting engine flags or runtime-provided code. Selectors form
-a cross product; with no selectors it runs every declared standard context and
-concurrency cell for both canonical code and prose. Core generates the same
-versioned prompt bytes for every model, then the exact runtime tokenizer-count
-capability records the rendered count without resizing them. Prompts, their
-derived plan, identity hashes, and a validated `benchmark.json` are written
-into evidence. Every measured domain/cell uses a fresh
-managed container and an empty prefix store. The output directory defaults to
-a timestamped path under `$LETSINFER_HOME/benchmarks/`. `--list` validates the
-declarative contract and prints selected cells without starting inference.
+`benchmark clean` asks for confirmation and removes only locally generated
+benchmark data.
 
-The benchmark is one durable node job. The launch command attaches to a live
-dashboard with an animated current phase, workload completion bar, completed,
-current, and upcoming cells, elapsed time, expected duration, and evidence
-directory; `--detach` returns immediately. Ctrl-C detaches the terminal and
-leaves the benchmark running. Running `letsinfer benchmark` while a job is
-active attaches to that same dashboard instead of printing a one-time
-snapshot. `letsinfer benchmark --json` remains a one-shot machine-readable
-snapshot. Once no job is active, `letsinfer benchmark` shows the most recent
-terminal result. `letsinfer benchmark stop` is the explicit cancellation path. A second
-benchmark is rejected until the active worker finishes or is stopped. The
-worker owns temporary-container cleanup and restoration of inference-slot
-intent: it restores the prior resident engine and recovery-timer state, or
-rearms the final isolated candidate when a candidate was serving before the
-benchmark. Cancellation waits for that restoration instead of leaving status
-at `STOPPED`.
+## Core and runtime updates
 
-`benchmark clean` removes locally generated benchmark results, telemetry, job
-logs, and completed job state after confirmation. `--yes` is available for
-automation. It never removes the sealed `benchmark.json` inside an installed
-runtime object.
+```bash
+letsinfer update check
+letsinfer update
+letsinfer upgrade qwen3.8-27b
+letsinfer rollback qwen3.8-27b
+```
 
-`uninstall` requires interactive confirmation, removes the services, managed
-containers and images, installed core, credentials, runtime objects, caches,
-logs, and local evidence, and then removes `LETSINFER_HOME`. With
-`--keep-models`, the home remains with only its `models/` directory. There is
-no non-interactive confirmation bypass for full uninstall.
+`update check` refreshes core and active-runtime availability. Every
+interactive command can show the cached update notice without blocking on the
+network.
 
-The public JSON includes a cryptographic benchmark ID and per-workload
-aggregate/decode TPS, TTFT, prefix-cache state, maximum GPU/CPU temperature,
-maximum GPU/CPU usage, and Watchdog's compact one-second timeline. The
-benchmark ID binds the private installation identity, exact benchmark contract,
-run timestamp, and complete results/timeline digest; raw host and GPU
-identifiers are never published.
+`update` changes core and leaves installed runtimes unchanged. `upgrade`
+changes the runtime and leaves core unchanged. `rollback` reinstalls the
+retained previous runtime. No catalog change silently moves a running model.
 
-`serve --qualification-mode --evidence-dir PATH` is the only path that permits
-an unqualified recipe. It is explicit, evidence-bound, and does not promote or
-make the candidate boot-persistent. Qualification owns one atomic local
-candidate slot. Starting a newer candidate first retires the prior candidate,
-then publishes the new manifest, placement, gateway route, protection root,
-and Watchdog projection as one lifecycle. The boot-persistent resident config
-is retained for restoration. During qualification, `status` labels the runtime
-`UNQUALIFIED`, reports candidate context, capacity, and version, and excludes the
-intentionally quiesced resident engine and recovery timer from service health.
+Use `--dry-run` on upgrade or rollback to inspect the transition first.
 
-`pair` opens one temporary TLS 1.3 enrollment session on fixed port 9769 and
-prints an eight-digit setup code. Pairing completes only after the terminal and
-Mac show the same key-bound six-digit verification code. `controllers` lists
-the authorized controller registry. `controllers forget` immediately removes
-the named controller fingerprint, reloads Watchdog, and disconnects any open
-connection; the protected local controller cannot be removed. Pairing timeouts
-are bounded to 30–180 seconds; the default is 180 seconds.
+## Runtime development
 
-Run `letsinfer COMMAND --help` for path, credential, cache, port, and service
-options intended mainly for deployment automation.
+```bash
+letsinfer pack ./candidate --output /tmp/candidate.letsinfer
+letsinfer install /tmp/candidate.letsinfer
+letsinfer inspect <candidate-id> --json
+letsinfer serve <candidate-id> --qualification-mode \
+  --evidence-dir /new/empty/evidence
+```
+
+Local candidates are unqualified. Qualification mode never promotes a
+candidate automatically or makes it boot-persistent.
+
+## Local data and removal
+
+```bash
+letsinfer uninstall
+letsinfer uninstall --keep-models
+```
+
+Uninstall asks for confirmation, removes Let's Infer-managed services and
+containers by exact identity, and removes `$LETSINFER_HOME`.
+`--keep-models` preserves only the model directory.
+
+## Public exposure
+
+Your LAN endpoint is advertised through mDNS. Use `exposure` to inspect public
+state, `expose` to publish only the inference gateway through the configured
+secure transport, and `unexpose` to disable it. Public exposure never publishes
+the controller or Watchdog endpoints.
+
+## Machine-readable output
+
+Prefer `--json` for automation. Human output, progress animation, and update
+notices may evolve; JSON fields and exit status are the automation contract.

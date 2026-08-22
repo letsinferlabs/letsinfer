@@ -112,10 +112,7 @@ class ActionRegistryTests(unittest.TestCase):
     def test_handler_prevalidation_failure_is_audited_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            environment = {
-                "LETSINFER_CONFIG_HOME": str(root / "config"),
-                "LETSINFER_DATA_HOME": str(root / "data"),
-            }
+            environment = {"LETSINFER_HOME": str(root)}
             with mock.patch.dict(os.environ, environment):
                 identity = state.setup_site("Home", "127.0.0.1")
 
@@ -148,10 +145,7 @@ class ActionRegistryTests(unittest.TestCase):
     def test_handler_owned_failure_audit_is_not_duplicated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            environment = {
-                "LETSINFER_CONFIG_HOME": str(root / "config"),
-                "LETSINFER_DATA_HOME": str(root / "data"),
-            }
+            environment = {"LETSINFER_HOME": str(root)}
             with mock.patch.dict(os.environ, environment):
                 identity = state.setup_site("Home", "127.0.0.1")
 
@@ -187,10 +181,7 @@ class ActionRegistryTests(unittest.TestCase):
     def test_audit_export_is_complete_private_verified_and_itself_audited(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            environment = {
-                "LETSINFER_CONFIG_HOME": str(root / "config"),
-                "LETSINFER_DATA_HOME": str(root / "data"),
-            }
+            environment = {"LETSINFER_HOME": str(root)}
             with mock.patch.dict(os.environ, environment):
                 identity = state.setup_site("Home", "127.0.0.1")
                 with state.SiteStore(identity=identity) as store:

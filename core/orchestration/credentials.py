@@ -14,7 +14,7 @@ import secrets
 import stat
 import tempfile
 
-from ..paths import config_root
+from ..paths import secrets_root
 
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 MASTER_BYTES = 32
@@ -25,7 +25,7 @@ class GroupCredentialError(RuntimeError):
 
 
 def default_master_path() -> pathlib.Path:
-    return config_root() / "group-credential.key"
+    return secrets_root() / "group-credential.key"
 
 
 def _private_directory(path: pathlib.Path) -> None:

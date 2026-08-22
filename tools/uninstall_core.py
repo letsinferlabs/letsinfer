@@ -42,7 +42,7 @@ def remove(
     source: pathlib.Path,
     *,
     launcher_directory: pathlib.Path,
-    operator_home: pathlib.Path,
+    letsinfer_home: pathlib.Path,
 ) -> dict[str, object]:
     source = source.resolve(strict=True)
     manifest_path = source / "SOURCE-MANIFEST.json"
@@ -52,43 +52,33 @@ def remove(
         raise CoreUninstallError("source is not an immutable Let's Infer installation") from error
     if manifest.get("product") != "letsinfer":
         raise CoreUninstallError("installed source manifest has the wrong product")
-    if len(source.parents) < 4 or source.parents[1].name != "letsinfer":
+    home = letsinfer_home.expanduser().resolve(strict=True)
+    if (
+        len(source.parents) < 4
+        or source.parent.parent.name != "versions"
+        or source.parent.parent.parent.name != "core"
+        or source.parent.parent.parent.parent != home
+    ):
         raise CoreUninstallError("installed source is outside the versioned core layout")
-    store = source.parents[1]
-    prefix = source.parents[3]
-    allowed_prefixes = {
-        pathlib.Path("/opt/letsinfer"),
-        operator_home.expanduser().resolve(strict=False) / ".local",
-    }
-    if prefix not in allowed_prefixes:
-        raise CoreUninstallError(f"refusing to remove unsupported install prefix: {prefix}")
-    allowed_launcher_directories = {prefix / "bin", pathlib.Path("/usr/local/bin")}
+    store = home / "core"
+    current = store / "current"
+    if not current.is_symlink() or current.resolve(strict=True) != source:
+        raise CoreUninstallError("source is not LETSINFER_HOME/core/current")
     launcher_directory = launcher_directory.expanduser().resolve(strict=False)
-    if launcher_directory not in allowed_launcher_directories:
+    if not launcher_directory.is_absolute() or launcher_directory == pathlib.Path("/"):
         raise CoreUninstallError(
             f"refusing to remove unsupported launcher directory: {launcher_directory}"
         )
 
     removed_launchers: list[str] = []
-    candidates = {
-        launcher_directory / name for name in LAUNCHERS
-    } | {
-        prefix / "bin" / name for name in LAUNCHERS
-    } | {
-        operator_home / ".local" / "bin" / name for name in LAUNCHERS
-    }
+    candidates = {launcher_directory / name for name in LAUNCHERS}
     for path in sorted(candidates):
         if _remove_managed_launcher(path, store):
             removed_launchers.append(str(path))
 
     shutil.rmtree(store)
-    for directory in (prefix / "bin", prefix / "lib", prefix):
-        try:
-            directory.rmdir()
-        except OSError:
-            pass
     return {
-        "prefix": str(prefix),
+        "home": str(home),
         "removed_launchers": removed_launchers,
         "removed_store": str(store),
     }
@@ -98,14 +88,14 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="remove an immutable Let's Infer core")
     parser.add_argument("--source", type=pathlib.Path, required=True)
     parser.add_argument("--launcher-directory", type=pathlib.Path, required=True)
-    parser.add_argument("--operator-home", type=pathlib.Path, required=True)
+    parser.add_argument("--letsinfer-home", type=pathlib.Path, required=True)
     parser.add_argument("--quiet", action="store_true")
     parsed = parser.parse_args(arguments)
     try:
         result = remove(
             parsed.source,
             launcher_directory=parsed.launcher_directory,
-            operator_home=parsed.operator_home,
+            letsinfer_home=parsed.letsinfer_home,
         )
     except CoreUninstallError as error:
         parser.error(str(error))

@@ -35,16 +35,12 @@ class _BackendHandler(http.server.BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != f"Bearer {BACKEND_SECRET}":
             self.send_error(401)
             return
-        if self.path in {"/v1/token-count", "/v1/messages/count_tokens"}:
-            value = (
-                {"input_tokens": self.server.prompt_tokens}
-                if self.path == "/v1/messages/count_tokens"
-                else {
-                    "object": "token_count",
-                    "model": MODEL,
-                    "prompt_tokens": self.server.prompt_tokens,
-                }
-            )
+        if self.path == "/v1/letsinfer/token-count":
+            value = {
+                "object": "token_count",
+                "model": MODEL,
+                "prompt_tokens": self.server.prompt_tokens,
+            }
             payload = json.dumps(value, separators=(",", ":")).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -147,10 +143,7 @@ class LiveGatewayTests(unittest.TestCase):
         self.root = pathlib.Path(self.temporary.name)
         self.environment = mock.patch.dict(
             os.environ,
-            {
-                "LETSINFER_CONFIG_HOME": str(self.root / "config"),
-                "LETSINFER_DATA_HOME": str(self.root / "data"),
-            },
+            {"LETSINFER_HOME": str(self.root)},
             clear=False,
         )
         self.environment.start()
@@ -224,7 +217,7 @@ class LiveGatewayTests(unittest.TestCase):
                     "url": f"http://127.0.0.1:{backend.server_port}",
                     "credential_file": str(self.backend_token),
                     "ca_file": None,
-                    "token_count_path": "/v1/token-count",
+                    "token_count_path": "/v1/letsinfer/token-count",
                     "token_count_protocol": "letsinfer-token-count-v1",
                     "max_active_requests": 1,
                     "max_context_tokens": 256,
@@ -467,7 +460,7 @@ class LiveGatewayTests(unittest.TestCase):
             "/site/v1/facts",
             "/pair",
             "/watchdog/v1/status",
-            "/v1/token-count",
+            "/v1/letsinfer/token-count",
             "/v1/admin",
         ):
             request = urllib.request.Request(
@@ -554,18 +547,12 @@ class LiveGatewayTests(unittest.TestCase):
         self.assertEqual(rows[0]["cached_tokens"], 2)
         self.assertEqual(rows[0]["exact_tokens"], 1)
 
-    def test_sglang_stream_usage_updates_live_and_reconciles_once(self) -> None:
+    def test_protocol_stream_usage_updates_live_and_reconciles_once(self) -> None:
         backend = self.backends[0]
         backend.mode = "stream"
         with state.SiteStore(identity=self.identity) as store:
             placement = self._placement(self.backends)
-            placement["runtime"] = f"{MODEL}/sglang/target@1"
-            placement["endpoints"][0]["token_count_protocol"] = (
-                "sglang-anthropic-count-tokens-v1"
-            )
-            placement["endpoints"][0]["token_count_path"] = (
-                "/v1/messages/count_tokens"
-            )
+            placement["runtime"] = f"{MODEL}/example-engine/target@1"
             store.set_placement(placement)
         self.gateway.policy.reload(force=True)
 
@@ -603,7 +590,6 @@ class LiveGatewayTests(unittest.TestCase):
         sent = json.loads(backend.requests[0][1])
         self.assertEqual(sent["stream_options"], {
             "include_usage": True,
-            "continuous_usage_stats": True,
         })
         final = self.gateway.metrics.snapshot()
         self.assertEqual(final["input_tokens"], 16)

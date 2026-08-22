@@ -15,7 +15,16 @@ from typing import Any
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 WORKLOAD_RE = re.compile(r"pp[1-9][0-9]*,tg[1-9][0-9]*,c[1-9][0-9]*")
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+SUBJECT_FIELDS = {
+    "candidate_id",
+    "runtime_version",
+    "model_uri",
+    "model_revision",
+    "engine_oci",
+    "target",
+    "target_contract_sha256",
+}
 RESULT_FIELDS = {
     "workload",
     "prompt_domain",
@@ -48,6 +57,7 @@ RECORD_FIELDS = {
     "installation_id",
     "timestamp",
     "timestamp_unix_ns",
+    "subject",
     "benchmark_contract_sha256",
     "results_sha256",
     "results",
@@ -83,6 +93,7 @@ def canonical_bytes(value: Any) -> bytes:
 def benchmark_id(
     installation_id: str,
     timestamp_unix_ns: int,
+    subject: dict[str, Any],
     benchmark_contract_sha256: str,
     results_sha256: str,
 ) -> str:
@@ -99,14 +110,59 @@ def benchmark_id(
         or timestamp_unix_ns <= 0
     ):
         raise BenchmarkRecordError("timestamp_unix_ns must be positive")
+    validate_subject(subject)
     material = {
         "benchmark_contract_sha256": benchmark_contract_sha256,
-        "contract": "letsinfer-benchmark-identity-v1",
+        "contract": "letsinfer-benchmark-identity-v2",
         "installation_id": installation_id,
         "results_sha256": results_sha256,
+        "subject": subject,
         "timestamp_unix_ns": timestamp_unix_ns,
     }
     return hashlib.sha256(canonical_bytes(material)).hexdigest()
+
+
+def validate_subject(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != SUBJECT_FIELDS:
+        raise BenchmarkRecordError(
+            "benchmark subject must contain exactly "
+            + ", ".join(sorted(SUBJECT_FIELDS))
+        )
+    candidate = value.get("candidate_id")
+    if not isinstance(candidate, str) or re.fullmatch(
+        r"[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*--"
+        r"[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*",
+        candidate,
+    ) is None:
+        raise BenchmarkRecordError("subject.candidate_id is invalid")
+    version = value.get("runtime_version")
+    if not isinstance(version, str) or re.fullmatch(
+        r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?",
+        version,
+    ) is None:
+        raise BenchmarkRecordError("subject.runtime_version is invalid")
+    uri = value.get("model_uri")
+    if not isinstance(uri, str) or re.fullmatch(
+        r"hf://[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", uri
+    ) is None:
+        raise BenchmarkRecordError("subject.model_uri is invalid")
+    revision = value.get("model_revision")
+    if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise BenchmarkRecordError("subject.model_revision must be a full commit SHA")
+    engine_oci = value.get("engine_oci")
+    if not isinstance(engine_oci, str) or re.fullmatch(
+        r"[^\s@]+@sha256:[0-9a-f]{64}", engine_oci
+    ) is None:
+        raise BenchmarkRecordError("subject.engine_oci must be digest-pinned")
+    target = value.get("target")
+    if not isinstance(target, str) or re.fullmatch(
+        r"[a-z0-9][a-z0-9._-]*", target
+    ) is None:
+        raise BenchmarkRecordError("subject.target is invalid")
+    target_sha = value.get("target_contract_sha256")
+    if not isinstance(target_sha, str) or SHA256_RE.fullmatch(target_sha) is None:
+        raise BenchmarkRecordError("subject.target_contract_sha256 must be a SHA-256")
+    return value
 
 
 def results_sha256(results: Any) -> str:
@@ -472,6 +528,7 @@ def validate_record(value: Any) -> dict[str, Any]:
     expected_id = benchmark_id(
         value.get("installation_id"),
         timestamp_ns,
+        value.get("subject"),
         value.get("benchmark_contract_sha256"),
         actual_results_sha,
     )

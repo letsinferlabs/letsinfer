@@ -50,6 +50,7 @@ jobs:
     runs-on: macos-15
     environment: production-macos-release
     permissions:
+      artifact-metadata: write
       contents: write
       id-token: write
       attestations: write
@@ -143,7 +144,7 @@ jobs:
           security delete-keychain "$keychain"
           trap - EXIT
       - name: Attest macOS release assets
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             dist/${{ steps.version.outputs.artifact }}

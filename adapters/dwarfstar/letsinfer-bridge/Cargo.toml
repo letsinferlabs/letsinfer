@@ -1,8 +1,0 @@
-# SPDX-License-Identifier: AGPL-3.0-only
-[workspace]
-resolver = "2"
-members = ["capi", "vendor/letsinfer_prefix_store"]
-
-[profile.release]
-lto = true
-codegen-units = 1

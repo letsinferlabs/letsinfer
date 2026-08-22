@@ -33,6 +33,9 @@ from core.updates.manager import (
 RUNTIME_DIGEST = "1" * 64
 NEXT_RUNTIME_DIGEST = "2" * 64
 TARGET_DIGEST = "3" * 64
+CANDIDATE = "sglang--radixark--qwen3.8-27b-nvfp4--dgx-spark"
+ENGINE_DIGEST = "4" * 64
+BENCHMARK_ID = "5" * 64
 
 
 def components(*, core_identity: str = "core-a", runtime_policy: str = "recommended"):
@@ -45,6 +48,7 @@ def components(*, core_identity: str = "core-a", runtime_policy: str = "recommen
             RUNTIME_DIGEST,
             policy=runtime_policy,
             model="qwen3.8-27b",
+            runtime=CANDIDATE,
             engine="sglang",
             target="dgx-spark",
             target_contract_sha256=target_contract_sha256(
@@ -58,7 +62,7 @@ def components(*, core_identity: str = "core-a", runtime_policy: str = "recommen
 
 def catalog(version: str = "0.1.0-rc.11", digest: str = NEXT_RUNTIME_DIGEST):
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "targets": {
             "dgx-spark": {
                 "match": {
@@ -89,12 +93,22 @@ def catalog(version: str = "0.1.0-rc.11", digest: str = NEXT_RUNTIME_DIGEST):
             "qwen3.8-27b": {
                 "targets": {
                     "dgx-spark": {
-                        "recommended": "sglang",
-                        "engines": {
-                            "sglang": {
+                        "recommended": CANDIDATE,
+                        "candidates": {
+                            CANDIDATE: {
                                 "version": version,
                                 "source": "ghcr.io/letsinferlabs/runtimes/qwen"
                                 f"@sha256:{digest}",
+                                "qualified": True,
+                                "engine": "sglang",
+                                "engine_oci": "ghcr.io/letsinferlabs/engines/sglang"
+                                f"@sha256:{ENGINE_DIGEST}",
+                                "model_uri": "hf://RadixArk/Qwen3.8-27B-NVFP4",
+                                "benchmark": {
+                                    "id": BENCHMARK_ID,
+                                    "suite": "letsinfer-code-prose-v1",
+                                    "score": 1.0,
+                                },
                             }
                         },
                     }
@@ -141,6 +155,22 @@ class UpdateManagerTests(unittest.TestCase):
             catalog_loader=catalog_loader,
             clock=lambda: self.now,
         )
+
+    def test_source_checkout_identity_is_stable_without_generated_manifest(self):
+        root = pathlib.Path(self.temporary.name) / "checkout"
+        for relative, content in (
+            ("core/__init__.py", "PRODUCT_VERSION = 'test'\n"),
+            ("core/cli.py", "# cli\n"),
+            ("core/updates/manager.py", "# manager\n"),
+        ):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        with mock.patch.object(cli, "source_root", return_value=root):
+            first = cli._core_update_identity()
+            second = cli._core_update_identity()
+        self.assertRegex(first, r"^[0-9a-f]{64}$")
+        self.assertEqual(first, second)
 
     def test_version_order_covers_rc_and_stable(self):
         self.assertLess(compare_versions("0.11.0-rc.9", "0.11.0-rc.10"), 0)

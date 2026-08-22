@@ -1,13 +1,14 @@
 # Core tests
 
 These tests exercise Let's Infer's control-plane contracts without importing a
-real model runtime. `cli/` covers manifests, adapters, lifecycle, packaging,
+real model runtime. `cli/` covers runtime candidates, the Engine protocol,
+lifecycle, packaging,
 and installation; `benchmarks/` covers the engine-neutral runners.
 
-`fixtures/manifests/` uses synthetic model, image, and target identities while
-retaining one schema fixture per registered adapter. `fixtures/runtime-source/`
-is a tiny runtime-owned source root used to prove that runtime artifacts remain
-separate from independently identified core bundles. None of these fixtures is
+`runtime_fixture.py` supplies one synthetic schema-v3 candidate with exact
+model, Engine OCI, and target identities. `fixtures/runtime-source/` is a tiny
+runtime-owned source root used to prove that runtime artifacts remain separate
+from independently identified core bundles. None of these fixtures is
 discoverable as a production runtime.
 
 Model checkpoints, engine forks, kernels, target tuning, benchmark plans,
