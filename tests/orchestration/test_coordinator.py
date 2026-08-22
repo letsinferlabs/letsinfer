@@ -23,10 +23,9 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = pathlib.Path(self.temporary.name)
-        self.environment = mock.patch.dict(os.environ, {
-            "LETSINFER_CONFIG_HOME": str(root / "config"),
-            "LETSINFER_DATA_HOME": str(root / "data"),
-        })
+        self.environment = mock.patch.dict(
+            os.environ, {"LETSINFER_HOME": str(root)}
+        )
         self.environment.start()
         self.identity = state.setup_site()
         self.members = (self.identity.member_id, "e" * 32, "f" * 32)

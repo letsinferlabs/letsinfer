@@ -1,153 +1,89 @@
-# Benchmark and qualification runners
+# Benchmark and qualification framework
 
-Let's Infer owns the engine-neutral benchmark transport, workload generator,
-isolation, safety, and evidence contracts. A runtime declares only its
-versioned benchmark configuration in `runtime.json`; it does not ship prompt
-files, plans, or benchmark code.
+Let's Infer core owns benchmark transport, canonical prompts, workload
+generation, isolation, safety checks, telemetry capture, and evidence. Your
+runtime declares only its benchmark contract in `runtime.json` and retains the
+validated public `benchmark.json`.
 
-## Runners
+## Run a benchmark
 
-### `openai_matrix.py`
-
-The common OpenAI-v1 gate works with any registered engine adapter.
-It verifies the release and container identity, authenticated TLS endpoint,
-model identity, prompt hashes and observed token counts, concurrent request
-behavior, output requirements, container health, restarts, OOM state, host and
-GPU telemetry, and the measured source identity.
-
-It writes immutable request evidence, `results.json`, `results.sha256`, and a
-short `bench-block.md`. It rejects HTTP endpoints, dirty or unidentified
-source, unpinned prompts, token drift, unhealthy or replaced containers, and
-an existing evidence directory.
-
-The lower-level runner still accepts an explicit fixture manifest for
-benchmark development and specialized qualification gates. Those inputs are
-evidence-bound development inputs, not runtime-pack contents.
+Use the CLI:
 
 ```bash
-python3 benchmarks/openai_matrix.py \
-  --release-manifest /path/to/runtime/release.json \
-  --fixture-manifest /path/to/runtime/fixtures.json \
-  --output-directory ~/.cache/letsinfer/results/<run-id> \
-  --api-key-file ~/.config/letsinfer/api-key \
-  --ca-cert-file ~/.config/letsinfer/tls/server.crt \
-  --container letsinfer-<engine> \
-  --measured-commit <full-commit>
+letsinfer benchmark qwen3.8-27b --c1
 ```
 
-### `runtime_matrix.py`
+With no selectors, the standard contract runs 32K, 64K, 128K, and 256K at C1,
+C2, C4, C8, and C16 for both code and prose. Select only the cells you need
+with flags such as `--32k`, `--64k`, `--c1`, or `--c8`.
 
-The public `letsinfer benchmark` command uses this runner to execute a runtime
-pack's declared standard matrix without exposing engine flags:
+The benchmark is a durable job:
 
 ```bash
-letsinfer benchmark MODEL --c1 --c2 --c4 --c8
+letsinfer benchmark          # attach to live progress
+letsinfer benchmark stop     # cancel and restore prior inference state
+letsinfer benchmark clean    # remove local generated benchmark data
 ```
 
-The CLI starts one durable benchmark worker per node and attaches to its live
-phase, workload, elapsed time, and expected duration. Ctrl-C only detaches;
-`letsinfer benchmark` reconnects to status and `letsinfer benchmark stop`
-explicitly cancels the worker. The worker retains exclusive ownership of its
-temporary container and service restoration, including after the launching
-terminal exits.
+Ctrl-C detaches. It does not cancel the worker.
 
-With no selectors, the current standard contract runs the complete
-32K/64K/128K/256K by C1/C2/C4/C8/C16 cross-product for both code and prose.
-The versioned core generator owns fixed model-neutral bytes and stream order;
-the registered adapter counts each complete rendered request without resizing
-it. Generated prompts and the derived plan live under the new evidence
-directory.
+## Isolation
 
-Every measured cell receives a fresh Let's Infer-managed container and empty
-prefix store. The runner rejects cache reuse, identity drift, tokenizer/model/
-image mismatch, invalid prompt counts, unsafe post-load headroom, and any
-mismatch between a CLI sampling override and the declared contract.
+Each measured cell gets a fresh Let's Infer-managed runtime instance and empty
+prefix state. The resident Watchdog stays active while the worker temporarily
+owns inference. On success, failure, cancellation, or terminal disconnect, the
+worker restores the exact prior service state.
 
-On a service host, the worker temporarily stops the recovery timer and active
-engine unit before inference. The resident Watchdog stays active. Let's Infer
-restores the exact prior engine and timer state after success, failure, or
-explicit cancellation. When an active qualification candidate owned the
-inference slot, the worker instead rearms the final isolated candidate before
-it exits. A host that had no active inference returns to that state. Operators
-therefore do not manually stop or restart inference around a benchmark.
+The runner rejects runtime, model, Engine OCI, tokenizer, prompt, source,
+container, cache, or sampling drift. It also rejects unsafe launch headroom and
+workloads that exceed the runtime's declared envelope.
 
-An installed hash-addressed control bundle is a verified source identity. A
-developer checkout must be clean and match the measured commit, or provide a
-source attestation copied from the exact clean checkpoint.
+## Canonical prompts
 
-The command writes a validated `benchmark.json` beside the complete evidence.
-Each flat row reports the neutral workload, code/prose domain, suite and
-prompt-set identities, per-stream actual prompt counts, aggregate/decode throughput, TTFT,
-whether any prompt prefix was cached, maximum GPU/CPU utilization and
-temperature, CPU/GPU/VRAM/system-RAM clocks, NVMe temperature, root-storage
-usage, NVMe read/write throughput and their maxima, and a compact fixed-schema
-timeline from Watchdog's independent one-second ring. An unavailable clock or
-NVMe metric is `-1`. Root-storage usage is capacity consumed, not I/O busy
-time. Its cryptographic ID binds the runtime installation, benchmark
-contract, timestamp, and complete results/timeline digest. Validate a retained
-or merged record independently with:
+[`prompts/PROTOCOL.md`](prompts/PROTOCOL.md) defines the model-neutral code and
+prose templates and stream order. [`prompt_generator.py`](prompt_generator.py)
+generates fixed bytes without consulting a tokenizer. The Engine adapter counts
+the complete rendered request; it never resizes the prompt.
+
+Generated prompts and plans live only in evidence. Do not copy them into a
+runtime pack or substitute runtime-provided prompts.
+
+## Public record
+
+The worker writes a validated `benchmark.json`. Each result row includes:
+
+- neutral `ppN,tgN,cN` workload;
+- code or prose domain, prompt suite, and prompt-set SHA-256;
+- actual rendered prompt tokens per stream;
+- aggregate and decode throughput;
+- TTFT and its statistic;
+- prefix-cache state;
+- utilization, clock, temperature, memory, NVMe, power, and network maxima;
+- a fixed-schema Watchdog telemetry timeline; and
+- immutable runtime, installation, contract, and result identities.
+
+Unavailable clocks are `-1`. Other unavailable optional telemetry is `null`.
+Validate a record independently with:
 
 ```bash
 python3 benchmarks/benchmark_record.py /path/to/benchmark.json
 ```
 
-### `openai_load.py` and `cache_replay.py`
+## Lower-level runners
 
-`openai_load.py` runs crash-safe, resumable single- and concurrent-stream
-waves. The reusable plans in [`load-plans/`](load-plans/) define short load and
-soak shapes; a runtime supplies the exact prompts and cells. Every wave and
-attempt is written atomically and hashed before state advances. Resume is
-accepted only for the same release, source, plan, container lifecycle,
-endpoint, command, and runner.
+`runtime_matrix.py` implements the public CLI matrix.
+`openai_matrix.py`, `openai_load.py`, and `cache_replay.py` implement common
+qualification gates. They consume the private installed
+`runtime-execution.json` plus the authoritative runtime configuration supplied
+by core. Runtime candidates do not invoke them directly or carry custom
+benchmark commands.
 
-The runner retains raw SSE output and OpenAI usage together with TTFT,
-latency, decode and aggregate throughput, cache counters, host memory/swap,
-CPU, thermals, NVIDIA state, NVMe counters, Docker state, and Watchdog state.
-
-`cache_replay.py` compares a completed cold/hot population run with a
-completed post-restart run. It requires a changed container lifecycle and an
-unchanged source, release, image, fixture, and command identity. Cache reuse
-must be reported by the engine; timing alone is not evidence. A persistent
-runtime declaratively chooses `all-phases-exact` or
-`restored-repeat-exact` as its output policy. The generic runner contains no
-engine/provider branches or executable runtime hooks.
-
-```bash
-python3 benchmarks/openai_load.py \
-  --release-manifest /path/to/runtime/release.json \
-  --plan benchmarks/load-plans/<plan>.json \
-  --fixture-manifest /path/to/runtime/fixtures.json \
-  --output-directory ~/.cache/letsinfer/results/<run-id> \
-  --api-key-file ~/.config/letsinfer/api-key \
-  --ca-cert-file ~/.config/letsinfer/tls/server.crt \
-  --container letsinfer-<engine> \
-  --measured-commit <full-commit>
-```
-
-## Standard prompt generation
-
-[`prompts/PROTOCOL.md`](prompts/PROTOCOL.md) defines the standard model-neutral
-code/prose templates and stream ordering. [`prompt_generator.py`](prompt_generator.py)
-deterministically creates fixed bytes without consulting a tokenizer. The
-runtime's exact tokenizer capability only records rendered counts; a request
-that does not fit fails closed instead of being resized.
-
-The runtime contract pins the suite and generator versions, model and engine
-image identities, rendered-chat contract, request settings, cases, and
-concurrencies. Evidence pins the runtime contract, generator source,
-templates, generated prompt set, derived plan, and exact tokenizer identity.
-Materialized prompts are evidence—not source, runtime-pack content, or reusable
-inputs for another runtime identity.
+Persistent-cache verification uses the runtime's declarative
+`all-phases-exact` or `restored-repeat-exact` policy. Cache reuse must be
+reported by the Engine adapter; timing alone is not evidence.
 
 ## Tests
-
-Runner unit tests live under the repository's test tree and load these scripts
-without installing a Python package:
 
 ```bash
 python3 -m unittest discover -s tests/benchmarks -p 'test_*.py'
 ```
-
-The root [`tests/fixtures/`](../tests/fixtures/) tree contains only small,
-synthetic inputs for core contract tests. It is not searched by runtime
-discovery or included in production packs.

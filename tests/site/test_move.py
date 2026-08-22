@@ -15,12 +15,10 @@ class SiteMoveTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.temporary.name)
         self.source_environment = {
-            "LETSINFER_CONFIG_HOME": str(self.root / "source-config"),
-            "LETSINFER_DATA_HOME": str(self.root / "source-data"),
+            "LETSINFER_HOME": str(self.root / "source"),
         }
         self.destination_environment = {
-            "LETSINFER_CONFIG_HOME": str(self.root / "destination-config"),
-            "LETSINFER_DATA_HOME": str(self.root / "destination-data"),
+            "LETSINFER_HOME": str(self.root / "destination"),
         }
 
     def tearDown(self) -> None:
@@ -29,7 +27,7 @@ class SiteMoveTests(unittest.TestCase):
     def test_failed_move_restores_site_and_preserves_runtime_objects(self) -> None:
         with mock.patch.dict(os.environ, self.source_environment):
             source = state.setup_site("Source", "source.local")
-            old_secret = state.config_root() / "api-key"
+            old_secret = state.secrets_root() / "api-key"
             old_secret.write_text("source-only\n", encoding="ascii")
             old_secret.chmod(0o600)
             runtime = state.data_root() / "runtimes/objects/example"
@@ -41,7 +39,7 @@ class SiteMoveTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cancel"):
                 with move.LocalMoveTransaction(source):
                     self.assertFalse(old_secret.exists())
-                    self.assertTrue((state.config_root() / "member.key").is_file())
+                    self.assertTrue((state.secrets_root() / "member.key").is_file())
                     self.assertTrue(runtime.is_dir())
                     raise RuntimeError("cancel")
             self.assertEqual(state.read_identity(), source)
@@ -61,7 +59,7 @@ class SiteMoveTests(unittest.TestCase):
         with mock.patch.dict(os.environ, self.source_environment):
             source = state.setup_site("Source", "source.local")
             old_site_public = state.site_public_key_path().read_bytes()
-            old_secret = state.config_root() / "api-key"
+            old_secret = state.secrets_root() / "api-key"
             old_secret.write_text("source-only\n", encoding="ascii")
             old_secret.chmod(0o600)
             runtime = state.data_root() / "runtimes/objects/example"

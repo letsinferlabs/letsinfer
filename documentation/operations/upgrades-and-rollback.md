@@ -1,77 +1,75 @@
-# Upgrades and rollback
+# Core and runtime updates
 
 [Back to documentation](../README.md)
 
-Check both independently distributed layers without changing either one:
+Check core and runtime availability without changing either one:
 
 ```bash
 letsinfer update check
 ```
 
-Core availability is advertised by the GitHub release channel and runtime
-availability by the signed catalog's immutable OCI digest for the selected
-model/engine/target. The site agent refreshes this state hourly. Normal
-CLI commands only read the local identity-bound snapshot, so an unavailable
-registry or catalog cannot delay inference administration. The notice tells
-the user what can move; it never applies an update automatically. The core
-installer still verifies checksums and the release signature before applying.
-The advisory snapshot is the private node-local database
-`$LETSINFER_HOME/state/updates.sqlite3`; it contains component identities,
-versions, immutable sources, and verification timestamps, never credentials.
+Core availability comes from the signed GitHub release channel. Runtime
+availability comes from the signed catalog and immutable OCI digest for your
+selected candidate. The site agent refreshes this state periodically, and
+interactive commands read the local snapshot without delaying administration
+on a network request.
 
-Update core without changing runtime selection:
+The private update database is
+`$LETSINFER_HOME/state/updates.sqlite3`. It stores component identities,
+versions, immutable sources, results, and verification times—never
+credentials.
+
+## Update core
 
 ```bash
 letsinfer update
 ```
 
-Core update installs the new immutable identity beside the active one, rebinds
-the existing services and runtime, and verifies the new launcher. Only after
-those checks pass does it remove superseded validated core identities, stale
-unreferenced control bundles, and old Watchdog builds. A failed handoff keeps
-the previous core bytes available for recovery. Runtime objects, models,
-benchmark evidence, and runtime rollback history are never part of core
-garbage collection.
+Core update installs the new immutable version beside the active one, rebinds
+your existing services and unchanged runtime, and verifies the launcher and
+service handoff. Only then does it remove superseded validated core versions,
+unreferenced control bundles, and old Watchdog builds.
 
-Upgrade follows the policy recorded at installation:
+If the handoff fails, the previous core remains available. Core cleanup never
+removes runtime rollback objects, models, benchmark evidence, or runtime
+selection history.
 
-- `recommended` follows the catalog's current recommended engine;
-- `engine:NAME` stays on that engine's release line;
-- `pinned`, `local`, and `derived` do not move without `--to`.
+## Upgrade a runtime
 
-Preview an upgrade:
+Your installation records one policy:
 
-```bash
-letsinfer upgrade example-model --dry-run
-```
+- `recommended` follows the current catalog recommendation;
+- `runtime:CANDIDATE_ID` stays on that exact candidate line;
+- `pinned` and `local` move only when you provide `--to`.
 
-Apply it:
+Preview and apply:
 
 ```bash
-letsinfer upgrade example-model
+letsinfer upgrade qwen3.8-27b --dry-run
+letsinfer upgrade qwen3.8-27b
 ```
 
-Select an explicit immutable artifact instead of the recorded policy:
+Choose an exact immutable source:
 
 ```bash
-letsinfer upgrade example-model \
-  --to ghcr.io/example/runtime@sha256:...
+letsinfer upgrade qwen3.8-27b \
+  --to ghcr.io/example/runtime@sha256:<digest>
 ```
 
-Let's Infer verifies and stages the new runtime before stopping the old service.
-It then performs the same transactional service replacement as installation:
-exact artifacts, model, image, target, memory, Watchdog, health, authentication,
-and model identity must pass. A failed activation restores the prior config,
-units, immutable core/runtime service bundle, and running service.
+Let's Infer verifies and stages the candidate before replacing the active
+service. Model, Engine OCI, runtime pack, target, memory, Watchdog, health,
+authentication, and served identity must all pass. A failed activation restores
+the previous configuration and running service.
 
-Successful selections retain the previous runtime object and receipt:
+## Roll back
 
 ```bash
-letsinfer rollback example-model --dry-run
-letsinfer rollback example-model
+letsinfer rollback qwen3.8-27b --dry-run
+letsinfer rollback qwen3.8-27b
 ```
 
-Rollback reuses the retained immutable object; it does not resolve a mutable
-tag or reinterpret the prior catalog. Derived candidates do not automatically
-rebase when their parent is upgraded. Create a new derivation and inspect its
-resolved diff instead.
+Rollback uses the retained immutable object and receipt. It never resolves a
+mutable tag or reinterprets the old catalog entry.
+
+Core update, runtime upgrade, and rollback are explicit independent actions.
+None silently changes the other component.

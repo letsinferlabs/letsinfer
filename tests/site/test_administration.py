@@ -22,10 +22,7 @@ class SiteAdministrationTests(unittest.TestCase):
         root = pathlib.Path(self.temporary.name)
         self.environment = mock.patch.dict(
             os.environ,
-            {
-                "LETSINFER_CONFIG_HOME": str(root / "config"),
-                "LETSINFER_DATA_HOME": str(root / "data"),
-            },
+            {"LETSINFER_HOME": str(root)},
         )
         self.environment.start()
         self.identity = state.setup_site("Home", "home.local")

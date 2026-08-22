@@ -100,12 +100,10 @@ class SiteControlTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.temporary.name)
         self.coordinator_environment = {
-            "LETSINFER_CONFIG_HOME": str(self.root / "coordinator-config"),
-            "LETSINFER_DATA_HOME": str(self.root / "coordinator-data"),
+            "LETSINFER_HOME": str(self.root / "coordinator"),
         }
         self.member_environment = {
-            "LETSINFER_CONFIG_HOME": str(self.root / "member-config"),
-            "LETSINFER_DATA_HOME": str(self.root / "member-data"),
+            "LETSINFER_HOME": str(self.root / "member"),
         }
 
     def tearDown(self) -> None:

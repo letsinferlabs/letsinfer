@@ -38,7 +38,7 @@ import benchmark_record  # pylint: disable=wrong-import-position
 import prompt_generator  # pylint: disable=wrong-import-position
 import watchdog_client  # pylint: disable=wrong-import-position
 from core import ui  # pylint: disable=wrong-import-position
-from core.token_count import (  # pylint: disable=wrong-import-position
+from core.exact_tokens import (  # pylint: disable=wrong-import-position
     TokenCountError,
     parse_token_count_response,
     prepare_token_count_request,
@@ -177,7 +177,7 @@ def parse_arguments() -> argparse.Namespace:
         "--runtime",
         required=True,
         help=(
-            "installed Let's Infer runtime name or sealed release-manifest path; "
+            "installed Let's Infer runtime name or private runtime-execution path; "
             "it is the only serving config"
         ),
     )
@@ -348,7 +348,8 @@ def load_benchmark_contract(
     path: pathlib.Path, manifest: dict[str, Any]
 ) -> dict[str, Any]:
     runtime = common.read_json_object(path, "runtime config")
-    contract = runtime.get("benchmark")
+    benchmark = runtime.get("benchmark")
+    contract = benchmark.get("contract") if isinstance(benchmark, dict) else None
     try:
         prompt_generator.validate_benchmark_contract(contract)
     except ValueError as error:
@@ -515,13 +516,13 @@ def host_mem_available_bytes(
     raise RuntimeMatrixError(f"cannot read MemAvailable from {meminfo}")
 
 
-def require_post_load_warning_headroom(
+def observe_post_load_memory_headroom(
     manifest: dict[str, Any],
     *,
     samples: int = 3,
     interval_seconds: float = 1.0,
 ) -> dict[str, Any]:
-    """Require a stable post-load baseline above the release warning line."""
+    """Record the loaded engine's host-memory baseline as telemetry."""
     protection = manifest.get("watchdog", {}).get("protection", {})
     warning = protection.get("warning_available_bytes")
     if isinstance(warning, bool) or not isinstance(warning, int) or warning <= 0:
@@ -543,12 +544,6 @@ def require_post_load_warning_headroom(
         "minimum_available_bytes": minimum,
         "passed": minimum >= warning,
     }
-    if minimum < warning:
-        raise RuntimeMatrixError(
-            "post-load host memory is below the manifest warning line: "
-            f"minimum {minimum} bytes < required {warning} bytes; "
-            "do not start benchmark traffic from this host state"
-        )
     return result
 
 
@@ -1031,11 +1026,18 @@ def verified_source_identity(
         )
 
     manifest_sha256 = common.sha256_file(manifest_path)
-    expected_manifest = source_root / "releases" / manifest_path.name
-    if manifest_path.resolve() != expected_manifest.resolve():
+    try:
+        relative_manifest = manifest_path.resolve(strict=True).relative_to(
+            source_root.resolve(strict=True)
+        )
+    except (OSError, ValueError) as error:
         raise RuntimeMatrixError(
             "deployment tree is not a hash-addressed control bundle; "
             "--source-attestation is required"
+        ) from error
+    if relative_manifest.as_posix() != "runtime-execution.json":
+        raise RuntimeMatrixError(
+            "control bundle must contain exactly runtime-execution.json"
         )
     try:
         from tools.source_archive import (  # pylint: disable=import-outside-toplevel
@@ -1076,22 +1078,11 @@ def verified_source_identity(
         raise RuntimeMatrixError(
             "a verified control bundle must use its sealed measured commit"
         )
-    artifacts = sorted(
-        (
-            {"path": row["path"], "sha256": row["sha256"]}
-            for row in manifest.get("source_artifacts", [])
-        ),
-        key=lambda row: row["path"],
-    )
-    artifacts_sha256 = common.sha256_text(
-        json.dumps(artifacts, sort_keys=True, separators=(",", ":"))
-    )
     return {
         "kind": "verified-control-bundle",
         "commit": measured_commit,
         "core_source_sha256": core_identity,
-        "manifest_sha256": manifest_sha256,
-        "source_artifacts_sha256": artifacts_sha256,
+        "execution_manifest_sha256": manifest_sha256,
     }
 
 
@@ -1340,7 +1331,7 @@ def run_isolated_matrix(
                 protocol=arguments.token_count_protocol,
                 api_key=token_count_api_key,
                 tls_context=tls_context,
-                model_id=manifest["model"]["id"],
+                model_id=model_name,
                 timeout=arguments.timeout,
             )
             with benchmark_activity(
@@ -1567,18 +1558,59 @@ def run_isolated_matrix(
     assert arguments.installation_id is not None
     assert arguments.benchmark_timestamp_unix_ns is not None
     assert arguments.benchmark_contract_sha256 is not None
+    if arguments.runtime_config is None:
+        raise RuntimeMatrixError("--runtime-config is required for benchmark identity")
+    runtime_source = common.read_json_object(
+        arguments.runtime_config, "runtime configuration"
+    )
+    model = runtime_source.get("model")
+    artifacts = runtime_source.get("artifacts")
+    engine = runtime_source.get("engine")
+    target = runtime_source.get("target")
+    if not all(isinstance(item, dict) for item in (model, engine, target)) or not isinstance(
+        artifacts, list
+    ):
+        raise RuntimeMatrixError("runtime configuration cannot produce a benchmark subject")
+    primary = next(
+        (
+            artifact
+            for artifact in artifacts
+            if isinstance(artifact, dict) and artifact.get("name") == model.get("artifact")
+        ),
+        None,
+    )
+    engine_oci = engine.get("oci")
+    if not isinstance(primary, dict) or not isinstance(engine_oci, dict):
+        raise RuntimeMatrixError("runtime primary artifact or Engine OCI is unavailable")
+    subject = {
+        "candidate_id": runtime_source.get("id"),
+        "runtime_version": runtime_source.get("version"),
+        "model_uri": model.get("uri"),
+        "model_revision": primary.get("revision"),
+        "engine_oci": engine_oci.get("reference"),
+        "target": target.get("id"),
+        "target_contract_sha256": hashlib.sha256(
+            benchmark_record.canonical_bytes(target)
+        ).hexdigest(),
+    }
+    try:
+        benchmark_record.validate_subject(subject)
+    except benchmark_record.BenchmarkRecordError as error:
+        raise RuntimeMatrixError(str(error)) from error
     public_results_sha = benchmark_record.results_sha256(public_results)
     public_record = {
         "schema_version": benchmark_record.SCHEMA_VERSION,
         "id": benchmark_record.benchmark_id(
             arguments.installation_id,
             arguments.benchmark_timestamp_unix_ns,
+            subject,
             arguments.benchmark_contract_sha256,
             public_results_sha,
         ),
         "installation_id": arguments.installation_id,
         "timestamp": arguments.benchmark_timestamp_unix_ns // 1_000_000_000,
         "timestamp_unix_ns": arguments.benchmark_timestamp_unix_ns,
+        "subject": subject,
         "benchmark_contract_sha256": arguments.benchmark_contract_sha256,
         "results_sha256": public_results_sha,
         "results": public_results,
@@ -1723,6 +1755,15 @@ def main() -> int:
             benchmark_record.benchmark_id(
                 arguments.installation_id,
                 arguments.benchmark_timestamp_unix_ns,
+                {
+                    "candidate_id": "placeholder--placeholder--placeholder--placeholder",
+                    "runtime_version": "0.0.0",
+                    "model_uri": "hf://placeholder/placeholder",
+                    "model_revision": "0" * 40,
+                    "engine_oci": "example.invalid/engine@sha256:" + "0" * 64,
+                    "target": "placeholder",
+                    "target_contract_sha256": "0" * 64,
+                },
                 arguments.benchmark_contract_sha256,
                 "0" * 64,
             )
@@ -1773,7 +1814,7 @@ def main() -> int:
     preflight = common.preflight(
         base_url, tls_context, min(arguments.timeout, 30), api_key, served_model
     )
-    preflight["post_load_memory"] = require_post_load_warning_headroom(manifest)
+    preflight["post_load_memory"] = observe_post_load_memory_headroom(manifest)
     monitor = load.TelemetryMonitor(
         output / "telemetry.jsonl",
         container,

@@ -23,11 +23,9 @@ ARCHIVE_ROOT = "letsinfer"
 MANIFEST_NAME = "SOURCE-MANIFEST.json"
 PUBLIC_ROOT_FILES = (".gitignore", "LICENSE", "NOTICE", "README.md", "install.sh")
 PUBLIC_DIRECTORIES = (
-    "adapters",
     "benchmarks",
     "bin",
     "cache",
-    "connectors",
     "core",
     "documentation",
     "skills",

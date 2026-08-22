@@ -1,62 +1,80 @@
 ---
 name: cli
-description: Use and troubleshoot the Let's Infer command-line interface for runtime discovery, packaging, derivation, inspection, installation, qualification serving, upgrades, verification, service operations, credentials, and removal. Use whenever an agent needs to choose or execute a letsinfer CLI command or explain its options.
+description: Use and troubleshoot the Let's Infer CLI for setup, signed runtime installation, model acquisition, serving, benchmarks, updates, rollback, site administration, keys, telemetry, and removal.
 ---
 
 # Use the Let's Infer CLI
 
-Read [`references/commands.md`](references/commands.md) for the complete public command and option surface before constructing a command. Prefer the installed `letsinfer`; use repository `bin/letsinfer` only for source-tree development.
+Read [`references/commands.md`](references/commands.md) before constructing a
+command. Prefer the installed `letsinfer`. Use the source-tree launcher only
+while developing core.
+
+## Preserve the architecture
+
+- Install the model you want with `letsinfer install MODEL`.
+- Use `--runtime CANDIDATE_ID` only to pin one exact candidate.
+- Never ask the operator to select an engine or enter a target source path.
+- Let the signed catalog and detected hardware choose the qualified candidate.
+- Treat core updates and runtime upgrades as independent operations.
+- Treat a local runtime directory, archive, or OCI digest as an unqualified
+  source until its complete qualification contract passes.
 
 ## Work safely
 
-1. Read the applicable public documentation and any locally supplied repository
-   policy, then inspect live state before changing it.
-2. Use `hardware --json`, `inspect --json`, `status --json`, `doctor --json`, and available `--dry-run` paths before activation, upgrade, rollback, or service changes.
-3. Let automatic target selection match capabilities. Multiple matches mean the catalog is ambiguous and must be corrected; do not delegate ordinary target selection to the user. An explicit development `--target` never bypasses compatibility.
-4. Treat local/derived runtimes as unqualified candidates. Only `serve --qualification-mode --evidence-dir NEW_PATH` may launch one, and it does not install, promote, or make it boot-persistent.
-5. Keep API keys, TLS keys, and Watchdog credentials in private files. Never print or embed their contents in commands, manifests, logs, or evidence.
-6. Preserve model weights, runtime objects, cache data, and credentials unless the user explicitly requests the corresponding purge option.
-7. Before installing boot-persistent user services, require systemd user
-   lingering. Installation must fail before mutation when lingering is not
-   available.
+1. Inspect `hardware --json`, `status --json`, `doctor --json`, and
+   `inspect --json` before a mutation.
+2. Use `--dry-run` on upgrade and rollback when available.
+3. Keep API keys, TLS material, controller credentials, and registry tokens out
+   of commands, logs, manifests, and evidence.
+4. Do not bypass target compatibility, Engine OCI identity, model revision,
+   runtime digest, or catalog signature checks.
+5. Do not clear a protection trip with start or restart. Inspect it and use
+   `recover` only after explicit acknowledgement.
+6. Respect the `coordinator`, `member`, or `all` scope printed in command help.
+   A member never proxies a coordinator-only command.
 
 ## Choose the operation
 
-- Configure the logical site: `setup`, `site status`, `member`, `topology`.
-- Discover: `engines`, `releases`, `hardware`, `runtimes`.
-- Create/distribute: `pack`, `derive`, `inspect`.
-- Resolve lifecycle: `install`, `upgrade`, `rollback`, `acquire`, `verify`.
-- Run/diagnose: `serve`, `status`, `doctor`, `logs`, `start`, `restart`,
+- Site: `setup`, `site`, `topology`, `member`.
+- Discover: `hardware`, `runtimes`, `inspect`.
+- Install: `install`, `acquire`, `verify`, `pack`.
+- Run: `serve`, `status`, `doctor`, `logs`, `start`, `restart`,
   `recover`, `stop`.
-- Policy and trust: `pair`, `controllers`, `key`, `alias`, `audit`, `exposure`.
-- Remove: `uninstall`.
-- Do not invoke `service-start` or `service-stop` directly; they are systemd internals.
+- Benchmark: `benchmark`, `benchmark stop`, `benchmark clean`.
+- Update: `update check`, `update`, `upgrade`, `rollback`.
+- Access and trust: `key`, `pair`, `controllers`, `alias`, `audit`,
+  `exposure`, `expose`, `unexpose`.
+- Remove: `uninstall`, optionally `--keep-models`.
 
-Use `stop --name <container>` to remove only a named qualification container
-while keeping the resident Watchdog active. Use `stop` without `--name` for
-the configured service lifecycle.
+Do not invoke internal service commands directly.
 
-Treat a protection trip as an operator decision. `start` and `restart` never
-clear one; use `recover` only after inspecting the cause and intentionally
-acknowledging the durable trip.
+## Local candidates
 
-For derivation, put Let's Infer options before `--` and raw upstream engine arguments after it. Matching option names replace inherited clauses, unknown clauses append, and repeatable clauses replace as a group. Use repeatable `--without=--flag` to remove inherited flags. Let's Infer passes argv directly and does not maintain upstream flag schemas. Core-owned model, listener, TLS, authentication, and safety arguments cannot be changed.
+Package a candidate with:
 
-After any mutation, run `status --json`, `verify`, and `doctor --json` as applicable and verify the exact runtime, image, model, container lifecycle, Watchdog state, and service enablement.
+```bash
+letsinfer pack ./candidate --output /tmp/candidate.letsinfer
+```
 
-Respect the scope label on every command. Coordinator-only commands never run
-from or proxy through a member. API-key create/rotate output is secret material
-shown once; do not copy it into a command, log, source file, or evidence.
+Install the archive as a local source. An unqualified runtime remains blocked
+for ordinary activation. Launch it only through explicit qualification mode
+with a new evidence directory. Qualification mode does not promote it or make
+it boot-persistent.
 
-For planned member maintenance, use coordinator-only `member drain MEMBER_ID`
-before taking the node out of service and `member resume MEMBER_ID` afterward.
-Drain affects only new admission: it does not stop the engine or cancel active
-requests. Confirm the resulting member state and the placement behavior before
-continuing.
+## Benchmarks
 
-Watchdog is the always-running process; the inference engine may legitimately
-be stopped, qualification-held, or recovery-latched. Do not interpret an
-inactive engine as zero Let's Infer runtime memory or silently start another model.
-The Watchdog user unit must stay in the host user namespace so its exact-process
-pidfd containment works; do not add systemd filesystem namespace directives as
-generic hardening.
+`letsinfer benchmark MODEL` starts a durable job. Ctrl-C detaches. Running
+`letsinfer benchmark` with no model attaches to live progress.
+`letsinfer benchmark stop` cancels the active job. Do not run a second
+benchmark while one is active.
+
+## Updates
+
+`letsinfer update` installs signed core bytes and leaves runtime selections,
+models, and benchmark evidence unchanged. `letsinfer upgrade MODEL` moves the
+runtime according to its recorded policy and retains bounded rollback history.
+Never claim an update succeeded until the new launcher, services, API, and
+runtime identity all verify.
+
+After any mutation, inspect machine-readable state and verify the exact runtime,
+Engine OCI, model revision, service lifecycle, Watchdog state, and API.

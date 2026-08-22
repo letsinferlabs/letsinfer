@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Serve immutable, independently qualified Let's Infer inference releases."""
+"""Install and serve immutable, independently qualified Let's Infer runtimes."""
 
 from __future__ import annotations
 
@@ -50,11 +50,8 @@ from .paths import (
     home_root as letsinfer_home_root,
     managed_roots,
     models_root,
-)
-from .cache_plugins import (
-    CachePluginError,
-    install_sglang_plugin,
-    verify_sglang_plugin,
+    oci_root,
+    secrets_root,
 )
 from .actions import (
     ACTIONS,
@@ -64,16 +61,17 @@ from .actions import (
     help_label,
     validate_registry,
 )
-from .engines import (
-    ADAPTERS,
+from .engine_protocol import (
+    ENGINE_ADAPTER,
+    ENGINE_PROTOCOL_VERSION,
     EngineManifestError,
+    SAFE_NAME_RE,
     adapter_for,
-    artifact_cache_repository,
+    artifact_storage_slug,
     cache_provider_for,
     evidence_contract_for,
     launch_for,
     persistent_cache_for,
-    requires_core_cache_plugin,
     shell_command,
     validate_engine_manifest,
 )
@@ -104,25 +102,22 @@ from .runtime_packs import (
     RUNTIME_SCHEMA_VERSION,
     RuntimePack,
     RuntimePackError,
-    apply_overlay,
     build_archive,
     canonical_bytes,
     catalog_release,
     catalog_target_contract,
-    clause_key,
     compatible_catalog_targets,
     default_runtime_home,
     describe_source,
-    flatten_clauses,
     load_catalog,
     materialize,
     new_receipt,
-    overlay_clauses,
     resolved_catalog_location,
     selections,
     store_pack,
     target_matches,
     target_contract_sha256,
+    validate_runtime_config,
     validate_target_contract,
     verify_descriptor,
     write_selection,
@@ -228,7 +223,7 @@ GROUP_ID_LABEL = "io.letsinfer.group"
 GROUP_MEMBER_LABEL = "io.letsinfer.group-member"
 GROUP_ROLE_LABEL = "io.letsinfer.group-role"
 SECURITY_PROFILE = "tls-api-key-v1"
-SERVICE_CONFIG_VERSION = 3
+SERVICE_CONFIG_VERSION = 4
 CORE_SOURCE_MANIFEST = "SOURCE-MANIFEST.json"
 SERVICE_NAME = "letsinfer.service"
 ENGINE_SERVICE_NAME = "letsinfer-engine.service"
@@ -284,7 +279,6 @@ ACTION_PROGRESS: Mapping[str, tuple[str, str]] = {
     "alias.set": ("Saving the model alias", "Model alias saved"),
     "alias.remove": ("Removing the model alias", "Model alias removed"),
     "pack": ("Building the runtime pack", "Runtime pack built"),
-    "derive": ("Deriving the runtime", "Runtime derived"),
     "upgrade": ("Resolving the runtime upgrade", "Runtime upgraded"),
     "rollback": ("Restoring the previous runtime", "Runtime restored"),
     "verify": ("Verifying the runtime", "Runtime verified"),
@@ -354,19 +348,20 @@ def _core_update_identity() -> str:
             if not manifest.is_symlink() and manifest.is_file()
             else None
         )
-        records = {
-            row["path"]: row["sha256"]
-            for row in document.get("files", [])
-            if isinstance(row, dict)
-            and isinstance(row.get("path"), str)
-            and isinstance(row.get("sha256"), str)
-        }
-        bound_paths = ("core/cli.py", "core/updates/manager.py")
-        if all(
-            records.get(relative) == sha256_file(root / relative)
-            for relative in bound_paths
-        ):
-            return sha256_file(manifest)
+        if isinstance(document, dict):
+            records = {
+                row["path"]: row["sha256"]
+                for row in document.get("files", [])
+                if isinstance(row, dict)
+                and isinstance(row.get("path"), str)
+                and isinstance(row.get("sha256"), str)
+            }
+            bound_paths = ("core/cli.py", "core/updates/manager.py")
+            if all(
+                records.get(relative) == sha256_file(root / relative)
+                for relative in bound_paths
+            ):
+                return sha256_file(manifest)
     except (OSError, KeyError, TypeError, json.JSONDecodeError):
         pass
     # Development trees do not necessarily have a freshly materialized source
@@ -404,11 +399,12 @@ def _update_components() -> tuple[Component, ...]:
         components.append(
             Component(
                 "runtime",
-                receipt["model"],
+                receipt["logical_model"],
                 receipt["version"],
                 receipt["digest"],
                 policy=receipt["policy"],
-                model=receipt["model"],
+                model=receipt["logical_model"],
+                runtime=receipt["candidate_id"],
                 engine=receipt["engine"],
                 target=receipt["target"],
                 target_contract_sha256=receipt["target_contract_sha256"],
@@ -429,31 +425,12 @@ def _update_manager(catalog: str | None = None) -> UpdateManager:
     )
 
 
-def releases_dir() -> pathlib.Path:
-    override = os.environ.get("LETSINFER_RELEASES_DIR")
-    return pathlib.Path(override) if override else source_root() / "releases"
-
-
 def expanded_path(value: str | os.PathLike[str]) -> pathlib.Path:
     return pathlib.Path(value).expanduser().resolve(strict=False)
 
 
 def absolute_user_path(value: str | os.PathLike[str]) -> pathlib.Path:
     return pathlib.Path(os.path.abspath(pathlib.Path(value).expanduser()))
-
-
-def default_plugin_root(
-    manifest: dict[str, Any], manifest_sha256: str
-) -> pathlib.Path:
-    plugins = manifest.get("runtime_plugins")
-    if isinstance(plugins, dict) and isinstance(plugins.get("default_root"), str):
-        return expanded_path(plugins["default_root"]) / manifest_sha256
-    return (
-        site_data_root()
-        / "runtime"
-        / manifest["release"]
-        / manifest_sha256
-    )
 
 
 def default_store_root(manifest: dict[str, Any]) -> pathlib.Path:
@@ -476,11 +453,11 @@ def requested_model_cache(
 
 
 def default_api_key_path() -> pathlib.Path:
-    return site_config_root() / "api-key"
+    return secrets_root() / "api-key"
 
 
 def default_engine_api_key_path() -> pathlib.Path:
-    return site_config_root() / "engine/api-key"
+    return secrets_root() / "engine/api-key"
 
 
 def default_tls_cert_path() -> pathlib.Path:
@@ -488,11 +465,11 @@ def default_tls_cert_path() -> pathlib.Path:
 
 
 def default_tls_key_path() -> pathlib.Path:
-    return site_config_root() / "tls/server.key"
+    return secrets_root() / "tls/server.key"
 
 
 def default_control_parent() -> pathlib.Path:
-    return site_data_root() / "control"
+    return letsinfer_home_root() / "core" / "control"
 
 
 def default_watchdog_runtime_parent() -> pathlib.Path:
@@ -516,7 +493,7 @@ def default_watchdog_cert_path() -> pathlib.Path:
 
 
 def default_watchdog_key_path() -> pathlib.Path:
-    return site_config_root() / "watchdog/server.key"
+    return secrets_root() / "watchdog/server.key"
 
 
 def default_watchdog_controller_ca_path() -> pathlib.Path:
@@ -524,7 +501,7 @@ def default_watchdog_controller_ca_path() -> pathlib.Path:
 
 
 def default_watchdog_controller_ca_key_path() -> pathlib.Path:
-    return site_config_root() / "watchdog/controller-ca.key"
+    return secrets_root() / "watchdog/controller-ca.key"
 
 
 def default_watchdog_local_controller_cert_path() -> pathlib.Path:
@@ -532,7 +509,7 @@ def default_watchdog_local_controller_cert_path() -> pathlib.Path:
 
 
 def default_watchdog_local_controller_key_path() -> pathlib.Path:
-    return site_config_root() / "watchdog/local-controller.key"
+    return secrets_root() / "watchdog/local-controller.key"
 
 
 def default_installation_identity_path() -> pathlib.Path:
@@ -559,6 +536,72 @@ def read_json(path: pathlib.Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise LetsInferError(f"manifest {path} is not a JSON object")
     return value
+
+
+def runtime_execution_manifest(runtime: dict[str, Any]) -> dict[str, Any]:
+    """Derive the private core execution view from authoritative runtime.json.
+
+    Runtime packs expose only schema-v3 runtime.json.  The control plane keeps a
+    deterministic, hash-bound execution view so existing lifecycle code never
+    needs to reinterpret source metadata or trust a second author-written file.
+    """
+
+    try:
+        runtime = validate_runtime_config(runtime)
+    except RuntimePackError as error:
+        raise LetsInferError(str(error)) from error
+    engine = runtime["engine"]
+    model = runtime["model"]
+    artifacts = []
+    for source in runtime["artifacts"]:
+        artifact = dict(source)
+        uri = artifact.pop("uri")
+        if not uri.startswith("hf://"):
+            raise LetsInferError("runtime artifact URI must use hf://")
+        artifact["repository"] = uri.removeprefix("hf://")
+        artifacts.append(artifact)
+    execution_engine = {
+        "name": engine["id"],
+        "model_format": engine["model_format"],
+        "api_protocol": "openai-v1",
+        "cache_provider": engine["cache_provider"],
+        "arguments": list(engine["arguments"]),
+        "environment": dict(engine["environment"]),
+    }
+    execution = {
+        "schema_version": 1,
+        "release": f"{runtime['id']}@{runtime['version']}",
+        "status": "stable" if runtime["status"] == "qualified" else "candidate",
+        "target": runtime["target"],
+        "engine": execution_engine,
+        "model": {
+            "alias": runtime["logical_model"],
+            "id": model["uri"].removeprefix("hf://"),
+            "artifact": model["artifact"],
+            "acquisition_image": model["acquisition"]["image"],
+        },
+        "artifacts": artifacts,
+        "image": {"distribution": "registry-digest", **engine["oci"]},
+        "container": {**runtime["container"], "model_cache": "/models"},
+        "watchdog": {
+            "listen": "0.0.0.0",
+            "protocol_version": WATCHDOG_PROTOCOL_VERSION,
+            "port": 9768,
+            **core_watchdog_contract(),
+            "build": {
+                "source_root": "watchdog",
+                "target": "letsinfer_watchdog",
+                "output": "letsinfer-watchdog",
+            },
+        },
+        "cache": runtime["cache"],
+        "serving": runtime["serving"],
+    }
+    for optional in ("orchestration",):
+        if optional in runtime:
+            execution[optional] = runtime[optional]
+    validate_manifest(execution)
+    return execution
 
 
 def _require(mapping: dict[str, Any], key: str, expected: type, where: str) -> Any:
@@ -685,32 +728,15 @@ def _validate_stable_evidence(
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
-    prose_fields = {"comment", "comments", "description", "note", "notes", "reason"}
+    """Validate the private execution view derived from schema-v3 runtime.json.
 
-    def reject_prose_fields(value: Any, where: str) -> None:
-        if isinstance(value, dict):
-            forbidden = prose_fields.intersection(value)
-            if forbidden:
-                raise LetsInferError(
-                    f"{where} contains forbidden prose fields: "
-                    + ", ".join(sorted(forbidden))
-                )
-            for key, child in value.items():
-                reject_prose_fields(child, f"{where}.{key}")
-        elif isinstance(value, list):
-            for index, child in enumerate(value):
-                reject_prose_fields(child, f"{where}[{index}]")
-        elif isinstance(value, str) and any(character.isspace() for character in value):
-            raise LetsInferError(f"{where} must not contain prose or whitespace")
+    This is deliberately engine agnostic. Engine-specific arguments and cache
+    configuration are opaque to core and are interpreted by the digest-pinned
+    Engine OCI adapter.
+    """
 
     if not isinstance(manifest, dict):
         raise LetsInferError("manifest must be an object")
-    reject_prose_fields(manifest, "manifest")
-    if "runtime" in manifest:
-        raise LetsInferError(
-            "manifest.runtime is unsupported; native engine configuration belongs "
-            "in manifest.engine.arguments and manifest.engine.environment"
-        )
     _reject_unknown_fields(
         manifest,
         {
@@ -722,27 +748,36 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
             "model",
             "artifacts",
             "image",
-            "source_artifacts",
-            "runtime_plugins",
             "container",
             "watchdog",
             "cache",
             "serving",
-            "derivation",
+            "orchestration",
         },
         "manifest",
     )
-    if type(manifest.get("schema_version")) is not int or manifest.get("schema_version") != 1:
-        raise LetsInferError("unsupported manifest schema_version")
-    _require(manifest, "release", str, "manifest")
+    if manifest.get("schema_version") != 1 or isinstance(
+        manifest.get("schema_version"), bool
+    ):
+        raise LetsInferError("unsupported execution manifest schema_version")
+    release = _require(manifest, "release", str, "manifest")
+    if not release or any(character.isspace() for character in release):
+        raise LetsInferError("manifest.release must be a machine identifier")
     status = _require(manifest, "status", str, "manifest")
     if status not in {"candidate", "stable"}:
         raise LetsInferError("manifest.status must be candidate or stable")
-    target = target_contract(manifest)
 
+    target = target_contract(manifest)
     model = _require(manifest, "model", dict, "manifest")
+    _reject_unknown_fields(
+        model,
+        {"alias", "id", "artifact", "acquisition_image"},
+        "manifest.model",
+    )
     for key in ("alias", "id", "artifact"):
-        _require(model, key, str, "manifest.model")
+        value = _require(model, key, str, "manifest.model")
+        if not value or any(character.isspace() for character in value):
+            raise LetsInferError(f"manifest.model.{key} must be a machine identifier")
     acquisition_image = _require(
         model, "acquisition_image", str, "manifest.model"
     )
@@ -750,201 +785,29 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise LetsInferError("manifest.model.acquisition_image must be digest-pinned")
 
     image = _require(manifest, "image", dict, "manifest")
-    _reject_unknown_fields(
-        image,
+    if set(image) not in (
+        {"distribution", "reference", "immutable_id"},
         {"distribution", "reference", "immutable_id", "base"},
-        "manifest.image",
-    )
+    ):
+        raise LetsInferError("manifest.image has invalid fields")
     distribution = _require(image, "distribution", str, "manifest.image")
-    _require(image, "reference", str, "manifest.image")
+    reference = _require(image, "reference", str, "manifest.image")
     immutable_id = _require(image, "immutable_id", str, "manifest.image")
-    base = _require(image, "base", str, "manifest.image")
     if distribution not in {"local-image-id", "registry-digest"}:
         raise LetsInferError("manifest.image.distribution is invalid")
     if not IMAGE_ID_RE.fullmatch(immutable_id):
         raise LetsInferError("manifest.image.immutable_id must be an exact image ID")
-    if not REGISTRY_DIGEST_RE.fullmatch(base):
-        raise LetsInferError("manifest.image.base must be digest-pinned")
-    if (
-        distribution == "registry-digest"
-        and not REGISTRY_DIGEST_RE.fullmatch(image["reference"])
+    if distribution == "registry-digest" and not REGISTRY_DIGEST_RE.fullmatch(
+        reference
     ):
         raise LetsInferError("registry image reference must be digest-pinned")
-    if distribution == "local-image-id" and image["reference"] != immutable_id:
+    if distribution == "local-image-id" and reference != immutable_id:
         raise LetsInferError("local image reference must equal its immutable image ID")
-
-    source_artifacts = manifest.get("source_artifacts")
-    if source_artifacts is not None:
-        _validate_artifact_entries(source_artifacts, "source_artifacts")
-    try:
-        adapter = adapter_for(manifest)
-    except EngineManifestError as error:
-        raise LetsInferError(str(error)) from error
-    if adapter.requires_runtime_plugins:
-        plugins = _require(manifest, "runtime_plugins", dict, "manifest")
-        expected_plugin_fields = (
-            {"default_root", "artifacts", "wheel_builder"}
-            if adapter.name == "vllm"
-            else {"default_root", "artifacts", "native_builder"}
-        )
-        _reject_unknown_fields(
-            plugins, expected_plugin_fields, "manifest.runtime_plugins"
-        )
-        _require(plugins, "default_root", str, "manifest.runtime_plugins")
-        _validate_artifact_entries(plugins.get("artifacts"), "runtime_plugins.artifacts")
-        runtime_paths = {entry["path"] for entry in plugins["artifacts"]}
-        if adapter.name == "vllm":
-            required_runtime_paths = {
-                "letsinfer_prefix_connector/__init__.py",
-                "letsinfer_prefix_connector/connector.py",
-                "prewarm_prefixes.py",
-            }
-            if not required_runtime_paths.issubset(runtime_paths):
-                raise LetsInferError("runtime plugin set omits connector or prewarm files")
-            if len([path for path in runtime_paths if path.endswith(".whl")]) != 1:
-                raise LetsInferError("runtime plugin set must pin exactly one wheel")
-            wheel_path = next(path for path in runtime_paths if path.endswith(".whl"))
-            platform_architecture = target["platform"].split("/", 1)[1]
-            wheel_architectures = {
-                "arm64": ("aarch64", "arm64"),
-                "amd64": ("x86_64", "amd64"),
-            }.get(platform_architecture, (platform_architecture,))
-            wheel_name = pathlib.PurePosixPath(wheel_path).name
-            platform_tags = wheel_name[:-4].rsplit("-", 1)[-1].split(".")
-            if not any(
-                tag == architecture or tag.endswith(f"_{architecture}")
-                for tag in platform_tags
-                for architecture in wheel_architectures
-            ):
-                raise LetsInferError(
-                    "runtime wheel architecture does not match manifest.target.platform"
-                )
-            builder = _require(
-                plugins, "wheel_builder", dict, "manifest.runtime_plugins"
-            )
-            _reject_unknown_fields(
-                builder,
-                {"image", "source_root", "source_date_epoch", "arguments"},
-                "manifest.runtime_plugins.wheel_builder",
-            )
-            builder_image = _require(
-                builder, "image", str, "manifest.runtime_plugins.wheel_builder"
-            )
-            if not REGISTRY_DIGEST_RE.fullmatch(builder_image):
-                raise LetsInferError("runtime wheel builder image must be digest-pinned")
-            builder_source_root = _require(
-                builder, "source_root", str, "manifest.runtime_plugins.wheel_builder"
-            )
-            builder_source = pathlib.PurePosixPath(builder_source_root)
-            if builder_source.is_absolute() or ".." in builder_source.parts:
-                raise LetsInferError(
-                    "runtime wheel builder source_root must be relative and contained"
-                )
-            if (
-                not isinstance(builder.get("source_date_epoch"), int)
-                or isinstance(builder.get("source_date_epoch"), bool)
-                or builder["source_date_epoch"] <= 0
-            ):
-                raise LetsInferError(
-                    "runtime wheel builder source_date_epoch must be positive"
-                )
-            arguments = builder.get("arguments")
-            if not isinstance(arguments, list) or not arguments or not all(
-                isinstance(value, str) and value for value in arguments
-            ):
-                raise LetsInferError(
-                    "runtime wheel builder arguments must be non-empty strings"
-                )
-        elif adapter.name == "dwarfstar":
-            required_runtime_paths = {
-                "dwarfstar_gateway.py",
-                "libletsinfer_prefix_capi.so",
-            }
-            if runtime_paths != required_runtime_paths:
-                raise LetsInferError(
-                    "DwarfStar runtime plugin set must contain its gateway and "
-                    "Let's Infer native cache bridge"
-                )
-            if "wheel_builder" in plugins:
-                raise LetsInferError(
-                    "DwarfStar runtime plugins cannot declare a wheel builder"
-                )
-            builder = _require(
-                plugins, "native_builder", dict, "manifest.runtime_plugins"
-            )
-            _reject_unknown_fields(
-                builder,
-                {
-                    "image",
-                    "source_root",
-                    "source_date_epoch",
-                    "entrypoint",
-                    "arguments",
-                    "output",
-                },
-                "manifest.runtime_plugins.native_builder",
-            )
-            builder_image = _require(
-                builder, "image", str, "manifest.runtime_plugins.native_builder"
-            )
-            if not REGISTRY_DIGEST_RE.fullmatch(builder_image):
-                raise LetsInferError(
-                    "runtime native builder image must be digest-pinned"
-                )
-            builder_source_root = _require(
-                builder,
-                "source_root",
-                str,
-                "manifest.runtime_plugins.native_builder",
-            )
-            builder_source = pathlib.PurePosixPath(builder_source_root)
-            if builder_source.is_absolute() or ".." in builder_source.parts:
-                raise LetsInferError(
-                    "runtime native builder source_root must be relative and contained"
-                )
-            if (
-                not isinstance(builder.get("source_date_epoch"), int)
-                or isinstance(builder.get("source_date_epoch"), bool)
-                or builder["source_date_epoch"] <= 0
-            ):
-                raise LetsInferError(
-                    "runtime native builder source_date_epoch must be positive"
-                )
-            entrypoint = builder.get("entrypoint")
-            if not isinstance(entrypoint, str) or not entrypoint:
-                raise LetsInferError(
-                    "runtime native builder entrypoint must be non-empty"
-                )
-            arguments = builder.get("arguments")
-            if not isinstance(arguments, list) or not arguments or not all(
-                isinstance(value, str) and value for value in arguments
-            ):
-                raise LetsInferError(
-                    "runtime native builder arguments must be non-empty strings"
-                )
-            output_value = builder.get("output")
-            if not isinstance(output_value, str) or not output_value:
-                raise LetsInferError(
-                    "runtime native builder output must be non-empty"
-                )
-            output = pathlib.PurePosixPath(output_value)
-            if output.is_absolute() or any(
-                part in {"", ".", ".."} for part in output.parts
-            ):
-                raise LetsInferError(
-                    "runtime native builder output must be relative and contained"
-                )
-            if output.name != "libletsinfer_prefix_capi.so":
-                raise LetsInferError(
-                    "runtime native builder output must be libletsinfer_prefix_capi.so"
-                )
-    elif "runtime_plugins" in manifest:
-        raise LetsInferError(
-            f"{adapter.name} releases cannot declare runtime_plugins"
-        )
+    if "base" in image and not REGISTRY_DIGEST_RE.fullmatch(image["base"]):
+        raise LetsInferError("manifest.image.base must be digest-pinned")
 
     container = _require(manifest, "container", dict, "manifest")
-    container_fields = {
+    allowed_container = {
         "memory_bytes",
         "shm_bytes",
         "cpuset_cpus",
@@ -955,30 +818,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         "min_gpu_free_gib",
         "runtime_min_gpu_free_gib",
     }
-    _reject_unknown_fields(container, container_fields, "manifest.container")
-    cpuset_cpus = container.get("cpuset_cpus")
-    if cpuset_cpus is not None:
-        if (
-            not isinstance(cpuset_cpus, str)
-            or not cpuset_cpus
-            or len(cpuset_cpus) > 1024
-            or re.fullmatch(r"(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*))?(?:,(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*))?)*", cpuset_cpus)
-            is None
-        ):
-            raise LetsInferError(
-                "manifest.container.cpuset_cpus must be a canonical Docker CPU set"
-            )
-        previous_end = -1
-        for clause in cpuset_cpus.split(","):
-            start_text, separator, end_text = clause.partition("-")
-            start = int(start_text)
-            end = int(end_text) if separator else start
-            if end < start or start <= previous_end or end > 8191:
-                raise LetsInferError(
-                    "manifest.container.cpuset_cpus ranges must be ascending, "
-                    "non-overlapping CPU indices through 8191"
-                )
-            previous_end = end
+    _reject_unknown_fields(container, allowed_container, "manifest.container")
     for key in (
         "memory_bytes",
         "shm_bytes",
@@ -986,164 +826,64 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         "runtime_min_available_gib",
         "startup_timeout_seconds",
     ):
-        if (
-            not isinstance(container.get(key), int)
-            or isinstance(container.get(key), bool)
-            or container[key] <= 0
-        ):
+        value = container.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise LetsInferError(f"manifest.container.{key} must be positive")
-    runtime_min_available_gib = container["runtime_min_available_gib"]
-    if (
-        not isinstance(runtime_min_available_gib, int)
-        or isinstance(runtime_min_available_gib, bool)
-        or runtime_min_available_gib <= 0
-    ):
-        raise LetsInferError(
-            "manifest.container.runtime_min_available_gib must be positive"
-        )
-    if runtime_min_available_gib >= container["min_available_gib"]:
+    if container["runtime_min_available_gib"] >= container["min_available_gib"]:
         raise LetsInferError(
             "manifest.container.runtime_min_available_gib must be below the launch floor"
         )
-    gpu_floor_keys = ("min_gpu_free_gib", "runtime_min_gpu_free_gib")
-    if target["memory"]["topology"] == "unified":
-        if any(key in container for key in gpu_floor_keys):
+    if container.get("model_cache") != "/models":
+        raise LetsInferError("manifest.container.model_cache must be /models")
+    cpuset = container.get("cpuset_cpus")
+    if cpuset is not None and (
+        not isinstance(cpuset, str)
+        or re.fullmatch(
+            r"(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*))?"
+            r"(?:,(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*))?)*",
+            cpuset,
+        )
+        is None
+    ):
+        raise LetsInferError(
+            "manifest.container.cpuset_cpus must be a canonical Docker CPU set"
+        )
+    gpu_floor_keys = {"min_gpu_free_gib", "runtime_min_gpu_free_gib"}
+    present_gpu_floors = gpu_floor_keys.intersection(container)
+    if target["memory"]["topology"] == "unified" and present_gpu_floors:
+        raise LetsInferError(
+            "unified-memory targets cannot declare separate GPU-memory floors"
+        )
+    if target["memory"]["topology"] == "discrete":
+        if present_gpu_floors != gpu_floor_keys:
             raise LetsInferError(
-                "unified-memory targets cannot declare separate GPU-memory floors"
+                "discrete-memory targets require launch and runtime GPU floors"
             )
-    else:
         for key in gpu_floor_keys:
-            if (
-                not isinstance(container.get(key), int)
-                or isinstance(container.get(key), bool)
-                or container[key] <= 0
-            ):
+            value = container[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise LetsInferError(f"manifest.container.{key} must be positive")
         if container["runtime_min_gpu_free_gib"] >= container["min_gpu_free_gib"]:
             raise LetsInferError(
                 "manifest.container.runtime_min_gpu_free_gib must be below the launch floor"
             )
-    _require(container, "model_cache", str, "manifest.container")
 
-    watchdog = _require(manifest, "watchdog", dict, "manifest")
-    _reject_unknown_fields(
-        watchdog,
-        {
-            "listen",
-            "protocol_version",
-            "port",
-            "sample_interval_ms",
-            "flush_interval_ms",
-            "max_controllers",
-            "memory_high_bytes",
-            "memory_max_bytes",
-            "protection",
-            "build",
+    expected_watchdog = {
+        "listen": "0.0.0.0",
+        "protocol_version": WATCHDOG_PROTOCOL_VERSION,
+        "port": 9768,
+        **core_watchdog_contract(),
+        "build": {
+            "source_root": "watchdog",
+            "target": "letsinfer_watchdog",
+            "output": "letsinfer-watchdog",
         },
-        "manifest.watchdog",
-    )
-    _require(watchdog, "listen", str, "manifest.watchdog")
-    for key in (
-        "protocol_version",
-        "port",
-        "sample_interval_ms",
-        "flush_interval_ms",
-        "max_controllers",
-        "memory_high_bytes",
-        "memory_max_bytes",
-    ):
-        if (
-            not isinstance(watchdog.get(key), int)
-            or isinstance(watchdog.get(key), bool)
-            or watchdog[key] <= 0
-        ):
-            raise LetsInferError(f"manifest.watchdog.{key} must be positive")
-    if watchdog["protocol_version"] != WATCHDOG_PROTOCOL_VERSION:
-        raise LetsInferError(
-            "manifest.watchdog.protocol_version must be "
-            f"{WATCHDOG_PROTOCOL_VERSION}"
-        )
-    if watchdog["port"] not in range(1, 65536):
-        raise LetsInferError("manifest.watchdog.port must be between 1 and 65535")
-    if watchdog["max_controllers"] > WATCHDOG_CONTROLLER_STREAM_LIMIT:
-        raise LetsInferError(
-            "manifest.watchdog.max_controllers cannot exceed "
-            f"{WATCHDOG_CONTROLLER_STREAM_LIMIT}"
-        )
-    if watchdog["memory_high_bytes"] > watchdog["memory_max_bytes"]:
-        raise LetsInferError("manifest.watchdog memory high cannot exceed memory max")
-    if watchdog["memory_max_bytes"] != CONTROL_PLANE_MEMORY_LIMIT_BYTES:
-        raise LetsInferError(
-            f"manifest.watchdog.memory_max_bytes must be {CONTROL_PLANE_MEMORY_LIMIT_BYTES}"
-        )
-    protection = _require(watchdog, "protection", dict, "manifest.watchdog")
-    _reject_unknown_fields(
-        protection,
-        {
-            "warning_available_bytes",
-            "graceful_available_bytes",
-            "emergency_available_bytes",
-            "swap_stop_bytes",
-            "psi_some_us",
-            "psi_full_us",
-            "state_failures",
-            "containment_grace_ms",
-        },
-        "manifest.watchdog.protection",
-    )
-    for key in (
-        "warning_available_bytes",
-        "graceful_available_bytes",
-        "emergency_available_bytes",
-        "swap_stop_bytes",
-        "psi_some_us",
-        "psi_full_us",
-        "state_failures",
-        "containment_grace_ms",
-    ):
-        if (
-            not isinstance(protection.get(key), int)
-            or isinstance(protection[key], bool)
-            or protection[key] <= 0
-        ):
-            raise LetsInferError(f"manifest.watchdog.protection.{key} must be positive")
-    if not (
-        protection["warning_available_bytes"]
-        > protection["graceful_available_bytes"]
-        > protection["emergency_available_bytes"]
-    ):
-        raise LetsInferError(
-            "manifest.watchdog protection memory thresholds must satisfy "
-            "warning > graceful > emergency"
-        )
-    runtime_floor_bytes = container["runtime_min_available_gib"] * (1 << 30)
-    if protection["warning_available_bytes"] < runtime_floor_bytes:
-        raise LetsInferError(
-            "manifest.watchdog protection warning threshold must be at least the "
-            "runtime host-memory floor"
-        )
-    if protection["state_failures"] < 2:
-        raise LetsInferError("manifest.watchdog protection state failures must be at least 2")
-    if protection["containment_grace_ms"] > 30000:
-        raise LetsInferError("manifest.watchdog protection grace cannot exceed 30000 ms")
-    build = _require(watchdog, "build", dict, "manifest.watchdog")
-    _reject_unknown_fields(
-        build,
-        {"source_root", "target", "output"},
-        "manifest.watchdog.build",
-    )
-    for key, expected in (
-        ("source_root", "watchdog"),
-        ("target", "letsinfer_watchdog"),
-        ("output", "letsinfer-watchdog"),
-    ):
-        if _require(build, key, str, "manifest.watchdog.build") != expected:
-            raise LetsInferError(
-                f"manifest.watchdog.build.{key} must be {expected!r}"
-            )
+    }
+    if manifest.get("watchdog") != expected_watchdog:
+        raise LetsInferError("manifest.watchdog must equal the core Watchdog contract")
 
     serving = _require(manifest, "serving", dict, "manifest")
-    allowed_serving_fields = {
+    allowed_serving = {
         "qualified",
         "max_connections",
         "max_active_requests",
@@ -1151,13 +891,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         "gate",
         "blocked_by",
     }
-    unknown_serving_fields = set(serving) - allowed_serving_fields
-    if unknown_serving_fields:
-        raise LetsInferError(
-            "manifest.serving has unsupported fields; native engine settings belong "
-            "in manifest.engine.arguments or manifest.engine.environment: "
-            + ", ".join(sorted(unknown_serving_fields))
-        )
+    _reject_unknown_fields(serving, allowed_serving, "manifest.serving")
     if not isinstance(serving.get("qualified"), bool):
         raise LetsInferError("manifest.serving.qualified must be boolean")
     for key in ("max_connections", "max_active_requests", "max_context_tokens"):
@@ -1168,124 +902,27 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise LetsInferError(
             "manifest.serving.max_active_requests cannot exceed max_connections"
         )
-    gate = _require(serving, "gate", dict, "manifest.serving")
-    _reject_unknown_fields(
-        gate,
-        {
-            "measured_commit",
-            "bench_block",
-            "evidence_directory",
-            "results_sha256",
-            "common",
-            "engine",
-        },
-        "manifest.serving.gate",
-    )
-    for key in ("measured_commit", "bench_block", "evidence_directory", "results_sha256"):
-        _require(gate, key, str, "manifest.serving.gate")
-    if not MANIFEST_CODE_RE.fullmatch(gate["bench_block"]):
-        raise LetsInferError("manifest.serving.gate.bench_block must be a machine identifier")
-    if not SHA256_RE.fullmatch(gate["results_sha256"]):
-        raise LetsInferError("manifest.serving.gate.results_sha256 is invalid")
-    if not serving["qualified"]:
+    if status == "stable" and not serving["qualified"]:
+        raise LetsInferError("stable execution manifest must be qualified")
+    if status == "candidate":
         blocked_by = serving.get("blocked_by")
-        if not isinstance(blocked_by, str) or not MANIFEST_CODE_RE.fullmatch(blocked_by):
-            raise LetsInferError(
-                "unqualified serving configuration requires a machine-identifier blocked_by"
-            )
-
-    derivation = manifest.get("derivation")
-    if derivation is not None:
-        if not isinstance(derivation, dict):
-            raise LetsInferError("manifest.derivation must be an object")
-        _reject_unknown_fields(
-            derivation,
-            {
-                "name",
-                "parent_release",
-                "parent_manifest_sha256",
-                "without",
-                "supplied_engine_arguments",
-                "resolved_engine_arguments",
-                "resolved_arguments_sha256",
-                "diff",
-            },
-            "manifest.derivation",
-        )
-        for key in ("name", "parent_release", "parent_manifest_sha256"):
-            _require(derivation, key, str, "manifest.derivation")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", derivation["name"]):
-            raise LetsInferError("manifest.derivation.name contains unsupported characters")
-        if not SHA256_RE.fullmatch(derivation["parent_manifest_sha256"]):
-            raise LetsInferError("manifest.derivation.parent_manifest_sha256 is invalid")
-        if manifest["status"] != "candidate" or serving["qualified"]:
-            raise LetsInferError("derived runtimes must remain unqualified candidates")
-        if model["alias"] != derivation["name"]:
-            raise LetsInferError("derived runtime alias must equal manifest.derivation.name")
-        without = derivation.get("without")
-        if not isinstance(without, list) or not all(
-            isinstance(value, str) and "=" not in value for value in without
+        if not isinstance(blocked_by, str) or not MANIFEST_CODE_RE.fullmatch(
+            blocked_by
         ):
-            raise LetsInferError("manifest.derivation.without must contain option names")
-        try:
-            for value in without:
-                clause_key([value])
-        except RuntimePackError as error:
-            raise LetsInferError(str(error)) from error
-        resolved = derivation.get("resolved_engine_arguments")
-        if not isinstance(resolved, list) or not resolved:
             raise LetsInferError(
-                "manifest.derivation.resolved_engine_arguments must be non-empty"
+                "candidate execution manifest requires a machine-identifier blocked_by"
             )
-        for index, clause in enumerate(resolved):
-            if (
-                not isinstance(clause, list)
-                or not clause
-                or not all(isinstance(token, str) and token for token in clause)
-            ):
-                raise LetsInferError(
-                    f"manifest.derivation.resolved_engine_arguments[{index}] is invalid"
-                )
-            try:
-                clause_key(clause)
-            except RuntimePackError as error:
-                raise LetsInferError(str(error)) from error
-        resolved_digest = _require(
-            derivation, "resolved_arguments_sha256", str, "manifest.derivation"
-        )
-        actual_digest = hashlib.sha256(
-            json.dumps(
-                list(flatten_clauses(resolved)),
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode("utf-8")
-        ).hexdigest()
-        if resolved_digest != actual_digest:
-            raise LetsInferError("manifest.derivation resolved argument digest mismatch")
-        difference = derivation.get("diff")
-        if not isinstance(difference, dict) or set(difference) != {
-            "removed",
-            "replaced",
-            "added",
-        }:
-            raise LetsInferError("manifest.derivation.diff is invalid")
 
     try:
         validate_engine_manifest(manifest)
         launch_for(manifest, serving, 8000)
     except EngineManifestError as error:
         raise LetsInferError(str(error)) from error
-
-    if status == "stable":
-        if distribution != "registry-digest":
-            raise LetsInferError("stable releases require a pullable registry digest")
-        if not persistent_cache_for(manifest):
-            raise LetsInferError(
-                f"stable {adapter.name} releases require a qualified persistent-cache adapter"
-            )
-        if not serving["qualified"]:
-            raise LetsInferError("stable release has an unqualified serving configuration")
-        _validate_stable_evidence(manifest, adapter)
+    if "orchestration" in manifest:
+        try:
+            validate_orchestration_contract(manifest["orchestration"])
+        except OrchestrationError as error:
+            raise LetsInferError(str(error)) from error
 
 
 def _contained_regular_file(root: pathlib.Path, relative: str) -> pathlib.Path:
@@ -1301,90 +938,32 @@ def _contained_regular_file(root: pathlib.Path, relative: str) -> pathlib.Path:
     return resolved
 
 
-def verify_artifacts(root: pathlib.Path, entries: Iterable[dict[str, str]]) -> None:
-    if root.is_symlink() or not root.is_dir():
-        raise LetsInferError(f"artifact root is not a regular directory: {root}")
-    for entry in entries:
+def verify_runtime_sources(manifest: dict[str, Any], root: pathlib.Path) -> None:
+    """Verify runtime bytes without interpreting engine-owned source code."""
+
+    validate_manifest(manifest)
+    descriptor = root / "letsinfer-runtime.json"
+    if descriptor.is_file() and not descriptor.is_symlink():
         try:
-            path = _contained_regular_file(root, entry["path"])
-        except FileNotFoundError as error:
-            raise LetsInferError(f"missing pinned artifact: {root / entry['path']}") from error
-        actual = sha256_file(path)
-        if actual != entry["sha256"]:
+            pack = verify_descriptor(root)
+        except RuntimePackError as error:
+            raise LetsInferError(str(error)) from error
+        if runtime_execution_manifest(pack.runtime) != manifest:
             raise LetsInferError(
-                f"artifact SHA-256 mismatch: {path} (expected {entry['sha256']}, got {actual})"
+                "runtime descriptor and private execution manifest disagree"
             )
-
-
-def verify_release_sources(manifest: dict[str, Any], root: pathlib.Path) -> None:
-    artifacts = manifest.get("source_artifacts", [])
-    verify_artifacts(root, artifacts)
-    pinned_paths = {entry["path"] for entry in artifacts}
-    adapter = adapter_for(manifest)
-    if adapter.requires_runtime_plugins:
-        source_hashes = {
-            entry["path"]: entry["sha256"] for entry in artifacts
-        }
-        for entry in manifest["runtime_plugins"]["artifacts"]:
-            if entry["path"].endswith((".whl", ".so")):
-                continue
-            source_path = entry.get("source_path")
-            if not isinstance(source_path, str):
-                raise LetsInferError(
-                    f"runtime artifact {entry['path']} has no explicit source_path"
-                )
-            if source_path in source_hashes and source_hashes[source_path] != entry["sha256"]:
-                raise LetsInferError(
-                    f"runtime artifact must have an identical source pin: {source_path}"
-                )
-    if adapter.name != "vllm":
         return
-
-    base_lines = [
-        line.strip()
-        for line in (root / "image/BASE_IMAGE").read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    if base_lines != [manifest["image"]["base"]]:
-        raise LetsInferError("manifest base image does not match image/BASE_IMAGE")
-
-    series = [
-        line.strip()
-        for line in (root / "patches/series").read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    expected = {f"patches/{name}" for name in series}
-    expected.update(f"patches/{name.removesuffix('.patch')}.verify.py" for name in series)
-    pinned = {
-        entry["path"]
-        for entry in artifacts
-        if entry["path"].startswith("patches/") and entry["path"] != "patches/series"
-    }
-    if pinned != expected:
-        raise LetsInferError("manifest patch artifacts do not exactly match patches/series")
-
-def manifests(
-    directory: pathlib.Path | None = None,
-) -> list[tuple[pathlib.Path, dict[str, Any]]]:
-    explicit_directory = directory is not None or bool(os.environ.get("LETSINFER_RELEASES_DIR"))
-    root = directory or releases_dir()
-    found: list[tuple[pathlib.Path, dict[str, Any]]] = []
-    for path in sorted(root.glob("*.json")):
-        if not path.is_file() or path.name.startswith("."):
-            continue
-        manifest = read_json(path)
-        validate_manifest(manifest)
-        found.append((path, manifest))
-    if not found and explicit_directory:
-        raise LetsInferError(f"no release manifests under {root}")
-    return found
+    if "source_artifacts" in manifest or "runtime_plugins" in manifest:
+        raise LetsInferError(
+            "Engine OCI source and plugins cannot be supplied by core manifests"
+        )
 
 
-def manifest_source_root(manifest_path: pathlib.Path) -> pathlib.Path:
-    """Return the immutable control root containing a releases/ manifest."""
-    if manifest_path.parent.name != "releases":
-        return source_root()
-    return manifest_path.parent.parent
+def runtime_source_root(manifest_path: pathlib.Path) -> pathlib.Path:
+    """Return the private immutable control root for a runtime execution view."""
+    if manifest_path.name != "runtime-execution.json":
+        raise LetsInferError("installed runtime manifest must be runtime-execution.json")
+    return manifest_path.parent
 
 
 def installed_runtime_manifests() -> list[tuple[pathlib.Path, dict[str, Any], dict[str, Any]]]:
@@ -1401,7 +980,7 @@ def installed_runtime_manifests() -> list[tuple[pathlib.Path, dict[str, Any], di
             raise LetsInferError(str(error)) from error
         if pack.digest != receipt["digest"]:
             raise LetsInferError(
-                f"installed runtime receipt digest mismatch: {receipt['name']}"
+                f"installed runtime receipt digest mismatch: {receipt['candidate_id']}"
             )
         control_root = pathlib.Path(receipt["control_root"]).expanduser()
         manifest_path = pathlib.Path(receipt["manifest_path"]).expanduser()
@@ -1411,17 +990,18 @@ def installed_runtime_manifests() -> list[tuple[pathlib.Path, dict[str, Any], di
             sha256_file(manifest_path),
         )
         if (
-            pack.descriptor["model"] != receipt["model"]
-            or pack.descriptor["engine"] != receipt["engine"]
-            or pack.descriptor["target"] != receipt["target"]
-            or manifest["model"]["alias"] != receipt["model"]
+            pack.runtime["id"] != receipt["candidate_id"]
+            or pack.runtime["logical_model"] != receipt["logical_model"]
+            or pack.runtime["engine"]["id"] != receipt["engine"]
+            or pack.runtime["target"]["id"] != receipt["target"]
+            or manifest["model"]["alias"] != receipt["logical_model"]
             or adapter_for(manifest).name != receipt["engine"]
             or target_contract(manifest)["id"] != receipt["target"]
             or target_contract_sha256(target_contract(manifest))
             != receipt["target_contract_sha256"]
         ):
             raise LetsInferError(
-                f"installed runtime receipt identity mismatch: {receipt['name']}"
+                f"installed runtime receipt identity mismatch: {receipt['candidate_id']}"
             )
         found.append((manifest_path, manifest, receipt))
     return found
@@ -1437,45 +1017,29 @@ def runtime_receipt_for_manifest(manifest_path: pathlib.Path) -> dict[str, Any] 
 
 def resolve_model(
     name: str,
-    engine: str | None = None,
-    directory: pathlib.Path | None = None,
     target: str | None = None,
 ) -> tuple[pathlib.Path, dict[str, Any]]:
-    available = manifests(directory)
+    available: list[tuple[pathlib.Path, dict[str, Any]]] = []
     runtime_names: dict[tuple[str, str, str], str] = {}
-    if directory is None:
-        selected_runtimes: dict[
-            tuple[str, str, str],
-            tuple[pathlib.Path, dict[str, Any], dict[str, Any]],
-        ] = {}
-        for path, manifest, receipt in installed_runtime_manifests():
-            target_id = target_contract(manifest)["id"]
-            key = (manifest["model"]["alias"], adapter_for(manifest).name, target_id)
-            candidate_rank = receipt["installed_at"]
-            current = selected_runtimes.get(key)
-            if current is not None:
-                current_receipt = current[2]
-                current_rank = current_receipt["installed_at"]
-                if candidate_rank <= current_rank:
-                    continue
-            selected_runtimes[key] = (path, manifest, receipt)
-        for key in sorted(selected_runtimes):
-            path, manifest, receipt = selected_runtimes[key]
-            target_id = key[2]
-            available = [
-                item
-                for item in available
-                if (
-                    item[1]["model"]["alias"],
-                    adapter_for(item[1]).name,
-                    target_contract(item[1])["id"],
-                )
-                != key
-            ]
-            available.append((path, manifest))
-            runtime_names[(manifest["release"], adapter_for(manifest).name, target_id)] = receipt[
-                "name"
-            ]
+    selected_runtimes: dict[
+        tuple[str, str, str],
+        tuple[pathlib.Path, dict[str, Any], dict[str, Any]],
+    ] = {}
+    for path, manifest, receipt in installed_runtime_manifests():
+        target_id = target_contract(manifest)["id"]
+        key = (manifest["model"]["alias"], adapter_for(manifest).name, target_id)
+        candidate_rank = receipt["installed_at"]
+        current = selected_runtimes.get(key)
+        if current is not None and candidate_rank <= current[2]["installed_at"]:
+            continue
+        selected_runtimes[key] = (path, manifest, receipt)
+    for key in sorted(selected_runtimes):
+        path, manifest, receipt = selected_runtimes[key]
+        target_id = key[2]
+        available.append((path, manifest))
+        runtime_names[(manifest["release"], adapter_for(manifest).name, target_id)] = receipt[
+            "candidate_id"
+        ]
     matches: list[tuple[pathlib.Path, dict[str, Any]]] = []
     model_id_matches: list[tuple[pathlib.Path, dict[str, Any]]] = []
     for path, manifest in available:
@@ -1492,9 +1056,7 @@ def resolve_model(
             runtime_name,
             variant_name,
         }
-        if (engine is None or engine_name == engine) and (
-            target is None or target_id == target
-        ):
+        if target is None or target_id == target:
             if name in exact_names:
                 matches.append((path, manifest))
             elif name == model["id"]:
@@ -1523,7 +1085,7 @@ def resolve_model(
         )
         raise LetsInferError(
             f"model name is ambiguous across runtime variants ({choices}); "
-            "specify --engine and/or --target"
+            "specify an exact runtime candidate or target"
         )
     raise LetsInferError(f"unknown model: {name}")
 
@@ -1540,7 +1102,6 @@ def docker_command(
     runtime_digest: str | None,
     port: int,
     model_cache: pathlib.Path,
-    plugin_root: pathlib.Path,
     store_root: pathlib.Path,
     runtime_cache_root: pathlib.Path,
     api_key_file: pathlib.Path,
@@ -1558,6 +1119,15 @@ def docker_command(
     adapter = adapter_for(manifest)
     target = target_contract(manifest)
     launch = launch_for(manifest, manifest["serving"], port)
+    if runtime_artifact_root is None:
+        raise LetsInferError("engine launch requires an immutable runtime artifact")
+    runtime_path = runtime_artifact_root.expanduser().resolve(strict=True)
+    try:
+        runtime_path.relative_to(default_runtime_home().expanduser().resolve(strict=True))
+    except (OSError, ValueError) as error:
+        raise LetsInferError(
+            "engine launch runtime artifact must be installed under LETSINFER_HOME"
+        ) from error
     runtime_command: tuple[str, ...] | None = None
     if group_context is not None:
         required_group = {
@@ -1575,7 +1145,6 @@ def docker_command(
             or isinstance(group_context["port_count"], bool)
             or group_context["port_count"] not in range(1, 33)
             or group_config_file is None
-            or runtime_artifact_root is None
         ):
             raise LetsInferError("engine-group container identity is invalid")
         if group_context["launcher"] == "runtime-command":
@@ -1585,14 +1154,8 @@ def docker_command(
             runtime_command = tuple(raw_command)
         elif group_context["launcher"] != "manifest" or group_context["command"] != []:
             raise LetsInferError("engine-group launcher is invalid")
-    elif group_config_file is not None or runtime_artifact_root is not None:
-        raise LetsInferError("engine-group mounts require a group context")
-    inner = None if runtime_command is not None else (
-        "set -euo pipefail; umask 077; "
-        + launch.shell_setup
-        + "exec "
-        + shell_command(launch)
-    )
+    elif group_config_file is not None:
+        raise LetsInferError("engine-group configuration requires a group context")
     # Startup readiness is verified separately through the authenticated API.
     # Docker health is liveness: long prefills may occupy an engine's HTTP loop,
     # but its kernel listener must remain present for queued requests.
@@ -1673,7 +1236,7 @@ def docker_command(
         "--tmpfs",
         "/tmp:rw,nosuid,nodev,exec,size=8589934592",
         "--entrypoint",
-        runtime_command[0] if runtime_command is not None else "bash",
+        runtime_command[0] if runtime_command is not None else launch.command[0],
         "--network",
         "host",
         "--ipc",
@@ -1694,7 +1257,9 @@ def docker_command(
         "-v",
         f"{runtime_cache_root}:/root",
         "-v",
-        f"{model_cache / 'hub'}:/root/.cache/huggingface/hub:ro",
+        f"{model_cache}:/models:ro",
+        "-v",
+        f"{runtime_path}:/opt/letsinfer/runtime-pack:ro",
         "-v",
         f"{api_key_file}:/run/secrets/letsinfer-api-key:ro",
         "-v",
@@ -1710,10 +1275,8 @@ def docker_command(
     ]
     if group_context is not None:
         group_path = pathlib.Path(group_config_file).expanduser()
-        runtime_path = pathlib.Path(runtime_artifact_root).expanduser()
         command.extend([
             "-v", f"{group_path}:/run/letsinfer/group.json:ro",
-            "-v", f"{runtime_path}:/opt/letsinfer/runtime-pack:ro",
             "-e", "LETSINFER_GROUP_CONFIG=/run/letsinfer/group.json",
             "-e", f"LETSINFER_GROUP_ID={group_context['group_id']}",
             "-e", f"LETSINFER_MEMBER_ID={group_context['member_id']}",
@@ -1727,8 +1290,6 @@ def docker_command(
             "-e", "LETSINFER_TLS_CERT_FILE=/run/secrets/letsinfer-tls.crt",
             "-e", "LETSINFER_TLS_KEY_FILE=/run/secrets/letsinfer-tls.key",
         ])
-    if launch.mount_runtime_plugins:
-        command.extend(["-v", f"{plugin_root}:/plugins:ro"])
     if launch.mount_prefix_store:
         command.extend(["-v", f"{store_root}:/root/.cache/letsinfer-prefix-store"])
     for key, value in launch.environment:
@@ -1746,7 +1307,7 @@ def docker_command(
     if runtime_command is not None:
         command.extend(runtime_command[1:])
     else:
-        command.extend(["-c", str(inner)])
+        command.extend(launch.command[1:])
     return command
 
 
@@ -2502,7 +2063,7 @@ def validate_control_bundle(
         raise LetsInferError("control bundle manifest SHA-256 mismatch")
     manifest = read_json(contained_manifest)
     validate_manifest(manifest)
-    verify_release_sources(manifest, root)
+    verify_runtime_sources(manifest, root)
     return contained_manifest, manifest
 
 
@@ -2511,21 +2072,18 @@ def install_control_bundle(
     manifest: dict[str, Any],
     *,
     control_parent: pathlib.Path | None = None,
-    artifact_roots: Sequence[pathlib.Path] | None = None,
     core_source_root: pathlib.Path | None = None,
 ) -> tuple[pathlib.Path, pathlib.Path]:
-    sources = tuple(artifact_roots or (source_root(),))
-    if not sources:
-        raise LetsInferError("control bundle requires at least one artifact source root")
     core_records, core_manifest, core_identity = _core_release(
         core_source_root or source_root()
     )
-    manifest_sha = sha256_file(manifest_path)
+    manifest_data = canonical_bytes(manifest)
+    manifest_sha = hashlib.sha256(manifest_data).hexdigest()
     bundle_identity = _control_bundle_identity(core_identity, manifest_sha)
     parent = control_parent or default_control_parent()
     ensure_private_directory(parent)
     destination = parent / bundle_identity
-    destination_manifest = destination / "releases" / manifest_path.name
+    destination_manifest = destination / "runtime-execution.json"
     if destination.exists():
         _, installed = validate_control_bundle(
             destination, destination_manifest, manifest_sha
@@ -2567,35 +2125,18 @@ def install_control_bundle(
             handle.flush()
             os.fsync(handle.fileno())
         targets.append(core_manifest_path)
-        for entry in manifest.get("source_artifacts", []):
-            source_path: pathlib.Path | None = None
-            for source in sources:
-                try:
-                    candidate = _contained_regular_file(source, entry["path"])
-                except (LetsInferError, FileNotFoundError):
-                    continue
-                if sha256_file(candidate) == entry["sha256"]:
-                    source_path = candidate
-                    break
-            if source_path is None:
-                raise LetsInferError(
-                    f"no exact source is available for pinned artifact {entry['path']}"
-                )
-            target = staging / entry["path"]
-            if target.exists():
-                raise LetsInferError(
-                    f"runtime artifact collides with core source: {entry['path']}"
-                )
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            shutil.copy2(source_path, target)
-            target.chmod(0o500 if os.access(source_path, os.X_OK) else 0o400)
-            targets.append(target)
-        staged_manifest = staging / "releases" / manifest_path.name
+        staged_manifest = staging / "runtime-execution.json"
         if staged_manifest in targets:
             raise LetsInferError("release manifest collides with a source artifact")
-        staged_manifest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        shutil.copy2(manifest_path, staged_manifest)
-        staged_manifest.chmod(0o400)
+        descriptor = os.open(
+            staged_manifest,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o400,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(manifest_data)
+            handle.flush()
+            os.fsync(handle.fileno())
         targets.append(staged_manifest)
         for target in targets:
             _fsync_path(target)
@@ -2884,12 +2425,7 @@ def core_watchdog_service_config(
         "watchdog_public_state_file": str(public_state),
         "gateway_telemetry_file": str(default_gateway_telemetry_path()),
     }
-    watchdog = (
-        runtime_manifest["watchdog"]
-        if runtime_manifest is not None
-        else core_watchdog_contract()
-    )
-    return config, {"watchdog": watchdog}
+    return config, {"watchdog": core_watchdog_contract()}
 
 
 def purge_watchdog_runtime(config: dict[str, Any]) -> None:
@@ -3263,13 +2799,10 @@ def ensure_watchdog_tls_material(
             "watchdog controller credentials exist without server credentials"
         )
     paths = (*server_paths, *controller_paths)
-    parents = {path.parent for path in paths}
-    if len(parents) != 1:
-        raise LetsInferError("generated watchdog mTLS credentials must share a directory")
-    credential_root = parents.pop()
-    ensure_private_directory(credential_root)
+    for parent in {path.parent for path in paths}:
+        ensure_private_directory(parent)
     staging = pathlib.Path(
-        tempfile.mkdtemp(prefix=".watchdog-tls-", dir=credential_root)
+        tempfile.mkdtemp(prefix=".watchdog-tls-", dir=key_path.parent)
     )
     staging.chmod(0o700)
     try:
@@ -3865,10 +3398,9 @@ def ensure_tls_material(cert_path: pathlib.Path, key_path: pathlib.Path) -> None
         validate_tls_material(cert_path, key_path)
         return
 
-    if cert_path.parent != key_path.parent:
-        raise LetsInferError("generated TLS certificate and key must share a directory")
+    ensure_private_directory(key_path.parent)
     ensure_private_directory(cert_path.parent)
-    staging = pathlib.Path(tempfile.mkdtemp(prefix=".tls-generate-", dir=cert_path.parent))
+    staging = pathlib.Path(tempfile.mkdtemp(prefix=".tls-generate-", dir=key_path.parent))
     try:
         staged_cert = staging / "server.crt"
         staged_key = staging / "server.key"
@@ -3939,13 +3471,29 @@ def image_id(manifest: dict[str, Any]) -> str:
             f"runtime image platform is {actual_platform or 'unknown'}; "
             f"{expected_platform} is required"
         )
+    digest = actual.removeprefix("sha256:")
+    receipt = oci_root() / "engines" / f"{digest}.json"
+    ensure_private_directory(receipt.parent.parent)
+    ensure_private_directory(receipt.parent)
+    atomic_json(
+        receipt,
+        {
+            "schema_version": 1,
+            "kind": "engine-oci",
+            "engine": adapter_for(manifest).name,
+            "reference": image["reference"],
+            "immutable_id": actual,
+            "platform": actual_platform,
+            "verified_at_unix_ns": time.time_ns(),
+        },
+    )
     return actual
 
 
 def model_artifacts(manifest: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     """Return all exact dependencies with their deterministic shared-store paths."""
     return tuple(
-        {**artifact, "cache_repository": artifact_cache_repository(artifact)}
+        {**artifact, "storage_slug": artifact_storage_slug(artifact)}
         for artifact in manifest["artifacts"]
     )
 
@@ -3954,11 +3502,7 @@ def artifact_snapshot_path(
     artifact: dict[str, Any], model_cache: pathlib.Path
 ) -> pathlib.Path:
     return (
-        model_cache
-        / "hub"
-        / artifact["cache_repository"]
-        / "snapshots"
-        / artifact["revision"]
+        model_cache / artifact["storage_slug"] / artifact["revision"]
     )
 
 
@@ -4021,15 +3565,7 @@ def _verify_gguf_artifact(
     artifact: dict[str, Any], snapshot: pathlib.Path, model_cache: pathlib.Path
 ) -> None:
     model_file = snapshot / artifact["filename"]
-    if model_file.is_symlink():
-        try:
-            resolved = model_file.resolve(strict=True)
-            resolved.relative_to((model_cache / "hub").resolve(strict=True))
-        except (OSError, ValueError) as error:
-            raise LetsInferError(
-                f"{artifact['name']} GGUF object link escapes the model cache: {model_file}"
-            ) from error
-    elif not model_file.is_file():
+    if model_file.is_symlink() or not model_file.is_file():
         raise LetsInferError(f"exact {artifact['name']} GGUF file is missing: {model_file}")
     if "bytes" in artifact and model_file.stat().st_size != artifact["bytes"]:
         raise LetsInferError(
@@ -4073,8 +3609,19 @@ def acquire_model_snapshot(manifest: dict[str, Any], model_cache: pathlib.Path) 
         if identity in acquired:
             continue
         acquired.add(identity)
+        destination = artifact_snapshot_path(artifact, model_cache)
+        if destination.is_dir():
+            continue
+        parent = destination.parent
+        ensure_private_directory(parent)
+        staging = parent / f".{artifact['revision']}.incoming-{secrets.token_hex(8)}"
+        staging.mkdir(mode=0o700)
+        container_destination = (
+            f"/model-store/{artifact['storage_slug']}/{staging.name}"
+        )
         download_arguments = (
-            f"repo_id={artifact['repository']!r}, revision={artifact['revision']!r}"
+            f"repo_id={artifact['repository']!r}, revision={artifact['revision']!r}, "
+            f"local_dir={container_destination!r}"
         )
         if "filename" in artifact:
             download_arguments += f", allow_patterns={[artifact['filename']]!r}"
@@ -4082,55 +3629,104 @@ def acquire_model_snapshot(manifest: dict[str, Any], model_cache: pathlib.Path) 
             "from huggingface_hub import snapshot_download; "
             f"snapshot_download({download_arguments})"
         )
-        run_passthrough(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--pull",
-                "missing",
-                "--platform",
-                target_contract(manifest)["platform"],
-                "--entrypoint",
-                "python3",
-                "--user",
-                f"{os.getuid()}:{os.getgid()}",
-                "--workdir",
-                "/tmp",
-                "-v",
-                f"{model_cache}:/model-cache",
-                "-e",
-                "HF_HOME=/model-cache",
-                "-e",
-                "HOME=/tmp",
-                manifest["model"]["acquisition_image"],
-                "-c",
-                script,
+        try:
+            run_passthrough(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--pull",
+                    "missing",
+                    "--platform",
+                    target_contract(manifest)["platform"],
+                    "--entrypoint",
+                    "python3",
+                    "--user",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "--workdir",
+                    "/tmp",
+                    "-v",
+                    f"{model_cache}:/model-store",
+                    "-e",
+                    "HF_HOME=/tmp/huggingface",
+                    "-e",
+                    "HOME=/tmp",
+                    manifest["model"]["acquisition_image"],
+                    "-c",
+                    script,
+                ]
+            )
+            metadata = staging / ".cache"
+            if metadata.exists():
+                shutil.rmtree(metadata)
+            invalid = [
+                path
+                for path in staging.rglob("*")
+                if path.is_symlink() or (not path.is_file() and not path.is_dir())
             ]
-        )
+            if invalid:
+                raise LetsInferError(
+                    f"downloaded model contains an unsafe entry: {invalid[0]}"
+                )
+            if "filename" in artifact:
+                _verify_gguf_artifact(artifact, staging, model_cache)
+            try:
+                staging.replace(destination)
+            except FileExistsError:
+                shutil.rmtree(staging)
+            _fsync_path(parent)
+        except BaseException:
+            if staging.exists():
+                shutil.rmtree(staging)
+            raise
     return verify_model_snapshot(manifest, model_cache)
 
 
-def verify_installed_release(
+def verify_installed_runtime(
     manifest: dict[str, Any],
     *,
     model_cache: pathlib.Path,
-    plugin_root: pathlib.Path,
 ) -> str:
+    """Verify exact model bytes and the adapter baked into the Engine OCI."""
+
     verify_model_snapshot(manifest, model_cache)
-    adapter = adapter_for(manifest)
-    if adapter.requires_runtime_plugins:
-        verify_artifacts(plugin_root, manifest["runtime_plugins"]["artifacts"])
-    elif requires_core_cache_plugin(manifest):
-        try:
-            verify_sglang_plugin(
-                plugin_root,
-                source_root=source_root(),
-                core_version=PRODUCT_VERSION,
-            )
-        except CachePluginError as error:
-            raise LetsInferError(str(error)) from error
-    return image_id(manifest)
+    actual_image_id = image_id(manifest)
+    result = run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges=true",
+            "--entrypoint",
+            ENGINE_ADAPTER,
+            manifest["image"]["reference"],
+            "verify",
+            "--protocol",
+            str(ENGINE_PROTOCOL_VERSION),
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or "no adapter output"
+        raise LetsInferError(f"Engine OCI protocol verification failed: {detail}")
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise LetsInferError("Engine OCI adapter verification returned invalid JSON") from error
+    if report != {
+        "engine_protocol": ENGINE_PROTOCOL_VERSION,
+        "status": "ok",
+    }:
+        raise LetsInferError("Engine OCI adapter verification returned the wrong contract")
+    return actual_image_id
 
 
 def run_passthrough(command: Sequence[str]) -> None:
@@ -4337,313 +3933,6 @@ def ensure_install_dependencies(
         pull=download,
         artifact_root=runtime_artifact_root,
     )
-
-
-def _verified_artifact_source(path: pathlib.Path, expected: str) -> pathlib.Path | None:
-    if not path.is_symlink() and path.is_file() and sha256_file(path) == expected:
-        return path
-    return None
-
-
-def runtime_artifact_object_path(digest: str) -> pathlib.Path:
-    """Return the shared content-addressed store path for one plugin artifact."""
-    if not SHA256_RE.fullmatch(digest):
-        raise LetsInferError("runtime artifact digest is invalid")
-    return (
-        site_data_root()
-        / "artifacts/sha256"
-        / digest[:2]
-        / digest
-    )
-
-
-def store_runtime_artifact(source: pathlib.Path, expected: str) -> pathlib.Path:
-    """Atomically persist exact plugin bytes for reuse across runtime manifests."""
-    if _verified_artifact_source(source, expected) is None:
-        raise LetsInferError(f"runtime artifact source does not match sha256:{expected}")
-    destination = runtime_artifact_object_path(expected)
-    existing = _verified_artifact_source(destination, expected)
-    if existing is not None:
-        return existing
-    if destination.exists() or destination.is_symlink():
-        raise LetsInferError(f"runtime artifact store object is corrupt: {destination}")
-
-    ensure_private_directory(destination.parent.parent)
-    ensure_private_directory(destination.parent)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{expected}.", dir=destination.parent
-    )
-    temporary = pathlib.Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as output, source.open("rb") as input_stream:
-            shutil.copyfileobj(input_stream, output)
-            output.flush()
-            source_mode = stat.S_IMODE(source.stat().st_mode)
-            os.fchmod(output.fileno(), 0o755 if source_mode & 0o111 else 0o644)
-            os.fsync(output.fileno())
-        if _verified_artifact_source(temporary, expected) is None:
-            raise LetsInferError("runtime artifact changed while entering the shared store")
-        try:
-            os.link(temporary, destination)
-        except FileExistsError:
-            if _verified_artifact_source(destination, expected) is None:
-                raise LetsInferError(
-                    f"runtime artifact store object is corrupt: {destination}"
-                )
-        _fsync_path(destination.parent)
-    finally:
-        temporary.unlink(missing_ok=True)
-    verified = _verified_artifact_source(destination, expected)
-    if verified is None:
-        raise LetsInferError(f"runtime artifact store commit failed: {destination}")
-    return verified
-
-
-def build_runtime_wheel(
-    manifest: dict[str, Any],
-    output_root: pathlib.Path,
-    *,
-    artifact_root: pathlib.Path | None = None,
-) -> pathlib.Path:
-    builder = manifest["runtime_plugins"]["wheel_builder"]
-    crate_root = (artifact_root or source_root()) / builder["source_root"]
-    if crate_root.is_symlink() or not crate_root.is_dir():
-        raise LetsInferError(f"wheel source is not a regular directory: {crate_root}")
-    for path in crate_root.rglob("*"):
-        if path.is_symlink():
-            raise LetsInferError(f"wheel source contains a symlink: {path}")
-
-    build_source = output_root / "source"
-    build_output = output_root / "output"
-    shutil.copytree(
-        crate_root,
-        build_source,
-        ignore=shutil.ignore_patterns("target", "dist", "__pycache__"),
-    )
-    build_output.mkdir()
-    run_passthrough(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--pull",
-            "missing",
-            "--platform",
-            target_contract(manifest)["platform"],
-            "-e",
-            f"SOURCE_DATE_EPOCH={builder['source_date_epoch']}",
-            "-e",
-            "RUSTFLAGS=--remap-path-prefix=/io=letsinfer_prefix_store",
-            "-e",
-            "CARGO_TARGET_DIR=/tmp/target",
-            "-v",
-            f"{build_source}:/io",
-            "-v",
-            f"{build_output}:/output",
-            builder["image"],
-            *builder["arguments"],
-        ]
-    )
-    wheel_entry = next(
-        entry
-        for entry in manifest["runtime_plugins"]["artifacts"]
-        if entry["path"].endswith(".whl")
-    )
-    wheel = build_output / pathlib.Path(wheel_entry["path"]).name
-    if _verified_artifact_source(wheel, wheel_entry["sha256"]) is None:
-        actual = sha256_file(wheel) if wheel.is_file() else "missing"
-        raise LetsInferError(
-            f"reproducible wheel mismatch (expected {wheel_entry['sha256']}, got {actual})"
-        )
-    return wheel
-
-
-def build_runtime_native_artifact(
-    manifest: dict[str, Any],
-    output_root: pathlib.Path,
-    *,
-    artifact_root: pathlib.Path | None = None,
-) -> pathlib.Path:
-    """Build the manifest-pinned Let's Infer native bridge from core source."""
-    builder = manifest["runtime_plugins"]["native_builder"]
-    crate_root = (artifact_root or source_root()) / builder["source_root"]
-    if crate_root.is_symlink() or not crate_root.is_dir():
-        raise LetsInferError(f"native source is not a regular directory: {crate_root}")
-    for path in crate_root.rglob("*"):
-        if path.is_symlink():
-            raise LetsInferError(f"native source contains a symlink: {path}")
-
-    build_source = output_root / "native-source"
-    build_output = output_root / "native-output"
-    shutil.copytree(
-        crate_root,
-        build_source,
-        ignore=shutil.ignore_patterns("target", "__pycache__"),
-    )
-    build_output.mkdir()
-    run_passthrough(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--pull",
-            "missing",
-            "--platform",
-            target_contract(manifest)["platform"],
-            "--entrypoint",
-            "sh",
-            "--workdir",
-            "/io",
-            "-e",
-            f"SOURCE_DATE_EPOCH={builder['source_date_epoch']}",
-            "-e",
-            "RUSTFLAGS=--remap-path-prefix=/io=letsinfer_native_bridge",
-            "-e",
-            "CARGO_TARGET_DIR=/output",
-            "-e",
-            f"LETSINFER_BUILD_ENTRYPOINT={builder['entrypoint']}",
-            "-e",
-            f"LETSINFER_BUILD_OUTPUT={builder['output']}",
-            "-e",
-            f"LETSINFER_OUTPUT_UID={os.getuid()}",
-            "-e",
-            f"LETSINFER_OUTPUT_GID={os.getgid()}",
-            "-v",
-            f"{build_source}:/io:ro",
-            "-v",
-            f"{build_output}:/artifact",
-            builder["image"],
-            "-c",
-            (
-                'set -eu; "$LETSINFER_BUILD_ENTRYPOINT" "$@"; '
-                'install -D -m 0755 -o "$LETSINFER_OUTPUT_UID" '
-                '-g "$LETSINFER_OUTPUT_GID" '
-                '"/output/$LETSINFER_BUILD_OUTPUT" '
-                '"/artifact/$LETSINFER_BUILD_OUTPUT"; '
-                'chown -R "$LETSINFER_OUTPUT_UID:$LETSINFER_OUTPUT_GID" /artifact'
-            ),
-            "letsinfer-native-build",
-            *builder["arguments"],
-        ]
-    )
-    built = build_output / builder["output"]
-    native_entry = next(
-        entry
-        for entry in manifest["runtime_plugins"]["artifacts"]
-        if entry["path"] == "libletsinfer_prefix_capi.so"
-    )
-    if _verified_artifact_source(built, native_entry["sha256"]) is None:
-        actual = sha256_file(built) if built.is_file() else "missing"
-        raise LetsInferError(
-            "reproducible native bridge mismatch "
-            f"(expected {native_entry['sha256']}, got {actual})"
-        )
-    return built
-
-
-def install_runtime_plugins(
-    manifest: dict[str, Any],
-    *,
-    plugin_root: pathlib.Path,
-    wheel_source: pathlib.Path | None,
-    artifact_root: pathlib.Path | None = None,
-) -> None:
-    if requires_core_cache_plugin(manifest):
-        try:
-            install_sglang_plugin(
-                plugin_root,
-                source_root=source_root(),
-                core_version=PRODUCT_VERSION,
-                platform=target_contract(manifest)["platform"],
-                run=run_passthrough,
-                store=store_runtime_artifact,
-            )
-        except CachePluginError as error:
-            raise LetsInferError(str(error)) from error
-        return
-    if not adapter_for(manifest).requires_runtime_plugins:
-        return
-    if plugin_root.is_symlink():
-        raise LetsInferError(f"runtime plugin root cannot be a symlink: {plugin_root}")
-    plugin_root.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="letsinfer-runtime-artifacts-") as build_directory:
-        sources: list[tuple[dict[str, str], pathlib.Path]] = []
-        built_wheel: pathlib.Path | None = None
-        built_native: pathlib.Path | None = None
-        for entry in manifest["runtime_plugins"]["artifacts"]:
-            relative = pathlib.Path(entry["path"])
-            candidates: list[pathlib.Path] = []
-            if relative.suffix == ".whl" and wheel_source is not None:
-                candidates.append(wheel_source)
-            candidates.extend(
-                [
-                    (artifact_root or source_root()) / entry.get("source_path", ""),
-                    runtime_artifact_object_path(entry["sha256"]),
-                    plugin_root / relative,
-                ]
-            )
-            source = next(
-                (
-                    candidate
-                    for candidate in candidates
-                    if _verified_artifact_source(candidate, entry["sha256"]) is not None
-                ),
-                None,
-            )
-            if source is None and relative.suffix == ".whl":
-                built_wheel = build_runtime_wheel(
-                    manifest,
-                    pathlib.Path(build_directory),
-                    artifact_root=artifact_root,
-                )
-                source = built_wheel
-            if source is None and relative.suffix == ".so":
-                if built_native is None:
-                    built_native = build_runtime_native_artifact(
-                        manifest,
-                        pathlib.Path(build_directory),
-                        artifact_root=artifact_root,
-                    )
-                source = built_native
-            if source is None:
-                raise LetsInferError(f"no exact source is available for runtime artifact {relative}")
-            sources.append(
-                (entry, store_runtime_artifact(source, entry["sha256"]))
-            )
-
-        staging = pathlib.Path(
-            tempfile.mkdtemp(prefix=f".{plugin_root.name}.install-", dir=plugin_root.parent)
-        )
-        backup = plugin_root.with_name(f".{plugin_root.name}.previous-{os.getpid()}")
-        moved_existing = False
-        try:
-            for entry, source in sources:
-                destination = staging / entry["path"]
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-            verify_artifacts(staging, manifest["runtime_plugins"]["artifacts"])
-            if backup.exists():
-                raise LetsInferError(f"refusing to overwrite stale install backup: {backup}")
-            if plugin_root.exists():
-                plugin_root.replace(backup)
-                moved_existing = True
-            staging.replace(plugin_root)
-            plugin_root.chmod(0o700)
-            if moved_existing:
-                try:
-                    shutil.rmtree(backup)
-                except OSError as error:
-                    print(
-                        f"WARNING: installed exact runtime artifacts but could not remove "
-                        f"the previous tree {backup}: {error}",
-                        file=sys.stderr,
-                    )
-        except BaseException:
-            if staging.exists():
-                shutil.rmtree(staging)
-            if moved_existing and not plugin_root.exists() and backup.exists():
-                backup.replace(plugin_root)
-            raise
 
 
 def container_inspect(name: str) -> dict[str, Any] | None:
@@ -5052,12 +4341,11 @@ def serve(
 ) -> int:
     manifest_path, manifest = resolved_release or resolve_model(
         arguments.model,
-        getattr(arguments, "engine", None),
         target=getattr(arguments, "target", None),
     )
-    verify_release_sources(
+    verify_runtime_sources(
         manifest,
-        release_root or manifest_source_root(manifest_path),
+        release_root or runtime_source_root(manifest_path),
     )
     serving = manifest["serving"]
     qualification_mode = bool(getattr(arguments, "qualification_mode", False))
@@ -5091,11 +4379,6 @@ def serve(
     else:
         port = requested_port
     model_cache = requested_model_cache(arguments.model_cache)
-    plugin_root = (
-        expanded_path(arguments.plugin_root)
-        if arguments.plugin_root
-        else default_plugin_root(manifest, sha256_file(manifest_path))
-    )
     store_root = (
         expanded_path(arguments.store_root)
         if arguments.store_root
@@ -5138,12 +4421,12 @@ def serve(
         runtime_digest=runtime_digest,
         port=port,
         model_cache=model_cache,
-        plugin_root=plugin_root,
         store_root=store_root,
         runtime_cache_root=runtime_cache_root,
         api_key_file=api_key_file,
         tls_cert_file=tls_cert_file,
         tls_key_file=tls_key_file,
+        runtime_artifact_root=runtime_artifact_root,
     )
     if arguments.dry_run:
         print(
@@ -5171,20 +4454,8 @@ def serve(
         build=qualification_mode,
         artifact_root=runtime_artifact_root,
     )
-    if adapter_for(manifest).requires_runtime_plugins or requires_core_cache_plugin(manifest):
-        try:
-            verify_installed_release(
-                manifest, model_cache=model_cache, plugin_root=plugin_root
-            )
-        except LetsInferError:
-            install_runtime_plugins(
-                manifest,
-                plugin_root=plugin_root,
-                wheel_source=None,
-                artifact_root=release_root or manifest_source_root(manifest_path),
-            )
-    actual_image_id = verify_installed_release(
-        manifest, model_cache=model_cache, plugin_root=plugin_root
+    actual_image_id = verify_installed_runtime(
+        manifest, model_cache=model_cache
     )
     api_key = read_api_key(api_key_file)
     validate_tls_material(tls_cert_file, tls_key_file)
@@ -5205,12 +4476,11 @@ def serve(
         qualification_config = _qualification_config(
             manifest_path=manifest_path,
             manifest=manifest,
-            release_root=release_root or manifest_source_root(manifest_path),
+            release_root=release_root or runtime_source_root(manifest_path),
             manifest_sha256=manifest_sha256,
             name=name,
             port=port,
             model_cache=model_cache,
-            plugin_root=plugin_root,
             store_root=store_root,
             runtime_cache_root=runtime_cache_root,
             api_key_file=api_key_file,
@@ -5454,7 +4724,6 @@ def read_service_config(path: pathlib.Path) -> dict[str, Any]:
         "placement_members": list,
         "topology_sha256": str,
         "model_cache": str,
-        "plugin_root": str,
         "store_root": str,
         "runtime_cache_root": str,
         "engine_api_key_file": str,
@@ -5490,8 +4759,8 @@ def read_service_config(path: pathlib.Path) -> dict[str, Any]:
             raise LetsInferError(f"service configuration {key} must be {expected.__name__}")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", config["name"]):
         raise LetsInferError("service configuration contains an invalid container name")
-    if config["engine"] not in ADAPTERS:
-        raise LetsInferError("service configuration contains an unsupported engine")
+    if not SAFE_NAME_RE.fullmatch(config["engine"]):
+        raise LetsInferError("service configuration contains an invalid engine identity")
     if not SHA256_RE.fullmatch(config["manifest_sha256"]):
         raise LetsInferError("service configuration contains an invalid manifest hash")
     if not SHA256_RE.fullmatch(config["installation_id"]):
@@ -5703,7 +4972,6 @@ def _qualification_config(
     name: str,
     port: int,
     model_cache: pathlib.Path,
-    plugin_root: pathlib.Path,
     store_root: pathlib.Path,
     runtime_cache_root: pathlib.Path,
     api_key_file: pathlib.Path,
@@ -5714,16 +4982,14 @@ def _qualification_config(
 ) -> dict[str, Any]:
     """Bind an explicit qualification launch to the site's one candidate slot."""
     resident_path = default_service_config_path()
-    if not resident_path.is_file():
-        raise LetsInferError(
-            "qualification requires an installed Let's Infer service for gateway, "
-            "Watchdog, and site identity"
-        )
-    resident = read_service_config(resident_path)
+    resident = (
+        read_service_config(resident_path)
+        if resident_path.is_file()
+        else _qualification_core_plane_config()
+    )
     control_root, installed_manifest_path = install_control_bundle(
         manifest_path,
         manifest,
-        artifact_roots=(release_root, source_root()),
     )
     placement = resolve_service_placement(manifest, manifest_sha256)
     candidate = dict(resident)
@@ -5740,7 +5006,6 @@ def _qualification_config(
             "engine_port": port,
             **placement,
             "model_cache": str(model_cache),
-            "plugin_root": str(plugin_root),
             "store_root": str(store_root),
             "runtime_cache_root": str(runtime_cache_root),
             "engine_api_key_file": str(api_key_file),
@@ -5761,12 +5026,12 @@ def _qualification_config(
         }
     )
     if runtime_receipt is not None:
-        required = ("name", "version", "digest", "policy")
+        required = ("candidate_id", "version", "digest", "policy")
         if not all(isinstance(runtime_receipt.get(key), str) for key in required):
             raise LetsInferError("qualification runtime receipt is incomplete")
         candidate.update(
             {
-                "runtime_name": runtime_receipt["name"],
+                "runtime_name": runtime_receipt["candidate_id"],
                 "runtime_version": runtime_receipt["version"],
                 "runtime_digest": runtime_receipt["digest"],
                 "runtime_policy": runtime_receipt["policy"],
@@ -5778,6 +5043,47 @@ def _qualification_config(
         / f"{manifest_sha256}.state"
     )
     return candidate
+
+
+def _qualification_core_plane_config() -> dict[str, Any]:
+    """Describe setup-owned services when no qualified runtime is resident yet."""
+    watchdog_binary, watchdog_binary_sha256 = verify_active_core_watchdog()
+    gateway = core_gateway_config()
+    identity = ensure_installation_identity()
+    return {
+        **gateway,
+        "gateway_api_key_file": str(default_api_key_path()),
+        "engine_api_key_file": str(default_engine_api_key_path()),
+        "tls_cert_file": str(default_tls_cert_path()),
+        "tls_key_file": str(default_tls_key_path()),
+        "watchdog_binary_path": str(watchdog_binary),
+        "watchdog_binary_sha256": watchdog_binary_sha256,
+        "watchdog_source_sha256": core_watchdog_source_identity(),
+        "watchdog_data_root": str(default_watchdog_data_root()),
+        "watchdog_listen": "0.0.0.0",
+        "watchdog_port": 9768,
+        "watchdog_cert_file": str(default_watchdog_cert_path()),
+        "watchdog_key_file": str(default_watchdog_key_path()),
+        "watchdog_controller_ca_file": str(default_watchdog_controller_ca_path()),
+        "watchdog_controller_ca_key_file": str(
+            default_watchdog_controller_ca_key_path()
+        ),
+        "watchdog_local_controller_cert_file": str(
+            default_watchdog_local_controller_cert_path()
+        ),
+        "watchdog_local_controller_key_file": str(
+            default_watchdog_local_controller_key_path()
+        ),
+        "installation_id": identity["installation_id"],
+        "watchdog_controller_allowlist_file": str(
+            default_controller_allowlist_path()
+        ),
+        "watchdog_public_state_file": str(
+            default_watchdog_data_root()
+            / WATCHDOG_PUBLIC_STATE_DIRECTORY
+            / "site.state"
+        ),
+    }
 
 
 def _restore_resident_watchdog_projection() -> None:
@@ -6067,7 +5373,7 @@ def bind_config_to_control_bundle(config: dict[str, Any]) -> dict[str, Any]:
         source, manifest_path, manifest_sha
     )
     candidate_root, manifest_path = _bind_runtime_release_to_current_core(
-        manifest_path, manifest, previous_root=source
+        manifest_path, manifest
     )
     if manifest["model"]["alias"] != config["model"]:
         raise LetsInferError("previous service bundle model alias is inconsistent")
@@ -6080,15 +5386,12 @@ def bind_config_to_control_bundle(config: dict[str, Any]) -> dict[str, Any]:
 def _bind_runtime_release_to_current_core(
     manifest_path: pathlib.Path,
     manifest: dict[str, Any],
-    *,
-    previous_root: pathlib.Path,
 ) -> tuple[pathlib.Path, pathlib.Path]:
-    """Compose unchanged runtime artifacts with exactly the executing core."""
+    """Bind immutable runtime metadata to exactly the executing core."""
 
     return install_control_bundle(
         manifest_path,
         manifest,
-        artifact_roots=(previous_root, source_root()),
     )
 
 
@@ -6129,7 +5432,13 @@ def serve_from_config(arguments: argparse.Namespace) -> int:
     resolved = configured_release(config)
     runtime_artifact_root: pathlib.Path | None = None
     if "runtime_digest" in config:
-        runtime_artifact_root = default_runtime_home() / "objects" / config["runtime_digest"]
+        try:
+            runtime_receipt = next(
+                item for item in selections() if item["digest"] == config["runtime_digest"]
+            )
+        except (RuntimePackError, StopIteration) as error:
+            raise LetsInferError("service runtime selection is unavailable") from error
+        runtime_artifact_root = pathlib.Path(runtime_receipt["object_root"]).expanduser()
         try:
             installed_runtime = verify_descriptor(runtime_artifact_root)
         except RuntimePackError as error:
@@ -6137,11 +5446,11 @@ def serve_from_config(arguments: argparse.Namespace) -> int:
         manifest = resolved[1]
         if (
             installed_runtime.digest != config["runtime_digest"]
-            or installed_runtime.descriptor["name"] != config["runtime_name"]
-            or installed_runtime.descriptor["version"] != config["runtime_version"]
-            or installed_runtime.descriptor["model"] != manifest["model"]["alias"]
-            or installed_runtime.descriptor["engine"] != adapter_for(manifest).name
-            or installed_runtime.descriptor["target"] != target_contract(manifest)["id"]
+            or installed_runtime.runtime["id"] != config["runtime_name"]
+            or installed_runtime.runtime["version"] != config["runtime_version"]
+            or installed_runtime.runtime["logical_model"] != manifest["model"]["alias"]
+            or installed_runtime.runtime["engine"]["id"] != adapter_for(manifest).name
+            or installed_runtime.runtime["target"]["id"] != target_contract(manifest)["id"]
         ):
             raise LetsInferError(
                 "service configuration does not match its immutable runtime object"
@@ -6156,7 +5465,6 @@ def serve_from_config(arguments: argparse.Namespace) -> int:
                 port=config["engine_port"],
                 name=config["name"],
                 model_cache=config["model_cache"],
-                plugin_root=config["plugin_root"],
                 store_root=config["store_root"],
                 runtime_cache_root=config["runtime_cache_root"],
                 api_key_file=config["engine_api_key_file"],
@@ -7327,7 +6635,7 @@ def _fresh_site_topology() -> tuple[Any, TopologyGraph]:
 def _catalog_site_release(
     catalog: dict[str, Any],
     model: str,
-    engine: str | None,
+    runtime: str | None,
     *,
     topology: tuple[Any, TopologyGraph] | None = None,
 ) -> tuple[tuple[str, str, str, str, str], TargetPlacement]:
@@ -7345,7 +6653,7 @@ def _catalog_site_release(
             contracts, coordinator_id=identity.coordinator_id
         )
         release = catalog_release(
-            catalog, model, engine, choice.target_id, device=None
+            catalog, model, runtime, choice.target_id, device=None
         )
     except (RuntimePackError, TopologyError) as error:
         raise LetsInferError(str(error)) from error
@@ -7354,9 +6662,9 @@ def _catalog_site_release(
 
 def _runtime_source_for_install(
     model: str,
-    engine: str | None,
+    runtime: str | None,
     catalog_location: str | None,
-) -> tuple[str, str, str | None, str | None, str | None] | None:
+) -> tuple[str, str, str | None, str | None, str | None]:
     path = pathlib.Path(model).expanduser()
     if path.exists():
         return str(path.resolve(strict=True)), "local", None, None, None
@@ -7364,21 +6672,21 @@ def _runtime_source_for_install(
         return model, "pinned", None, None, None
     location = resolved_catalog_location(catalog_location)
     if location is None:
-        return None
+        raise LetsInferError(
+            "runtime installation requires a signed catalog or an explicit local/OCI runtime source"
+        )
     try:
         catalog = load_catalog(location)
         (
             selected_target,
             selected_target_sha256,
-            selected_engine,
+            selected_runtime,
             version,
             source,
-        ), _choice = _catalog_site_release(catalog, model, engine)
+        ), _choice = _catalog_site_release(catalog, model, runtime)
     except RuntimePackError as error:
-        if catalog_location is None and "not present" in str(error):
-            return None
         raise LetsInferError(str(error)) from error
-    policy = f"engine:{selected_engine}" if engine else "recommended"
+    policy = f"runtime:{selected_runtime}" if runtime else "recommended"
     return source, policy, version, selected_target, selected_target_sha256
 
 
@@ -7386,11 +6694,10 @@ def prepare_runtime_install(
     source: str,
     *,
     policy: str,
-    requested_engine: str | None,
+    requested_runtime: str | None,
     requested_target: str | None = None,
     expected_version: str | None = None,
     expected_target_contract_sha256: str | None = None,
-    artifact_roots: Sequence[pathlib.Path] = (),
 ) -> tuple[pathlib.Path, dict[str, Any], pathlib.Path, dict[str, Any]]:
     try:
         with materialize(source) as incoming:
@@ -7398,36 +6705,35 @@ def prepare_runtime_install(
         pack = verify_descriptor(object_root)
     except RuntimePackError as error:
         raise LetsInferError(str(error)) from error
-    manifest_path = pack.release_path
-    manifest = read_json(manifest_path)
-    validate_manifest(manifest)
+    manifest_path = pack.runtime_path
+    manifest = runtime_execution_manifest(pack.runtime)
     engine = adapter_for(manifest).name
     manifest_target = target_contract(manifest)
     target_id = manifest_target["id"]
     manifest_target_sha256 = target_contract_sha256(manifest_target)
     try:
         validate_target_binding(
-            pack.descriptor.get("orchestration"), manifest_target["placement"]
+            pack.runtime.get("orchestration"), manifest_target["placement"]
         )
     except OrchestrationError as error:
         raise LetsInferError(
             f"runtime orchestration does not bind its release target: {error}"
         ) from error
-    if expected_version is not None and pack.descriptor["version"] != expected_version:
+    if expected_version is not None and pack.runtime["version"] != expected_version:
         raise LetsInferError(
             "runtime catalog version does not match the immutable artifact "
-            f"({expected_version!r} != {pack.descriptor['version']!r})"
+            f"({expected_version!r} != {pack.runtime['version']!r})"
         )
     if (
-        pack.descriptor["model"] != manifest["model"]["alias"]
-        or pack.descriptor["engine"] != engine
-        or pack.descriptor["target"] != target_id
-        or pack.descriptor["status"] != manifest["status"]
+        pack.runtime["logical_model"] != manifest["model"]["alias"]
+        or pack.runtime["engine"]["id"] != engine
+        or pack.runtime["target"]["id"] != target_id
+        or (pack.runtime["status"] == "qualified") != (manifest["status"] == "stable")
     ):
-        raise LetsInferError("runtime descriptor and release manifest identity disagree")
-    if requested_engine is not None and requested_engine != engine:
+        raise LetsInferError("runtime descriptor and runtime.json identity disagree")
+    if requested_runtime is not None and requested_runtime != pack.runtime["id"]:
         raise LetsInferError(
-            f"runtime uses engine {engine!r}, not requested engine {requested_engine!r}"
+            f"runtime candidate is {pack.runtime['id']!r}, not requested {requested_runtime!r}"
         )
     if requested_target is not None and requested_target != target_id:
         raise LetsInferError(
@@ -7441,9 +6747,8 @@ def prepare_runtime_install(
             "runtime target contract does not match the catalog target definition"
         )
     control_root, installed_manifest_path = install_control_bundle(
-        manifest_path,
+        pack.runtime_path,
         manifest,
-        artifact_roots=(object_root, *artifact_roots, source_root()),
     )
     installed_manifest = read_json(installed_manifest_path)
     receipt = new_receipt(
@@ -7560,7 +6865,7 @@ def install_engine_group(
     try:
         runtime = verify_descriptor(runtime_root)
         contract = validate_target_binding(
-            runtime.descriptor.get("orchestration"),
+            runtime.runtime.get("orchestration"),
             target_contract(manifest)["placement"],
         )
     except (RuntimePackError, OrchestrationError) as error:
@@ -7624,7 +6929,7 @@ def install_engine_group(
     submit, job_status, group_status = _engine_group_transport()
 
     runtime_identity = (
-        f"{runtime.descriptor['name']}@{runtime.descriptor['version']}"
+        f"{runtime.runtime['id']}@{runtime.runtime['version']}"
         f"@sha256:{runtime.digest}"
     )
     placement_document = {
@@ -7663,7 +6968,7 @@ def install_engine_group(
                 orchestrator.stage()
                 orchestrator.start()
                 started = True
-                credential_root = site_config_root() / "engine-groups" / plan.group_id
+                credential_root = secrets_root() / "engine-groups" / plan.group_id
                 ensure_private_directory(credential_root)
                 credential_file = credential_root / "engine-api.key"
                 _atomic_private_text(
@@ -7778,7 +7083,7 @@ def _restore_engine_group_orchestrator(
             or not REGISTRY_DIGEST_RE.fullmatch(str(row.get("source", "")))
         ):
             raise LetsInferError("durable engine-group identity is inconsistent")
-        runtime_root = default_runtime_home() / "objects" / document["runtime_digest"]
+        runtime_root = default_runtime_home() / ".objects" / document["runtime_digest"]
         runtime = verify_descriptor(runtime_root)
         if runtime.digest != document["runtime_digest"]:
             raise LetsInferError("engine-group runtime object identity changed")
@@ -7788,7 +7093,7 @@ def _restore_engine_group_orchestrator(
             control_root, manifest_path, document["manifest_sha256"]
         )
         contract = validate_target_binding(
-            runtime.descriptor.get("orchestration"),
+            runtime.runtime.get("orchestration"),
             target_contract(manifest)["placement"],
         )
         if contract is None:
@@ -8162,13 +7467,11 @@ def _controller_site_action(
     if action == "install":
         if model is None:
             raise LetsInferError("controller install action requires a model")
-        engine_value = payload.get("engine")
-        engine = engine_value if isinstance(engine_value, str) else None
-        if engine is not None and engine not in ADAPTERS:
-            raise LetsInferError(f"unknown inference engine: {engine}")
+        runtime_value = payload.get("runtime")
+        runtime = runtime_value if isinstance(runtime_value, str) else None
         command = ["install", model]
-        if engine is not None:
-            command.extend(("--engine", engine))
+        if runtime is not None:
+            command.extend(("--runtime", runtime))
         try:
             arguments = parser().parse_args(command)
         except SystemExit as error:
@@ -8178,15 +7481,15 @@ def _controller_site_action(
             candidates = [
                 receipt
                 for receipt in selections()
-                if receipt["model"] == model
-                and (engine is None or receipt["engine"] == engine)
+                if receipt["logical_model"] == model
+                and (runtime is None or receipt["candidate_id"] == runtime)
             ]
             if candidates:
                 receipt = max(
                     candidates, key=lambda value: value["installed_at_unix_ns"]
                 )
                 identifier = (
-                    f"{receipt['name']}@{receipt['version']}"
+                    f"{receipt['candidate_id']}@{receipt['version']}"
                     f"@sha256:{receipt['digest']}"
                 )
             else:
@@ -8231,11 +7534,11 @@ def _controller_site_action(
     if action == "topology-plan":
         if model is None:
             raise LetsInferError("controller topology action requires a model")
-        engine_value = payload.get("engine")
-        engine = engine_value if isinstance(engine_value, str) else None
+        runtime_value = payload.get("runtime")
+        runtime = runtime_value if isinstance(runtime_value, str) else None
         document = _topology_plan_document(
             model,
-            engine,
+            runtime,
             None,
             actor_type="controller",
             actor_id=principal.controller_id,
@@ -8487,7 +7790,7 @@ def install(arguments: argparse.Namespace) -> int:
         catalog_value = None
     runtime_source = _runtime_source_for_install(
         arguments.model,
-        arguments.engine,
+        getattr(arguments, "runtime", None),
         catalog_value,
     )
     runtime_policy = getattr(arguments, "runtime_policy", None)
@@ -8499,113 +7802,80 @@ def install(arguments: argparse.Namespace) -> int:
             runtime_source[3],
             runtime_source[4],
         )
-    prepared_receipt: dict[str, Any] | None = None
-    if runtime_source is None:
-        manifest_path, manifest = resolve_model(
-            arguments.model, arguments.engine
-        )
-        release_root = manifest_source_root(manifest_path)
-    else:
-        (
-            source,
-            policy,
-            expected_version,
-            selected_target,
-            selected_target_sha256,
-        ) = runtime_source
-        manifest_path, manifest, release_root, prepared_receipt = prepare_runtime_install(
-            source,
-            policy=policy,
-            requested_engine=arguments.engine,
-            requested_target=selected_target,
-            expected_version=expected_version,
-            expected_target_contract_sha256=(
-                selected_target_sha256
-                or getattr(arguments, "expected_target_contract_sha256", None)
-            ),
-        )
-    selected_receipt = prepared_receipt or runtime_receipt_for_manifest(manifest_path)
-    verify_release_sources(manifest, release_root)
+    (
+        source,
+        policy,
+        expected_version,
+        selected_target,
+        selected_target_sha256,
+    ) = runtime_source
+    manifest_path, manifest, release_root, prepared_receipt = prepare_runtime_install(
+        source,
+        policy=policy,
+        requested_runtime=getattr(arguments, "runtime", None),
+        requested_target=selected_target,
+        expected_version=expected_version,
+        expected_target_contract_sha256=(
+            selected_target_sha256
+            or getattr(arguments, "expected_target_contract_sha256", None)
+        ),
+    )
+    selected_receipt = prepared_receipt
+    verify_runtime_sources(manifest, release_root)
     serving = manifest["serving"]
     if not serving["qualified"]:
-        if prepared_receipt is not None:
-            manifest_sha = sha256_file(manifest_path)
-            model_cache = requested_model_cache(
-                getattr(arguments, "model_cache", None)
+        model_cache = requested_model_cache(getattr(arguments, "model_cache", None))
+        runtime_artifact_root = pathlib.Path(
+            prepared_receipt["object_root"]
+        ).expanduser()
+        download_dependencies = bool(
+            getattr(
+                arguments,
+                "download_dependencies",
+                getattr(arguments, "download", True),
             )
-            plugin_root_value = getattr(arguments, "plugin_root", None)
-            plugin_root = (
-                expanded_path(plugin_root_value)
-                if plugin_root_value
-                else default_plugin_root(manifest, manifest_sha)
-            )
-            runtime_artifact_root = pathlib.Path(
-                prepared_receipt["object_root"]
-            ).expanduser()
-            download_dependencies = bool(
-                getattr(
-                    arguments,
-                    "download_dependencies",
-                    getattr(arguments, "download", True),
-                )
-            )
-            ensure_install_dependencies(
-                manifest,
-                model_cache=model_cache,
-                runtime_artifact_root=runtime_artifact_root,
-                download=download_dependencies,
-                build_image=not getattr(arguments, "no_build_image", False),
-            )
-            wheel_value = getattr(arguments, "wheel", None)
-            install_runtime_plugins(
-                manifest,
-                plugin_root=plugin_root,
-                wheel_source=pathlib.Path(wheel_value) if wheel_value else None,
-                artifact_root=release_root,
-            )
-            verify_installed_release(
-                manifest,
-                model_cache=model_cache,
-                plugin_root=plugin_root,
-            )
-            store_root_value = getattr(arguments, "store_root", None)
-            store_root = (
-                expanded_path(store_root_value)
-                if store_root_value
-                else default_store_root(manifest)
-            )
-            runtime_cache_value = getattr(arguments, "runtime_cache_root", None)
-            runtime_cache_root = (
-                expanded_path(runtime_cache_value)
-                if runtime_cache_value
-                else default_runtime_cache_root(manifest)
-            )
-            api_key_value = getattr(arguments, "api_key_file", None)
-            tls_cert_value = getattr(arguments, "tls_cert_file", None)
-            tls_key_value = getattr(arguments, "tls_key_file", None)
-            api_key_file = expanded_path(
-                api_key_value or default_engine_api_key_path()
-            )
-            tls_cert_file = expanded_path(tls_cert_value or default_tls_cert_path())
-            tls_key_file = expanded_path(tls_key_value or default_tls_key_path())
-            ensure_private_directory(store_root)
-            ensure_runtime_home(runtime_cache_root)
-            ensure_api_key(api_key_file)
-            ensure_tls_material(tls_cert_file, tls_key_file)
-            try:
-                receipt_path = write_selection(prepared_receipt)
-            except RuntimePackError as error:
-                raise LetsInferError(str(error)) from error
-            print(
-                f"INSTALLED RUNTIME {prepared_receipt['name']} "
-                f"version={prepared_receipt['version']} digest=sha256:{prepared_receipt['digest']} "
-                f"activation=blocked receipt={receipt_path}"
-            )
-            print(f"  blocked_by: {serving['blocked_by']}")
-            return 0
-        raise LetsInferError(
-            f"serving configuration is not qualified: {serving['blocked_by']}"
         )
+        ensure_install_dependencies(
+            manifest,
+            model_cache=model_cache,
+            runtime_artifact_root=runtime_artifact_root,
+            download=download_dependencies,
+            build_image=not getattr(arguments, "no_build_image", False),
+        )
+        verify_installed_runtime(manifest, model_cache=model_cache)
+        store_root_value = getattr(arguments, "store_root", None)
+        store_root = (
+            expanded_path(store_root_value)
+            if store_root_value
+            else default_store_root(manifest)
+        )
+        runtime_cache_value = getattr(arguments, "runtime_cache_root", None)
+        runtime_cache_root = (
+            expanded_path(runtime_cache_value)
+            if runtime_cache_value
+            else default_runtime_cache_root(manifest)
+        )
+        api_key_value = getattr(arguments, "api_key_file", None)
+        tls_cert_value = getattr(arguments, "tls_cert_file", None)
+        tls_key_value = getattr(arguments, "tls_key_file", None)
+        api_key_file = expanded_path(api_key_value or default_engine_api_key_path())
+        tls_cert_file = expanded_path(tls_cert_value or default_tls_cert_path())
+        tls_key_file = expanded_path(tls_key_value or default_tls_key_path())
+        ensure_private_directory(store_root)
+        ensure_runtime_home(runtime_cache_root)
+        ensure_api_key(api_key_file)
+        ensure_tls_material(tls_cert_file, tls_key_file)
+        try:
+            receipt_path = write_selection(prepared_receipt)
+        except RuntimePackError as error:
+            raise LetsInferError(str(error)) from error
+        print(
+            f"INSTALLED RUNTIME {prepared_receipt['candidate_id']} "
+            f"version={prepared_receipt['version']} digest=sha256:{prepared_receipt['digest']} "
+            f"activation=blocked receipt={receipt_path}"
+        )
+        print(f"  blocked_by: {serving['blocked_by']}")
+        return 0
     if not arguments.no_service and not user_lingering_enabled():
         raise LetsInferError(
             "boot-persistent user service requires lingering; run "
@@ -8613,10 +7883,6 @@ def install(arguments: argparse.Namespace) -> int:
         )
     placement_strategy = target_contract(manifest)["placement"]["strategy"]
     if placement_strategy != "single":
-        if selected_receipt is None:
-            raise LetsInferError(
-                "multi-member installation requires an installed immutable runtime pack"
-            )
         return install_engine_group(
             arguments,
             source=str(selected_receipt["source"]),
@@ -8630,7 +7896,6 @@ def install(arguments: argparse.Namespace) -> int:
     control_root, installed_manifest_path = install_control_bundle(
         manifest_path,
         manifest,
-        artifact_roots=(release_root, source_root()),
     )
 
     config_path = absolute_user_path(
@@ -8646,11 +7911,6 @@ def install(arguments: argparse.Namespace) -> int:
             previous_config = candidate
 
     model_cache = requested_model_cache(arguments.model_cache)
-    plugin_root = (
-        expanded_path(arguments.plugin_root)
-        if arguments.plugin_root
-        else default_plugin_root(manifest, manifest_sha)
-    )
     store_root = (
         expanded_path(arguments.store_root)
         if arguments.store_root
@@ -8702,11 +7962,7 @@ def install(arguments: argparse.Namespace) -> int:
         arguments.watchdog_local_controller_key_file
         or default_watchdog_local_controller_key_path()
     )
-    runtime_artifact_root = (
-        pathlib.Path(selected_receipt["object_root"]).expanduser()
-        if selected_receipt is not None
-        else None
-    )
+    runtime_artifact_root = pathlib.Path(selected_receipt["object_root"]).expanduser()
     download_dependencies = bool(
         getattr(
             arguments,
@@ -8720,12 +7976,6 @@ def install(arguments: argparse.Namespace) -> int:
         runtime_artifact_root=runtime_artifact_root,
         download=download_dependencies,
         build_image=not arguments.no_build_image,
-    )
-    install_runtime_plugins(
-        manifest,
-        plugin_root=plugin_root,
-        wheel_source=pathlib.Path(arguments.wheel) if arguments.wheel else None,
-        artifact_root=control_root,
     )
     ensure_private_directory(store_root)
     ensure_runtime_home(runtime_cache_root)
@@ -8752,7 +8002,7 @@ def install(arguments: argparse.Namespace) -> int:
         watchdog_binary_sha,
         watchdog_source_sha,
     ) = install_core_watchdog_runtime()
-    verify_installed_release(manifest, model_cache=model_cache, plugin_root=plugin_root)
+    verify_installed_runtime(manifest, model_cache=model_cache)
 
     ensure_private_directory(config_path.parent)
     config = {
@@ -8771,7 +8021,6 @@ def install(arguments: argparse.Namespace) -> int:
         "engine_port": arguments.engine_port,
         **placement,
         "model_cache": str(model_cache),
-        "plugin_root": str(plugin_root),
         "store_root": str(store_root),
         "runtime_cache_root": str(runtime_cache_root),
         "engine_api_key_file": str(api_key_file),
@@ -8805,15 +8054,14 @@ def install(arguments: argparse.Namespace) -> int:
         "source_root": str(control_root),
         "manifest_path": str(installed_manifest_path),
     }
-    if selected_receipt is not None:
-        config.update(
-            {
-                "runtime_name": selected_receipt["name"],
-                "runtime_version": selected_receipt["version"],
-                "runtime_digest": selected_receipt["digest"],
-                "runtime_policy": selected_receipt["policy"],
-            }
-        )
+    config.update(
+        {
+            "runtime_name": selected_receipt["candidate_id"],
+            "runtime_version": selected_receipt["version"],
+            "runtime_digest": selected_receipt["digest"],
+            "runtime_policy": selected_receipt["policy"],
+        }
+    )
     config["watchdog_public_state_file"] = str(
         write_watchdog_public_state(config, manifest)
     )
@@ -9824,7 +9072,7 @@ def doctor(arguments: argparse.Namespace) -> int:
         record("runtime-memory-reserve", False, str(error))
 
     try:
-        verify_release_sources(
+        verify_runtime_sources(
             manifest, pathlib.Path(config["source_root"]).expanduser()
         )
         record("source-identity", True, manifest["release"])
@@ -9889,10 +9137,9 @@ def doctor(arguments: argparse.Namespace) -> int:
             record(f"unit-{SERVICE_NAME}", False, str(error))
 
     try:
-        actual_image = verify_installed_release(
+        actual_image = verify_installed_runtime(
             manifest,
             model_cache=expanded_path(config["model_cache"]),
-            plugin_root=expanded_path(config["plugin_root"]),
         )
         record("installed-identity", True, actual_image)
     except LetsInferError as error:
@@ -10184,7 +9431,6 @@ def _uninstall_service_config(explicit: str | None) -> tuple[pathlib.Path | None
         return path, read_service_config(path)
     candidates = (
         default_service_config_path(),
-        pathlib.Path.home() / ".config/letsinfer/service.json",
     )
     for path in candidates:
         if path.is_symlink():
@@ -10195,7 +9441,7 @@ def _uninstall_service_config(explicit: str | None) -> tuple[pathlib.Path | None
 
 
 def _installed_runtime_image_references() -> set[str]:
-    objects = default_runtime_home() / "objects"
+    objects = default_runtime_home() / ".objects"
     if not objects.exists():
         return set()
     if objects.is_symlink() or not objects.is_dir():
@@ -10205,34 +9451,17 @@ def _installed_runtime_image_references() -> set[str]:
         if descriptor_path.is_symlink() or not descriptor_path.is_file():
             continue
         try:
-            descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
-            release_name = descriptor["release_manifest"]
-            if not isinstance(release_name, str):
-                continue
-            relative = pathlib.PurePosixPath(release_name)
-            if (
-                relative.is_absolute()
-                or not relative.parts
-                or any(part in {"", ".", ".."} for part in relative.parts)
-            ):
-                continue
-            manifest_path = descriptor_path.parent.joinpath(*relative.parts)
-            if manifest_path.is_symlink() or not manifest_path.is_file():
-                continue
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            validate_manifest(manifest)
+            runtime = json.loads(descriptor_path.read_text(encoding="utf-8"))
+            manifest = runtime_execution_manifest(runtime)
         except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError, LetsInferError):
             # Corrupt local metadata is deleted with the runtime object, but must
             # never be trusted to select a Docker image for removal.
             continue
         image = manifest["image"]
-        references.update((image["reference"], image["immutable_id"], image["base"]))
+        references.update((image["reference"], image["immutable_id"]))
+        if "base" in image:
+            references.add(image["base"])
         references.add(manifest["model"]["acquisition_image"])
-        plugins = manifest.get("runtime_plugins") or {}
-        for builder_name in ("wheel_builder", "native_builder"):
-            builder = plugins.get(builder_name)
-            if isinstance(builder, dict) and isinstance(builder.get("image"), str):
-                references.add(builder["image"])
     return references
 
 
@@ -10355,14 +9584,7 @@ def _remove_managed_home(
     model_roots = {models_root()}
     if configured_model_cache is not None:
         model_roots.add(configured_model_cache)
-    external = {
-        *managed_roots(),
-        *model_roots,
-        pathlib.Path.home() / ".config/letsinfer",
-        pathlib.Path.home() / ".cache/letsinfer",
-        pathlib.Path.home() / ".local/share/letsinfer",
-        pathlib.Path.home() / "Library/Logs/LetsInfer",
-    }
+    external = {*managed_roots(), *model_roots}
     for path in sorted(external, key=lambda item: len(item.parts), reverse=True):
         if path == home or path.is_relative_to(home):
             continue
@@ -10400,18 +9622,17 @@ def _remove_installed_core() -> bool:
     launcher_directory = pathlib.Path(
         os.environ.get("LETSINFER_LAUNCHER_DIR", str(root / "bin"))
     )
-    store = root.parents[1]
     command = [
         str(helper),
         "--source",
         str(root),
         "--launcher-directory",
         str(launcher_directory),
-        "--operator-home",
-        str(pathlib.Path.home()),
+        "--letsinfer-home",
+        str(letsinfer_home_root()),
         "--quiet",
     ]
-    if not os.access(store.parent, os.W_OK):
+    if launcher_directory == pathlib.Path("/usr/local/bin"):
         command.insert(0, "sudo")
     run_passthrough(command)
     return True
@@ -10463,11 +9684,11 @@ def uninstall(arguments: argparse.Namespace) -> int:
     containers, images = _remove_managed_containers(runtime_images)
 
     def finalize() -> int:
+        core_removed = _remove_installed_core()
         _remove_managed_home(
             keep_models=arguments.keep_models,
             configured_model_cache=models,
         )
-        core_removed = _remove_installed_core()
         print(
             "UNINSTALLED Let's Infer "
             f"core_removed={str(core_removed).lower()} "
@@ -10489,7 +9710,7 @@ def pack_runtime(arguments: argparse.Namespace) -> int:
     except RuntimePackError as error:
         raise LetsInferError(str(error)) from error
     print(
-        f"PACKED {pack.descriptor['name']} version={pack.descriptor['version']} "
+        f"PACKED {pack.runtime['id']} version={pack.runtime['version']} "
         f"digest=sha256:{pack.digest} artifact={pathlib.Path(arguments.output).resolve()}"
     )
     return 0
@@ -10500,9 +9721,9 @@ def list_runtimes(_: argparse.Namespace) -> int:
         receipts = selections()
     except RuntimePackError as error:
         raise LetsInferError(str(error)) from error
-    for receipt in sorted(receipts, key=lambda item: (item["model"], item["engine"])):
+    for receipt in sorted(receipts, key=lambda item: item["logical_model"]):
         print(
-            f"{receipt['model']}\tengine={receipt['engine']}\ttarget={receipt['target']}\t"
+            f"{receipt['logical_model']}\truntime={receipt['candidate_id']}\tengine={receipt['engine']}\ttarget={receipt['target']}\t"
             f"version={receipt['version']}\tdigest=sha256:{receipt['digest']}\t"
             f"policy={receipt['policy']}"
         )
@@ -10540,145 +9761,22 @@ def hardware(arguments: argparse.Namespace) -> int:
     return 0
 
 
-def derive_runtime(arguments: argparse.Namespace) -> int:
-    manifest_path, parent = resolve_model(
-        arguments.runtime, arguments.engine, target=getattr(arguments, "target", None)
-    )
-    root = manifest_source_root(manifest_path)
-    verify_release_sources(parent, root)
-    name = arguments.name
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
-        raise LetsInferError("derived runtime name contains unsupported characters")
-    supplied_tokens = list(arguments.engine_arguments)
-    if supplied_tokens and supplied_tokens[0] == "--":
-        supplied_tokens.pop(0)
-    if not supplied_tokens and not arguments.without:
-        raise LetsInferError("derive requires --without or native engine arguments after --")
-    try:
-        supplied = overlay_clauses(supplied_tokens) if supplied_tokens else []
-        base_launch = launch_for(parent, parent["serving"], arguments.port)
-        requested_keys = {
-            *(clause_key(clause) for clause in supplied),
-            *arguments.without,
-        }
-        protected = requested_keys.intersection(base_launch.protected_arguments)
-        if protected:
-            raise LetsInferError(
-                "Let's Infer owns model identity, listener, authentication/TLS, "
-                "safety, and cache-integration arguments; "
-                f"cannot change: {', '.join(sorted(protected))}"
-            )
-        parent_clauses = overlay_clauses(
-            base_launch.command[base_launch.engine_argument_offset :]
-        )
-        resolved, difference = apply_overlay(
-            parent_clauses,
-            supplied,
-            arguments.without,
-        )
-    except (RuntimePackError, EngineManifestError) as error:
-        raise LetsInferError(str(error)) from error
-    # A derivation receives a new public alias. Engines whose core-owned
-    # served identity is that alias must carry the new value in the sealed
-    # resolved command; this is not a user override of a protected option.
-    if adapter_for(parent).name in {"vllm", "sglang"}:
-        resolved = [
-            ["--served-model-name", name]
-            if clause_key(clause) == "--served-model-name"
-            else clause
-            for clause in resolved
-        ]
-    resolved_arguments = flatten_clauses(resolved)
-    resolved_digest = hashlib.sha256(
-        json.dumps(
-            list(resolved_arguments),
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-    ).hexdigest()
-    manifest = json.loads(json.dumps(parent))
-    manifest["release"] = f"{name}-local-{resolved_digest[:12]}"
-    manifest["status"] = "candidate"
-    manifest["model"]["alias"] = name
-    manifest["serving"]["qualified"] = False
-    manifest["serving"]["blocked_by"] = "derived-runtime-qualification"
-    manifest["serving"]["gate"] = {
-        "measured_commit": "pending",
-        "bench_block": "derived-runtime-qualification-v1",
-        "evidence_directory": "pending",
-        "results_sha256": "0" * 64,
-    }
-    manifest["derivation"] = {
-        "name": name,
-        "parent_release": parent["release"],
-        "parent_manifest_sha256": sha256_file(manifest_path),
-        "without": list(dict.fromkeys(arguments.without)),
-        "supplied_engine_arguments": supplied,
-        "resolved_engine_arguments": resolved,
-        "resolved_arguments_sha256": resolved_digest,
-        "diff": difference,
-    }
-    validate_manifest(manifest)
-    engine = adapter_for(parent).name
-    target_id = target_contract(parent)["id"]
-    with tempfile.TemporaryDirectory(prefix="letsinfer-derived-runtime-") as temporary:
-        source = pathlib.Path(temporary)
-        runtime_config = {
-            "schema_version": RUNTIME_SCHEMA_VERSION,
-            "name": f"{name}/{engine}/{target_id}",
-            "version": f"0.0.0+derived.{resolved_digest[:12]}",
-            "model": name,
-            "engine": engine,
-            "target": target_id,
-            "status": "candidate",
-            "release_manifest": "release.json",
-            "core_compatibility": {"api": 2},
-            "parent": {
-                "release": parent["release"],
-                "manifest_sha256": sha256_file(manifest_path),
-            },
-        }
-        (source / RUNTIME_CONFIG).write_bytes(canonical_bytes(runtime_config))
-        (source / "release.json").write_bytes(canonical_bytes(manifest))
-        installed_path, installed, control_root, receipt = prepare_runtime_install(
-            str(source),
-            policy="derived",
-            requested_engine=engine,
-            requested_target=target_id,
-            artifact_roots=(root,),
-        )
-    try:
-        receipt_path = write_selection(receipt)
-    except RuntimePackError as error:
-        raise LetsInferError(str(error)) from error
-    launch = launch_for(installed, installed["serving"], arguments.port)
-    print(
-        f"DERIVED {receipt['name']} parent={parent['release']} "
-        f"digest=sha256:{receipt['digest']} receipt={receipt_path}"
-    )
-    print(f"  command: {shell_command(launch)}")
-    return 0
-
-
 def inspect_runtime(arguments: argparse.Namespace) -> int:
     manifest_path, manifest = resolve_model(
-        arguments.runtime, arguments.engine, target=getattr(arguments, "target", None)
+        arguments.runtime, target=getattr(arguments, "target", None)
     )
     receipt = runtime_receipt_for_manifest(manifest_path)
     launch = launch_for(manifest, manifest["serving"], arguments.port)
-    derivation = manifest.get("derivation")
     if arguments.json:
         print(
             json.dumps(
                 {
                     "runtime": receipt,
-                    "release": manifest["release"],
                     "model": manifest["model"],
                     "engine": adapter_for(manifest).name,
                     "target": target_contract(manifest),
                     "status": manifest["status"],
                     "serving": manifest["serving"],
-                    "derivation": derivation,
                     "command": list(launch.command),
                 },
                 indent=2,
@@ -10688,23 +9786,19 @@ def inspect_runtime(arguments: argparse.Namespace) -> int:
         return 0
     if arguments.command:
         print(shell_command(launch))
-    if arguments.diff:
-        if derivation is None:
-            print("No argument derivation; this runtime uses its packaged command.")
-        else:
-            print(json.dumps(derivation["diff"], indent=2, sort_keys=True))
-    if not arguments.command and not arguments.diff:
-        runtime_name = receipt["name"] if receipt else manifest["model"]["alias"]
+    if not arguments.command:
+        runtime_name = receipt["candidate_id"] if receipt else manifest["model"]["alias"]
         digest = f"sha256:{receipt['digest']}" if receipt else "unpacked-source"
+        version = receipt["version"] if receipt else manifest["release"].rsplit("@", 1)[-1]
         print(
             f"{runtime_name}\tengine={adapter_for(manifest).name}\t"
-            f"release={manifest['release']}\tstatus={manifest['status']}\tdigest={digest}"
+            f"version={version}\tstatus={manifest['status']}\tdigest={digest}"
         )
     return 0
 
 
 def _matching_runtime_receipt(
-    name: str, engine: str | None, target: str | None = None
+    name: str, target: str | None = None
 ) -> dict[str, Any]:
     try:
         available = selections()
@@ -10720,16 +9814,14 @@ def _matching_runtime_receipt(
         for receipt in available:
             if (
                 receipt["digest"] == active_digest
-                and name in {receipt["name"], receipt["model"], active.get("model")}
-                and (engine is None or receipt["engine"] == engine)
+                and name in {receipt["candidate_id"], receipt["logical_model"], active.get("model")}
                 and (target is None or receipt["target"] == target)
             ):
                 return receipt
     matches = [
         receipt
         for receipt in available
-        if name in {receipt["name"], receipt["model"]}
-        and (engine is None or receipt["engine"] == engine)
+        if name in {receipt["candidate_id"], receipt["logical_model"]}
         and (target is None or receipt["target"] == target)
     ]
     if len(matches) == 1:
@@ -10739,7 +9831,7 @@ def _matching_runtime_receipt(
             sorted(f"{receipt['engine']}/{receipt['target']}" for receipt in matches)
         )
         raise LetsInferError(
-            f"runtime is ambiguous across variants ({choices}); specify --engine and/or --target"
+            f"runtime is ambiguous across candidates ({choices}); specify the exact candidate ID"
         )
     raise LetsInferError(f"runtime is not installed: {name}")
 
@@ -10753,7 +9845,7 @@ def _upgrade_install_arguments(
     config = read_service_config(config_path) if config_path.is_file() else None
     return argparse.Namespace(
         model=source,
-        engine=None,
+        runtime=None,
         target=None,
         catalog=None,
         runtime_policy=policy,
@@ -10765,7 +9857,6 @@ def _upgrade_install_arguments(
         gateway_queue_timeout=(config["gateway_queue_timeout_seconds"] if config else 0),
         name=config["name"] if config else None,
         model_cache=config["model_cache"] if config else None,
-        plugin_root=None,
         store_root=None,
         runtime_cache_root=None,
         api_key_file=config["gateway_api_key_file"] if config else None,
@@ -10801,8 +9892,8 @@ def _receipt_snapshot(receipt: dict[str, Any]) -> dict[str, Any]:
     return {
         key: receipt[key]
         for key in (
-            "name",
-            "model",
+            "candidate_id",
+            "logical_model",
             "engine",
             "target",
             "target_contract_sha256",
@@ -10837,7 +9928,7 @@ def _retain_runtime_history(active_digest: str, previous: dict[str, Any]) -> Non
 
 def upgrade_runtime(arguments: argparse.Namespace) -> int:
     receipt = _matching_runtime_receipt(
-        arguments.runtime, arguments.engine, getattr(arguments, "target", None)
+        arguments.runtime, getattr(arguments, "target", None)
     )
     expected_version: str | None = None
     expected_target_sha256: str | None = None
@@ -10846,7 +9937,7 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
         policy = "pinned" if REGISTRY_DIGEST_RE.fullmatch(source) else "local"
     else:
         policy = receipt["policy"]
-        if policy not in {"recommended", f"engine:{receipt['engine']}"}:
+        if policy not in {"recommended", f"runtime:{receipt['candidate_id']}"}:
             raise LetsInferError(
                 f"runtime policy {policy!r} is pinned; use --to with an explicit runtime source"
             )
@@ -10855,7 +9946,7 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
             raise LetsInferError("runtime upgrade requires --catalog or LETSINFER_CATALOG")
         try:
             catalog = load_catalog(location)
-            selected_engine = None if policy == "recommended" else receipt["engine"]
+            selected_runtime = None if policy == "recommended" else receipt["candidate_id"]
             (
                 _,
                 expected_target_sha256,
@@ -10864,8 +9955,8 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
                 source,
             ) = catalog_release(
                 catalog,
-                receipt["model"],
-                selected_engine,
+                receipt["logical_model"],
+                selected_runtime,
                 receipt["target"],
             )
             if expected_target_sha256 != receipt["target_contract_sha256"]:
@@ -10877,11 +9968,11 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
     try:
         with materialize(source) as candidate:
             candidate_digest = candidate.digest
-            candidate_name = candidate.descriptor["name"]
-            candidate_version = candidate.descriptor["version"]
-            candidate_model = candidate.descriptor["model"]
-            candidate_engine = candidate.descriptor["engine"]
-            candidate_target = candidate.descriptor["target"]
+            candidate_name = candidate.runtime["id"]
+            candidate_version = candidate.runtime["version"]
+            candidate_model = candidate.runtime["logical_model"]
+            candidate_engine = candidate.runtime["engine"]["id"]
+            candidate_target = candidate.runtime["target"]["id"]
     except RuntimePackError as error:
         raise LetsInferError(str(error)) from error
     if expected_version is not None and candidate_version != expected_version:
@@ -10889,20 +9980,20 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
             "runtime catalog version does not match the immutable artifact "
             f"({expected_version!r} != {candidate_version!r})"
         )
-    if candidate_model != receipt["model"]:
+    if candidate_model != receipt["logical_model"]:
         raise LetsInferError(
-            f"upgrade runtime model changed ({receipt['model']!r} -> {candidate_model!r})"
+            f"upgrade runtime model changed ({receipt['logical_model']!r} -> {candidate_model!r})"
         )
     if candidate_target != receipt["target"]:
         raise LetsInferError(
             f"upgrade runtime target changed ({receipt['target']!r} -> {candidate_target!r})"
         )
-    if policy.startswith("engine:") and candidate_engine != policy.split(":", 1)[1]:
+    if policy.startswith("runtime:") and candidate_name != policy.split(":", 1)[1]:
         raise LetsInferError(
-            f"engine-pinned runtime cannot upgrade to {candidate_engine!r}"
+            f"runtime-pinned installation cannot upgrade to {candidate_name!r}"
         )
     print(
-        f"UPGRADE {receipt['name']} {receipt['version']}@sha256:{receipt['digest']} "
+        f"UPGRADE {receipt['candidate_id']} {receipt['version']}@sha256:{receipt['digest']} "
         f"-> {candidate_name} {candidate_version}@sha256:{candidate_digest}"
     )
     if candidate_digest == receipt["digest"]:
@@ -10917,11 +10008,11 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
 
 def rollback_runtime(arguments: argparse.Namespace) -> int:
     receipt = _matching_runtime_receipt(
-        arguments.runtime, arguments.engine, getattr(arguments, "target", None)
+        arguments.runtime, getattr(arguments, "target", None)
     )
     history = receipt.get("history")
     if not isinstance(history, list) or not history:
-        raise LetsInferError(f"runtime has no retained rollback receipt: {receipt['name']}")
+        raise LetsInferError(f"runtime has no retained rollback receipt: {receipt['candidate_id']}")
     target = history[-1]
     object_root = pathlib.Path(target["object_root"]).expanduser()
     try:
@@ -10931,8 +10022,8 @@ def rollback_runtime(arguments: argparse.Namespace) -> int:
     if pack.digest != target["digest"]:
         raise LetsInferError("rollback runtime object does not match its retained receipt")
     print(
-        f"ROLLBACK {receipt['name']} {receipt['version']}@sha256:{receipt['digest']} "
-        f"-> {target['name']} {target['version']}@sha256:{target['digest']}"
+        f"ROLLBACK {receipt['candidate_id']} {receipt['version']}@sha256:{receipt['digest']} "
+        f"-> {target['candidate_id']} {target['version']}@sha256:{target['digest']}"
     )
     if arguments.dry_run:
         return 0
@@ -10949,17 +10040,12 @@ def rollback_runtime(arguments: argparse.Namespace) -> int:
 
 def verify(arguments: argparse.Namespace) -> int:
     manifest_path, manifest = resolve_model(
-        arguments.model, arguments.engine, target=getattr(arguments, "target", None)
+        arguments.model, target=getattr(arguments, "target", None)
     )
-    verify_release_sources(manifest, manifest_source_root(manifest_path))
+    verify_runtime_sources(manifest, runtime_source_root(manifest_path))
     if not arguments.source_only:
         model_cache = requested_model_cache(arguments.model_cache)
-        plugin_root = (
-            expanded_path(arguments.plugin_root)
-            if arguments.plugin_root
-            else default_plugin_root(manifest, sha256_file(manifest_path))
-        )
-        verify_installed_release(manifest, model_cache=model_cache, plugin_root=plugin_root)
+        verify_installed_runtime(manifest, model_cache=model_cache)
     adapter = adapter_for(manifest)
     print(
         f"VERIFIED {manifest['release']} ({manifest['status']}) "
@@ -10967,20 +10053,19 @@ def verify(arguments: argparse.Namespace) -> int:
     )
     serving = manifest["serving"]
     state = "qualified" if serving["qualified"] else "blocked"
-    detail = f", MTP K={serving['mtp_tokens']}" if adapter.name == "vllm" else ""
     print(
         f"  serving: {state}, connections<={serving['max_connections']}, "
         f"active<={serving['max_active_requests']}, "
-        f"context<={serving['max_context_tokens']}{detail}"
+        f"context<={serving['max_context_tokens']}"
     )
     return 0
 
 
 def acquire(arguments: argparse.Namespace) -> int:
     manifest_path, manifest = resolve_model(
-        arguments.model, arguments.engine, target=getattr(arguments, "target", None)
+        arguments.model, target=getattr(arguments, "target", None)
     )
-    verify_release_sources(manifest, manifest_source_root(manifest_path))
+    verify_runtime_sources(manifest, runtime_source_root(manifest_path))
     model_cache = requested_model_cache(arguments.model_cache)
     try:
         snapshot = verify_model_snapshot(manifest, model_cache)
@@ -11384,9 +10469,9 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         raise LetsInferError("--json is available only for benchmark status")
     if arguments.list and arguments.detach:
         raise LetsInferError("--detach cannot be combined with --list")
-    manifest_path, manifest = resolve_model(arguments.runtime, None)
-    root = manifest_source_root(manifest_path)
-    verify_release_sources(manifest, root)
+    manifest_path, manifest = resolve_model(arguments.runtime)
+    root = runtime_source_root(manifest_path)
+    verify_runtime_sources(manifest, root)
     receipt = runtime_receipt_for_manifest(manifest_path)
     if receipt is None:
         raise LetsInferError(
@@ -11403,24 +10488,22 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         raise LetsInferError(str(error)) from error
     if runtime_descriptor.digest != receipt["digest"]:
         raise LetsInferError("installed runtime descriptor identity mismatch")
-    if "benchmark" not in runtime_descriptor.descriptor:
-        raise LetsInferError("installed runtime has no benchmark contract")
+    benchmark_contract = runtime_descriptor.runtime["benchmark"]["contract"]
     # Runtime receipts retain the immutable control bundle that was current at
     # install time.  Benchmarking must not execute that historical core after a
     # core-only update.  Recompose the unchanged runtime artifacts with this
     # executable's core and dispatch the worker from that immutable bundle.
-    original_root = root
     root, manifest_path = _bind_runtime_release_to_current_core(
-        manifest_path, manifest, previous_root=original_root
+        manifest_path, manifest
     )
-    verify_release_sources(manifest, root)
+    verify_runtime_sources(manifest, root)
     runtime_config_value = read_json(runtime_config)
-    if runtime_config_value.get("benchmark") != runtime_descriptor.descriptor["benchmark"]:
+    if runtime_config_value.get("benchmark", {}).get("contract") != benchmark_contract:
         raise LetsInferError(
             "installed runtime benchmark contract does not match its descriptor"
         )
     benchmark_contract_sha = hashlib.sha256(
-        canonical_bytes(runtime_descriptor.descriptor["benchmark"])
+        canonical_bytes(benchmark_contract)
     ).hexdigest()
     adapter = adapter_for(manifest)
     count_path = adapter.token_count_path
@@ -11474,11 +10557,21 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         command.append("--list")
     else:
         config_path = default_service_config_path()
-        if not config_path.is_file():
-            raise LetsInferError(
-                "benchmark requires an installed Let's Infer service for Watchdog telemetry"
+        if config_path.is_file():
+            config = read_service_config(config_path)
+        else:
+            config = _qualification_core_plane_config()
+            placement = resolve_service_placement(manifest, sha256_file(manifest_path))
+            config.update(
+                {
+                    "engine_port": 18000,
+                    "protection_root": str(
+                        default_watchdog_data_root()
+                        / PROTECTION_ROOT_NAME
+                        / placement["placement_id"]
+                    ),
+                }
             )
-        config = read_service_config(config_path)
         _, watchdog_state = _unit_enabled_active(SERVICE_NAME)
         if watchdog_state != "active":
             raise LetsInferError(
@@ -11739,61 +10832,35 @@ def _run_benchmark_with_service_isolation(
         raise benchmark_error
 
 
-def list_releases(_: argparse.Namespace) -> int:
-    installed = sorted(
-        installed_runtime_manifests(),
-        key=lambda item: (
-            item[1]["model"]["alias"],
-            adapter_for(item[1]).name,
-            target_contract(item[1])["id"],
-            item[1]["release"],
-        ),
-    )
-    for _, manifest, _ in installed:
-        serving = manifest["serving"]
-        state = "qualified" if serving["qualified"] else "blocked"
-        print(
-            f"{adapter_for(manifest).name}\t{manifest['model']['alias']}\t"
-            f"{manifest['release']}\t{manifest['status']}\t"
-            f"serving={state} connections={serving['max_connections']}"
-        )
-    return 0
-
-
-def list_engines(_: argparse.Namespace) -> int:
-    for name in sorted(ADAPTERS):
-        adapter = ADAPTERS[name]
-        print(
-            f"{adapter.name}\tformat={adapter.model_format}\t"
-            f"api=openai-v1\tcache={adapter.cache_provider}\t"
-            f"persistent_cache={str(adapter.persistent_cache).lower()}"
-        )
-    return 0
-
-
 def _installed_core_layout() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
-    """Return (prefix, installer, public launcher) for an immutable install."""
+    """Return (home, installer, public launcher) for an immutable install."""
     try:
         root = source_root().resolve(strict=True)
     except OSError as error:
         raise LetsInferError(f"cannot resolve the installed core: {error}") from error
     version_root = root.parent
-    product_root = version_root.parent
-    library_root = product_root.parent
-    if product_root.name != "letsinfer" or library_root.name != "lib":
+    versions_root = version_root.parent
+    core = versions_root.parent
+    if versions_root.name != "versions" or core.name != "core":
         raise LetsInferError(
             "core update must be run from an installed Let's Infer command"
         )
-    prefix = library_root.parent
+    home = core.parent
+    if home != letsinfer_home_root().resolve(strict=True):
+        raise LetsInferError("installed core is outside LETSINFER_HOME")
+    current = core / "current"
+    if not current.is_symlink() or current.resolve(strict=True) != root:
+        raise LetsInferError("installed core is not the active LETSINFER_HOME core")
     installer = root / "install.sh"
     if installer.is_symlink() or not installer.is_file():
         raise LetsInferError("the installed core has no trusted release installer")
+    launcher_root = os.environ.get("LETSINFER_LAUNCHER_DIR")
     launcher = (
-        pathlib.Path("/usr/local/bin/letsinfer")
-        if prefix == pathlib.Path("/opt/letsinfer")
-        else prefix / "bin/letsinfer"
+        pathlib.Path(launcher_root) / "letsinfer"
+        if launcher_root
+        else current / "bin/letsinfer"
     )
-    return prefix, installer, launcher
+    return home, installer, launcher
 
 
 def update_core(arguments: argparse.Namespace) -> int:
@@ -11807,10 +10874,12 @@ def update_core(arguments: argparse.Namespace) -> int:
             "core update is unavailable while a benchmark is active; "
             "run `letsinfer benchmark stop` first"
         )
-    prefix, installer, launcher = _installed_core_layout()
+    _, installer, launcher = _installed_core_layout()
     command = ["/bin/sh", str(installer), "--no-setup", "--no-progress"]
-    if prefix != pathlib.Path("/opt/letsinfer"):
-        command.extend(["--prefix", str(prefix)])
+    if launcher.parent != pathlib.Path("/usr/local/bin"):
+        if launcher.parent.name != "bin":
+            raise LetsInferError("installed launcher is outside a supported bin directory")
+        command.extend(["--prefix", str(launcher.parent.parent)])
     if arguments.version is not None:
         command.extend(["--version", arguments.version])
     terminal = ui.Terminal(sys.stderr)
@@ -11833,7 +10902,7 @@ def update_core(arguments: argparse.Namespace) -> int:
     # Authenticate before the progress owner starts. This keeps sudo's prompt
     # completely separate from animated output and avoids leaking spinner
     # frames into sudo's controlling terminal.
-    if prefix == pathlib.Path("/opt/letsinfer"):
+    if launcher.parent == pathlib.Path("/usr/local/bin"):
         run_passthrough(["sudo", "-v"])
     with ui.StepProgress(
         terminal,
@@ -12063,13 +11132,12 @@ def prune_core_command(arguments: argparse.Namespace) -> int:
     helper = root / "bin/letsinfer-prune-core"
     if helper.is_symlink() or not helper.is_file():
         raise LetsInferError("installed core pruning helper is unavailable")
-    product_root = root.parents[1]
     base_command = [
         str(helper),
         "--active-source",
         str(root),
-        "--operator-home",
-        str(pathlib.Path.home()),
+        "--letsinfer-home",
+        str(letsinfer_home_root()),
     ]
     plan_command = [*base_command, "--dry-run"]
     planned = run(plan_command)
@@ -12080,10 +11148,7 @@ def prune_core_command(arguments: argparse.Namespace) -> int:
     user_plan = _prune_core_user_artifacts(dry_run=True)
     if not arguments.dry_run:
         _prune_core_user_artifacts(dry_run=False)
-        command = [*base_command, "--quiet"]
-        if not os.access(product_root, os.W_OK):
-            command.insert(0, "sudo")
-        run_passthrough(command)
+        run_passthrough([*base_command, "--quiet"])
     payload = {
         "schema_version": 1,
         "dry_run": arguments.dry_run,
@@ -12732,7 +11797,7 @@ def _read_engine_group_config(group_id: str) -> dict[str, Any]:
         "runtime_digest", "runtime_name", "runtime_version", "object_root",
         "control_root", "manifest_path", "manifest_sha256", "topology_sha256",
         "role", "group_file", "credential_file", "tls_certificate_file",
-        "tls_key_file", "model_cache", "plugin_root", "store_root",
+        "tls_key_file", "model_cache", "store_root",
         "runtime_cache_root", "container_name", "protection_root",
     }
     if (
@@ -12885,7 +11950,7 @@ class LocalEngineGroupExecutor:
             manifest_path, manifest, control_root, receipt = prepare_runtime_install(
                 str(job["source"]),
                 policy="site-group",
-                requested_engine=None,
+                requested_runtime=None,
             )
             if (
                 receipt["digest"] != job["runtime_digest"]
@@ -12895,7 +11960,7 @@ class LocalEngineGroupExecutor:
             runtime_root = pathlib.Path(receipt["object_root"])
             runtime = verify_descriptor(runtime_root)
             contract = validate_target_binding(
-                runtime.descriptor.get("orchestration"),
+                runtime.runtime.get("orchestration"),
                 target_contract(manifest)["placement"],
             )
             if contract is None:
@@ -12925,7 +11990,6 @@ class LocalEngineGroupExecutor:
             ):
                 raise LetsInferError("engine-group plan differs from the release target")
             model_cache = default_model_cache_root()
-            plugin_root = default_plugin_root(manifest, job["manifest_sha256"])
             ensure_install_dependencies(
                 manifest,
                 model_cache=model_cache,
@@ -12933,14 +11997,8 @@ class LocalEngineGroupExecutor:
                 download=True,
                 build_image=True,
             )
-            install_runtime_plugins(
-                manifest,
-                plugin_root=plugin_root,
-                wheel_source=None,
-                artifact_root=control_root,
-            )
-            verify_installed_release(
-                manifest, model_cache=model_cache, plugin_root=plugin_root
+            verify_installed_runtime(
+                manifest, model_cache=model_cache
             )
             credential_file = root / "engine-api.key"
             _atomic_private_text(credential_file, engine_credential + "\n")
@@ -12961,8 +12019,8 @@ class LocalEngineGroupExecutor:
                 "plan_sha256": job["plan_sha256"],
                 "source": job["source"],
                 "runtime_digest": job["runtime_digest"],
-                "runtime_name": runtime.descriptor["name"],
-                "runtime_version": runtime.descriptor["version"],
+                "runtime_name": runtime.runtime["id"],
+                "runtime_version": runtime.runtime["version"],
                 "object_root": str(runtime_root),
                 "control_root": str(control_root),
                 "manifest_path": str(manifest_path),
@@ -12974,7 +12032,6 @@ class LocalEngineGroupExecutor:
                 "tls_certificate_file": str(tls_certificate),
                 "tls_key_file": str(tls_key),
                 "model_cache": str(model_cache),
-                "plugin_root": str(plugin_root),
                 "store_root": str(default_store_root(manifest)),
                 "runtime_cache_root": str(default_runtime_cache_root(manifest)),
                 "container_name": f"letsinfer-group-{job['group_id']}",
@@ -13025,10 +12082,9 @@ class LocalEngineGroupExecutor:
         verify_host_target(manifest)
         runtime_root = pathlib.Path(config["object_root"])
         ensure_image(manifest, build=False, pull=False, artifact_root=runtime_root)
-        verify_installed_release(
+        verify_installed_runtime(
             manifest,
             model_cache=pathlib.Path(config["model_cache"]),
-            plugin_root=pathlib.Path(config["plugin_root"]),
         )
         require_memory_reserve(manifest, phase="launch")
         command = docker_command(
@@ -13038,7 +12094,6 @@ class LocalEngineGroupExecutor:
             runtime_digest=config["runtime_digest"],
             port=role["port_base"],
             model_cache=pathlib.Path(config["model_cache"]),
-            plugin_root=pathlib.Path(config["plugin_root"]),
             store_root=pathlib.Path(config["store_root"]),
             runtime_cache_root=pathlib.Path(config["runtime_cache_root"]),
             api_key_file=pathlib.Path(config["credential_file"]),
@@ -13739,7 +12794,7 @@ def topology_command(arguments: argparse.Namespace) -> int:
 
 def _topology_plan_document(
     model: str,
-    engine: str | None,
+    runtime: str | None,
     catalog_location: str | None,
     *,
     actor_type: str = "local-user",
@@ -13756,13 +12811,14 @@ def _topology_plan_document(
         raise LetsInferError(str(error)) from error
     topology = _fresh_site_topology()
     release, choice = _catalog_site_release(
-        catalog, model, engine, topology=topology
+        catalog, model, runtime, topology=topology
     )
-    target_id, target_sha256, selected_engine, version, source = release
+    target_id, target_sha256, selected_runtime, version, source = release
+    selected_engine = catalog["models"][model]["targets"][target_id]["candidates"][selected_runtime]["engine"]
     identity, graph = topology
     source_digest = source.rsplit("@sha256:", 1)[1]
     desired_runtime = (
-        f"{model}/{selected_engine}/{target_id}@{version}"
+        f"{selected_runtime}@{version}"
         f"@sha256:{source_digest}"
     )
     with _site_store() as store:
@@ -13785,6 +12841,7 @@ def _topology_plan_document(
         "site_id": identity.site_id,
         "model": model,
         "engine": selected_engine,
+        "runtime_candidate": selected_runtime,
         "runtime_version": version,
         "runtime_identity": desired_runtime,
         "runtime_source": source,
@@ -13805,7 +12862,7 @@ def _topology_plan_document(
         proposed = {
             key: document[key]
             for key in (
-                "schema_version", "site_id", "model", "engine", "runtime_version",
+                "schema_version", "site_id", "model", "engine", "runtime_candidate", "runtime_version",
                 "runtime_identity", "runtime_source", "target",
                 "target_contract_sha256", "topology_sha256", "placement",
                 "automatic_restart",
@@ -13831,7 +12888,7 @@ def _topology_plan_document(
 
 def topology_plan_command(arguments: argparse.Namespace) -> int:
     document = _topology_plan_document(
-        arguments.model, arguments.engine, arguments.catalog
+        arguments.model, arguments.runtime, arguments.catalog
     )
     if arguments.json:
         print(json.dumps(document, sort_keys=True))
@@ -14507,7 +13564,7 @@ def parser() -> argparse.ArgumentParser:
         help=help_label("plan the best qualified model placement", "topology.plan"),
     )
     topology_plan.add_argument("model")
-    topology_plan.add_argument("--engine", choices=sorted(ADAPTERS))
+    topology_plan.add_argument("--runtime", help="select an exact runtime candidate ID")
     topology_plan.add_argument("--catalog")
     topology_plan.add_argument("--json", action="store_true")
     topology_plan.set_defaults(action=topology_plan_command, action_id="topology.plan")
@@ -14603,12 +13660,6 @@ def parser() -> argparse.ArgumentParser:
     alias_remove.add_argument("--json", action="store_true")
     alias_remove.set_defaults(action=alias_remove_command, action_id="alias.remove")
 
-    listing = subcommands.add_parser("releases", help="list installed release manifests")
-    listing.set_defaults(action=list_releases, action_id="releases")
-
-    engines = subcommands.add_parser("engines", help="list registered inference engines")
-    engines.set_defaults(action=list_engines, action_id="engines")
-
     hardware_probe = subcommands.add_parser(
         "hardware", help="show the capabilities used for runtime target selection"
     )
@@ -14643,26 +13694,13 @@ def parser() -> argparse.ArgumentParser:
     packing.add_argument("--output", required=True)
     packing.set_defaults(action=pack_runtime, action_id="pack")
 
-    deriving = subcommands.add_parser(
-        "derive", help="derive a local candidate with native engine argument changes"
-    )
-    deriving.add_argument("runtime")
-    deriving.add_argument("--name", required=True)
-    deriving.add_argument("--engine", choices=sorted(ADAPTERS))
-    deriving.add_argument("--target")
-    deriving.add_argument("--without", action="append", default=[])
-    deriving.add_argument("--port", type=int, default=8000)
-    deriving.set_defaults(action=derive_runtime, action_id="derive", engine_arguments=[])
-
     inspecting = subcommands.add_parser(
-        "inspect", help="inspect a runtime's resolved command or derivation"
+        "inspect", help="inspect an installed runtime and its resolved command"
     )
     inspecting.add_argument("runtime")
-    inspecting.add_argument("--engine", choices=sorted(ADAPTERS))
     inspecting.add_argument("--target")
     inspecting.add_argument("--port", type=int, default=8000)
     inspecting.add_argument("--command", action="store_true")
-    inspecting.add_argument("--diff", action="store_true")
     inspecting.add_argument("--json", action="store_true")
     inspecting.set_defaults(action=inspect_runtime, action_id="inspect")
 
@@ -14670,7 +13708,6 @@ def parser() -> argparse.ArgumentParser:
         "upgrade", help="upgrade an installed runtime according to its selection policy"
     )
     upgrading.add_argument("runtime")
-    upgrading.add_argument("--engine", choices=sorted(ADAPTERS))
     upgrading.add_argument("--target")
     upgrading.add_argument("--catalog")
     upgrading.add_argument("--to")
@@ -14681,21 +13718,18 @@ def parser() -> argparse.ArgumentParser:
         "rollback", help="reinstall the previous retained runtime"
     )
     rolling_back.add_argument("runtime")
-    rolling_back.add_argument("--engine", choices=sorted(ADAPTERS))
     rolling_back.add_argument("--target")
     rolling_back.add_argument("--dry-run", action="store_true")
     rolling_back.set_defaults(action=rollback_runtime, action_id="rollback")
 
     checking = subcommands.add_parser(
-        "verify", help="verify a release and its installed runtime artifacts"
+        "verify", help="verify an installed runtime and its exact artifacts"
     )
     checking.add_argument("model")
-    checking.add_argument("--engine", choices=sorted(ADAPTERS))
     checking.add_argument("--target")
     checking.add_argument("--model-cache")
-    checking.add_argument("--plugin-root")
     checking.add_argument(
-        "--source-only", action="store_true", help="skip target model, plugin, and image checks"
+        "--source-only", action="store_true", help="verify only the immutable runtime pack"
     )
     checking.set_defaults(action=verify, action_id="verify")
 
@@ -14703,7 +13737,6 @@ def parser() -> argparse.ArgumentParser:
         "acquire", help="acquire and verify an exact model artifact"
     )
     acquiring.add_argument("model")
-    acquiring.add_argument("--engine", choices=sorted(ADAPTERS))
     acquiring.add_argument("--target")
     acquiring.add_argument("--model-cache")
     acquiring.set_defaults(action=acquire, action_id="acquire")
@@ -14758,7 +13791,7 @@ def parser() -> argparse.ArgumentParser:
         "install", help="install a model or immutable runtime pack"
     )
     installing.add_argument("model")
-    installing.add_argument("--engine", choices=sorted(ADAPTERS))
+    installing.add_argument("--runtime", help="select an exact runtime candidate ID")
     installing.add_argument("--catalog")
     installing.add_argument("--port", type=int, default=8000)
     installing.add_argument("--engine-port", type=int, default=18000, help=argparse.SUPPRESS)
@@ -14772,7 +13805,6 @@ def parser() -> argparse.ArgumentParser:
     )
     installing.add_argument("--name")
     installing.add_argument("--model-cache")
-    installing.add_argument("--plugin-root")
     installing.add_argument("--store-root")
     installing.add_argument("--runtime-cache-root")
     installing.add_argument("--engine-api-key-file", dest="api_key_file")
@@ -14787,7 +13819,6 @@ def parser() -> argparse.ArgumentParser:
     installing.add_argument("--watchdog-controller-ca-key-file")
     installing.add_argument("--watchdog-local-controller-cert-file")
     installing.add_argument("--watchdog-local-controller-key-file")
-    installing.add_argument("--wheel")
     installing.add_argument("--config")
     installing.add_argument(
         "--download",
@@ -14812,9 +13843,8 @@ def parser() -> argparse.ArgumentParser:
     )
     installing.set_defaults(action=install, action_id="install", download_dependencies=True)
 
-    serving = subcommands.add_parser("serve", help="start a release's qualified serving configuration")
+    serving = subcommands.add_parser("serve", help="start an installed runtime")
     serving.add_argument("model")
-    serving.add_argument("--engine", choices=sorted(ADAPTERS))
     serving.add_argument("--target")
     serving.add_argument(
         "--port",
@@ -14824,7 +13854,6 @@ def parser() -> argparse.ArgumentParser:
     )
     serving.add_argument("--name")
     serving.add_argument("--model-cache")
-    serving.add_argument("--plugin-root")
     serving.add_argument("--store-root")
     serving.add_argument("--runtime-cache-root")
     serving.add_argument("--engine-api-key-file", dest="api_key_file")
@@ -15130,16 +14159,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 command_parser.print_help()
             return 0
-        engine_arguments: list[str] = []
-        if raw_arguments[:1] == ["derive"] and "--" in raw_arguments:
-            separator = raw_arguments.index("--")
-            engine_arguments = raw_arguments[separator:]
-            raw_arguments = raw_arguments[:separator]
         arguments = command_parser.parse_args(raw_arguments)
         metadata, identity = _authorize_command(arguments)
         audit_sequence = _audit_marker(metadata, identity)
-        if arguments.command == "derive":
-            arguments.engine_arguments = engine_arguments
         port = getattr(arguments, "port", 1)
         if port is not None and port not in range(1, 65536):
             raise LetsInferError("port must be between 1 and 65535")

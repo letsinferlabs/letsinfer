@@ -39,9 +39,9 @@ usage() {
     cat <<'EOF'
 Usage: install.sh [--version VERSION] [--prefix PATH] [--user] [--no-setup] [--no-progress]
 
-Install and initialize the latest stable Let's Infer core release. The default
-is a system command in /usr/local/bin backed by immutable files in
-/opt/letsinfer. --user installs under ~/.local without administrator access.
+Install and initialize the latest stable Let's Infer core release. Immutable
+core files live under $LETSINFER_HOME/core. The default exposes the command in
+/usr/local/bin; --user exposes it from ~/.local/bin without administrator access.
 EOF
 }
 
@@ -139,7 +139,6 @@ done
 if [ "$user_install" -eq 0 ]; then
     command -v sudo >/dev/null 2>&1 || fail "sudo is required for the default system installation"
     sudo -v
-    prefix="/opt/letsinfer"
 fi
 
 if [ -n "$version" ]; then
@@ -315,19 +314,11 @@ fi
 
 umask 022
 if [ "$user_install" -eq 1 ]; then
-    "$unpacked/letsinfer/bin/letsinfer-install" --prefix "$prefix" >/dev/null
+    "$unpacked/letsinfer/bin/letsinfer-install" \
+        --home "$LETSINFER_HOME" --launcher-root "$prefix/bin" >/dev/null
     command_path="$prefix/bin/letsinfer"
 else
-    sudo "$unpacked/letsinfer/bin/letsinfer-install" --prefix "$prefix" >/dev/null
-    for managed_directory in \
-        "$prefix" \
-        "$prefix/bin" \
-        "$prefix/lib" \
-        "$prefix/lib/letsinfer" \
-        "$prefix/lib/letsinfer/$version"
-    do
-        sudo chmod 0755 "$managed_directory"
-    done
+    "$unpacked/letsinfer/bin/letsinfer-install" --home "$LETSINFER_HOME" >/dev/null
     sudo install -d -m 0755 "$launcher_dir"
     for launcher_name in letsinfer letsinfer-recovery; do
         launcher="$launcher_dir/$launcher_name"
@@ -336,27 +327,8 @@ else
         fi
         temporary_launcher="$launcher.letsinfer.$$"
         sudo rm -f -- "$temporary_launcher"
-        sudo ln -s "$prefix/bin/$launcher_name" "$temporary_launcher"
+        sudo ln -s "$LETSINFER_HOME/core/current/bin/$launcher_name" "$temporary_launcher"
         sudo mv -f -- "$temporary_launcher" "$launcher"
-    done
-    # A prior user install can appear earlier in PATH than /usr/local/bin.
-    # Repoint only launchers whose symlink target proves they were created by
-    # Let's Infer's standard ~/.local layout; never replace an arbitrary file
-    # or user-managed link.
-    legacy_launcher_dir="$HOME/.local/bin"
-    for launcher_name in letsinfer letsinfer-recovery; do
-        legacy_launcher="$legacy_launcher_dir/$launcher_name"
-        if [ -L "$legacy_launcher" ]; then
-            legacy_target=$(readlink "$legacy_launcher")
-            case "$legacy_target" in
-                "$HOME"/.local/lib/letsinfer/*/bin/"$launcher_name")
-                    temporary_legacy="$legacy_launcher.letsinfer.$$"
-                    rm -f -- "$temporary_legacy"
-                    ln -s "$launcher_dir/$launcher_name" "$temporary_legacy"
-                    mv -f -- "$temporary_legacy" "$legacy_launcher"
-                    ;;
-            esac
-        fi
     done
     command_path="$launcher_dir/letsinfer"
 fi

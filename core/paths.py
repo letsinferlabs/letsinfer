@@ -10,11 +10,6 @@ import stat
 
 
 HOME_ENV = "LETSINFER_HOME"
-HOME_DEFAULTED_ENV = "LETSINFER_HOME_DEFAULTED"
-CONFIG_ENV = "LETSINFER_CONFIG_HOME"
-DATA_ENV = "LETSINFER_DATA_HOME"
-RUNTIME_ENV = "LETSINFER_RUNTIME_HOME"
-MODELS_ENV = "LETSINFER_MODELS_HOME"
 
 
 class PathContractError(RuntimeError):
@@ -45,45 +40,31 @@ def home_root() -> pathlib.Path:
 
 
 def config_root() -> pathlib.Path:
-    # Narrow legacy overrides remain useful for isolated tests and managed
-    # deployments. LETSINFER_HOME owns the ordinary installation contract.
-    override = _environment_path(CONFIG_ENV)
-    if override is not None:
-        return override
-    current = home_root() / "config"
-    legacy = pathlib.Path.home() / ".config" / "letsinfer"
-    defaulted = os.environ.get(HOME_DEFAULTED_ENV) == "1" or HOME_ENV not in os.environ
-    if (
-        defaulted
-        and (legacy / "site.json").is_file()
-        and not (current / "site.json").exists()
-    ):
-        return legacy
-    return current
+    return home_root() / "config"
+
+
+def secrets_root() -> pathlib.Path:
+    return home_root() / "secrets"
 
 
 def data_root() -> pathlib.Path:
-    override = _environment_path(DATA_ENV)
-    if override is not None:
-        return override
-    current = home_root() / "state"
-    legacy = home_root()
-    defaulted = os.environ.get(HOME_DEFAULTED_ENV) == "1" or HOME_ENV not in os.environ
-    if (
-        defaulted
-        and (legacy / "site.sqlite3").is_file()
-        and not (current / "site.sqlite3").exists()
-    ):
-        return legacy
-    return current
+    return home_root() / "state"
 
 
 def runtime_root() -> pathlib.Path:
-    return _environment_path(RUNTIME_ENV) or home_root() / "runtimes"
+    return home_root() / "runtimes"
 
 
 def models_root() -> pathlib.Path:
-    return _environment_path(MODELS_ENV) or home_root() / "models"
+    return home_root() / "models"
+
+
+def core_root() -> pathlib.Path:
+    return home_root() / "core"
+
+
+def oci_root() -> pathlib.Path:
+    return home_root() / "oci"
 
 
 def cache_root() -> pathlib.Path:
@@ -95,7 +76,7 @@ def benchmarks_root() -> pathlib.Path:
 
 
 def evidence_root() -> pathlib.Path:
-    return home_root() / "evidence"
+    return benchmarks_root() / "evidence"
 
 
 def logs_root() -> pathlib.Path:
@@ -105,12 +86,14 @@ def logs_root() -> pathlib.Path:
 def managed_roots() -> tuple[pathlib.Path, ...]:
     return (
         config_root(),
+        secrets_root(),
         data_root(),
+        core_root(),
         runtime_root(),
         models_root(),
+        oci_root(),
         cache_root(),
         benchmarks_root(),
-        evidence_root(),
         logs_root(),
     )
 

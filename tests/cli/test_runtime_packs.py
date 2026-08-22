@@ -314,7 +314,7 @@ class RuntimePackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
             os.environ,
             {
-                "LETSINFER_CONFIG_HOME": directory,
+                "LETSINFER_HOME": directory,
                 "LETSINFER_CATALOG": "",
                 "LETSINFER_CATALOG_PUBLIC_KEY": "",
             },
@@ -374,19 +374,75 @@ class RuntimePackTests(unittest.TestCase):
         source.mkdir()
         config = {
             "schema_version": runtime_packs.RUNTIME_SCHEMA_VERSION,
-            "name": "example-model/example-engine/fixture-unified",
+            "id": "example-engine--example--model--fixture-unified",
             "version": "1.2.3",
-            "model": "example-model",
-            "engine": "example-engine",
-            "target": "fixture-unified",
-            "status": "stable",
-            "release_manifest": "release.json",
-            "core_compatibility": {"api": 2},
+            "logical_model": "example-model",
+            "status": "candidate",
+            "target": {
+                "id": "fixture-unified",
+                "platform": "linux/arm64",
+                "accelerator": {
+                    "vendor": "example",
+                    "architecture": "accelerator-v1",
+                    "count": 1,
+                    "partitioning": "full-device",
+                },
+                "memory": {"topology": "unified", "minimum_total_gib": 32},
+                "placement": self._single_placement(),
+            },
+            "engine": {
+                "id": "example-engine",
+                "protocol": {"version": 1},
+                "oci": {
+                    "reference": "ghcr.io/example/engine@sha256:" + "a" * 64,
+                    "immutable_id": "sha256:" + "b" * 64,
+                },
+                "model_format": "huggingface-snapshot",
+                "cache_provider": "example-cache-v1",
+                "arguments": [],
+                "environment": {},
+            },
+            "model": {
+                "uri": "hf://example/model",
+                "artifact": "model",
+                "acquisition": {
+                    "image": "ghcr.io/example/acquire@sha256:" + "c" * 64
+                },
+            },
+            "artifacts": [
+                {
+                    "name": "model",
+                    "uri": "hf://example/model",
+                    "format": "huggingface-snapshot",
+                    "revision": "d" * 40,
+                }
+            ],
+            "container": {
+                "memory_bytes": 32 * (1 << 30),
+                "shm_bytes": 1 << 30,
+                "min_available_gib": 16,
+                "runtime_min_available_gib": 2,
+                "startup_timeout_seconds": 60,
+            },
+            "cache": {
+                "provider": "example-cache-v1",
+                "persistent": False,
+                "prewarm": False,
+                "replay_output_policy": None,
+                "config": {},
+            },
+            "serving": {
+                "qualified": False,
+                "blocked_by": "fixture-qualification",
+                "max_connections": 8,
+                "max_active_requests": 4,
+                "max_context_tokens": 32768,
+            },
+            "benchmark": {"contract": self._benchmark(), "record": None},
         }
         (source / "runtime.json").write_text(
             json.dumps(config), encoding="utf-8"
         )
-        (source / "release.json").write_text("{}\n", encoding="utf-8")
         payload = source / "payload" / "runtime.txt"
         payload.parent.mkdir()
         payload.write_text("synthetic runtime payload\n", encoding="utf-8")
@@ -404,7 +460,8 @@ class RuntimePackTests(unittest.TestCase):
             with runtime_packs.materialize(first) as installed:
                 self.assertEqual(installed.digest, expected.digest)
                 self.assertEqual(
-                    installed.descriptor["name"], "example-model/example-engine/fixture-unified"
+                    installed.descriptor["candidate"]["id"],
+                    "example-engine--example--model--fixture-unified",
                 )
 
     def test_unsupported_runtime_schema_is_rejected(self) -> None:
@@ -419,7 +476,7 @@ class RuntimePackTests(unittest.TestCase):
             ):
                 runtime_packs.describe_source(source)
 
-    def test_boolean_runtime_versions_and_compatibility_are_rejected(self) -> None:
+    def test_boolean_runtime_schema_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = self._source(pathlib.Path(directory))
             config_path = source / "runtime.json"
@@ -428,21 +485,6 @@ class RuntimePackTests(unittest.TestCase):
             config_path.write_text(json.dumps(config), encoding="utf-8")
             with self.assertRaisesRegex(
                 runtime_packs.RuntimePackError, "unsupported runtime schema_version"
-            ):
-                runtime_packs.describe_source(source)
-
-            config["schema_version"] = runtime_packs.RUNTIME_SCHEMA_VERSION
-            config["core_compatibility"]["api"] = True
-            config_path.write_text(json.dumps(config), encoding="utf-8")
-            with self.assertRaisesRegex(
-                runtime_packs.RuntimePackError, "core_compatibility.api"
-            ):
-                runtime_packs.describe_source(source)
-
-            config["core_compatibility"]["api"] = 1
-            config_path.write_text(json.dumps(config), encoding="utf-8")
-            with self.assertRaisesRegex(
-                runtime_packs.RuntimePackError, "must be 2"
             ):
                 runtime_packs.describe_source(source)
 
@@ -467,28 +509,9 @@ class RuntimePackTests(unittest.TestCase):
                 runtime_packs.canonical_bytes(descriptor)
             )
             with self.assertRaisesRegex(
-                runtime_packs.RuntimePackError, "descriptor has unsupported fields"
+                runtime_packs.RuntimePackError, "descriptor fields are invalid"
             ):
                 runtime_packs.verify_descriptor(source)
-
-    def test_derived_parent_identity_is_strict(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            source = self._source(pathlib.Path(directory))
-            config_path = source / "runtime.json"
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["parent"] = {
-                "release": "parent-r1",
-                "manifest_sha256": "a" * 64,
-            }
-            config_path.write_text(json.dumps(config), encoding="utf-8")
-            runtime_packs.describe_source(source)
-
-            config["parent"]["mutable_ref"] = "latest"
-            config_path.write_text(json.dumps(config), encoding="utf-8")
-            with self.assertRaisesRegex(
-                runtime_packs.RuntimePackError, "must contain exactly"
-            ):
-                runtime_packs.describe_source(source)
 
     def test_benchmark_contract_is_declarative_and_strict(self) -> None:
         value = self._benchmark()
@@ -511,12 +534,12 @@ class RuntimePackTests(unittest.TestCase):
             root = pathlib.Path(directory)
             source = self._source(root)
             with self.assertRaisesRegex(runtime_packs.RuntimePackError, "symlinks"):
-                (source / "link").symlink_to(source / "release.json")
+                (source / "link").symlink_to(source / "runtime.json")
                 runtime_packs.describe_source(source)
             (source / "link").unlink()
             pack = runtime_packs.describe_source(source)
             object_root = runtime_packs.store_pack(pack, root / "runtime-home")
-            (object_root / "release.json").chmod(0o755)
+            (object_root / "payload/runtime.txt").chmod(0o755)
             with self.assertRaisesRegex(runtime_packs.RuntimePackError, "identity mismatch"):
                 runtime_packs.verify_descriptor(object_root)
 
@@ -531,7 +554,7 @@ class RuntimePackTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 runtime_packs.RuntimePackError,
-                "artifact_schema_version",
+                "descriptor fields are invalid",
             ):
                 runtime_packs.verify_descriptor(source)
 
@@ -582,9 +605,18 @@ class RuntimePackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             source = self._source(root)
-            (source / "benchmark.json").write_text("{}\n", encoding="utf-8")
+            benchmark_path = source / "benchmark.json"
+            benchmark_path.write_text("{}\n", encoding="utf-8")
+            config_path = source / "runtime.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["benchmark"]["record"] = {
+                "path": "benchmark.json",
+                "sha256": runtime_packs.sha256_file(benchmark_path),
+                "id": "0" * 64,
+            }
+            config_path.write_text(json.dumps(config), encoding="utf-8")
             with self.assertRaisesRegex(
-                runtime_packs.RuntimePackError, "invalid runtime benchmark.json"
+                runtime_packs.RuntimePackError, "invalid runtime benchmark record"
             ):
                 runtime_packs.build_archive(source, root / "runtime.letsinfer")
 
@@ -612,15 +644,15 @@ class RuntimePackTests(unittest.TestCase):
             hardware_sha = "3" * 64
             base = {
                 "schema_version": runtime_packs.SELECTION_SCHEMA_VERSION,
-                "name": "example-model/example-engine/fixture-unified",
-                "model": "example-model",
+                "candidate_id": "example-engine--example--model--fixture-unified",
+                "logical_model": "example-model",
                 "engine": "example-engine",
                 "target": "fixture-unified",
                 "target_contract_sha256": "4" * 64,
                 "version": "1.0.0",
                 "digest": "1" * 64,
                 "object_root": "/objects/one",
-                "manifest_path": "/control/one/releases/release.json",
+                "manifest_path": "/objects/one/runtime.json",
                 "control_root": "/control/one",
                 "installed_at": "2026-08-13T00:00:00-04:00",
                 "installed_at_unix_ns": installed_at_ns,
@@ -632,14 +664,15 @@ class RuntimePackTests(unittest.TestCase):
                 "source": "registry/one@sha256:" + "1" * 64,
                 "history": [],
             }
-            runtime_packs.write_selection(base, home)
+            with mock.patch.object(runtime_packs, "_publish_candidate_view"):
+                runtime_packs.write_selection(base, home)
             replacement = dict(base)
             replacement.update(
                 {
                     "version": "2.0.0",
                     "digest": "2" * 64,
                     "object_root": "/objects/two",
-                    "manifest_path": "/control/two/releases/release.json",
+                    "manifest_path": "/objects/two/runtime.json",
                     "control_root": "/control/two",
                     "source": "registry/two@sha256:" + "2" * 64,
                     "installation_id": runtime_packs.installation_identity(
@@ -647,7 +680,8 @@ class RuntimePackTests(unittest.TestCase):
                     ),
                 }
             )
-            runtime_packs.write_selection(replacement, home)
+            with mock.patch.object(runtime_packs, "_publish_candidate_view"):
+                runtime_packs.write_selection(replacement, home)
             selected = runtime_packs.selections(home)[0]
             self.assertEqual(selected["digest"], "2" * 64)
             self.assertEqual(selected["history"][-1]["digest"], "1" * 64)
@@ -692,11 +726,20 @@ class RuntimePackTests(unittest.TestCase):
                     "example-model": {
                         "targets": {
                             "fixture-unified": {
-                                "recommended": "example-engine",
-                                "engines": {
-                                    "example-engine": {
+                                "recommended": "example-engine--example--model--fixture-unified",
+                                "candidates": {
+                                    "example-engine--example--model--fixture-unified": {
                                         "version": "1.2.3",
                                         "source": "ghcr.io/example/model@sha256:" + "a" * 64,
+                                        "qualified": True,
+                                        "engine": "example-engine",
+                                        "engine_oci": "ghcr.io/example/engine@sha256:" + "b" * 64,
+                                        "model_uri": "hf://example/model",
+                                        "benchmark": {
+                                            "id": "c" * 64,
+                                            "suite": "letsinfer-code-prose-v1",
+                                            "score": 1.0,
+                                        },
                                     }
                                 },
                             }
@@ -743,13 +786,13 @@ class RuntimePackTests(unittest.TestCase):
                     runtime_packs.target_contract_sha256(
                         catalog["targets"]["fixture-unified"]["match"]
                     ),
-                    "example-engine",
+                    "example-engine--example--model--fixture-unified",
                     "1.2.3",
                     "ghcr.io/example/model@sha256:" + "a" * 64,
                 ),
             )
-            catalog["models"]["example-model"]["targets"]["fixture-unified"]["engines"][
-                "example-engine"
+            catalog["models"]["example-model"]["targets"]["fixture-unified"]["candidates"][
+                "example-engine--example--model--fixture-unified"
             ]["source"] = "latest"
             path.write_text(json.dumps(catalog), encoding="utf-8")
             with self.assertRaisesRegex(runtime_packs.RuntimePackError, "digest-pinned"):
@@ -801,11 +844,20 @@ class RuntimePackTests(unittest.TestCase):
                 "example-model": {
                     "targets": {
                         "fixture-unified": {
-                            "recommended": "example-engine",
-                            "engines": {
-                                "example-engine": {
+                            "recommended": "example-engine--example--model--fixture-unified",
+                            "candidates": {
+                                "example-engine--example--model--fixture-unified": {
                                     "version": "1.0.0",
                                     "source": "registry.example/runtime@sha256:" + "a" * 64,
+                                    "qualified": True,
+                                    "engine": "example-engine",
+                                    "engine_oci": "registry.example/engine@sha256:" + "b" * 64,
+                                    "model_uri": "hf://example/model",
+                                    "benchmark": {
+                                        "id": "c" * 64,
+                                        "suite": "letsinfer-code-prose-v1",
+                                        "score": 1.0,
+                                    },
                                 }
                             },
                         }
@@ -1040,56 +1092,6 @@ class RuntimePackTests(unittest.TestCase):
             invalid[path[0]][path[1]] = True
             with self.subTest(path=path):
                 self.assertFalse(runtime_packs.target_matches(contract, invalid))
-
-
-class ArgumentOverlayTests(unittest.TestCase):
-    def test_replace_repeat_remove_and_append(self) -> None:
-        parent = runtime_packs.overlay_clauses(
-            [
-                "--max-num-seqs",
-                "1",
-                "--lora",
-                "a",
-                "--lora",
-                "b",
-                "--enable-prefix-caching",
-            ]
-        )
-        supplied = runtime_packs.overlay_clauses(
-            ["--max-num-seqs", "4", "--lora", "c", "--future-flag"]
-        )
-        resolved, difference = runtime_packs.apply_overlay(
-            parent,
-            supplied,
-            ["--enable-prefix-caching"],
-        )
-        self.assertEqual(
-            runtime_packs.flatten_clauses(resolved),
-            ("--max-num-seqs", "4", "--lora", "c", "--future-flag"),
-        )
-        self.assertEqual(difference["removed"], [["--enable-prefix-caching"]])
-        self.assertEqual(difference["added"], [["--future-flag"]])
-        self.assertEqual(len(difference["replaced"]), 2)
-
-    def test_short_options_replace_without_treating_negative_values_as_flags(self) -> None:
-        parent = runtime_packs.overlay_clauses(
-            ["-ngl", "99", "--rope-scale", "-1", "-fa"]
-        )
-        supplied = runtime_packs.overlay_clauses(["-ngl", "80", "-ctk", "q8_0"])
-        resolved, difference = runtime_packs.apply_overlay(parent, supplied, ["-fa"])
-        self.assertEqual(
-            runtime_packs.flatten_clauses(resolved),
-            ("-ngl", "80", "--rope-scale", "-1", "-ctk", "q8_0"),
-        )
-        self.assertEqual(difference["removed"], [["-fa"]])
-        self.assertEqual(difference["added"], [["-ctk", "q8_0"]])
-
-    def test_without_conflict_and_ambiguous_value_guidance(self) -> None:
-        supplied = runtime_packs.overlay_clauses(["--feature"])
-        with self.assertRaisesRegex(runtime_packs.RuntimePackError, "supplied and removed"):
-            runtime_packs.apply_overlay([], supplied, ["--feature"])
-        with self.assertRaisesRegex(runtime_packs.RuntimePackError, "unexpected"):
-            runtime_packs.overlay_clauses(["value", "--feature"])
 
 
 if __name__ == "__main__":

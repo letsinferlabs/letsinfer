@@ -31,6 +31,37 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
+    def test_runtime_config_uses_the_nested_benchmark_contract(self) -> None:
+        contract = {
+            "tokenizer": {
+                "model_sha256": "1" * 64,
+                "engine_image_sha256": "2" * 64,
+            },
+            "cases": [
+                {"id": context, "concurrencies": list(runtime_matrix.CONCURRENCIES)}
+                for context in runtime_matrix.CONTEXTS
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "runtime.json"
+            path.write_text(
+                json.dumps({"benchmark": {"contract": contract, "record": None}}),
+                encoding="ascii",
+            )
+            with (
+                mock.patch.object(
+                    runtime_matrix.prompt_generator, "validate_benchmark_contract"
+                ),
+                mock.patch.object(
+                    runtime_matrix, "benchmark_model_sha256", return_value="1" * 64
+                ),
+            ):
+                loaded = runtime_matrix.load_benchmark_contract(
+                    path, {"image": {"immutable_id": "sha256:" + "2" * 64}}
+                )
+
+        self.assertEqual(loaded, contract)
+
     def test_progress_records_completed_current_and_future_workloads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "progress.json"
@@ -86,8 +117,7 @@ class RuntimeMatrixTests(unittest.TestCase):
             path = staging / name
             path.mkdir(parents=True)
             (path / "source.txt").write_text(f"{name}\n", encoding="utf-8")
-        release = staging / "releases" / "release.json"
-        release.parent.mkdir()
+        release = staging / "runtime-execution.json"
         release.write_text(
             json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
@@ -111,7 +141,7 @@ class RuntimeMatrixTests(unittest.TestCase):
         ).hexdigest()
         root = parent / bundle_identity
         staging.rename(root)
-        return root, root / "releases" / "release.json", core_identity
+        return root, root / "runtime-execution.json", core_identity
 
     def test_composite_control_bundle_is_accepted_and_core_tampering_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -128,8 +158,8 @@ class RuntimeMatrixTests(unittest.TestCase):
             self.assertEqual(identity["kind"], "verified-control-bundle")
             self.assertEqual(identity["core_source_sha256"], core_identity)
             self.assertEqual(
-                identity["source_artifacts_sha256"],
-                runtime_matrix.common.sha256_text("[]"),
+                identity["execution_manifest_sha256"],
+                hashlib.sha256(release.read_bytes()).hexdigest(),
             )
 
             (root / "core" / "source.txt").write_text(
@@ -379,10 +409,6 @@ class RuntimeMatrixTests(unittest.TestCase):
     def test_hash_addressed_control_bundle_is_a_source_identity(self) -> None:
         manifest = {
             "serving": {"gate": {"measured_commit": "a" * 40}},
-            "source_artifacts": [
-                {"path": "z", "sha256": "2" * 64},
-                {"path": "a", "sha256": "1" * 64},
-            ]
         }
         with tempfile.TemporaryDirectory() as directory:
             root, path, _core_identity = self._control_bundle(
@@ -395,12 +421,11 @@ class RuntimeMatrixTests(unittest.TestCase):
 
         self.assertEqual(identity["kind"], "verified-control-bundle")
         self.assertEqual(identity["commit"], "a" * 40)
-        self.assertEqual(identity["manifest_sha256"], manifest_sha)
+        self.assertEqual(identity["execution_manifest_sha256"], manifest_sha)
 
     def test_control_bundle_rejects_an_unsealed_commit(self) -> None:
         manifest = {
             "serving": {"gate": {"measured_commit": "a" * 40}},
-            "source_artifacts": [],
         }
         with tempfile.TemporaryDirectory() as directory:
             root, path, _core_identity = self._control_bundle(
@@ -413,7 +438,7 @@ class RuntimeMatrixTests(unittest.TestCase):
                     root, path, manifest, "b" * 40, None
                 )
 
-    def test_post_load_memory_requires_stable_warning_headroom(self) -> None:
+    def test_post_load_memory_records_stable_warning_headroom(self) -> None:
         manifest = {
             "watchdog": {
                 "protection": {"warning_available_bytes": 12 * 1024**3}
@@ -427,12 +452,12 @@ class RuntimeMatrixTests(unittest.TestCase):
             ),
             mock.patch.object(runtime_matrix.time, "sleep"),
         ):
-            result = runtime_matrix.require_post_load_warning_headroom(manifest)
+            result = runtime_matrix.observe_post_load_memory_headroom(manifest)
         self.assertTrue(result["passed"])
         self.assertEqual(result["minimum_available_bytes"], 12 * 1024**3)
         self.assertEqual(len(result["observed_available_bytes"]), 3)
 
-    def test_post_load_memory_rejects_below_warning_line(self) -> None:
+    def test_post_load_memory_records_below_warning_line(self) -> None:
         manifest = {
             "watchdog": {
                 "protection": {"warning_available_bytes": 12 * 1024**3}
@@ -445,12 +470,10 @@ class RuntimeMatrixTests(unittest.TestCase):
                 side_effect=[13 * 1024**3, 12 * 1024**3 - 1, 14 * 1024**3],
             ),
             mock.patch.object(runtime_matrix.time, "sleep"),
-            self.assertRaisesRegex(
-                runtime_matrix.RuntimeMatrixError,
-                "below the manifest warning line",
-            ),
         ):
-            runtime_matrix.require_post_load_warning_headroom(manifest)
+            result = runtime_matrix.observe_post_load_memory_headroom(manifest)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["minimum_available_bytes"], 12 * 1024**3 - 1)
 
     def test_complete_matrix_is_capacity_safe_for_sixteen(self) -> None:
         manifest = {
@@ -472,7 +495,7 @@ class RuntimeMatrixTests(unittest.TestCase):
 
     def test_runtime_manifest_path_is_a_valid_runtime_argument(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            manifest_path = pathlib.Path(directory) / "release.json"
+            manifest_path = pathlib.Path(directory) / "runtime-execution.json"
             manifest_path.write_text(
                 json.dumps({"release": "example-model-example-engine-r1"}),
                 encoding="utf-8",
@@ -519,7 +542,7 @@ class RuntimeMatrixTests(unittest.TestCase):
 
     def test_installed_runtime_name_resolves_to_exact_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            manifest_path = pathlib.Path(directory) / "release.json"
+            manifest_path = pathlib.Path(directory) / "runtime-execution.json"
             manifest_path.write_text("{}", encoding="utf-8")
             response = types.SimpleNamespace(
                 returncode=0,
@@ -626,9 +649,27 @@ class RuntimeMatrixTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             output = root / "evidence"
-            manifest_path = root / "release.json"
+            manifest_path = root / "runtime-execution.json"
+            runtime_config = root / "runtime.json"
             plan_path = root / "plan.json"
             manifest_path.write_text('{"release":"release-r1"}', encoding="utf-8")
+            runtime_matrix.common.write_json_atomic(
+                runtime_config,
+                {
+                    "id": "sglang--example--model--dgx-spark",
+                    "version": "1.2.3",
+                    "model": {"uri": "hf://example/model", "artifact": "model"},
+                    "artifacts": [
+                        {"name": "model", "revision": "4" * 40}
+                    ],
+                    "engine": {
+                        "oci": {
+                            "reference": "ghcr.io/example/engine@sha256:" + "5" * 64
+                        }
+                    },
+                    "target": {"id": "dgx-spark"},
+                },
+            )
             plan_path.write_text("{}", encoding="utf-8")
             arguments = types.SimpleNamespace(
                 output_directory=output,
@@ -649,6 +690,7 @@ class RuntimeMatrixTests(unittest.TestCase):
                 installation_id="1" * 64,
                 benchmark_timestamp_unix_ns=1_800_000_000_123_456_789,
                 benchmark_contract_sha256="2" * 64,
+                runtime_config=runtime_config,
                 watchdog_port=9768,
                 watchdog_ca_file=root / "controller-ca.crt",
                 watchdog_controller_cert_file=root / "local-controller.crt",

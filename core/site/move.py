@@ -32,6 +32,7 @@ from .state import (
     member_public_key_path,
     pending_installation_path,
     read_identity,
+    secrets_root,
     existing_member_identity,
     _private_file,
 )
@@ -256,9 +257,11 @@ class LocalMoveTransaction:
             raise SiteError("only a coordinator can move its machine into another site")
         self.source = source
         self.config = config_root()
+        self.secrets = secrets_root()
         self.data = data_root()
         token = uuid.uuid4().hex
         self.config_backup = self.config.parent / f".{self.config.name}.site-move-{token}"
+        self.secrets_backup = self.secrets.parent / f".{self.secrets.name}.site-move-{token}"
         self.data_backup = self.data / f".site-move-{token}"
         self.committed = False
         self.started = False
@@ -266,18 +269,31 @@ class LocalMoveTransaction:
     def __enter__(self) -> "LocalMoveTransaction":
         if self.config.is_symlink() or not self.config.is_dir():
             raise SiteError("site configuration root is unsafe")
-        if self.config_backup.exists() or self.data_backup.exists():
+        if self.secrets.is_symlink() or not self.secrets.is_dir():
+            raise SiteError("site secrets root is unsafe")
+        if (
+            self.config_backup.exists()
+            or self.secrets_backup.exists()
+            or self.data_backup.exists()
+        ):
             raise SiteError("site move staging path already exists")
         member_key = _private_file(member_key_path(), minimum_bytes=128)
         member_public = _private_file(member_public_key_path(), minimum_bytes=128)
         self.config.rename(self.config_backup)
         try:
+            self.secrets.rename(self.secrets_backup)
             self.config.mkdir(mode=0o700)
-            for name, payload in (
-                ("member.key", member_key),
-                ("member.pub", member_public),
-                ("member-id", (self.source.member_id + "\n").encode("ascii")),
+            self.secrets.mkdir(mode=0o700)
+            for root, name, payload in (
+                (self.secrets, "member.key", member_key),
+                (self.config, "member.pub", member_public),
                 (
+                    self.config,
+                    "member-id",
+                    (self.source.member_id + "\n").encode("ascii"),
+                ),
+                (
+                    self.config,
                     pending_installation_path().name,
                     (
                         json.dumps(
@@ -292,7 +308,7 @@ class LocalMoveTransaction:
                     ).encode("ascii"),
                 ),
             ):
-                destination = self.config / name
+                destination = root / name
                 destination.write_bytes(payload)
                 destination.chmod(0o600)
             self.data.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -330,6 +346,7 @@ class LocalMoveTransaction:
             raise SiteError("site move changed the physical installation identity")
         self.committed = True
         shutil.rmtree(self.config_backup)
+        shutil.rmtree(self.secrets_backup)
         shutil.rmtree(self.data_backup)
         return replacement
 
@@ -338,6 +355,10 @@ class LocalMoveTransaction:
             if self.config.exists():
                 shutil.rmtree(self.config)
             self.config_backup.rename(self.config)
+        if self.secrets_backup.exists():
+            if self.secrets.exists():
+                shutil.rmtree(self.secrets)
+            self.secrets_backup.rename(self.secrets)
         if self.data_backup.exists():
             for relative in self._DATA_NAMES:
                 current = self.data / relative

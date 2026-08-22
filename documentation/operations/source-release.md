@@ -75,7 +75,7 @@ SHA256SUMS.sig
 install.sh
 ```
 
-Stable users install through the website's reviewed bootstrap, which then
+Install stable releases through the website's reviewed bootstrap. It then
 fetches signed immutable GitHub Release assets:
 
 ```bash
@@ -89,10 +89,10 @@ curl -fsSL https://letsinfer.ai/install.sh \
   | sh -s -- --version 0.11.0-rc.32
 ```
 
-`install.sh` supports Linux and macOS on x86_64 and arm64. The default system
-layout is `/opt/letsinfer` plus `/usr/local/bin` launchers and it runs
-`letsinfer setup`; `--user`, `--prefix`, and `--no-setup` provide explicit
-alternatives. `--no-progress` lets the `letsinfer update` command own its
+`install.sh` supports Linux and macOS on x86_64 and arm64. Immutable core files
+live under `$LETSINFER_HOME/core`; the default creates `/usr/local/bin`
+launchers and runs `letsinfer setup`. `--user`, `--prefix`, and `--no-setup`
+provide explicit alternatives. `--no-progress` lets `letsinfer update` own its
 three-stage TTY display; a direct curl install retains the single percentage
 indicator. The website build emits the reviewed core installer byte for
 byte rather than maintaining another implementation.

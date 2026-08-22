@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 from tools.install_core import CoreInstallError, install
+from tests.runtime_fixture import runtime_candidate
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -27,15 +28,18 @@ class CoreInstallTests(unittest.TestCase):
     def test_install_is_immutable_idempotent_and_exposes_cli(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             prefix = pathlib.Path(temporary) / "prefix"
+            home = prefix / "share/letsinfer"
+            launchers = prefix / "bin"
             self.addCleanup(self._restore_directory_modes, prefix)
-            first = install(REPOSITORY_ROOT, prefix)
-            second = install(REPOSITORY_ROOT, prefix)
+            first = install(REPOSITORY_ROOT, home, launcher_root=launchers)
+            second = install(REPOSITORY_ROOT, home, launcher_root=launchers)
             self.assertEqual(first, second)
             source = pathlib.Path(first["source_root"])
-            self.assertTrue((prefix / "bin/letsinfer").is_symlink())
-            self.assertEqual((prefix / "bin/letsinfer").resolve(), source / "bin/letsinfer")
+            self.assertTrue((launchers / "letsinfer").is_symlink())
+            self.assertEqual((launchers / "letsinfer").resolve(), source / "bin/letsinfer")
+            self.assertEqual((home / "core/current").resolve(), source)
             completed = subprocess.run(
-                [str(prefix / "bin/letsinfer"), "--help"],
+                [str(launchers / "letsinfer"), "--help"],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -63,35 +67,27 @@ class CoreInstallTests(unittest.TestCase):
             launcher = prefix / "bin/letsinfer"
             launcher.parent.mkdir(parents=True)
             launcher.write_text("user file\n", encoding="utf-8")
-            with self.assertRaisesRegex(CoreInstallError, "non-symlink launcher"):
-                install(REPOSITORY_ROOT, prefix)
+            with self.assertRaisesRegex(CoreInstallError, "non-symlink"):
+                install(
+                    REPOSITORY_ROOT,
+                    prefix / "share/letsinfer",
+                    launcher_root=prefix / "bin",
+                )
             self.assertEqual(launcher.read_text(encoding="utf-8"), "user file\n")
 
     def test_installed_cli_preserves_the_callers_working_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             prefix = root / "prefix"
+            home = prefix / "share/letsinfer"
             self.addCleanup(self._restore_directory_modes, prefix)
-            install(REPOSITORY_ROOT, prefix)
+            install(REPOSITORY_ROOT, home, launcher_root=prefix / "bin")
             runtime = root / "work" / "runtime"
             runtime.mkdir(parents=True)
             (runtime / "runtime.json").write_text(
-                json.dumps(
-                    {
-                        "schema_version": 2,
-                        "name": "fixture/engine/target",
-                        "version": "1.0.0",
-                        "model": "fixture",
-                        "engine": "engine",
-                        "target": "target",
-                        "status": "candidate",
-                        "release_manifest": "release.json",
-                        "core_compatibility": {"api": 2},
-                    }
-                ),
+                json.dumps(runtime_candidate()),
                 encoding="utf-8",
             )
-            (runtime / "release.json").write_text("{}\n", encoding="utf-8")
             output = root / "runtime.letsinfer"
 
             completed = subprocess.run(
@@ -102,8 +98,7 @@ class CoreInstallTests(unittest.TestCase):
                 text=True,
                 env={
                     **os.environ,
-                    "LETSINFER_CONFIG_HOME": str(root / "config"),
-                    "LETSINFER_DATA_HOME": str(root / "data"),
+                    "LETSINFER_HOME": str(root / "home"),
                 },
             )
 

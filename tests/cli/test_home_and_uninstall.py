@@ -8,7 +8,6 @@ import io
 import json
 import os
 import pathlib
-import shutil
 import stat
 import tempfile
 import unittest
@@ -18,6 +17,7 @@ from core import benchmark_jobs
 from core import cli
 from core import paths
 from tools.uninstall_core import CoreUninstallError, remove
+from tests.runtime_fixture import runtime_candidate
 
 
 class HomeContractTests(unittest.TestCase):
@@ -131,33 +131,21 @@ class ManagedHomeRemovalTests(unittest.TestCase):
 
 class RuntimeImageRemovalTests(unittest.TestCase):
     def test_collects_only_images_from_validated_runtime_objects(self) -> None:
-        fixture = (
-            pathlib.Path(__file__).parents[1]
-            / "fixtures/manifests/sglang.json"
-        )
-        manifest = json.loads(fixture.read_text(encoding="utf-8"))
+        runtime = runtime_candidate()
         with tempfile.TemporaryDirectory() as temporary:
             home = pathlib.Path(temporary) / "home"
-            valid = home / "runtimes/objects/valid"
+            valid = home / "runtimes/.objects/valid"
             valid.mkdir(parents=True)
             (valid / "runtime.json").write_text(
-                json.dumps({"release_manifest": "release.json"}),
+                json.dumps(runtime),
                 encoding="utf-8",
             )
-            shutil.copy2(fixture, valid / "release.json")
-            corrupt = home / "runtimes/objects/corrupt"
+            corrupt = home / "runtimes/.objects/corrupt"
             corrupt.mkdir()
             (corrupt / "runtime.json").write_text(
-                json.dumps({"release_manifest": "release.json"}),
-                encoding="utf-8",
-            )
-            (corrupt / "release.json").write_text(
                 json.dumps(
                     {
-                        "image": {
-                            "reference": "unrelated:latest",
-                            "immutable_id": "sha256:" + "f" * 64,
-                        }
+                        "engine": {"oci": {"reference": "unrelated:latest"}}
                     }
                 ),
                 encoding="utf-8",
@@ -165,9 +153,9 @@ class RuntimeImageRemovalTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"LETSINFER_HOME": str(home)}):
                 references = cli._installed_runtime_image_references()
 
-        self.assertIn(manifest["image"]["reference"], references)
-        self.assertIn(manifest["image"]["immutable_id"], references)
-        self.assertIn(manifest["model"]["acquisition_image"], references)
+        self.assertIn(runtime["engine"]["oci"]["reference"], references)
+        self.assertIn(runtime["engine"]["oci"]["immutable_id"], references)
+        self.assertIn(runtime["model"]["acquisition"]["image"], references)
         self.assertNotIn("unrelated:latest", references)
 
 
@@ -235,7 +223,8 @@ class CoreRemovalTests(unittest.TestCase):
             root = pathlib.Path(temporary)
             operator = root / "operator"
             prefix = operator / ".local"
-            source = prefix / "lib/letsinfer/1.0.0/identity"
+            home = prefix / "share/letsinfer"
+            source = home / "core/versions/1.0.0/identity"
             source.mkdir(parents=True)
             (source / "SOURCE-MANIFEST.json").write_text(
                 json.dumps({"product": "letsinfer"}), encoding="utf-8"
@@ -243,21 +232,23 @@ class CoreRemovalTests(unittest.TestCase):
             launcher = prefix / "bin/letsinfer"
             launcher.parent.mkdir(parents=True)
             launcher.symlink_to(source / "bin/letsinfer")
+            (home / "core/current").symlink_to(source)
             unrelated = prefix / "lib/unrelated"
             unrelated.mkdir(parents=True)
 
             result = remove(
                 source,
                 launcher_directory=prefix / "bin",
-                operator_home=operator,
+                letsinfer_home=home,
             )
 
             self.assertFalse((prefix / "lib/letsinfer").exists())
+            self.assertFalse((home / "core").exists())
             self.assertFalse(launcher.exists())
             self.assertTrue(unrelated.is_dir())
             self.assertEqual(
                 pathlib.Path(result["removed_store"]),
-                (prefix / "lib/letsinfer").resolve(strict=False),
+                (home / "core").resolve(strict=False),
             )
 
     def test_refuses_a_source_checkout(self) -> None:
@@ -267,7 +258,7 @@ class CoreRemovalTests(unittest.TestCase):
                 remove(
                     root,
                     launcher_directory=root / "bin",
-                    operator_home=root,
+                    letsinfer_home=root / "home",
                 )
 
 

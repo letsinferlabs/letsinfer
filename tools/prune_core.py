@@ -41,7 +41,7 @@ def _manifest_identity(root: pathlib.Path) -> str:
 def plan(
     active_source: pathlib.Path,
     *,
-    operator_home: pathlib.Path,
+    letsinfer_home: pathlib.Path,
 ) -> dict[str, Any]:
     supplied_source = active_source.expanduser()
     if supplied_source.is_symlink():
@@ -52,17 +52,18 @@ def plan(
     if len(active_source.parents) < 4:
         raise CorePruneError("active core source is outside the versioned layout")
     version_root = active_source.parent
-    product_root = version_root.parent
-    library_root = product_root.parent
-    prefix = library_root.parent
-    if product_root.name != "letsinfer" or library_root.name != "lib":
+    versions_root = version_root.parent
+    core_root = versions_root.parent
+    expected_home = letsinfer_home.expanduser().resolve(strict=True)
+    if (
+        versions_root.name != "versions"
+        or core_root.name != "core"
+        or core_root.parent != expected_home
+    ):
         raise CorePruneError("active core source is outside the versioned layout")
-    allowed_prefixes = {
-        pathlib.Path("/opt/letsinfer"),
-        operator_home.expanduser().resolve(strict=False) / ".local",
-    }
-    if prefix not in allowed_prefixes:
-        raise CorePruneError(f"unsupported core install prefix: {prefix}")
+    current = core_root / "current"
+    if not current.is_symlink() or current.resolve(strict=True) != active_source:
+        raise CorePruneError("active core does not match LETSINFER_HOME/core/current")
     if not VERSION_RE.fullmatch(version_root.name):
         raise CorePruneError("active core version directory is invalid")
     active_identity = _manifest_identity(active_source)
@@ -70,7 +71,7 @@ def plan(
         raise CorePruneError("active core directory does not match its manifest identity")
 
     remove: list[pathlib.Path] = []
-    for candidate_version in sorted(product_root.iterdir()):
+    for candidate_version in sorted(versions_root.iterdir()):
         if candidate_version.is_symlink() or not candidate_version.is_dir():
             raise CorePruneError(
                 f"core version entry is not a regular directory: {candidate_version}"
@@ -94,7 +95,7 @@ def plan(
     return {
         "schema_version": 1,
         "active_source": str(active_source),
-        "product_root": str(product_root),
+        "versions_root": str(versions_root),
         "remove": [str(path) for path in remove],
     }
 
@@ -115,10 +116,10 @@ def _remove_readonly_tree(root: pathlib.Path) -> None:
 def prune(
     active_source: pathlib.Path,
     *,
-    operator_home: pathlib.Path,
+    letsinfer_home: pathlib.Path,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    result = plan(active_source, operator_home=operator_home)
+    result = plan(active_source, letsinfer_home=letsinfer_home)
     if dry_run:
         return {**result, "dry_run": True, "removed": []}
     removed: list[str] = []
@@ -126,15 +127,15 @@ def prune(
         path = pathlib.Path(value)
         _remove_readonly_tree(path)
         removed.append(value)
-    product_root = pathlib.Path(result["product_root"])
+    versions_root = pathlib.Path(result["versions_root"])
     active_version = pathlib.Path(result["active_source"]).parent
-    for version in sorted(product_root.iterdir()):
+    for version in sorted(versions_root.iterdir()):
         if version != active_version:
             try:
                 version.rmdir()
             except OSError:
                 pass
-    descriptor = os.open(product_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    descriptor = os.open(versions_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
     finally:
@@ -145,14 +146,14 @@ def prune(
 def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="prune superseded Let's Infer cores")
     parser.add_argument("--active-source", type=pathlib.Path, required=True)
-    parser.add_argument("--operator-home", type=pathlib.Path, required=True)
+    parser.add_argument("--letsinfer-home", type=pathlib.Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parsed = parser.parse_args(arguments)
     try:
         result = prune(
             parsed.active_source,
-            operator_home=parsed.operator_home,
+            letsinfer_home=parsed.letsinfer_home,
             dry_run=parsed.dry_run,
         )
     except CorePruneError as error:
