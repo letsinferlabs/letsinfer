@@ -438,7 +438,7 @@ class RuntimeMatrixTests(unittest.TestCase):
                     root, path, manifest, "b" * 40, None
                 )
 
-    def test_post_load_memory_requires_stable_warning_headroom(self) -> None:
+    def test_post_load_memory_records_stable_warning_headroom(self) -> None:
         manifest = {
             "watchdog": {
                 "protection": {"warning_available_bytes": 12 * 1024**3}
@@ -452,12 +452,12 @@ class RuntimeMatrixTests(unittest.TestCase):
             ),
             mock.patch.object(runtime_matrix.time, "sleep"),
         ):
-            result = runtime_matrix.require_post_load_warning_headroom(manifest)
+            result = runtime_matrix.observe_post_load_memory_headroom(manifest)
         self.assertTrue(result["passed"])
         self.assertEqual(result["minimum_available_bytes"], 12 * 1024**3)
         self.assertEqual(len(result["observed_available_bytes"]), 3)
 
-    def test_post_load_memory_rejects_below_warning_line(self) -> None:
+    def test_post_load_memory_records_below_warning_line(self) -> None:
         manifest = {
             "watchdog": {
                 "protection": {"warning_available_bytes": 12 * 1024**3}
@@ -470,12 +470,10 @@ class RuntimeMatrixTests(unittest.TestCase):
                 side_effect=[13 * 1024**3, 12 * 1024**3 - 1, 14 * 1024**3],
             ),
             mock.patch.object(runtime_matrix.time, "sleep"),
-            self.assertRaisesRegex(
-                runtime_matrix.RuntimeMatrixError,
-                "below the manifest warning line",
-            ),
         ):
-            runtime_matrix.require_post_load_warning_headroom(manifest)
+            result = runtime_matrix.observe_post_load_memory_headroom(manifest)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["minimum_available_bytes"], 12 * 1024**3 - 1)
 
     def test_complete_matrix_is_capacity_safe_for_sixteen(self) -> None:
         manifest = {

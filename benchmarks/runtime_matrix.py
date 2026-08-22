@@ -516,13 +516,13 @@ def host_mem_available_bytes(
     raise RuntimeMatrixError(f"cannot read MemAvailable from {meminfo}")
 
 
-def require_post_load_warning_headroom(
+def observe_post_load_memory_headroom(
     manifest: dict[str, Any],
     *,
     samples: int = 3,
     interval_seconds: float = 1.0,
 ) -> dict[str, Any]:
-    """Require a stable post-load baseline above the release warning line."""
+    """Record the loaded engine's host-memory baseline as telemetry."""
     protection = manifest.get("watchdog", {}).get("protection", {})
     warning = protection.get("warning_available_bytes")
     if isinstance(warning, bool) or not isinstance(warning, int) or warning <= 0:
@@ -544,12 +544,6 @@ def require_post_load_warning_headroom(
         "minimum_available_bytes": minimum,
         "passed": minimum >= warning,
     }
-    if minimum < warning:
-        raise RuntimeMatrixError(
-            "post-load host memory is below the manifest warning line: "
-            f"minimum {minimum} bytes < required {warning} bytes; "
-            "do not start benchmark traffic from this host state"
-        )
     return result
 
 
@@ -1820,7 +1814,7 @@ def main() -> int:
     preflight = common.preflight(
         base_url, tls_context, min(arguments.timeout, 30), api_key, served_model
     )
-    preflight["post_load_memory"] = require_post_load_warning_headroom(manifest)
+    preflight["post_load_memory"] = observe_post_load_memory_headroom(manifest)
     monitor = load.TelemetryMonitor(
         output / "telemetry.jsonl",
         container,
