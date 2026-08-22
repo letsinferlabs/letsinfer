@@ -100,6 +100,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: production-release
     permissions:
+      artifact-metadata: write
       contents: write
       id-token: write
       attestations: write
@@ -177,7 +178,7 @@ jobs:
           rm -f "$key_path"
           trap - EXIT
       - name: Attest release assets
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             dist/letsinfer-linux-x86_64.tar.gz
