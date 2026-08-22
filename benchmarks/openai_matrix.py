@@ -62,7 +62,7 @@ def verify_letsinfer_release_sources(
         from core.cli import (  # pylint: disable=import-outside-toplevel
             LetsInferError,
             validate_manifest,
-            verify_release_sources,
+            verify_runtime_sources,
         )
     except ImportError as error:
         raise QualificationError(
@@ -70,7 +70,7 @@ def verify_letsinfer_release_sources(
         ) from error
     try:
         validate_manifest(manifest)
-        verify_release_sources(manifest, source_root)
+        verify_runtime_sources(manifest, source_root)
     except LetsInferError as error:
         raise QualificationError(f"Let's Infer release verification failed: {error}") from error
 
