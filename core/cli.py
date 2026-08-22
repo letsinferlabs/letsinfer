@@ -65,6 +65,7 @@ from .engine_protocol import (
     ENGINE_ADAPTER,
     ENGINE_PROTOCOL_VERSION,
     EngineManifestError,
+    SAFE_NAME_RE,
     adapter_for,
     artifact_storage_slug,
     cache_provider_for,

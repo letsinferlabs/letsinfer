@@ -1337,7 +1337,7 @@ def run_isolated_matrix(
                 protocol=arguments.token_count_protocol,
                 api_key=token_count_api_key,
                 tls_context=tls_context,
-                model_id=manifest["model"]["id"],
+                model_id=model_name,
                 timeout=arguments.timeout,
             )
             with benchmark_activity(
