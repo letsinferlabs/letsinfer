@@ -146,6 +146,29 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 ),
             )
 
+    def test_qualification_core_plane_uses_the_managed_engine_key(self) -> None:
+        with (
+            mock.patch.object(
+                cli,
+                "verify_active_core_watchdog",
+                return_value=(pathlib.Path("/watchdog"), "1" * 64),
+            ),
+            mock.patch.object(cli, "core_watchdog_source_identity", return_value="2" * 64),
+            mock.patch.object(
+                cli,
+                "ensure_installation_identity",
+                return_value={"installation_id": "3" * 64},
+            ),
+            mock.patch.object(
+                cli,
+                "default_engine_api_key_path",
+                return_value=pathlib.Path("/secrets/engine/api-key"),
+            ),
+        ):
+            config = cli._qualification_core_plane_config()
+
+        self.assertEqual(config["engine_api_key_file"], "/secrets/engine/api-key")
+
     def test_legacy_commands_are_not_registered(self) -> None:
         parser = cli.parser()
         for command in ("derive", "engines", "releases"):

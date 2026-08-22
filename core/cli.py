@@ -5052,6 +5052,7 @@ def _qualification_core_plane_config() -> dict[str, Any]:
     return {
         **gateway,
         "gateway_api_key_file": str(default_api_key_path()),
+        "engine_api_key_file": str(default_engine_api_key_path()),
         "tls_cert_file": str(default_tls_cert_path()),
         "tls_key_file": str(default_tls_key_path()),
         "watchdog_binary_path": str(watchdog_binary),
