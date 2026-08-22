@@ -47,6 +47,14 @@ artifacts by name. For GGUF, pin the exact filename and SHA-256.
 The runtime downloads every declared artifact. Do not require an operator to
 preinstall weights or invent a runtime-specific model cache.
 
+Create a root `README.md` that links the primary model—and every additional
+declared Hugging Face artifact—as
+`https://huggingface.co/<owner>/<repository>`, derived directly from each
+`hf://` URI. Put the primary model link near the top so you can inspect the
+checkpoint without decoding `runtime.json`. Keep the exact revision, filename,
+size, and checksum authority in `runtime.json`; a repository link never
+replaces an immutable pin.
+
 Use complete-token `${artifact:name}` references for additional artifacts.
 Core assigns no semantics to those names.
 
@@ -80,7 +88,9 @@ attention backend, cache format, or recipe.
 1. Validate runtime schema 3 and the generated root manifest.
 2. Run `engine-adapter verify --protocol 1` in the exact Engine OCI.
 3. Run every patch, kernel, model, and target-specific test.
-4. Verify every external image and model reference is immutable.
+4. Verify every external image and model reference is immutable and every
+   declared Hugging Face artifact has the matching repository link in the
+   candidate README.
 5. Run `letsinfer pack` twice and require byte-identical archives.
 6. Verify the OCI plan matches the exact candidate source digest.
 7. Import the candidate without activation and verify model, engine, target,
