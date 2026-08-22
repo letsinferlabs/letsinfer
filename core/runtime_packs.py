@@ -1713,9 +1713,22 @@ def write_selection(
     value["schema_version"] = SELECTION_SCHEMA_VERSION
     value["history"] = history[-1:]
     _validate_selection(value, "new receipt")
+    return _commit_selection(value, path, runtime_home, prune=home is None)
+
+
+def _commit_selection(
+    value: dict[str, Any],
+    path: pathlib.Path,
+    runtime_home: pathlib.Path,
+    *,
+    prune: bool,
+) -> pathlib.Path:
+    """Commit one already-validated receipt and its immutable candidate view."""
+
+    _validate_selection(value, "committed receipt")
     data = canonical_bytes(value)
     with tempfile.NamedTemporaryFile(
-        prefix=f".{path.name}.", dir=root, delete=False
+        prefix=f".{path.name}.", dir=path.parent, delete=False
     ) as handle:
         temporary = pathlib.Path(handle.name)
         handle.write(data)
@@ -1725,9 +1738,52 @@ def write_selection(
     temporary.replace(path)
     _private_directory(runtime_home)
     _publish_candidate_view(value, runtime_home)
-    if home is None:
+    if prune:
         _prune_runtime_objects(runtime_home)
     return path
+
+
+def restore_selection(
+    replacement: dict[str, Any],
+    previous: dict[str, Any] | None,
+    home: pathlib.Path | None = None,
+) -> None:
+    """Restore the exact prior receipt after a failed service activation."""
+
+    _validate_selection(replacement, "replacement receipt")
+    if previous is not None:
+        _validate_selection(previous, "previous receipt")
+        if previous["logical_model"] != replacement["logical_model"]:
+            raise RuntimePackError("runtime selection rollback model mismatch")
+    runtime_home = (home or default_runtime_home()).expanduser()
+    root = runtime_home / "selections" if home is not None else data_root() / "active"
+    path = root / f"{selection_key(replacement['logical_model'])}.json"
+    if not path.is_file() or path.is_symlink():
+        if previous is None and not path.exists():
+            return
+        raise RuntimePackError("runtime selection rollback receipt is unavailable")
+    current = _read_object(path, "runtime selection")
+    _validate_selection(current, str(path))
+    if previous is not None and current["digest"] == previous["digest"]:
+        return
+    if current["digest"] != replacement["digest"]:
+        raise RuntimePackError("runtime selection changed during activation rollback")
+    if previous is not None:
+        _commit_selection(previous, path, runtime_home, prune=home is None)
+        return
+
+    candidate = runtime_home / replacement["candidate_id"]
+    if candidate.exists():
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise RuntimePackError("runtime candidate rollback path is unsafe")
+        installed = verify_descriptor(candidate)
+        if installed.digest != replacement["digest"]:
+            raise RuntimePackError("runtime candidate changed during activation rollback")
+    path.unlink()
+    if candidate.exists():
+        shutil.rmtree(candidate)
+    if home is None:
+        _prune_runtime_objects(runtime_home)
 
 
 def new_receipt(
