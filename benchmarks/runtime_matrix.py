@@ -348,7 +348,8 @@ def load_benchmark_contract(
     path: pathlib.Path, manifest: dict[str, Any]
 ) -> dict[str, Any]:
     runtime = common.read_json_object(path, "runtime config")
-    contract = runtime.get("benchmark")
+    benchmark = runtime.get("benchmark")
+    contract = benchmark.get("contract") if isinstance(benchmark, dict) else None
     try:
         prompt_generator.validate_benchmark_contract(contract)
     except ValueError as error:

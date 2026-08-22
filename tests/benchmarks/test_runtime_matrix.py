@@ -31,6 +31,37 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
+    def test_runtime_config_uses_the_nested_benchmark_contract(self) -> None:
+        contract = {
+            "tokenizer": {
+                "model_sha256": "1" * 64,
+                "engine_image_sha256": "2" * 64,
+            },
+            "cases": [
+                {"id": context, "concurrencies": list(runtime_matrix.CONCURRENCIES)}
+                for context in runtime_matrix.CONTEXTS
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "runtime.json"
+            path.write_text(
+                json.dumps({"benchmark": {"contract": contract, "record": None}}),
+                encoding="ascii",
+            )
+            with (
+                mock.patch.object(
+                    runtime_matrix.prompt_generator, "validate_benchmark_contract"
+                ),
+                mock.patch.object(
+                    runtime_matrix, "benchmark_model_sha256", return_value="1" * 64
+                ),
+            ):
+                loaded = runtime_matrix.load_benchmark_contract(
+                    path, {"image": {"immutable_id": "sha256:" + "2" * 64}}
+                )
+
+        self.assertEqual(loaded, contract)
+
     def test_progress_records_completed_current_and_future_workloads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "progress.json"
