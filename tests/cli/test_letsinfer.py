@@ -18,6 +18,110 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_service_commits_runtime_selection_before_engine_start(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            events: list[str] = []
+            config = {
+                "name": "letsinfer-example",
+                "source_root": str(root),
+                "protection_root": str(root / "protection"),
+            }
+            manifest = {"container": {"startup_timeout_seconds": 30}}
+            receipt = {"logical_model": "example-model"}
+            completed = mock.Mock(returncode=0, stdout="", stderr="")
+
+            def start(command: list[str]) -> None:
+                if command[-1] == cli.ENGINE_SERVICE_NAME:
+                    self.assertIn("selection", events)
+                events.append(command[-1])
+
+            with (
+                mock.patch.object(
+                    cli, "_unit_enabled_active", return_value=("disabled", "inactive")
+                ),
+                mock.patch.object(cli, "selections", return_value=[]),
+                mock.patch.object(
+                    cli, "write_selection", side_effect=lambda _receipt: events.append("selection")
+                ),
+                mock.patch.object(cli, "run", return_value=completed),
+                mock.patch.object(cli, "run_passthrough", side_effect=start),
+                mock.patch.object(
+                    cli, "_service_state", return_value=("enabled", "active", 1024)
+                ),
+                mock.patch.object(cli, "render_engine_service", return_value="unit\n"),
+                mock.patch.object(cli, "render_gateway_service", return_value="unit\n"),
+                mock.patch.object(cli, "render_user_service", return_value="unit\n"),
+                mock.patch.object(cli, "render_site_service", return_value="unit\n"),
+                mock.patch.object(cli, "render_recovery_service", return_value="unit\n"),
+                mock.patch.object(cli, "render_recovery_timer", return_value="unit\n"),
+            ):
+                cli.install_user_service(
+                    root / "service.json",
+                    config,
+                    manifest,
+                    no_start=False,
+                    runtime_receipt=receipt,
+                    unit_dir=root / "units",
+                )
+
+            self.assertLess(events.index("selection"), events.index(cli.ENGINE_SERVICE_NAME))
+
+    def test_failed_service_activation_restores_runtime_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            events: list[str] = []
+            config = {
+                "name": "letsinfer-example",
+                "source_root": str(root),
+                "protection_root": str(root / "protection"),
+            }
+            manifest = {"container": {"startup_timeout_seconds": 30}}
+            receipt = {"logical_model": "example-model"}
+            completed = mock.Mock(returncode=0, stdout="", stderr="")
+
+            def start(command: list[str]) -> None:
+                if command[-1] == cli.ENGINE_SERVICE_NAME:
+                    raise cli.LetsInferError("synthetic engine failure")
+
+            with (
+                mock.patch.object(
+                    cli, "_unit_enabled_active", return_value=("disabled", "inactive")
+                ),
+                mock.patch.object(cli, "selections", return_value=[]),
+                mock.patch.object(
+                    cli, "write_selection", side_effect=lambda _receipt: events.append("selection")
+                ),
+                mock.patch.object(
+                    cli,
+                    "restore_selection",
+                    side_effect=lambda _replacement, _previous: events.append("restore"),
+                ),
+                mock.patch.object(cli, "run", return_value=completed),
+                mock.patch.object(cli, "run_passthrough", side_effect=start),
+                mock.patch.object(
+                    cli, "_service_state", return_value=("enabled", "active", 1024)
+                ),
+                mock.patch.object(cli, "container_inspect", return_value=None),
+                mock.patch.object(cli, "render_engine_service", return_value="unit\n"),
+                mock.patch.object(cli, "render_gateway_service", return_value="unit\n"),
+                mock.patch.object(cli, "render_user_service", return_value="unit\n"),
+                mock.patch.object(cli, "render_site_service", return_value="unit\n"),
+                mock.patch.object(cli, "render_recovery_service", return_value="unit\n"),
+                mock.patch.object(cli, "render_recovery_timer", return_value="unit\n"),
+                self.assertRaisesRegex(cli.LetsInferError, "previous installation restored"),
+            ):
+                cli.install_user_service(
+                    root / "service.json",
+                    config,
+                    manifest,
+                    no_start=False,
+                    runtime_receipt=receipt,
+                    unit_dir=root / "units",
+                )
+
+            self.assertEqual(events, ["selection", "restore"])
+
     def test_tls_generation_supports_split_config_and_secret_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

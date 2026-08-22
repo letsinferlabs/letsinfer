@@ -686,6 +686,84 @@ class RuntimePackTests(unittest.TestCase):
             self.assertEqual(selected["digest"], "2" * 64)
             self.assertEqual(selected["history"][-1]["digest"], "1" * 64)
 
+    def test_failed_activation_restores_exact_previous_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = pathlib.Path(directory)
+            installed_at_ns = 1_786_900_000_000_000_000
+            hardware_sha = "3" * 64
+            previous = {
+                "schema_version": runtime_packs.SELECTION_SCHEMA_VERSION,
+                "candidate_id": "example-engine--example--model--fixture-unified",
+                "logical_model": "example-model",
+                "engine": "example-engine",
+                "target": "fixture-unified",
+                "target_contract_sha256": "4" * 64,
+                "version": "1.0.0",
+                "digest": "1" * 64,
+                "object_root": "/objects/one",
+                "manifest_path": "/objects/one/runtime.json",
+                "control_root": "/control/one",
+                "installed_at": "2026-08-13T00:00:00-04:00",
+                "installed_at_unix_ns": installed_at_ns,
+                "hardware_fingerprint_sha256": hardware_sha,
+                "installation_id": runtime_packs.installation_identity(
+                    hardware_sha, "1" * 64, installed_at_ns
+                ),
+                "policy": "recommended",
+                "source": "registry/one@sha256:" + "1" * 64,
+                "history": [],
+            }
+            replacement = {
+                **previous,
+                "version": "2.0.0",
+                "digest": "2" * 64,
+                "object_root": "/objects/two",
+                "manifest_path": "/objects/two/runtime.json",
+                "control_root": "/control/two",
+                "source": "registry/two@sha256:" + "2" * 64,
+                "installation_id": runtime_packs.installation_identity(
+                    hardware_sha, "2" * 64, installed_at_ns
+                ),
+            }
+            with mock.patch.object(runtime_packs, "_publish_candidate_view"):
+                runtime_packs.write_selection(previous, home)
+                exact_previous = runtime_packs.selections(home)[0]
+                runtime_packs.write_selection(replacement, home)
+                runtime_packs.restore_selection(replacement, exact_previous, home)
+            self.assertEqual(runtime_packs.selections(home), [exact_previous])
+
+    def test_failed_first_activation_removes_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = pathlib.Path(directory)
+            installed_at_ns = 1_786_900_000_000_000_000
+            hardware_sha = "3" * 64
+            replacement = {
+                "schema_version": runtime_packs.SELECTION_SCHEMA_VERSION,
+                "candidate_id": "example-engine--example--model--fixture-unified",
+                "logical_model": "example-model",
+                "engine": "example-engine",
+                "target": "fixture-unified",
+                "target_contract_sha256": "4" * 64,
+                "version": "1.0.0",
+                "digest": "1" * 64,
+                "object_root": "/objects/one",
+                "manifest_path": "/objects/one/runtime.json",
+                "control_root": "/control/one",
+                "installed_at": "2026-08-13T00:00:00-04:00",
+                "installed_at_unix_ns": installed_at_ns,
+                "hardware_fingerprint_sha256": hardware_sha,
+                "installation_id": runtime_packs.installation_identity(
+                    hardware_sha, "1" * 64, installed_at_ns
+                ),
+                "policy": "recommended",
+                "source": "registry/one@sha256:" + "1" * 64,
+                "history": [],
+            }
+            with mock.patch.object(runtime_packs, "_publish_candidate_view"):
+                runtime_packs.write_selection(replacement, home)
+            runtime_packs.restore_selection(replacement, None, home)
+            self.assertEqual(runtime_packs.selections(home), [])
+
     def test_installation_identity_binds_hardware_runtime_and_timestamp(self) -> None:
         first = runtime_packs.installation_identity("1" * 64, "2" * 64, 3)
         self.assertRegex(first, r"^[0-9a-f]{64}$")

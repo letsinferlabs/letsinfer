@@ -113,6 +113,7 @@ from .runtime_packs import (
     materialize,
     new_receipt,
     resolved_catalog_location,
+    restore_selection,
     selections,
     store_pack,
     target_matches,
@@ -6347,6 +6348,7 @@ def install_user_service(
     manifest: dict[str, Any],
     *,
     no_start: bool,
+    runtime_receipt: dict[str, Any] | None = None,
     unit_dir: pathlib.Path | None = None,
 ) -> None:
     unit_root = unit_dir or pathlib.Path.home() / ".config/systemd/user"
@@ -6375,6 +6377,19 @@ def install_user_service(
         RECOVERY_TIMER_NAME,
     )
     previous_states = {name: _unit_enabled_active(name) for name in state_names}
+    previous_runtime_receipt: dict[str, Any] | None = None
+    if runtime_receipt is not None:
+        try:
+            previous_runtime_receipt = next(
+                (
+                    receipt
+                    for receipt in selections()
+                    if receipt["logical_model"] == runtime_receipt["logical_model"]
+                ),
+                None,
+            )
+        except RuntimePackError as error:
+            raise LetsInferError(str(error)) from error
     safe_enablement_states = {"enabled", "disabled", "not-found"}
     for name in (
         SERVICE_NAME, SITE_SERVICE_NAME, GATEWAY_SERVICE_NAME, RECOVERY_TIMER_NAME
@@ -6401,6 +6416,7 @@ def install_user_service(
         )
 
     replacement_loaded = False
+    selection_attempted = False
     try:
         if previous_states[RECOVERY_TIMER_NAME][1] == "active":
             run_passthrough(["systemctl", "--user", "stop", RECOVERY_TIMER_NAME])
@@ -6465,6 +6481,12 @@ def install_user_service(
         run(["systemctl", "--user", "enable", SITE_SERVICE_NAME])
         run(["systemctl", "--user", "enable", GATEWAY_SERVICE_NAME])
         run(["systemctl", "--user", "enable", RECOVERY_TIMER_NAME])
+        if runtime_receipt is not None:
+            selection_attempted = True
+            try:
+                write_selection(runtime_receipt)
+            except RuntimePackError as error:
+                raise LetsInferError(str(error)) from error
         if not no_start:
             run_passthrough(["systemctl", "--user", "start", SITE_SERVICE_NAME])
             _, _, site_memory_bytes = _service_state(SITE_SERVICE_NAME)
@@ -6527,6 +6549,11 @@ def install_user_service(
                 "service activation failed and rollback could not safely stop "
                 "the replacement runtime: " + "; ".join(rollback_errors)
             ) from failure
+        if selection_attempted and runtime_receipt is not None:
+            try:
+                restore_selection(runtime_receipt, previous_runtime_receipt)
+            except RuntimePackError as error:
+                rollback_errors.append(f"restore runtime selection: {error}")
         for path in managed_paths:
             try:
                 _restore_user_file(path, snapshots[path])
@@ -8065,6 +8092,9 @@ def install(arguments: argparse.Namespace) -> int:
     config["watchdog_public_state_file"] = str(
         write_watchdog_public_state(config, manifest)
     )
+    if prepared_receipt is not None:
+        prepared_receipt["manifest_path"] = str(installed_manifest_path)
+        prepared_receipt["control_root"] = str(control_root)
     if arguments.no_service:
         active = run(
             ["systemctl", "--user", "is-active", SERVICE_NAME], check=False
@@ -8082,12 +8112,11 @@ def install(arguments: argparse.Namespace) -> int:
             config,
             manifest,
             no_start=arguments.no_start,
+            runtime_receipt=prepared_receipt,
         )
         if arguments.no_start:
             update_service_placement(config, manifest, "stopped")
-    if prepared_receipt is not None:
-        prepared_receipt["manifest_path"] = str(installed_manifest_path)
-        prepared_receipt["control_root"] = str(control_root)
+    if prepared_receipt is not None and arguments.no_service:
         try:
             write_selection(prepared_receipt)
         except RuntimePackError as error:
