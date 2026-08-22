@@ -55,6 +55,14 @@ checkpoint without decoding `runtime.json`. Keep the exact revision, filename,
 size, and checksum authority in `runtime.json`; a repository link never
 replaces an immutable pin.
 
+Add a `## Reproduce this` section with the exact `letsinfer benchmark
+<logical-model>` command and selectors that reproduce the published
+`benchmark.json`. Use the friendly logical model name, explain that Let's Infer
+materializes the standard prompts and collects Watchdog telemetry, and never
+claim selectors or rows that are absent from the sealed record. For an
+unqualified candidate, label the command as the planned qualification run
+rather than implying that evidence already exists.
+
 Use complete-token `${artifact:name}` references for additional artifacts.
 Core assigns no semantics to those names.
 
@@ -88,9 +96,10 @@ attention backend, cache format, or recipe.
 1. Validate runtime schema 3 and the generated root manifest.
 2. Run `engine-adapter verify --protocol 1` in the exact Engine OCI.
 3. Run every patch, kernel, model, and target-specific test.
-4. Verify every external image and model reference is immutable and every
-   declared Hugging Face artifact has the matching repository link in the
-   candidate README.
+4. Verify every external image and model reference is immutable and the
+   candidate README contains every declared Hugging Face artifact link plus an
+   exact reproduction command matching its qualification state and benchmark
+   record.
 5. Run `letsinfer pack` twice and require byte-identical archives.
 6. Verify the OCI plan matches the exact candidate source digest.
 7. Import the candidate without activation and verify model, engine, target,
