@@ -20,6 +20,9 @@ struct ControllerOneTimeSecret: Identifiable, Equatable, Sendable {
 
 @MainActor
 final class SiteMonitoringController: ObservableObject {
+    static let presentationHistorySeconds: TimeInterval = 30 * 60
+    static let maximumPresentationPoints = 1_801
+
     @Published private(set) var snapshots: [SavedSite.ID: SiteSnapshot] = [:]
     @Published private(set) var errors: [SavedSite.ID: String] = [:]
     @Published private(set) var history: [SavedSite.ID: [MetricHistoryPoint]] = [:]
@@ -34,7 +37,6 @@ final class SiteMonitoringController: ObservableObject {
     private let dataSource: any SiteDataSource
     private let controllerAPI: any ControllerSiteAPI
     private let pollInterval: Duration
-    private let historyWindow: TimeInterval = 24 * 60 * 60
     private var monitoringTasks: [SavedSite.ID: Task<Void, Never>] = [:]
     private var monitoredConfiguration: String?
 
@@ -87,7 +89,7 @@ final class SiteMonitoringController: ObservableObject {
     }
 
     private func monitorMember(_ site: SavedSite) async {
-        let since = Date().addingTimeInterval(-historyWindow)
+        let since = Date().addingTimeInterval(-Self.presentationHistorySeconds)
         if let historical = try? await dataSource.fetchHistory(for: site, since: since) {
             applyHistory(historical, for: site.id)
         }
@@ -505,18 +507,18 @@ final class SiteMonitoringController: ObservableObject {
     private func record(_ snapshot: SiteSnapshot) {
         let point = historyPoint(from: snapshot)
         var points = history[snapshot.siteID, default: []]
-        points.removeAll { abs($0.timestamp.timeIntervalSince(point.timestamp)) < 0.001 }
-        points.append(point)
-        let cutoff = snapshot.sampledAt.addingTimeInterval(-historyWindow)
-        points.removeAll { $0.timestamp < cutoff }
-        points.sort { $0.timestamp < $1.timestamp }
+        upsert(point, into: &points)
+        Self.trimPresentationHistory(
+            &points,
+            newest: max(snapshot.sampledAt, points.last?.timestamp ?? snapshot.sampledAt)
+        )
         history[snapshot.siteID] = points
     }
 
     private func applyHistory(_ snapshots: [SiteSnapshot], for siteID: SavedSite.ID) {
         guard !snapshots.isEmpty else { return }
         let newest = snapshots.map(\.sampledAt).max() ?? Date()
-        let cutoff = newest.addingTimeInterval(-historyWindow)
+        let cutoff = newest.addingTimeInterval(-Self.presentationHistorySeconds)
         var pointsByMillisecond: [Int64: MetricHistoryPoint] = [:]
         for point in history[siteID, default: []] where point.timestamp >= cutoff {
             pointsByMillisecond[millisecondKey(point.timestamp)] = point
@@ -525,7 +527,50 @@ final class SiteMonitoringController: ObservableObject {
             let point = historyPoint(from: snapshot)
             pointsByMillisecond[millisecondKey(point.timestamp)] = point
         }
-        history[siteID] = pointsByMillisecond.values.sorted { $0.timestamp < $1.timestamp }
+        var points = pointsByMillisecond.values.sorted { $0.timestamp < $1.timestamp }
+        Self.trimPresentationHistory(&points, newest: newest)
+        history[siteID] = points
+    }
+
+    private func upsert(
+        _ point: MetricHistoryPoint,
+        into points: inout [MetricHistoryPoint]
+    ) {
+        let key = millisecondKey(point.timestamp)
+        if let last = points.last {
+            let lastKey = millisecondKey(last.timestamp)
+            if key > lastKey {
+                points.append(point)
+                return
+            }
+            if key == lastKey {
+                points[points.count - 1] = point
+                return
+            }
+        }
+
+        let index = points.partitioningIndex {
+            millisecondKey($0.timestamp) >= key
+        }
+        if index < points.count, millisecondKey(points[index].timestamp) == key {
+            points[index] = point
+        } else {
+            points.insert(point, at: index)
+        }
+    }
+
+    static func trimPresentationHistory(
+        _ points: inout [MetricHistoryPoint],
+        newest: Date
+    ) {
+        let cutoff = newest.addingTimeInterval(-Self.presentationHistorySeconds)
+        let firstVisible = points.partitioningIndex { $0.timestamp >= cutoff }
+        if firstVisible > 0 {
+            points.removeFirst(firstVisible)
+        }
+        if points.count > Self.maximumPresentationPoints {
+            points.removeFirst(points.count - Self.maximumPresentationPoints)
+        }
     }
 
     private func historyPoint(from snapshot: SiteSnapshot) -> MetricHistoryPoint {
@@ -563,5 +608,21 @@ final class SiteMonitoringController: ObservableObject {
         apiKeys = apiKeys.filter { ids.contains($0.key) }
         oneTimeSecrets = oneTimeSecrets.filter { ids.contains($0.key) }
         monitoringTasks = monitoringTasks.filter { ids.contains($0.key) }
+    }
+}
+
+private extension Array {
+    func partitioningIndex(where predicate: (Element) -> Bool) -> Int {
+        var lower = startIndex
+        var upper = endIndex
+        while lower < upper {
+            let middle = index(lower, offsetBy: distance(from: lower, to: upper) / 2)
+            if predicate(self[middle]) {
+                upper = middle
+            } else {
+                lower = index(after: middle)
+            }
+        }
+        return distance(from: startIndex, to: lower)
     }
 }

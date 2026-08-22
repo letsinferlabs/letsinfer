@@ -5,6 +5,34 @@ import Testing
 
 struct MetricHistoryChartTests {
     @Test @MainActor
+    func presentationHistoryIsTimeAndMemoryBounded() {
+        let newest = Date(timeIntervalSince1970: 1_700_000_000)
+        var points = (0..<2_100).map { offset in
+            MetricHistoryPoint(
+                timestamp: newest.addingTimeInterval(TimeInterval(offset - 2_099)),
+                gpuUtilization: Double(offset % 100),
+                memoryUtilization: nil,
+                cpuUtilization: nil,
+                diskUtilization: nil,
+                temperature: nil,
+                generationTokensPerSecond: nil
+            )
+        }
+
+        SiteMonitoringController.trimPresentationHistory(&points, newest: newest)
+
+        #expect(points.count == SiteMonitoringController.maximumPresentationPoints)
+        #expect(points.first?.timestamp == newest.addingTimeInterval(-1_800))
+        #expect(points.last?.timestamp == newest)
+        #expect(
+            points.allSatisfy {
+                newest.timeIntervalSince($0.timestamp)
+                    <= SiteMonitoringController.presentationHistorySeconds
+            }
+        )
+    }
+
+    @Test @MainActor
     func hoverSelectsAndExposesEverySeries() {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         let points = [
