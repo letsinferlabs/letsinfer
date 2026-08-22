@@ -87,7 +87,6 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             runtime = runtime_candidate()
             manifest = cli.runtime_execution_manifest(runtime)
             receipt = {
-                "name": runtime["id"],
                 "candidate_id": runtime["id"],
                 "version": runtime["version"],
                 "digest": "5" * 64,

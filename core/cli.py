@@ -5025,7 +5025,7 @@ def _qualification_config(
         }
     )
     if runtime_receipt is not None:
-        required = ("name", "version", "digest", "policy")
+        required = ("candidate_id", "version", "digest", "policy")
         if not all(isinstance(runtime_receipt.get(key), str) for key in required):
             raise LetsInferError("qualification runtime receipt is incomplete")
         candidate.update(
