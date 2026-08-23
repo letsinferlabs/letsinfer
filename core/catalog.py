@@ -18,6 +18,13 @@ import urllib.request
 from typing import Any
 
 from core.paths import data_root, ensure_private_directory
+from core.revocations import (
+    RevocationError,
+    apply_to_catalog,
+    canonical_bytes as revocation_bytes,
+    empty_ledger,
+    load_ledger,
+)
 from core.runtime_packs import (
     MAX_CATALOG_BYTES,
     MAX_CATALOG_SIGNATURE_BYTES,
@@ -25,15 +32,28 @@ from core.runtime_packs import (
     canonical_bytes,
     load_catalog,
     resolved_catalog_location,
+    _catalog_public_key,
 )
 
 
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 DEFAULT_MAX_AGE_SECONDS = 60 * 60
 
 
 class CatalogError(RuntimeError):
     """The production catalog could not be resolved safely."""
+
+
+def _snapshot_identity(catalog_data: bytes, revocations_data: bytes) -> str:
+    digest = hashlib.sha256()
+    for label, value in (
+        (b"letsinfer.catalog.v1\0", catalog_data),
+        (b"letsinfer.revocations.v1\0", revocations_data),
+    ):
+        digest.update(label)
+        digest.update(len(value).to_bytes(8, "big"))
+        digest.update(value)
+    return digest.hexdigest()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -43,6 +63,7 @@ class CatalogSnapshot:
     catalog_sha256: str
     verified_at_unix: int
     stale: bool
+    revocations: dict[str, Any] = dataclasses.field(default_factory=empty_ledger)
 
     @property
     def age_seconds(self) -> int:
@@ -112,11 +133,11 @@ class CatalogManager:
             pointer = json.loads(self._current.read_text(encoding="utf-8"))
             if (
                 not isinstance(pointer, dict)
-                or set(pointer) != {"schema_version", "catalog_sha256"}
+                or set(pointer) != {"schema_version", "snapshot_sha256"}
                 or pointer.get("schema_version") != CACHE_SCHEMA_VERSION
             ):
                 raise CatalogError("catalog cache pointer is invalid")
-            identity = pointer.get("catalog_sha256")
+            identity = pointer.get("snapshot_sha256")
             if (
                 not isinstance(identity, str)
                 or len(identity) != 64
@@ -126,12 +147,18 @@ class CatalogManager:
             object_root = self._objects / identity
             catalog_path = object_root / "catalog.json"
             signature_path = object_root / "catalog.json.sig"
+            revocations_path = object_root / "revocations.json"
+            revocations_signature_path = object_root / "revocations.json.sig"
             metadata_path = object_root / "metadata.json"
-            for path in (catalog_path, signature_path, metadata_path):
+            for path in (
+                catalog_path,
+                signature_path,
+                revocations_path,
+                revocations_signature_path,
+                metadata_path,
+            ):
                 self._regular(path)
             data = catalog_path.read_bytes()
-            if hashlib.sha256(data).hexdigest() != identity:
-                raise CatalogError("catalog cache content identity differs")
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             if (
                 not isinstance(metadata, dict)
@@ -139,28 +166,46 @@ class CatalogManager:
                 != {
                     "schema_version",
                     "source",
+                    "snapshot_sha256",
                     "catalog_sha256",
+                    "revocations_sha256",
                     "verified_at_unix",
                 }
                 or metadata.get("schema_version") != CACHE_SCHEMA_VERSION
-                or metadata.get("catalog_sha256") != identity
+                or metadata.get("snapshot_sha256") != identity
+                or metadata.get("catalog_sha256")
+                != hashlib.sha256(data).hexdigest()
+                or metadata.get("revocations_sha256")
+                != hashlib.sha256(revocations_path.read_bytes()).hexdigest()
+                or _snapshot_identity(data, revocations_path.read_bytes()) != identity
                 or not isinstance(metadata.get("source"), str)
                 or not isinstance(metadata.get("verified_at_unix"), int)
             ):
                 raise CatalogError("catalog cache metadata is invalid")
             document = load_catalog(str(catalog_path))
+            ledger, _ledger_data, _signature = load_ledger(
+                str(revocations_path), public_key=_catalog_public_key(None)
+            )
+            document = apply_to_catalog(document, ledger)
             now = int(self._clock())
             return CatalogSnapshot(
                 document=document,
                 source=metadata["source"],
-                catalog_sha256=identity,
+                catalog_sha256=metadata["catalog_sha256"],
                 verified_at_unix=metadata["verified_at_unix"],
                 stale=(
                     metadata["source"] != self.location
                     or now - metadata["verified_at_unix"] > self.max_age_seconds
                 ),
+                revocations=ledger,
             )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, RuntimePackError) as error:
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            RuntimePackError,
+            RevocationError,
+        ) as error:
             raise CatalogError(f"catalog cache is invalid: {error}") from error
 
     def _write_pointer(self, identity: str) -> None:
@@ -174,7 +219,7 @@ class CatalogManager:
                     canonical_bytes(
                         {
                             "schema_version": CACHE_SCHEMA_VERSION,
-                            "catalog_sha256": identity,
+                            "snapshot_sha256": identity,
                         }
                     )
                 )
@@ -192,7 +237,17 @@ class CatalogManager:
             try:
                 document = load_catalog(self.location)
                 data = pathlib.Path(self.location).expanduser().read_bytes()
-            except (OSError, RuntimePackError) as error:
+                ledger_path = pathlib.Path(self.location).expanduser().with_name(
+                    "revocations.json"
+                )
+                if ledger_path.is_file():
+                    ledger, _ledger_data, _signature = load_ledger(
+                        str(ledger_path), public_key=_catalog_public_key(None)
+                    )
+                else:
+                    ledger = empty_ledger()
+                document = apply_to_catalog(document, ledger)
+            except (OSError, RuntimePackError, RevocationError) as error:
                 raise CatalogError(str(error)) from error
             return CatalogSnapshot(
                 document,
@@ -200,6 +255,7 @@ class CatalogManager:
                 hashlib.sha256(data).hexdigest(),
                 int(self._clock()),
                 False,
+                ledger,
             )
         data = _download(self.location, MAX_CATALOG_BYTES, "runtime catalog")
         signature = _download(
@@ -207,6 +263,18 @@ class CatalogManager:
             MAX_CATALOG_SIGNATURE_BYTES,
             "runtime catalog signature",
         )
+        ledger_location = self.location.rsplit("/", 1)[0] + "/revocations.json"
+        public_key = _catalog_public_key(None)
+        if public_key is None:
+            raise CatalogError("runtime catalog trust key is unavailable")
+        try:
+            ledger, ledger_data, ledger_signature = load_ledger(
+                ledger_location, public_key=public_key
+            )
+        except RevocationError as error:
+            raise CatalogError(str(error)) from error
+        if ledger_signature is None:
+            raise CatalogError("remote revocation ledger is unsigned")
         self._prepare()
         incoming = pathlib.Path(
             tempfile.mkdtemp(prefix=".incoming-", dir=self.root)
@@ -215,17 +283,26 @@ class CatalogManager:
         try:
             catalog_path = incoming / "catalog.json"
             signature_path = incoming / "catalog.json.sig"
+            revocations_path = incoming / "revocations.json"
+            revocations_signature_path = incoming / "revocations.json.sig"
             catalog_path.write_bytes(data)
             signature_path.write_bytes(signature)
+            revocations_path.write_bytes(ledger_data)
+            revocations_signature_path.write_bytes(ledger_signature)
             catalog_path.chmod(0o600)
             signature_path.chmod(0o600)
-            document = load_catalog(str(catalog_path))
-            identity = hashlib.sha256(data).hexdigest()
+            revocations_path.chmod(0o600)
+            revocations_signature_path.chmod(0o600)
+            document = apply_to_catalog(load_catalog(str(catalog_path)), ledger)
+            catalog_identity = hashlib.sha256(data).hexdigest()
+            identity = _snapshot_identity(data, ledger_data)
             verified_at = int(self._clock())
             metadata = {
                 "schema_version": CACHE_SCHEMA_VERSION,
                 "source": self.location,
-                "catalog_sha256": identity,
+                "snapshot_sha256": identity,
+                "catalog_sha256": catalog_identity,
+                "revocations_sha256": hashlib.sha256(ledger_data).hexdigest(),
                 "verified_at_unix": verified_at,
             }
             metadata_path = incoming / "metadata.json"
@@ -240,9 +317,10 @@ class CatalogManager:
             return CatalogSnapshot(
                 document,
                 self.location,
-                identity,
+                catalog_identity,
                 verified_at,
                 False,
+                ledger,
             )
         except BaseException:
             if incoming.exists():

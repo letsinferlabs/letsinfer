@@ -12,7 +12,7 @@ runtime, model artifacts, engine, lifecycle, safety, and telemetry.
 - dynamic request admission and memory-aware queueing;
 - live throughput, request, cache, temperature, power, and system telemetry;
 - independent Watchdog protection with explicit safety recovery;
-- signed, digest-pinned, reproducible runtimes and benchmarks;
+- signed, digest-pinned runtimes with independent community verification;
 - independent core/runtime updates with runtime rollback; and
 - secure mDNS discovery, scoped API keys, controller pairing, and audit.
 
@@ -35,5 +35,6 @@ runtime, model artifacts, engine, lifecycle, safety, and telemetry.
 - [Core release process](operations/source-release.md)
 - [macOS app release process](operations/macos-release.md)
 
-The public contract is runtime schema 3, runtime artifact schema 3, catalog
-schema 5, and Engine protocol 1. Unsupported schemas fail closed.
+The public contract is runtime schema 4, runtime artifact schema 4, catalog
+schema 6, revocation-ledger schema 1, and Engine protocol 1. Unsupported
+schemas fail closed.

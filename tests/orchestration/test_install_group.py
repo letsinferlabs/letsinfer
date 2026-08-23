@@ -55,7 +55,14 @@ class EngineGroupInstallTests(unittest.TestCase):
             mock.patch.object(
                 cli,
                 "_runtime_source_for_install",
-                return_value=(source, "recommended", "1.0.0", "target", "2" * 64),
+                return_value=(
+                    source,
+                    "recommended",
+                    "1.0.0",
+                    "target",
+                    "2" * 64,
+                    True,
+                ),
             ),
             mock.patch.object(
                 cli,

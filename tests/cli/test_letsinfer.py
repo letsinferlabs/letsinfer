@@ -270,7 +270,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             manifest_path = root / "runtime.json"
             manifest_path.write_text("{}\n", encoding="ascii")
             runtime = runtime_candidate()
-            manifest = cli.runtime_execution_manifest(runtime)
+            manifest = cli.runtime_execution_manifest(runtime, qualified=False)
             receipt = {
                 "candidate_id": runtime["id"],
                 "version": runtime["version"],
@@ -383,12 +383,12 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             "future-engine", runtime["model"]["uri"], runtime["target"]["id"]
         )
         validated = validate_runtime_config(runtime)
-        execution = cli.runtime_execution_manifest(validated)
+        execution = cli.runtime_execution_manifest(validated, qualified=False)
         self.assertEqual(execution["engine"]["name"], "future-engine")
         self.assertEqual(execution["image"]["reference"], runtime["engine"]["oci"]["reference"])
 
     def test_model_store_mirrors_exact_hugging_face_identity_and_revision(self) -> None:
-        execution = cli.runtime_execution_manifest(runtime_candidate())
+        execution = cli.runtime_execution_manifest(runtime_candidate(), qualified=False)
         artifact = execution["artifacts"][0]
         self.assertEqual(artifact_storage_slug(artifact), "example--model")
         root = pathlib.Path("/letsinfer/models")
@@ -407,7 +407,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
 
     def test_resolve_model_only_considers_installed_runtime_receipts(self) -> None:
         runtime = runtime_candidate()
-        execution = cli.runtime_execution_manifest(runtime)
+        execution = cli.runtime_execution_manifest(runtime, qualified=False)
         manifest_path = pathlib.Path("/installed/runtime-execution.json")
         receipt = {
             "candidate_id": runtime["id"],

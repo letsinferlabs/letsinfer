@@ -37,6 +37,9 @@ No engine hunting. No model-file plumbing. No hardware-specific install path.
   without silently changing the others.
 - **Reproducible benchmarks** — durable, isolated code-and-prose runs capture
   TTFT, throughput, cache state, hardware telemetry, and validated JSON.
+- **Community-qualified runtimes** — independent users can verify an exact
+  runtime PR; signed full evidence, transparent consensus, and verifier
+  identities determine qualification without granting upload credentials.
 - **Secure by default** — scoped API keys, audit records, mDNS discovery,
   private controller mTLS, and optional inference-only public exposure.
 
@@ -102,6 +105,7 @@ independent runtime candidates—without adding model-specific code to core.
 | Upgrade a runtime | `letsinfer upgrade MODEL` |
 | Roll back a runtime | `letsinfer rollback MODEL` |
 | Run the C1 benchmark | `letsinfer benchmark MODEL --c1` |
+| Verify a runtime PR | `letsinfer benchmark verify PR_URL` |
 | Verify an installation | `letsinfer doctor` |
 | Remove everything | `letsinfer uninstall` |
 
