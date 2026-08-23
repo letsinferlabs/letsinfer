@@ -17,7 +17,7 @@ from typing import Any
 from .exact_tokens import LETSINFER_TOKEN_COUNT_PROTOCOL
 
 
-ENGINE_PROTOCOL_VERSION = 1
+ENGINE_PROTOCOL_VERSION = 2
 ENGINE_ADAPTER = "/opt/letsinfer/bin/engine-adapter"
 ENGINE_API_PROTOCOL = "openai-v1"
 ENGINE_HEALTH_PATH = "/health"

@@ -54,7 +54,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 mock.patch.object(cli, "render_engine_service", return_value="unit\n"),
                 mock.patch.object(cli, "render_gateway_service", return_value="unit\n"),
                 mock.patch.object(cli, "render_user_service", return_value="unit\n"),
-                mock.patch.object(cli, "render_site_service", return_value="unit\n"),
+                mock.patch.object(cli, "render_node_service", return_value="unit\n"),
                 mock.patch.object(cli, "render_recovery_service", return_value="unit\n"),
                 mock.patch.object(cli, "render_recovery_timer", return_value="unit\n"),
             ):
@@ -109,7 +109,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 mock.patch.object(cli, "render_engine_service", return_value="unit\n"),
                 mock.patch.object(cli, "render_gateway_service", return_value="unit\n"),
                 mock.patch.object(cli, "render_user_service", return_value="unit\n"),
-                mock.patch.object(cli, "render_site_service", return_value="unit\n"),
+                mock.patch.object(cli, "render_node_service", return_value="unit\n"),
                 mock.patch.object(cli, "render_recovery_service", return_value="unit\n"),
                 mock.patch.object(cli, "render_recovery_timer", return_value="unit\n"),
                 self.assertRaisesRegex(cli.LetsInferError, "previous installation restored"),
@@ -126,7 +126,10 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             self.assertEqual(events, ["selection", "restore"])
 
     def test_service_placement_uses_gateway_runtime_contract(self) -> None:
-        identity = types.SimpleNamespace(member_id="1" * 32)
+        identity = types.SimpleNamespace(
+            site_id="0" * 32,
+            member_id="1" * 32,
+        )
         adapter = types.SimpleNamespace(
             name="example-engine",
             token_count_path="/v1/count_tokens",
@@ -270,7 +273,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             manifest_path = root / "runtime.json"
             manifest_path.write_text("{}\n", encoding="ascii")
             runtime = runtime_candidate()
-            manifest = cli.runtime_execution_manifest(runtime)
+            manifest = cli.runtime_execution_manifest(runtime, qualified=False)
             receipt = {
                 "candidate_id": runtime["id"],
                 "version": runtime["version"],
@@ -383,12 +386,12 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             "future-engine", runtime["model"]["uri"], runtime["target"]["id"]
         )
         validated = validate_runtime_config(runtime)
-        execution = cli.runtime_execution_manifest(validated)
+        execution = cli.runtime_execution_manifest(validated, qualified=False)
         self.assertEqual(execution["engine"]["name"], "future-engine")
         self.assertEqual(execution["image"]["reference"], runtime["engine"]["oci"]["reference"])
 
     def test_model_store_mirrors_exact_hugging_face_identity_and_revision(self) -> None:
-        execution = cli.runtime_execution_manifest(runtime_candidate())
+        execution = cli.runtime_execution_manifest(runtime_candidate(), qualified=False)
         artifact = execution["artifacts"][0]
         self.assertEqual(artifact_storage_slug(artifact), "example--model")
         root = pathlib.Path("/letsinfer/models")
@@ -407,7 +410,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
 
     def test_resolve_model_only_considers_installed_runtime_receipts(self) -> None:
         runtime = runtime_candidate()
-        execution = cli.runtime_execution_manifest(runtime)
+        execution = cli.runtime_execution_manifest(runtime, qualified=False)
         manifest_path = pathlib.Path("/installed/runtime-execution.json")
         receipt = {
             "candidate_id": runtime["id"],

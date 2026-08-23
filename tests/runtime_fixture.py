@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Small schema-v3 runtime candidates shared by engine-neutral core tests."""
+"""Small schema-v4 runtime candidates shared by engine-neutral core tests."""
 
 from __future__ import annotations
 
@@ -9,11 +9,10 @@ from typing import Any
 
 def runtime_candidate() -> dict[str, Any]:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "id": "example-engine--example--model--test-target",
         "version": "1.0.0",
         "logical_model": "example-model",
-        "status": "candidate",
         "target": {
             "id": "test-target",
             "platform": "linux/arm64",
@@ -38,7 +37,7 @@ def runtime_candidate() -> dict[str, Any]:
         },
         "engine": {
             "id": "example-engine",
-            "protocol": {"version": 1},
+            "protocol": {"version": 2},
             "oci": {
                 "reference": "registry.example/engine@sha256:" + "1" * 64,
                 "immutable_id": "sha256:" + "2" * 64,
@@ -78,11 +77,9 @@ def runtime_candidate() -> dict[str, Any]:
             "config": {},
         },
         "serving": {
-            "qualified": False,
             "max_connections": 16,
             "max_active_requests": 4,
             "max_context_tokens": 32768,
-            "blocked_by": "qualification-required",
         },
-        "benchmark": {"contract": {}, "record": None},
+        "benchmark": {"contract": {}},
     }

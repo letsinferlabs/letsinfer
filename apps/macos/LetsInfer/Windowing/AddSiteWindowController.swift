@@ -23,7 +23,7 @@ final class AddSiteWindowController: NSObject, ObservableObject, NSWindowDelegat
             backing: .buffered,
             defer: false
         )
-        window.title = "Add Site"
+        window.title = "Add Node"
         window.contentViewController = NSHostingController(rootView: content)
         window.isReleasedWhenClosed = false
         window.delegate = self

@@ -99,8 +99,8 @@ class ControllerState:
         ]
         | None = None,
     ) -> None:
-        if identity.role != "coordinator":
-            raise ControllerError("private controller API is coordinator-only")
+        if identity.role != "main":
+            raise ControllerError("private control API runs on the main node")
         self.identity = identity
         self.telemetry = telemetry
         self.site_provider = site_provider
@@ -445,7 +445,7 @@ class ControllerState:
             "action": value,
         }
 
-    def site(self, principal: ControllerPrincipal) -> dict[str, Any]:
+    def node(self, principal: ControllerPrincipal) -> dict[str, Any]:
         value = dict(self.site_provider())
         return {
             "protocol": PROTOCOL,
@@ -453,7 +453,7 @@ class ControllerState:
                 "id": principal.controller_id,
                 "role": principal.role,
             },
-            "site": value,
+            "node": value,
         }
 
     def administer(
@@ -469,24 +469,24 @@ class ControllerState:
                 "controller.administer",
                 "insufficient_controller_role",
             )
-            raise ControllerError("controller role cannot administer the site")
+            raise ControllerError("controller role cannot administer the node")
         if self.administration_provider is None:
             self._record_denied(
                 principal, "controller.administer", "administration_unavailable"
             )
-            raise ControllerError("site administration is unavailable")
+            raise ControllerError("node administration is unavailable")
         if action not in {
-            "site.move.plan",
-            "site.move.prepare",
-            "site.move.commit",
-            "site.move.cancel",
-            "member.invite",
-            "member.adopt",
-            "member.approve",
-            "member.cancel",
-            "member.drain",
-            "member.resume",
-            "member.remove",
+            "node.move.plan",
+            "node.move.prepare",
+            "node.move.commit",
+            "node.move.cancel",
+            "child.invite",
+            "child.adopt",
+            "child.approve",
+            "child.cancel",
+            "child.drain",
+            "child.resume",
+            "child.remove",
             "key.list",
             "key.show",
             "key.create",
@@ -497,7 +497,7 @@ class ControllerState:
             self._record_denied(
                 principal, "controller.administer", "invalid_action"
             )
-            raise ControllerError("site administrator action is invalid")
+            raise ControllerError("node administrator action is invalid")
         try:
             result = self.administration_provider(
                 principal, action, dict(payload)
@@ -518,7 +518,7 @@ class ControllerState:
                 pass
             raise ControllerError(str(error)) from error
         if not isinstance(result, Mapping) or not result:
-            raise ControllerError("site administrator returned an invalid result")
+            raise ControllerError("node administrator returned an invalid result")
         return {
             "protocol": PROTOCOL,
             "controller": {"id": principal.controller_id, "role": principal.role},
@@ -605,15 +605,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         try:
             principal = self._principal()
             parsed = urllib.parse.urlsplit(self.path)
-            if parsed.path == "/control/v1/site" and not parsed.query:
-                self._respond(200, self.state.site(principal))
+            if parsed.path == "/control/v1/node" and not parsed.query:
+                self._respond(200, self.state.node(principal))
                 return
-            if parsed.path == "/control/v1/site-move/plan" and not parsed.query:
+            if parsed.path == "/control/v1/node-move/plan" and not parsed.query:
                 principal = self._principal("administrator")
                 self._respond(
                     200,
                     self.state.administer(
-                        principal, action="site.move.plan", payload={}
+                        principal, action="node.move.plan", payload={}
                     ),
                 )
                 return
@@ -666,20 +666,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         try:
             parsed = urllib.parse.urlsplit(self.path)
             administrator_actions = {
-                "/control/v1/members/invite": "member.invite",
-                "/control/v1/members/adopt": "member.adopt",
-                "/control/v1/members/approve": "member.approve",
-                "/control/v1/members/cancel": "member.cancel",
-                "/control/v1/members/drain": "member.drain",
-                "/control/v1/members/resume": "member.resume",
-                "/control/v1/members/remove": "member.remove",
+                "/control/v1/children/invite": "child.invite",
+                "/control/v1/children/adopt": "child.adopt",
+                "/control/v1/children/approve": "child.approve",
+                "/control/v1/children/cancel": "child.cancel",
+                "/control/v1/children/drain": "child.drain",
+                "/control/v1/children/resume": "child.resume",
+                "/control/v1/children/remove": "child.remove",
                 "/control/v1/keys/create": "key.create",
                 "/control/v1/keys/rotate": "key.rotate",
                 "/control/v1/keys/revoke": "key.revoke",
                 "/control/v1/keys/policy": "key.policy",
-                "/control/v1/site-move/prepare": "site.move.prepare",
-                "/control/v1/site-move/commit": "site.move.commit",
-                "/control/v1/site-move/cancel": "site.move.cancel",
+                "/control/v1/node-move/prepare": "node.move.prepare",
+                "/control/v1/node-move/commit": "node.move.commit",
+                "/control/v1/node-move/cancel": "node.move.cancel",
             }
             administrator_action = administrator_actions.get(parsed.path)
             if administrator_action is not None and not parsed.query:

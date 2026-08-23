@@ -197,7 +197,7 @@ class CoreUpdateTests(unittest.TestCase):
             config_path = root / "service.json"
             config_path.write_text("{}\n", encoding="utf-8")
             previous = {"model": "qwen3.8-27b"}
-            site = mock.Mock(role="coordinator")
+            site = mock.Mock(role="main")
             output = io.StringIO()
             with (
                 mock.patch.object(letsinfer, "site_identity_path", return_value=identity),
@@ -319,7 +319,7 @@ class CoreUpdateTests(unittest.TestCase):
 
     def test_core_plane_handoff_quiesces_and_restores_runtime_services(self) -> None:
         commands: list[list[str]] = []
-        identity = mock.Mock(role="coordinator")
+        identity = mock.Mock(role="main")
         manifest = {"watchdog": {"protection": {"warning_available_bytes": 4 << 30}}}
         with tempfile.TemporaryDirectory() as directory:
             config_path = pathlib.Path(directory) / "service.json"
@@ -354,7 +354,7 @@ class CoreUpdateTests(unittest.TestCase):
                 mock.patch.object(
                     letsinfer, "disarm_before_planned_stop"
                 ) as disarm,
-                mock.patch.object(letsinfer, "install_site_service_only") as install_site,
+                mock.patch.object(letsinfer, "install_node_service_only") as install_site,
                 mock.patch.object(
                     letsinfer, "install_core_watchdog_service"
                 ) as install_watchdog,
@@ -390,7 +390,7 @@ class CoreUpdateTests(unittest.TestCase):
 
     def test_core_plane_handoff_stops_an_incompatible_runtime(self) -> None:
         commands: list[list[str]] = []
-        identity = mock.Mock(role="coordinator")
+        identity = mock.Mock(role="main")
         with tempfile.TemporaryDirectory() as directory:
             config_path = pathlib.Path(directory) / "service.json"
             config_path.write_text("{}\n", encoding="utf-8")
@@ -416,7 +416,7 @@ class CoreUpdateTests(unittest.TestCase):
                 mock.patch.object(
                     letsinfer, "disarm_before_planned_stop"
                 ) as disarm,
-                mock.patch.object(letsinfer, "install_site_service_only"),
+                mock.patch.object(letsinfer, "install_node_service_only"),
                 mock.patch.object(
                     letsinfer, "install_core_watchdog_service"
                 ) as install_watchdog,
@@ -439,7 +439,7 @@ class CoreUpdateTests(unittest.TestCase):
         disarm.assert_called_once_with({})
 
     def test_core_plane_handoff_uses_the_active_candidate_not_stale_resident(self) -> None:
-        identity = mock.Mock(role="coordinator")
+        identity = mock.Mock(role="main")
         candidate_manifest = {
             "watchdog": {"protection": {"warning_available_bytes": 4 << 30}}
         }
@@ -485,7 +485,7 @@ class CoreUpdateTests(unittest.TestCase):
                     "_unit_enabled_active",
                     return_value=("enabled", "inactive"),
                 ),
-                mock.patch.object(letsinfer, "install_site_service_only"),
+                mock.patch.object(letsinfer, "install_node_service_only"),
                 mock.patch.object(
                     letsinfer, "install_core_watchdog_service"
                 ) as install_watchdog,

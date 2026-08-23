@@ -19,8 +19,7 @@ enum SSHTransportError: LocalizedError, Equatable {
         case .timedOut:
             "The SSH connection timed out."
         case .commandFailed(let message):
-            message.isEmpty ? "SSH could not connect to this site." : message
+            message.isEmpty ? "SSH could not connect to this node." : message
         }
     }
 }
-

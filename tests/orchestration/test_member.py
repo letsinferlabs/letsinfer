@@ -17,7 +17,9 @@ from core.orchestration.member import (
     canonical_bytes,
     validate_group_job,
 )
+from core.orchestration import build_single_group_plan
 from core.orchestration.credentials import credential_sha256
+from tests.orchestration.helpers import release_identity
 
 
 class MemberJobTests(unittest.TestCase):
@@ -25,58 +27,21 @@ class MemberJobTests(unittest.TestCase):
     credential = "A" * 43
 
     def job(self, *, action: str = "stage", operation_id: str = "2" * 32) -> dict:
-        group = {
-            "schema_version": 1,
-            "group_id": "0" * 32,
-            "strategy": "replicated",
-            "engine_strategy": "replica-pool",
-            "failure_policy": "replica-independent",
-            "minimum_healthy_members": 1,
-            "topology_sha256": "4" * 64,
-            "manifest_sha256": "5" * 64,
-            "runtime_digest": "6" * 64,
-            "engine_coordinator_id": self.member_id,
-            "startup_order": ["replica"],
-            "members": [{
-                "member_id": self.member_id,
-                "address": "member.local:9770",
-                "rank": 0,
-                "role_rank": 0,
-                "role": "replica",
-                "port_base": 18000,
-                "port_count": 1,
-                "inference_endpoint": True,
-            }, {
-                "member_id": "7" * 32,
-                "address": "member-b.local:9770",
-                "rank": 1,
-                "role_rank": 1,
-                "role": "replica",
-                "port_base": 18000,
-                "port_count": 1,
-                "inference_endpoint": True,
-            }],
-        }
-        identity = {
-            "contract": "letsinfer-engine-group-v1",
-            "strategy": group["strategy"],
-            "engine_strategy": group["engine_strategy"],
-            "topology_sha256": group["topology_sha256"],
-            "manifest_sha256": group["manifest_sha256"],
-            "runtime_digest": group["runtime_digest"],
-            "engine_coordinator_id": group["engine_coordinator_id"],
-            "members": [
-                {
-                    "member_id": item["member_id"],
-                    "address": item["address"],
-                    "role": item["role"],
-                    "port_base": item["port_base"],
-                    "port_count": item["port_count"],
-                }
-                for item in group["members"]
-            ],
-        }
-        group["group_id"] = hashlib.sha256(canonical_bytes(identity)).hexdigest()[:32]
+        release = release_identity()
+        plan = build_single_group_plan(
+            member_id=self.member_id,
+            member_address="member.local:9770",
+            device_uuids=["GPU-fixture"],
+            engine_strategy="single",
+            topology_sha256="4" * 64,
+            manifest_sha256="5" * 64,
+            runtime_digest="6" * 64,
+            service_id="3" * 32,
+            release=release,
+            port_base=18000,
+        )
+        group = plan.document()
+        assignment = plan.assignments[0]
         return {
             "protocol": PROTOCOL,
             "operation_id": operation_id,
@@ -89,18 +54,19 @@ class MemberJobTests(unittest.TestCase):
             "topology_sha256": group["topology_sha256"],
             "engine_credential_sha256": credential_sha256(self.credential),
             "expires_at_unix": int(time.time()) + 60,
-            "source": "registry.example/runtime@sha256:" + "8" * 64 if action == "stage" else None,
+            "source": release["source"] if action == "stage" else None,
             "role": {
-                "name": "replica",
-                "rank": 0,
-                "role_rank": 0,
-                "launcher": "manifest",
-                "port_base": 18000,
-                "port_count": 1,
-                "command": [],
-                "environment": {},
-                "inference_endpoint": True,
-                "readiness": {"kind": "manifest"},
+                "name": assignment.role,
+                "rank": assignment.rank,
+                "role_rank": assignment.role_rank,
+                "launcher": assignment.launcher,
+                "port_base": assignment.port_base,
+                "port_count": assignment.port_count,
+                "command": list(assignment.command),
+                "environment": dict(assignment.environment),
+                "inference_endpoint": assignment.inference_endpoint,
+                "readiness": dict(assignment.readiness),
+                "device_uuids": list(assignment.device_uuids),
             },
             "group": group,
         }
@@ -109,7 +75,7 @@ class MemberJobTests(unittest.TestCase):
         value = self.job()
         self.assertIs(validate_group_job(value, expected_member_id=self.member_id), value)
         changed = self.job()
-        changed["group"]["members"][1]["address"] = "changed.local:9770"
+        changed["group"]["members"][0]["address"] = "changed.local:9770"
         with self.assertRaisesRegex(MemberJobError, "identity does not match"):
             validate_group_job(changed, expected_member_id=self.member_id)
         changed = self.job()

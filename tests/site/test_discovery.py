@@ -14,7 +14,7 @@ def identity() -> SiteIdentity:
         member_id="2" * 32,
         installation_id="3" * 64,
         display_name="Home",
-        role="coordinator",
+        role="main",
         coordinator_id="2" * 32,
         coordinator_address="home.local",
         site_public_key_sha256="4" * 64,
@@ -58,7 +58,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(
             set(record["txt"]),
             {
-                "protocol", "site", "member", "role", "state", "key", "tls",
+                "protocol", "node", "machine", "role", "state", "key", "tls",
                 "control", "inference", "inference_port",
             },
         )

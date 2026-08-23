@@ -41,6 +41,7 @@ class GatewayPolicyTests(unittest.TestCase):
                 "client", models=["fixture-model"], concurrency_limit=2
             )
             store.set_alias("fixture", "fixture-model")
+            self.service_id = store.ensure_model_service("fixture-model")["service_id"]
             store.set_placement(self.placement())
 
     def tearDown(self) -> None:
@@ -56,6 +57,7 @@ class GatewayPolicyTests(unittest.TestCase):
     def placement(self, *, temperature: float = 45.0) -> dict:
         return {
             "placement_id": "a" * 32,
+            "service_id": self.service_id,
             "model": "fixture-model",
             "runtime": "fixture-model/fixture-engine/fixture-target",
             "target": "fixture-target",
@@ -79,6 +81,26 @@ class GatewayPolicyTests(unittest.TestCase):
             }],
             "capacity": {"max_active_requests": 1, "max_context_tokens": 557056},
         }
+
+    def replica_placement(
+        self,
+        member_id: str,
+        *,
+        temperature: float = 50.0,
+        prefix_keys: list[str] | None = None,
+    ) -> dict:
+        placement = self.placement(temperature=temperature)
+        placement["placement_id"] = "c" * 32
+        placement["topology_sha256"] = "d" * 64
+        placement["members"] = [member_id]
+        placement["endpoints"] = [{
+            **placement["endpoints"][0],
+            "member_id": member_id,
+            "url": "http://127.0.0.1:18001",
+            "temperature_c": temperature,
+            "prefix_keys": list(prefix_keys or []),
+        }]
+        return placement
 
     def test_metrics_publisher_fails_startup_on_unsafe_destination(self) -> None:
         root = pathlib.Path(self.temporary.name)
@@ -358,7 +380,7 @@ class GatewayPolicyTests(unittest.TestCase):
                 ),
             )
             placement = self.placement()
-            placement["strategy"] = "distributed"
+            placement["strategy"] = "parallel"
             placement["members"] = [self.identity.member_id, other]
             placement["capacity"]["interconnect"] = {
                 "kind": "connectx",
@@ -438,7 +460,7 @@ class GatewayPolicyTests(unittest.TestCase):
                 ),
             )
             placement = self.placement()
-            placement["strategy"] = "distributed"
+            placement["strategy"] = "parallel"
             placement["members"] = [self.identity.member_id, other]
             placement["endpoints"].append(
                 {
@@ -462,17 +484,7 @@ class GatewayPolicyTests(unittest.TestCase):
         other = "e" * 32
         with state.SiteStore(identity=self.identity) as store:
             self.add_member(store, other)
-            placement = self.placement()
-            placement["strategy"] = "replicated"
-            placement["members"] = [self.identity.member_id, other]
-            placement["endpoints"].append(
-                {
-                    **placement["endpoints"][0],
-                    "member_id": other,
-                    "url": "http://127.0.0.1:18001",
-                }
-            )
-            store.set_placement(placement)
+            store.set_placement(self.replica_placement(other))
             store.set_member_draining(self.identity.member_id, True)
         policy = server.PolicySnapshot(self.identity)
         policy.reload(force=True)
@@ -482,17 +494,7 @@ class GatewayPolicyTests(unittest.TestCase):
         other = "e" * 32
         with state.SiteStore(identity=self.identity) as store:
             self.add_member(store, other)
-            placement = self.placement()
-            placement["strategy"] = "replicated"
-            placement["members"] = [self.identity.member_id, other]
-            placement["endpoints"].append(
-                {
-                    **placement["endpoints"][0],
-                    "member_id": other,
-                    "url": "http://127.0.0.1:18001",
-                }
-            )
-            store.set_placement(placement)
+            store.set_placement(self.replica_placement(other))
 
         policy = server.PolicySnapshot(self.identity)
         policy.reload(force=True)
@@ -636,19 +638,7 @@ class GatewayPolicyTests(unittest.TestCase):
         other = "e" * 32
         with state.SiteStore(identity=self.identity) as store:
             insert_member(store, other)
-            placement = self.placement(temperature=40.0)
-            placement["strategy"] = "replicated"
-            placement["members"] = [self.identity.member_id, other]
-            placement["endpoints"].append(
-                {
-                    **placement["endpoints"][0],
-                    "member_id": other,
-                    "url": "http://127.0.0.1:18001",
-                    "temperature_c": 50.0,
-                    "prefix_keys": [],
-                }
-            )
-            store.set_placement(placement)
+            store.set_placement(self.replica_placement(other))
         policy = server.PolicySnapshot(self.identity)
         policy.reload(force=True)
         first, _ = policy.acquire_backend(

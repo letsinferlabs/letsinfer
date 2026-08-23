@@ -15,7 +15,7 @@ import unittest
 import contextlib
 from unittest import mock
 
-from core import cli, ui
+from core import cli, runtime_packs, ui
 from core.runtime_packs import target_contract_sha256
 from core.updates.manager import (
     Component,
@@ -62,7 +62,7 @@ def components(*, core_identity: str = "core-a", runtime_policy: str = "recommen
 
 def catalog(version: str = "0.1.0-rc.11", digest: str = NEXT_RUNTIME_DIGEST):
     return {
-        "schema_version": 5,
+        "schema_version": runtime_packs.CATALOG_SCHEMA_VERSION,
         "recommendation_policy": {
             "id": "letsinfer-throughput-geomean-v1",
             "benchmark_suite": "letsinfer-code-prose-v1",

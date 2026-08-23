@@ -37,6 +37,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Iterable, Mapping, Sequence
 
+from benchmarks import benchmark_record as benchmark_record_contract
+
 # A hash-addressed control bundle must not mutate itself when Python imports
 # the adjacent engine registry. Runtime caches belong outside the bundle.
 sys.dont_write_bytecode = True
@@ -85,6 +87,7 @@ from .exposure import (
 )
 from .orchestration import (
     build_group_plan,
+    build_single_group_plan,
     MemberAgent,
     MemberJobError,
     MemberJobStore,
@@ -127,7 +130,7 @@ from .runtime_packs import (
 from .updates import Component, UpdateManager, UpdatePoller
 from .updates.manager import UpdateError, compare_versions
 from .catalog import CatalogError, CatalogManager
-from . import benchmark_jobs, ui
+from . import benchmark_jobs, benchmark_verification, ui
 from .state_plane import runtime_lifecycle as derive_runtime_lifecycle
 from .platform import macos as macos_services
 from .site.state import (
@@ -175,6 +178,7 @@ from .site.move import (
 )
 from .site.links import LinkError, LinkStore
 from .site.topology import (
+    Placement,
     TargetPlacement,
     TopologyError,
     TopologyGraph,
@@ -231,21 +235,21 @@ CORE_SOURCE_MANIFEST = "SOURCE-MANIFEST.json"
 SERVICE_NAME = "letsinfer.service"
 ENGINE_SERVICE_NAME = "letsinfer-engine.service"
 GATEWAY_SERVICE_NAME = "letsinfer-gateway.service"
-SITE_SERVICE_NAME = "letsinfer-site.service"
+NODE_SERVICE_NAME = "letsinfer-node.service"
 RECOVERY_SERVICE_NAME = "letsinfer-recovery.service"
 RECOVERY_TIMER_NAME = "letsinfer-recovery.timer"
 
 
 def _macos_service_label(name: str) -> str | None:
     return {
-        SITE_SERVICE_NAME: macos_services.SITE_LABEL,
+        NODE_SERVICE_NAME: macos_services.NODE_LABEL,
         GATEWAY_SERVICE_NAME: macos_services.GATEWAY_LABEL,
     }.get(name)
 CONTROL_PLANE_MEMORY_HIGH_BYTES = 24 * 1024 * 1024
 CONTROL_PLANE_MEMORY_LIMIT_BYTES = 30 * 1024 * 1024
-SITE_AGENT_MEMORY_HIGH_BYTES = 64 * 1024 * 1024
-SITE_AGENT_MEMORY_LIMIT_BYTES = 96 * 1024 * 1024
-SITE_AGENT_TASK_LIMIT = 32
+NODE_AGENT_MEMORY_HIGH_BYTES = 64 * 1024 * 1024
+NODE_AGENT_MEMORY_LIMIT_BYTES = 96 * 1024 * 1024
+NODE_AGENT_TASK_LIMIT = 32
 GATEWAY_MEMORY_HIGH_BYTES = 64 * 1024 * 1024
 GATEWAY_MEMORY_LIMIT_BYTES = 96 * 1024 * 1024
 PROTECTION_STATE_NAME = "protected-engine.state"
@@ -266,19 +270,19 @@ MIN_API_KEY_BYTES = 32
 # use one compact, interactive stderr activity/result line while their durable
 # result (including one-time secrets) remains byte-for-byte on stdout.
 ACTION_PROGRESS: Mapping[str, tuple[str, str]] = {
-    "setup": ("Creating the site", "Site ready"),
+    "setup": ("Creating the node", "Node ready"),
     "update": ("Updating Let's Infer core", "Core updated"),
-    "site.move": ("Preparing the site move", "Site move ready"),
-    "topology.probe": ("Probing the member link", "Member link verified"),
+    "node.move": ("Preparing the node move", "Node move ready"),
+    "topology.probe": ("Probing the child link", "Child link verified"),
     "topology.plan": ("Planning model placement", "Placement plan ready"),
-    "member.prepare": ("Preparing the member identity", "Member identity ready"),
-    "member.join": ("Joining the site", "Site joined"),
-    "member.invite": ("Creating the member invitation", "Member invitation ready"),
-    "member.approve": ("Approving the member", "Member approved"),
-    "member.sync": ("Refreshing member facts", "Member facts refreshed"),
-    "member.drain": ("Draining the member", "Member drained"),
-    "member.resume": ("Resuming the member", "Member active"),
-    "member.remove": ("Removing the member", "Member removed"),
+    "child.prepare": ("Preparing the child identity", "Child identity ready"),
+    "child.join": ("Joining the main node", "Child joined"),
+    "child.invite": ("Creating the child invitation", "Child invitation ready"),
+    "child.approve": ("Approving the child", "Child approved"),
+    "child.sync": ("Refreshing child facts", "Child facts refreshed"),
+    "child.drain": ("Draining the child", "Child drained"),
+    "child.resume": ("Resuming the child", "Child active"),
+    "child.remove": ("Removing the child", "Child removed"),
     "alias.set": ("Saving the model alias", "Model alias saved"),
     "alias.remove": ("Removing the model alias", "Model alias removed"),
     "pack": ("Building the runtime pack", "Runtime pack built"),
@@ -287,6 +291,7 @@ ACTION_PROGRESS: Mapping[str, tuple[str, str]] = {
     "verify": ("Verifying the runtime", "Runtime verified"),
     "acquire": ("Acquiring the model", "Model acquired"),
     "install": ("Installing the runtime", "Runtime installed"),
+    "scale": ("Scaling the replica pool", "Replica pool scaled"),
     "serve": ("Starting inference", "Inference ready"),
     "start": ("Starting inference", "Inference ready"),
     "restart": ("Restarting inference", "Inference ready"),
@@ -490,6 +495,11 @@ def default_gateway_telemetry_path() -> pathlib.Path:
     return site_data_root() / "gateway/telemetry.state"
 
 
+def default_gateway_group_telemetry_path() -> pathlib.Path:
+    path = default_gateway_telemetry_path()
+    return path.with_name(path.name + ".groups.json")
+
+
 def default_engine_group_root() -> pathlib.Path:
     return site_data_root() / "engine-groups"
 
@@ -544,12 +554,15 @@ def read_json(path: pathlib.Path) -> dict[str, Any]:
     return value
 
 
-def runtime_execution_manifest(runtime: dict[str, Any]) -> dict[str, Any]:
+def runtime_execution_manifest(
+    runtime: dict[str, Any], *, qualified: bool, blocked_by: str = "runtime-unqualified"
+) -> dict[str, Any]:
     """Derive the private core execution view from authoritative runtime.json.
 
-    Runtime packs expose only schema-v3 runtime.json.  The control plane keeps a
+    Runtime packs expose only schema-v4 runtime.json. The control plane keeps a
     deterministic, hash-bound execution view so existing lifecycle code never
-    needs to reinterpret source metadata or trust a second author-written file.
+    needs to reinterpret source metadata. Qualification is authorization from a
+    signed catalog, never an author-controlled property of executable bytes.
     """
 
     try:
@@ -577,7 +590,7 @@ def runtime_execution_manifest(runtime: dict[str, Any]) -> dict[str, Any]:
     execution = {
         "schema_version": 1,
         "release": f"{runtime['id']}@{runtime['version']}",
-        "status": "stable" if runtime["status"] == "qualified" else "candidate",
+        "status": "stable" if qualified else "candidate",
         "target": runtime["target"],
         "engine": execution_engine,
         "model": {
@@ -601,7 +614,11 @@ def runtime_execution_manifest(runtime: dict[str, Any]) -> dict[str, Any]:
             },
         },
         "cache": runtime["cache"],
-        "serving": runtime["serving"],
+        "serving": {
+            **runtime["serving"],
+            "qualified": qualified,
+            **({} if qualified else {"blocked_by": blocked_by}),
+        },
     }
     for optional in ("orchestration",):
         if optional in runtime:
@@ -954,7 +971,11 @@ def verify_runtime_sources(manifest: dict[str, Any], root: pathlib.Path) -> None
             pack = verify_descriptor(root)
         except RuntimePackError as error:
             raise LetsInferError(str(error)) from error
-        if runtime_execution_manifest(pack.runtime) != manifest:
+        if runtime_execution_manifest(
+            pack.runtime,
+            qualified=manifest["serving"]["qualified"],
+            blocked_by=manifest["serving"].get("blocked_by", "runtime-unqualified"),
+        ) != manifest:
             raise LetsInferError(
                 "runtime descriptor and private execution manifest disagree"
             )
@@ -1139,7 +1160,7 @@ def docker_command(
         required_group = {
             "group_id", "member_id", "rank", "role_rank", "role", "launcher",
             "command", "environment", "port_base", "port_count",
-            "inference_endpoint", "readiness",
+            "inference_endpoint", "readiness", "device_uuids",
         }
         if set(group_context) != required_group:
             raise LetsInferError("engine-group container context is invalid")
@@ -1150,6 +1171,14 @@ def docker_command(
             or not isinstance(group_context["port_count"], int)
             or isinstance(group_context["port_count"], bool)
             or group_context["port_count"] not in range(1, 33)
+            or not isinstance(group_context["device_uuids"], list)
+            or not group_context["device_uuids"]
+            or len(group_context["device_uuids"])
+            != len(set(group_context["device_uuids"]))
+            or any(
+                not isinstance(device_uuid, str) or not device_uuid
+                for device_uuid in group_context["device_uuids"]
+            )
             or group_config_file is None
         ):
             raise LetsInferError("engine-group container identity is invalid")
@@ -1248,7 +1277,11 @@ def docker_command(
         "--ipc",
         "host",
         "--gpus",
-        "all",
+        (
+            "all"
+            if group_context is None
+            else "device=" + ",".join(group_context["device_uuids"])
+        ),
         "--memory",
         str(container["memory_bytes"]),
         "--memory-swap",
@@ -1453,10 +1486,10 @@ def host_device_fingerprint() -> dict[str, Any]:
 def refresh_local_member_facts() -> dict[str, Any]:
     """Publish a freshly signed local inventory into the coordinator store."""
     identity = read_site_identity()
-    if identity.role != "coordinator":
+    if identity.role != "main":
         raise LetsInferError(
             "local fact publication for members requires the authenticated "
-            "member-control channel"
+            "child-control channel"
         )
     try:
         link_store = LinkStore(identity)
@@ -2405,12 +2438,12 @@ def core_watchdog_service_config(
         public_state = write_core_watchdog_public_state(
             identity.installation_id, source_sha256
         )
-    if identity.role == "coordinator":
+    if identity.role == "main":
         listen = "0.0.0.0"
         allowlist = ensure_controller_authorization(
             identity, default_watchdog_local_controller_cert_path()
         )
-    elif identity.role == "member":
+    elif identity.role == "child":
         listen = "127.0.0.1"
         allowlist = ensure_member_watchdog_authorization(
             identity, default_watchdog_local_controller_cert_path()
@@ -2625,12 +2658,12 @@ def ensure_member_watchdog_authorization(
     allowlist_path: pathlib.Path | None = None,
 ) -> pathlib.Path:
     """Authorize only the node-local agent on a non-coordinator Watchdog."""
-    if identity.role != "member":
-        raise LetsInferError("member Watchdog authorization requires a member identity")
+    if identity.role != "child":
+        raise LetsInferError("child Watchdog authorization requires a child identity")
     fingerprint = certificate_sha256(local_certificate)
     controller_id = hashlib.sha256(
         (
-            "letsinfer-member-watchdog-v1\n"
+            "letsinfer-child-watchdog-v1\n"
             f"{identity.installation_id}\n{identity.member_id}\n"
         ).encode("ascii")
     ).hexdigest()[:32]
@@ -4903,6 +4936,10 @@ def service_placement_identity(
         "topology_sha256": placement.topology_sha256,
         "strategy": placement.strategy,
         "members": list(placement.member_ids),
+        "device_uuids": {
+            member_id: list(placement.device_uuids[member_id])
+            for member_id in placement.member_ids
+        },
     }
     return {
         "placement_id": hashlib.sha256(canonical_bytes(identity_material)).hexdigest()[:32],
@@ -4910,6 +4947,19 @@ def service_placement_identity(
         "placement_members": list(placement.member_ids),
         "topology_sha256": placement.topology_sha256,
     }
+
+
+def logical_service_id(node_id: str, model: str) -> str:
+    """Return the stable public service identity for one logical model."""
+    return hashlib.sha256(
+        canonical_bytes(
+            {
+                "contract": "letsinfer-model-service-v1",
+                "node_id": node_id,
+                "model": model,
+            }
+        )
+    ).hexdigest()[:32]
 
 
 def service_placement_document(
@@ -4943,6 +4993,7 @@ def service_placement_document(
     )
     return {
         "placement_id": config["placement_id"],
+        "service_id": logical_service_id(identity.site_id, manifest["model"]["alias"]),
         "model": manifest["model"]["alias"],
         "runtime": runtime_identity,
         "target": target_contract(manifest)["id"],
@@ -4965,6 +5016,7 @@ def update_service_placement(
     try:
         identity = read_site_identity()
         with SiteStore(identity=identity) as store:
+            store.ensure_model_service(manifest["model"]["alias"])
             store.set_placement(service_placement_document(config, manifest, state))
     except SiteError as error:
         raise LetsInferError(f"cannot update service placement: {error}") from error
@@ -5542,9 +5594,9 @@ def render_gateway_service(
     executable = (executable_root or source_root()) / "bin/letsinfer"
     return f"""[Unit]
 Description=Let's Infer coordinator inference gateway
-Requires={SERVICE_NAME} {SITE_SERVICE_NAME}
-PartOf={SITE_SERVICE_NAME}
-After=network-online.target {SITE_SERVICE_NAME} {SERVICE_NAME}
+Requires={SERVICE_NAME} {NODE_SERVICE_NAME}
+PartOf={NODE_SERVICE_NAME}
+After=network-online.target {NODE_SERVICE_NAME} {SERVICE_NAME}
 Wants=network-online.target
 StartLimitIntervalSec=0
 
@@ -5729,10 +5781,10 @@ def install_core_gateway_service(
         ) from failure
 
 
-def render_site_service(executable_root: pathlib.Path | None = None) -> str:
+def render_node_service(executable_root: pathlib.Path | None = None) -> str:
     executable = (executable_root or source_root()) / "bin/letsinfer"
     return f"""[Unit]
-Description=Let's Infer private site agent
+Description=Let's Infer private node agent
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=0
@@ -5740,13 +5792,13 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 MemoryAccounting=yes
-MemoryHigh={SITE_AGENT_MEMORY_HIGH_BYTES}
-MemoryMax={SITE_AGENT_MEMORY_LIMIT_BYTES}
+MemoryHigh={NODE_AGENT_MEMORY_HIGH_BYTES}
+MemoryMax={NODE_AGENT_MEMORY_LIMIT_BYTES}
 MemorySwapMax=0
 Restart=always
 RestartSec=2
 UMask=0077
-TasksMax={SITE_AGENT_TASK_LIMIT}
+TasksMax={NODE_AGENT_TASK_LIMIT}
 LimitNOFILE=128
 NoNewPrivileges=yes
 LockPersonality=yes
@@ -5754,7 +5806,7 @@ MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart={_systemd_quote(executable)} site-agent --listen 0.0.0.0 --port {SITE_CONTROL_PORT}
+ExecStart={_systemd_quote(executable)} node-agent --listen 0.0.0.0 --port {SITE_CONTROL_PORT}
 TimeoutStopSec=15
 
 [Install]
@@ -5762,7 +5814,7 @@ WantedBy=default.target
 """
 
 
-def install_site_service_only(
+def install_node_service_only(
     *,
     no_start: bool = False,
     unit_dir: pathlib.Path | None = None,
@@ -5774,22 +5826,22 @@ def install_site_service_only(
                 "the macOS launchd user domain is unavailable; log into the target user session"
             )
         raise LetsInferError(
-            "user-systemd lingering is required before installing the site service"
+            "user-systemd lingering is required before installing the node service"
         )
     root = executable_root or source_root()
     executable = root / "bin/letsinfer"
     if not executable.is_file() or executable.is_symlink():
-        raise LetsInferError(f"site service executable is unavailable: {executable}")
+        raise LetsInferError(f"node service executable is unavailable: {executable}")
     if platform.system() == "Darwin":
         if unit_dir is not None:
             raise LetsInferError("a custom systemd unit directory is not valid on macOS")
         try:
             macos_services.install_launch_agent(
                 macos_services.LaunchAgent(
-                    label=macos_services.SITE_LABEL,
+                    label=macos_services.NODE_LABEL,
                     arguments=(
                         str(executable),
-                        "site-agent",
+                        "node-agent",
                         "--listen",
                         "0.0.0.0",
                         "--port",
@@ -5800,65 +5852,65 @@ def install_site_service_only(
                 no_start=no_start,
             )
         except macos_services.MacOSServiceError as error:
-            raise LetsInferError(f"cannot install macOS site service: {error}") from error
+            raise LetsInferError(f"cannot install macOS node service: {error}") from error
         return
     unit_root = unit_dir or pathlib.Path.home() / ".config/systemd/user"
     unit_root.mkdir(parents=True, exist_ok=True)
-    path = unit_root / SITE_SERVICE_NAME
+    path = unit_root / NODE_SERVICE_NAME
     snapshot = _snapshot_user_file(path)
-    previous = _unit_enabled_active(SITE_SERVICE_NAME)
+    previous = _unit_enabled_active(NODE_SERVICE_NAME)
     if previous[0] not in {"enabled", "disabled", "not-found"}:
         raise LetsInferError(
-            f"refusing site-service install while enablement is {previous[0]!r}"
+            f"refusing node-service install while enablement is {previous[0]!r}"
         )
     if previous[1] not in {"active", "inactive", "failed"}:
         raise LetsInferError(
-            f"refusing site-service install while state is {previous[1]!r}"
+            f"refusing node-service install while state is {previous[1]!r}"
         )
     if no_start and previous[1] == "active":
-        raise LetsInferError("--no-service cannot replace an active site service")
+        raise LetsInferError("--no-service cannot replace an active node service")
     loaded = False
     try:
         if previous[1] == "active":
-            run_passthrough(["systemctl", "--user", "stop", SITE_SERVICE_NAME])
-        write_text(path, render_site_service(root))
+            run_passthrough(["systemctl", "--user", "stop", NODE_SERVICE_NAME])
+        write_text(path, render_node_service(root))
         path.chmod(0o644)
         run(["systemctl", "--user", "daemon-reload"])
         loaded = True
-        run(["systemctl", "--user", "enable", SITE_SERVICE_NAME])
+        run(["systemctl", "--user", "enable", NODE_SERVICE_NAME])
         if not no_start:
-            run_passthrough(["systemctl", "--user", "start", SITE_SERVICE_NAME])
-            enabled, active, memory_bytes = _service_state(SITE_SERVICE_NAME)
+            run_passthrough(["systemctl", "--user", "start", NODE_SERVICE_NAME])
+            enabled, active, memory_bytes = _service_state(NODE_SERVICE_NAME)
             if enabled != "enabled" or active != "active":
-                raise LetsInferError("site service did not become enabled and active")
-            if memory_bytes is None or memory_bytes >= SITE_AGENT_MEMORY_LIMIT_BYTES:
+                raise LetsInferError("node service did not become enabled and active")
+            if memory_bytes is None or memory_bytes >= NODE_AGENT_MEMORY_LIMIT_BYTES:
                 raise LetsInferError(
-                    f"Let's Infer site-agent memory is {memory_bytes} bytes; "
-                    f"the limit is below {SITE_AGENT_MEMORY_LIMIT_BYTES} bytes"
+                    f"Let's Infer node-agent memory is {memory_bytes} bytes; "
+                    f"the limit is below {NODE_AGENT_MEMORY_LIMIT_BYTES} bytes"
                 )
     except BaseException as failure:
         errors: list[str] = []
         if loaded:
             result = run(
-                ["systemctl", "--user", "stop", SITE_SERVICE_NAME], check=False
+                ["systemctl", "--user", "stop", NODE_SERVICE_NAME], check=False
             )
             if result.returncode != 0:
-                errors.append("could not stop replacement site service")
+                errors.append("could not stop replacement node service")
         try:
             _restore_user_file(path, snapshot)
             run(["systemctl", "--user", "daemon-reload"])
-            _restore_unit_enablement(SITE_SERVICE_NAME, previous[0])
+            _restore_unit_enablement(NODE_SERVICE_NAME, previous[0])
             if previous[1] == "active":
-                run_passthrough(["systemctl", "--user", "start", SITE_SERVICE_NAME])
+                run_passthrough(["systemctl", "--user", "start", NODE_SERVICE_NAME])
         except BaseException as error:
             errors.append(str(error))
         if errors:
             raise LetsInferError(
-                "site-service activation failed and rollback was incomplete: "
+                "node-service activation failed and rollback was incomplete: "
                 + "; ".join(errors)
             ) from failure
         raise LetsInferError(
-            f"site-service activation failed; previous state restored: {failure}"
+            f"node-service activation failed; previous state restored: {failure}"
         ) from failure
 
 
@@ -5874,8 +5926,8 @@ def render_user_service(
     protection_root = pathlib.Path(config["watchdog_data_root"]) / PROTECTION_ROOT_NAME
     return f"""[Unit]
 Description=Let's Infer resident Watchdog
-Wants={SITE_SERVICE_NAME}
-After=network-online.target {SITE_SERVICE_NAME}
+Wants={NODE_SERVICE_NAME}
+After=network-online.target {NODE_SERVICE_NAME}
 StartLimitIntervalSec=0
 
 [Service]
@@ -6036,7 +6088,7 @@ def install_core_plane_services(
         "qualification_active": qualification_active,
     }
     if platform.system() != "Linux":
-        install_site_service_only()
+        install_node_service_only()
         if include_gateway:
             install_core_gateway_service(replace_active=True)
         return runtime_state
@@ -6083,7 +6135,7 @@ def install_core_plane_services(
                 )
             disarm_before_planned_stop(read_service_config(resident_path))
         stop_if_active(ENGINE_SERVICE_NAME)
-        install_site_service_only()
+        install_node_service_only()
         install_core_watchdog_service(
             identity,
             replace_active=True,
@@ -6166,7 +6218,7 @@ def wait_for_core_plane_ready(
         return
     if timeout_seconds <= 0 or poll_seconds <= 0 or stable_polls <= 0:
         raise LetsInferError("invalid core-plane readiness bounds")
-    expected = [SITE_SERVICE_NAME, SERVICE_NAME]
+    expected = [NODE_SERVICE_NAME, SERVICE_NAME]
     if include_gateway:
         expected.append(GATEWAY_SERVICE_NAME)
     deadline = time.monotonic() + timeout_seconds
@@ -6361,7 +6413,7 @@ def install_user_service(
     unit_root.mkdir(parents=True, exist_ok=True)
     paths = {
         SERVICE_NAME: unit_root / SERVICE_NAME,
-        SITE_SERVICE_NAME: unit_root / SITE_SERVICE_NAME,
+        NODE_SERVICE_NAME: unit_root / NODE_SERVICE_NAME,
         ENGINE_SERVICE_NAME: unit_root / ENGINE_SERVICE_NAME,
         GATEWAY_SERVICE_NAME: unit_root / GATEWAY_SERVICE_NAME,
         RECOVERY_SERVICE_NAME: unit_root / RECOVERY_SERVICE_NAME,
@@ -6377,7 +6429,7 @@ def install_user_service(
 
     state_names = (
         SERVICE_NAME,
-        SITE_SERVICE_NAME,
+        NODE_SERVICE_NAME,
         ENGINE_SERVICE_NAME,
         GATEWAY_SERVICE_NAME,
         RECOVERY_TIMER_NAME,
@@ -6398,7 +6450,7 @@ def install_user_service(
             raise LetsInferError(str(error)) from error
     safe_enablement_states = {"enabled", "disabled", "not-found"}
     for name in (
-        SERVICE_NAME, SITE_SERVICE_NAME, GATEWAY_SERVICE_NAME, RECOVERY_TIMER_NAME
+        SERVICE_NAME, NODE_SERVICE_NAME, GATEWAY_SERVICE_NAME, RECOVERY_TIMER_NAME
     ):
         state = previous_states[name][0]
         if state not in safe_enablement_states:
@@ -6414,7 +6466,7 @@ def install_user_service(
             )
     if no_start and any(
         previous_states[name][1] == "active"
-        for name in (SERVICE_NAME, SITE_SERVICE_NAME)
+        for name in (SERVICE_NAME, NODE_SERVICE_NAME)
     ):
         raise LetsInferError(
             "--no-start cannot replace an active Let's Infer service; "
@@ -6437,8 +6489,8 @@ def install_user_service(
             run_passthrough(["systemctl", "--user", "stop", ENGINE_SERVICE_NAME])
         if previous_states[SERVICE_NAME][1] == "active":
             run_passthrough(["systemctl", "--user", "stop", SERVICE_NAME])
-        if previous_states[SITE_SERVICE_NAME][1] == "active":
-            run_passthrough(["systemctl", "--user", "stop", SITE_SERVICE_NAME])
+        if previous_states[NODE_SERVICE_NAME][1] == "active":
+            run_passthrough(["systemctl", "--user", "stop", NODE_SERVICE_NAME])
         atomic_json(config_path, config)
         config_path.chmod(0o600)
         write_text(
@@ -6459,8 +6511,8 @@ def install_user_service(
             paths[SERVICE_NAME], render_user_service(config, manifest)
         )
         write_text(
-            paths[SITE_SERVICE_NAME],
-            render_site_service(pathlib.Path(config["source_root"])),
+            paths[NODE_SERVICE_NAME],
+            render_node_service(pathlib.Path(config["source_root"])),
         )
         write_text(
             paths[RECOVERY_SERVICE_NAME],
@@ -6473,7 +6525,7 @@ def install_user_service(
         write_text(paths[RECOVERY_TIMER_NAME], render_recovery_timer())
         for name in (
             SERVICE_NAME,
-            SITE_SERVICE_NAME,
+            NODE_SERVICE_NAME,
             ENGINE_SERVICE_NAME,
             GATEWAY_SERVICE_NAME,
             RECOVERY_SERVICE_NAME,
@@ -6484,7 +6536,7 @@ def install_user_service(
         run(["systemctl", "--user", "daemon-reload"])
         replacement_loaded = True
         run(["systemctl", "--user", "enable", SERVICE_NAME])
-        run(["systemctl", "--user", "enable", SITE_SERVICE_NAME])
+        run(["systemctl", "--user", "enable", NODE_SERVICE_NAME])
         run(["systemctl", "--user", "enable", GATEWAY_SERVICE_NAME])
         run(["systemctl", "--user", "enable", RECOVERY_TIMER_NAME])
         if runtime_receipt is not None:
@@ -6494,15 +6546,15 @@ def install_user_service(
             except RuntimePackError as error:
                 raise LetsInferError(str(error)) from error
         if not no_start:
-            run_passthrough(["systemctl", "--user", "start", SITE_SERVICE_NAME])
-            _, _, site_memory_bytes = _service_state(SITE_SERVICE_NAME)
+            run_passthrough(["systemctl", "--user", "start", NODE_SERVICE_NAME])
+            _, _, node_memory_bytes = _service_state(NODE_SERVICE_NAME)
             if (
-                site_memory_bytes is None
-                or site_memory_bytes >= SITE_AGENT_MEMORY_LIMIT_BYTES
+                node_memory_bytes is None
+                or node_memory_bytes >= NODE_AGENT_MEMORY_LIMIT_BYTES
             ):
                 raise LetsInferError(
-                    f"Let's Infer site-agent memory is {site_memory_bytes} bytes; "
-                    f"the limit is below {SITE_AGENT_MEMORY_LIMIT_BYTES} bytes"
+                    f"Let's Infer node-agent memory is {node_memory_bytes} bytes; "
+                    f"the limit is below {NODE_AGENT_MEMORY_LIMIT_BYTES} bytes"
                 )
             run_passthrough(["systemctl", "--user", "start", SERVICE_NAME])
             _, _, memory_bytes = _service_state()
@@ -6540,7 +6592,7 @@ def install_user_service(
                 GATEWAY_SERVICE_NAME,
                 ENGINE_SERVICE_NAME,
                 SERVICE_NAME,
-                SITE_SERVICE_NAME,
+                NODE_SERVICE_NAME,
             ):
                 result = run(
                     ["systemctl", "--user", "stop", name], check=False
@@ -6576,7 +6628,7 @@ def install_user_service(
             )
             rollback_errors.append(f"reload previous units: {detail}")
         for name in (
-            SERVICE_NAME, SITE_SERVICE_NAME, GATEWAY_SERVICE_NAME, RECOVERY_TIMER_NAME
+            SERVICE_NAME, NODE_SERVICE_NAME, GATEWAY_SERVICE_NAME, RECOVERY_TIMER_NAME
         ):
             state = previous_states[name][0]
             try:
@@ -6584,8 +6636,8 @@ def install_user_service(
             except (LetsInferError, OSError) as error:
                 rollback_errors.append(f"restore {name} enablement: {error}")
         try:
-            if previous_states[SITE_SERVICE_NAME][1] == "active":
-                run_passthrough(["systemctl", "--user", "start", SITE_SERVICE_NAME])
+            if previous_states[NODE_SERVICE_NAME][1] == "active":
+                run_passthrough(["systemctl", "--user", "start", NODE_SERVICE_NAME])
             if previous_states[SERVICE_NAME][1] == "active":
                 run_passthrough(["systemctl", "--user", "start", SERVICE_NAME])
             if previous_states[ENGINE_SERVICE_NAME][1] == "active":
@@ -6635,12 +6687,12 @@ def _service_state(name: str = SERVICE_NAME) -> tuple[str, str, int | None]:
 
 
 def _fresh_site_topology() -> tuple[Any, TopologyGraph]:
-    """Return the coordinator identity and one fully refreshed active graph."""
+    """Return the main identity and one fully refreshed active graph."""
     identity = read_site_identity()
-    if identity.role != "coordinator":
+    if identity.role != "main":
         raise LetsInferError(
-            "site topology selection is coordinator-owned; "
-            f"coordinator={identity.coordinator_id}@{identity.coordinator_address}"
+            "node topology selection is main-node-owned; "
+            f"main={identity.coordinator_id}@{identity.coordinator_address}"
         )
     synchronized = _synchronize_member_facts()
     if synchronized["failed"]:
@@ -6651,6 +6703,7 @@ def _fresh_site_topology() -> tuple[Any, TopologyGraph]:
     try:
         with SiteStore(identity=identity) as store:
             members = [row for row in store.members() if row["state"] == "active"]
+            allocations = store.device_allocations(active_only=True)
         missing = [row["member_id"] for row in members if not row["facts"]]
         if missing:
             raise LetsInferError(
@@ -6660,6 +6713,14 @@ def _fresh_site_topology() -> tuple[Any, TopologyGraph]:
             [row["facts"] for row in members],
             member_certificates={
                 row["member_id"]: row["certificate_sha256"] for row in members
+            },
+            allocated_devices={
+                member_id: [
+                    row["device_uuid"]
+                    for row in allocations
+                    if row["member_id"] == member_id
+                ]
+                for member_id in (row["member_id"] for row in members)
             },
         )
     except (SiteError, TopologyError) as error:
@@ -6698,12 +6759,12 @@ def _runtime_source_for_install(
     model: str,
     runtime: str | None,
     catalog_location: str | None,
-) -> tuple[str, str, str | None, str | None, str | None]:
+) -> tuple[str, str, str | None, str | None, str | None, bool]:
     path = pathlib.Path(model).expanduser()
     if path.exists():
-        return str(path.resolve(strict=True)), "local", None, None, None
+        return str(path.resolve(strict=True)), "local", None, None, None, False
     if REGISTRY_DIGEST_RE.fullmatch(model):
-        return model, "pinned", None, None, None
+        return model, "pinned", None, None, None, False
     location = resolved_catalog_location(catalog_location)
     if location is None:
         raise LetsInferError(
@@ -6721,13 +6782,14 @@ def _runtime_source_for_install(
     except (CatalogError, RuntimePackError) as error:
         raise LetsInferError(str(error)) from error
     policy = f"runtime:{selected_runtime}" if runtime else "recommended"
-    return source, policy, version, selected_target, selected_target_sha256
+    return source, policy, version, selected_target, selected_target_sha256, True
 
 
 def prepare_runtime_install(
     source: str,
     *,
     policy: str,
+    qualified: bool,
     requested_runtime: str | None,
     requested_target: str | None = None,
     expected_version: str | None = None,
@@ -6740,7 +6802,7 @@ def prepare_runtime_install(
     except RuntimePackError as error:
         raise LetsInferError(str(error)) from error
     manifest_path = pack.runtime_path
-    manifest = runtime_execution_manifest(pack.runtime)
+    manifest = runtime_execution_manifest(pack.runtime, qualified=qualified)
     engine = adapter_for(manifest).name
     manifest_target = target_contract(manifest)
     target_id = manifest_target["id"]
@@ -6762,7 +6824,6 @@ def prepare_runtime_install(
         pack.runtime["logical_model"] != manifest["model"]["alias"]
         or pack.runtime["engine"]["id"] != engine
         or pack.runtime["target"]["id"] != target_id
-        or (pack.runtime["status"] == "qualified") != (manifest["status"] == "stable")
     ):
         raise LetsInferError("runtime descriptor and runtime.json identity disagree")
     if requested_runtime is not None and requested_runtime != pack.runtime["id"]:
@@ -6792,6 +6853,7 @@ def prepare_runtime_install(
         control_root=control_root,
         source=source,
         policy=policy,
+        qualified=qualified,
         hardware_fingerprint_sha256=host_hardware_fingerprint_sha256(),
         target_contract_sha256=manifest_target_sha256,
         installed_at_unix_ns=time.time_ns(),
@@ -6803,7 +6865,7 @@ def _control_member_host(address: str) -> str:
     endpoint = _site_control_endpoint(address)
     parsed = urllib.parse.urlsplit(endpoint)
     if not parsed.hostname:
-        raise LetsInferError("member control address has no host")
+        raise LetsInferError("child control address has no host")
     return f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
 
 
@@ -6871,6 +6933,66 @@ def _engine_group_member_controls(
     }
 
 
+def _group_release_identity(
+    *,
+    catalog_release_value: Mapping[str, Any],
+    candidate_id: str,
+    version: str,
+    source: str,
+    target_id: str,
+    target_sha256: str,
+    runtime: RuntimePack,
+    manifest_sha256: str,
+) -> dict[str, Any]:
+    """Bind one installed group to the exact signed-catalog release."""
+    release = dict(catalog_release_value)
+    benchmark = release.get("benchmark")
+    record = runtime.runtime["benchmark"]["record"]
+    if (
+        release.get("source") != source
+        or release.get("engine") != runtime.runtime["engine"]["id"]
+        or release.get("engine_oci") != runtime.runtime["engine"]["oci"]["reference"]
+        or release.get("model_uri") != runtime.runtime["model"]["uri"]
+        or release.get("qualified") is not True
+        or release.get("revoked") is not False
+        or not isinstance(benchmark, Mapping)
+        or not isinstance(record, Mapping)
+        or benchmark.get("id") != record.get("id")
+    ):
+        raise LetsInferError(
+            "signed catalog release does not match the installed runtime bytes"
+        )
+    artifacts = [
+        {
+            "name": artifact["name"],
+            "uri": artifact["uri"],
+            "revision": artifact["revision"],
+            "sha256": artifact.get("sha256"),
+        }
+        for artifact in runtime.runtime["artifacts"]
+    ]
+    return {
+        "logical_model": runtime.runtime["logical_model"],
+        "candidate_id": candidate_id,
+        "version": version,
+        "source": source,
+        "runtime_digest": runtime.digest,
+        "manifest_sha256": manifest_sha256,
+        "engine_oci": release["engine_oci"],
+        "model_uri": release["model_uri"],
+        "artifacts": artifacts,
+        "target_id": target_id,
+        "target_contract_sha256": target_sha256,
+        "qualification": "qualified",
+        "benchmark": {
+            "id": benchmark["id"],
+            "evidence": benchmark["evidence"],
+        },
+        "authors": list(release["authors"]),
+        "license": release["license"],
+    }
+
+
 def install_engine_group(
     arguments: argparse.Namespace,
     *,
@@ -6879,38 +7001,49 @@ def install_engine_group(
     manifest: dict[str, Any],
     control_root: pathlib.Path,
     receipt: dict[str, Any],
+    release_identity: Mapping[str, Any],
+    resolved_topology: tuple[Any, TopologyGraph, Any] | None = None,
 ) -> int:
-    """Install one runtime-owned replicated or distributed engine group."""
+    """Install one exact engine group under a logical model service."""
     if not REGISTRY_DIGEST_RE.fullmatch(source):
         raise LetsInferError(
-            "multi-member installation requires a digest-pinned OCI runtime"
+            "engine-group installation requires a digest-pinned OCI runtime"
         )
     if any(
         bool(getattr(arguments, name, False))
         for name in ("no_service", "no_start", "no_build_image")
     ):
         raise LetsInferError(
-            "multi-member installation does not support disabling required lifecycle services"
+            "engine-group installation does not support disabling required lifecycle services"
         )
-    identity, graph, placement = resolve_manifest_placement(manifest)
-    if placement.strategy not in {"replicated", "distributed"}:
-        raise LetsInferError("engine-group installation requires a multi-member target")
+    identity, graph, placement = (
+        resolved_topology or resolve_manifest_placement(manifest)
+    )
+    if placement.strategy not in {"single", "parallel"}:
+        raise LetsInferError("engine-group installation has an invalid target strategy")
     runtime_root = pathlib.Path(receipt["object_root"])
     try:
         runtime = verify_descriptor(runtime_root)
+        if (
+            release_identity.get("source") != source
+            or release_identity.get("logical_model") != manifest["model"]["alias"]
+            or release_identity.get("target_id") != target_contract(manifest)["id"]
+        ):
+            raise OrchestrationError(
+                "signed release identity does not match the requested model, target, and source"
+            )
         contract = validate_target_binding(
             runtime.runtime.get("orchestration"),
             target_contract(manifest)["placement"],
         )
     except (RuntimePackError, OrchestrationError) as error:
         raise LetsInferError(f"runtime engine-group contract is invalid: {error}") from error
-    if contract is None:
-        raise LetsInferError("multi-member runtime has no engine-group contract")
+    if placement.strategy == "parallel" and contract is None:
+        raise LetsInferError("parallel runtime has no engine-group contract")
+    if placement.strategy == "single" and contract is not None:
+        raise LetsInferError("single runtime cannot carry a parallel group contract")
     manifest_sha256 = sha256_file(manifest_path)
-    placement_identity = service_placement_identity(
-        identity, placement, manifest_sha256
-    )
-    placement_id = placement_identity["placement_id"]
+    service_id = logical_service_id(identity.site_id, manifest["model"]["alias"])
     with _site_store() as store:
         selected_records = {
             row["member_id"]: row
@@ -6933,13 +7066,45 @@ def install_engine_group(
                     (member["port_base"], member["port_count"])
                 )
     try:
-        port_bases = allocate_group_ports(
-            contract,
-            member_ids=placement.member_ids,
-            engine_coordinator_id=placement.engine_coordinator_id,
-            occupied={key: tuple(value) for key, value in occupied.items()},
-        )
-        if placement.strategy == "distributed":
+        if contract is None:
+            member_id = placement.member_ids[0]
+            port_base = next(
+                (
+                    candidate
+                    for candidate in range(18000, 60000)
+                    if all(
+                        candidate + 1 <= used or used + length <= candidate
+                        for used, length in occupied[member_id]
+                    )
+                ),
+                None,
+            )
+            if port_base is None:
+                raise GroupOrchestrationError(
+                    f"no engine port remains on node {member_id}"
+                )
+            plan = build_single_group_plan(
+                member_id=member_id,
+                member_address=_control_member_host(
+                    selected_records[member_id]["address"]
+                ),
+                device_uuids=placement.device_uuids[member_id],
+                engine_strategy=target_contract(manifest)["placement"]["engine_strategy"],
+                topology_sha256=placement.topology_sha256,
+                manifest_sha256=manifest_sha256,
+                runtime_digest=runtime.digest,
+                service_id=service_id,
+                release=release_identity,
+                port_base=port_base,
+            )
+        else:
+            port_bases = allocate_group_ports(
+                contract,
+                member_ids=placement.member_ids,
+                engine_coordinator_id=placement.engine_coordinator_id,
+                occupied={key: tuple(value) for key, value in occupied.items()},
+            )
+        if placement.strategy == "parallel" and len(placement.member_ids) > 1:
             engine_addresses = graph.engine_addresses(
                 placement, target_contract(manifest)["placement"]["interconnect"]
             )
@@ -6948,26 +7113,33 @@ def install_engine_group(
                 member_id: _control_member_host(selected_records[member_id]["address"])
                 for member_id in placement.member_ids
             }
-        plan = build_group_plan(
-            contract,
-            member_ids=placement.member_ids,
-            member_addresses=engine_addresses,
-            engine_coordinator_id=placement.engine_coordinator_id,
-            topology_sha256=placement.topology_sha256,
-            manifest_sha256=manifest_sha256,
-            runtime_digest=runtime.digest,
-            member_port_bases=port_bases,
-        )
+        if contract is not None:
+            plan = build_group_plan(
+                contract,
+                member_ids=placement.member_ids,
+                member_addresses=engine_addresses,
+                engine_coordinator_id=placement.engine_coordinator_id,
+                topology_sha256=placement.topology_sha256,
+                manifest_sha256=manifest_sha256,
+                runtime_digest=runtime.digest,
+                service_id=service_id,
+                release=release_identity,
+                member_port_bases=port_bases,
+                member_device_uuids=placement.device_uuids,
+            )
     except (OrchestrationError, GroupOrchestrationError, TopologyError) as error:
         raise LetsInferError(f"cannot build engine-group plan: {error}") from error
     submit, job_status, group_status = _engine_group_transport()
 
     runtime_identity = (
-        f"{runtime.runtime['id']}@{runtime.runtime['version']}"
+        f"{manifest['model']['alias']}/{adapter_for(manifest).name}/"
+        f"{target_contract(manifest)['id']}@{runtime.runtime['version']}"
         f"@sha256:{runtime.digest}"
     )
+    placement_id = plan.group_id
     placement_document = {
         "placement_id": placement_id,
+        "service_id": service_id,
         "model": manifest["model"]["alias"],
         "runtime": runtime_identity,
         "target": target_contract(manifest)["id"],
@@ -6986,6 +7158,19 @@ def install_engine_group(
     receipt_path: pathlib.Path | None = None
     try:
         with _site_store() as store:
+            service = store.ensure_model_service(manifest["model"]["alias"])
+            if service["service_id"] != service_id:
+                raise LetsInferError("logical model service identity is inconsistent")
+            store.reserve_group_devices(
+                plan.group_id,
+                [
+                    {
+                        "member_id": assignment.member_id,
+                        "device_uuids": list(assignment.device_uuids),
+                    }
+                    for assignment in plan.assignments
+                ],
+            )
             store.set_placement(placement_document)
             orchestrator = EngineGroupOrchestrator(
                 store=store,
@@ -7073,6 +7258,10 @@ def install_engine_group(
                     store.set_placement(placement_document)
                 except BaseException as state_error:
                     rollback_error = rollback_error or state_error
+                try:
+                    store.set_group_allocation_state(plan.group_id, "released")
+                except BaseException as allocation_error:
+                    rollback_error = rollback_error or allocation_error
                 if rollback_error is not None:
                     raise LetsInferError(
                         "engine-group installation failed and rollback was incomplete: "
@@ -7100,7 +7289,7 @@ def _restore_engine_group_orchestrator(
     row: Mapping[str, Any],
     *,
     actor_type: str = "system",
-    actor_id: str = "coordinator",
+    actor_id: str = "main",
     origin_interface: str = "orchestrator",
     correlation_id: str | None = None,
 ) -> tuple[EngineGroupOrchestrator, dict[str, Any]]:
@@ -7115,6 +7304,7 @@ def _restore_engine_group_orchestrator(
             or row.get("plan_sha256")
             != hashlib.sha256(canonical_bytes(document)).hexdigest()
             or not REGISTRY_DIGEST_RE.fullmatch(str(row.get("source", "")))
+            or row.get("source") != document["release"]["source"]
         ):
             raise LetsInferError("durable engine-group identity is inconsistent")
         runtime_root = default_runtime_home() / ".objects" / document["runtime_digest"]
@@ -7130,19 +7320,39 @@ def _restore_engine_group_orchestrator(
             runtime.runtime.get("orchestration"),
             target_contract(manifest)["placement"],
         )
-        if contract is None:
-            raise LetsInferError("engine-group runtime lost its orchestration contract")
         members = sorted(document["members"], key=lambda item: item["rank"])
-        plan = build_group_plan(
-            contract,
-            member_ids=tuple(item["member_id"] for item in members),
-            member_addresses={item["member_id"]: item["address"] for item in members},
-            engine_coordinator_id=document["engine_coordinator_id"],
-            topology_sha256=document["topology_sha256"],
-            manifest_sha256=document["manifest_sha256"],
-            runtime_digest=document["runtime_digest"],
-            member_port_bases={item["member_id"]: item["port_base"] for item in members},
-        )
+        if contract is None:
+            if document["strategy"] != "single" or len(members) != 1:
+                raise LetsInferError("engine-group runtime lost its parallel contract")
+            member = members[0]
+            plan = build_single_group_plan(
+                member_id=member["member_id"],
+                member_address=member["address"],
+                device_uuids=member["device_uuids"],
+                engine_strategy=document["engine_strategy"],
+                topology_sha256=document["topology_sha256"],
+                manifest_sha256=document["manifest_sha256"],
+                runtime_digest=document["runtime_digest"],
+                service_id=document["service_id"],
+                release=document["release"],
+                port_base=member["port_base"],
+            )
+        else:
+            plan = build_group_plan(
+                contract,
+                member_ids=tuple(item["member_id"] for item in members),
+                member_addresses={item["member_id"]: item["address"] for item in members},
+                engine_coordinator_id=document["engine_coordinator_id"],
+                topology_sha256=document["topology_sha256"],
+                manifest_sha256=document["manifest_sha256"],
+                runtime_digest=document["runtime_digest"],
+                service_id=document["service_id"],
+                release=document["release"],
+                member_port_bases={item["member_id"]: item["port_base"] for item in members},
+                member_device_uuids={
+                    item["member_id"]: item["device_uuids"] for item in members
+                },
+            )
         if plan.document() != document:
             raise LetsInferError("runtime contract no longer reproduces the engine-group plan")
         controls = _engine_group_member_controls(
@@ -7200,7 +7410,7 @@ def _sync_group_placement(
     member_states = {
         item["member_id"]: item["state"] for item in group["member_states"]
     }
-    group_running = group["state"] in {"running", "degraded"}
+    group_running = group["state"] == "running"
     updated = dict(placement)
     if group_running:
         updated["state"] = "running"
@@ -7268,61 +7478,87 @@ def _engine_group_lifecycle(
     correlation_id: str | None = None,
 ) -> dict[str, Any] | None:
     identity = read_site_identity()
-    if identity.role != "coordinator":
-        raise LetsInferError("engine-group lifecycle is coordinator-only")
+    if identity.role != "main":
+        raise LetsInferError("engine-group lifecycle is main-node-only")
     with _site_store() as store:
-        selected = _select_engine_group(store, model, required=False)
-        if selected is None:
+        placements = {row["placement_id"]: row for row in store.placements()}
+        selected = [
+            (row, placements[row["placement_id"]])
+            for row in store.engine_groups()
+            if row["state"] != "removed"
+            and row["desired_state"] != "removed"
+            and row["placement_id"] in placements
+            and (model is None or placements[row["placement_id"]]["model"] == model)
+        ]
+        if not selected:
             return None
-        row, _placement = selected
-        orchestrator, _manifest = _restore_engine_group_orchestrator(
-            store,
-            row,
-            actor_type=actor_type,
-            actor_id=actor_id or getpass.getuser(),
-            origin_interface=origin_interface,
-            correlation_id=correlation_id,
-        )
-        try:
-            if action == "stop":
-                result = orchestrator.stop()
-            elif action == "start":
-                result = orchestrator.recover(acknowledge_trips=False)
-            elif action == "restart":
-                stopped = orchestrator.stop()
-                _sync_group_placement(store, stopped)
-                result = orchestrator.recover(acknowledge_trips=False)
-            elif action == "recover":
-                result = orchestrator.recover(acknowledge_trips=True)
-            elif action == "remove":
-                if row["state"] not in {"staged", "stopped"}:
+        results: list[dict[str, Any]] = []
+        for row, _placement in selected:
+            orchestrator, _manifest = _restore_engine_group_orchestrator(
+                store,
+                row,
+                actor_type=actor_type,
+                actor_id=actor_id or getpass.getuser(),
+                origin_interface=origin_interface,
+                correlation_id=correlation_id,
+            )
+            try:
+                if action == "stop":
+                    result = orchestrator.stop()
+                elif action == "start":
+                    result = orchestrator.recover(acknowledge_trips=False)
+                elif action == "restart":
                     stopped = orchestrator.stop()
                     _sync_group_placement(store, stopped)
-                result = orchestrator.remove()
-            else:
-                raise LetsInferError("engine-group lifecycle action is invalid")
-        except GroupOrchestrationError:
-            current = next(
-                item
-                for item in store.engine_groups()
-                if item["group_id"] == row["group_id"]
+                    result = orchestrator.recover(acknowledge_trips=False)
+                elif action == "recover":
+                    result = orchestrator.recover(acknowledge_trips=True)
+                elif action == "remove":
+                    if row["state"] not in {"staged", "stopped"}:
+                        stopped = orchestrator.stop()
+                        _sync_group_placement(store, stopped)
+                    result = orchestrator.remove()
+                else:
+                    raise LetsInferError("engine-group lifecycle action is invalid")
+            except GroupOrchestrationError:
+                current = next(
+                    item
+                    for item in store.engine_groups()
+                    if item["group_id"] == row["group_id"]
+                )
+                failed = {
+                    **current["plan"],
+                    "placement_id": current["placement_id"],
+                    "desired_state": current["desired_state"],
+                    "state": current["state"],
+                    "member_states": current["members"],
+                }
+                _sync_group_placement(store, failed)
+                raise
+            _sync_group_placement(store, result)
+            results.append(result)
+        if len(results) == 1:
+            return results[0]
+        aggregate_id = hashlib.sha256(
+            canonical_bytes(
+                {
+                    "contract": "letsinfer-replica-lifecycle-v1",
+                    "model": model,
+                    "groups": sorted(result["group_id"] for result in results),
+                }
             )
-            failed = {
-                **current["plan"],
-                "placement_id": current["placement_id"],
-                "desired_state": current["desired_state"],
-                "state": current["state"],
-                "member_states": current["members"],
-            }
-            _sync_group_placement(store, failed)
-            raise
-        _sync_group_placement(store, result)
-        return result
+        ).hexdigest()[:32]
+        return {
+            "group_id": aggregate_id,
+            "group_ids": [result["group_id"] for result in results],
+            "state": results[0]["state"],
+            "groups": results,
+        }
 
 
 def _remove_all_engine_groups() -> list[str]:
     identity = read_site_identity()
-    if identity.role != "coordinator":
+    if identity.role != "main":
         return []
     removed: list[str] = []
     while True:
@@ -7348,25 +7584,25 @@ def _remove_all_engine_groups() -> list[str]:
 
 
 def _apply_controller_site_move(prepared: PreparedMove) -> Any:
-    """Commit an approved move and restart the site agent after its HTTP reply."""
+    """Commit an approved move and restart the node agent after its HTTP reply."""
     if platform.system().lower() != "linux":
-        raise SiteError("persistent site moves require Linux user systemd")
+        raise SiteError("persistent node moves require Linux user systemd")
     if not user_lingering_enabled():
-        raise SiteError("user-systemd lingering is required before a site move")
+        raise SiteError("user-systemd lingering is required before a node move")
     systemctl = shutil.which("systemctl")
     systemd_run = shutil.which("systemd-run")
     if not systemctl or not pathlib.Path(systemctl).is_absolute() or not systemd_run:
         raise SiteError("user systemd move activation tools are unavailable")
     units = (
         SERVICE_NAME,
-        SITE_SERVICE_NAME,
+        NODE_SERVICE_NAME,
         ENGINE_SERVICE_NAME,
         GATEWAY_SERVICE_NAME,
         RECOVERY_TIMER_NAME,
     )
     prior = {name: _unit_enabled_active(name) for name in units}
-    if prior[SITE_SERVICE_NAME][1] != "active":
-        raise SiteError("site move requires the private site service to be active")
+    if prior[NODE_SERVICE_NAME][1] != "active":
+        raise SiteError("node move requires the private node service to be active")
     active_work = [
         name
         for name in (ENGINE_SERVICE_NAME,)
@@ -7374,13 +7610,13 @@ def _apply_controller_site_move(prepared: PreparedMove) -> Any:
     ]
     if active_work:
         raise SiteError(
-            "site move requires active inference services to be stopped first: "
+            "node move requires active inference services to be stopped first: "
             + ",".join(active_work)
         )
     unit_root = pathlib.Path.home() / ".config/systemd/user"
     watchdog_unit = unit_root / SERVICE_NAME
     watchdog_snapshot = _snapshot_user_file(watchdog_unit)
-    restart_unit = f"letsinfer-site-move-{prepared.move_id}"
+    restart_unit = f"letsinfer-node-move-{prepared.move_id}"
     restart_scheduled = False
 
     def cancel_restart() -> None:
@@ -7409,7 +7645,7 @@ def _apply_controller_site_move(prepared: PreparedMove) -> Any:
                 "kill",
                 "--signal=TERM",
                 "--kill-whom=main",
-                SITE_SERVICE_NAME,
+                NODE_SERVICE_NAME,
             ]
         )
         restart_scheduled = True
@@ -7443,13 +7679,13 @@ def _apply_controller_site_move(prepared: PreparedMove) -> Any:
             run([systemctl, "--user", "daemon-reload"])
             for name, (enabled, active) in prior.items():
                 _restore_unit_enablement(name, enabled)
-                if active == "active" and name != SITE_SERVICE_NAME:
+                if active == "active" and name != NODE_SERVICE_NAME:
                     run_passthrough([systemctl, "--user", "start", name])
         except BaseException as error:
             errors.append(str(error))
         if errors:
             raise SiteError(
-                "site move failed and service rollback was incomplete: "
+                "node move failed and service rollback was incomplete: "
                 + "; ".join(errors)
             ) from failure
         raise
@@ -7459,7 +7695,7 @@ def _controller_administration_completed(
     action: str, result: Mapping[str, Any]
 ) -> None:
     """After the commit response is on the wire, activate the new site identity."""
-    if action != "site.move.commit":
+    if action != "node.move.commit":
         return
     move = result.get("move")
     move_id = move.get("move_id") if isinstance(move, Mapping) else None
@@ -7468,7 +7704,7 @@ def _controller_administration_completed(
     systemctl = shutil.which("systemctl")
     if systemctl is None:
         return
-    restart_unit = f"letsinfer-site-move-{move_id}"
+    restart_unit = f"letsinfer-node-move-{move_id}"
     run(
         [systemctl, "--user", "stop", f"{restart_unit}.timer"],
         check=False,
@@ -7770,24 +8006,13 @@ def reconcile_engine_groups_once() -> dict[str, Any]:
                         for item in current["member_states"]
                     }
                     if (
-                        orchestrator.plan.strategy == "distributed"
-                        and current["state"] == "failed"
+                        current["state"] == "failed"
                         and "unreachable" not in states.values()
                         and not any(orchestrator.protection_trips.values())
                     ):
                         current = orchestrator.recover(
                             acknowledge_trips=False
                         )
-                    elif (
-                        orchestrator.plan.strategy == "replicated"
-                        and current["state"] in {"degraded", "failed"}
-                        and any(
-                            state not in {"running", "unreachable"}
-                            and not orchestrator.protection_trips[member_id]
-                            for member_id, state in states.items()
-                        )
-                    ):
-                        current = orchestrator.recover_replicas()
                 _sync_group_placement(store, current)
                 bucket = "healthy" if current["state"] == "running" else current["state"]
                 summary[bucket].append(row["group_id"])
@@ -7818,7 +8043,368 @@ def reconcile_engine_groups_once() -> dict[str, Any]:
     return summary
 
 
+def _catalog_release_for_node(
+    catalog: Mapping[str, Any],
+    model: str,
+    runtime: str | None,
+    *,
+    identity: Any,
+    graph: TopologyGraph,
+    member_id: str,
+    ignore_allocations: bool = False,
+) -> tuple[tuple[str, str, str, str, str], TargetPlacement, TopologyGraph]:
+    """Resolve one exact target-specific release for one physical node."""
+    if member_id not in graph.members:
+        raise LetsInferError(f"node is not active in this topology: {member_id}")
+    model_record = catalog.get("models", {}).get(model)
+    if not isinstance(model_record, Mapping):
+        raise LetsInferError(f"model is not present in runtime catalog: {model}")
+    contracts = {
+        target_id: catalog_target_contract(dict(catalog), target_id)
+        for target_id in model_record["targets"]
+    }
+    node_graph = TopologyGraph(
+        [graph.members[member_id]],
+        allocated_devices={
+            member_id: ()
+            if ignore_allocations
+            else tuple(graph.allocated_devices.get(member_id, ()))
+        },
+    )
+    try:
+        choice = node_graph.resolve_catalog_targets(
+            contracts, coordinator_id=member_id
+        )
+        release = catalog_release(
+            dict(catalog), model, runtime, choice.target_id, device=None
+        )
+    except (RuntimePackError, TopologyError) as error:
+        raise LetsInferError(str(error)) from error
+    return release, choice, node_graph
+
+
+def _selected_install_node_ids(
+    arguments: argparse.Namespace,
+    identity: Any,
+    members: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    active = [dict(row) for row in members if row.get("state") == "active"]
+    by_id = {str(row["member_id"]): row for row in active}
+    by_name: dict[str, list[str]] = {}
+    for row in active:
+        by_name.setdefault(str(row["display_name"]), []).append(str(row["member_id"]))
+    requested = list(getattr(arguments, "node", None) or [])
+    if getattr(arguments, "all_nodes", False) and requested:
+        raise LetsInferError("--node and --all-nodes cannot be combined")
+    if getattr(arguments, "all_nodes", False):
+        return tuple(sorted(by_id))
+    if requested:
+        selected: list[str] = []
+        for value in requested:
+            if value in by_id:
+                member_id = value
+            else:
+                matches = by_name.get(value, [])
+                if not matches:
+                    raise LetsInferError(f"unknown active node: {value}")
+                if len(matches) != 1:
+                    raise LetsInferError(
+                        f"node name is ambiguous; use its identity: {value}"
+                    )
+                member_id = matches[0]
+            if member_id not in selected:
+                selected.append(member_id)
+        return tuple(selected)
+    if len(active) > 1 and sys.stdin.isatty():
+        answer = input(
+            f"Replicate this model across all {len(active)} compatible nodes? [y/N] "
+        ).strip().lower()
+        if answer in {"y", "yes"}:
+            return tuple(sorted(by_id))
+    return (identity.member_id,)
+
+
+def _remove_engine_groups_by_id(group_ids: Sequence[str]) -> None:
+    """Drain and remove exact groups before an explicitly approved replacement."""
+    wanted = tuple(dict.fromkeys(group_ids))
+    if not wanted:
+        return
+    with _site_store() as store:
+        rows = {row["group_id"]: row for row in store.engine_groups()}
+        missing = [group_id for group_id in wanted if group_id not in rows]
+        if missing:
+            raise LetsInferError(
+                "replacement group state disappeared: " + ",".join(missing)
+            )
+        for group_id in wanted:
+            row = rows[group_id]
+            if row["state"] == "removed" or row["desired_state"] == "removed":
+                continue
+            orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
+            if row["state"] not in {"staged", "stopped"}:
+                stopped = orchestrator.stop()
+                _sync_group_placement(store, stopped)
+            removed = orchestrator.remove()
+            _sync_group_placement(store, removed)
+
+
+def _install_catalog_nodes(
+    arguments: argparse.Namespace,
+) -> int | None:
+    """Plan and install one independent target-specific group per selected node."""
+    model_path = pathlib.Path(arguments.model).expanduser()
+    if model_path.exists() or REGISTRY_DIGEST_RE.fullmatch(arguments.model):
+        return None
+    location = resolved_catalog_location(getattr(arguments, "catalog", None))
+    if location is None:
+        return None
+    try:
+        catalog = CatalogManager(location).load().document
+    except (CatalogError, RuntimePackError) as error:
+        raise LetsInferError(str(error)) from error
+    identity, graph = _fresh_site_topology()
+    with _site_store() as store:
+        members = store.members()
+        placements = {
+            row["placement_id"]: row
+            for row in store.placements()
+            if row["state"] in {"starting", "running", "draining"}
+        }
+        groups = [
+            row
+            for row in store.engine_groups()
+            if row["state"] != "removed" and row["desired_state"] != "removed"
+        ]
+    selected = _selected_install_node_ids(arguments, identity, members)
+    member_rows = {str(row["member_id"]): dict(row) for row in members}
+    groups_by_node: dict[str, list[dict[str, Any]]] = {
+        member_id: [] for member_id in selected
+    }
+    for group in groups:
+        for member in group["plan"]["members"]:
+            if member["member_id"] in groups_by_node:
+                groups_by_node[member["member_id"]].append(group)
+    install_nodes: list[str] = []
+    replacements: dict[str, list[str]] = {}
+    planned: dict[str, tuple[tuple[str, str, str, str, str], TargetPlacement]] = {}
+    for member_id in selected:
+        resident = groups_by_node[member_id]
+        resident_models = {
+            placements[row["placement_id"]]["model"]
+            for row in resident
+            if row["placement_id"] in placements
+        }
+        if (
+            resident
+            and resident_models == {arguments.model}
+            and getattr(arguments, "runtime", None) is None
+        ):
+            print(
+                f"✓ {member_rows[member_id]['display_name']}  already serving {arguments.model}"
+            )
+            continue
+        try:
+            release, choice, _node_graph = _catalog_release_for_node(
+                catalog,
+                arguments.model,
+                getattr(arguments, "runtime", None),
+                identity=identity,
+                graph=graph,
+                member_id=member_id,
+                ignore_allocations=bool(resident),
+            )
+        except LetsInferError as error:
+            print(f"✕ {member_rows[member_id]['display_name']}  {error}")
+            continue
+        planned[member_id] = (release, choice)
+        install_nodes.append(member_id)
+        if resident:
+            replacements[member_id] = [row["group_id"] for row in resident]
+            names = ", ".join(sorted(resident_models)) or "an installed runtime"
+            print(
+                f"! {member_rows[member_id]['display_name']}  supported; replaces {names}"
+            )
+        else:
+            print(
+                f"✓ {member_rows[member_id]['display_name']}  supported; "
+                f"{release[2]}@{release[3]}"
+            )
+    if not install_nodes:
+        if any(
+            placements[row["placement_id"]]["model"] == arguments.model
+            for rows in groups_by_node.values()
+            for row in rows
+            if row["placement_id"] in placements
+        ):
+            return 0
+        raise LetsInferError("no selected node has a qualified runtime for this model")
+    if replacements and not getattr(arguments, "replace_existing", False):
+        if not sys.stdin.isatty():
+            raise LetsInferError(
+                "installation would replace running groups; retry with --replace-existing"
+            )
+        answer = input("Replace the listed running model groups? [y/N] ").strip().lower()
+        if answer not in {"y", "yes"}:
+            raise LetsInferError("installation cancelled before replacement")
+    if replacements:
+        _remove_engine_groups_by_id(
+            [group_id for values in replacements.values() for group_id in values]
+        )
+    completed = 0
+    for member_id in install_nodes:
+        # Refresh after every launch so the next plan observes the newly sealed
+        # GPU allocation and cannot overlap it.
+        identity, graph = _fresh_site_topology()
+        release, choice, node_graph = _catalog_release_for_node(
+            catalog,
+            arguments.model,
+            getattr(arguments, "runtime", None),
+            identity=identity,
+            graph=graph,
+            member_id=member_id,
+        )
+        target_id, target_sha256, candidate, version, source = release
+        manifest_path, manifest, control_root, receipt = prepare_runtime_install(
+            source,
+            policy=f"runtime:{candidate}" if getattr(arguments, "runtime", None) else "recommended",
+            requested_runtime=getattr(arguments, "runtime", None),
+            requested_target=target_id,
+            expected_version=version,
+            expected_target_contract_sha256=target_sha256,
+        )
+        runtime = verify_descriptor(pathlib.Path(receipt["object_root"]))
+        release_record = catalog_release_record(
+            dict(catalog), arguments.model, target_id, candidate, version
+        )
+        release_identity = _group_release_identity(
+            catalog_release_value=release_record,
+            candidate_id=candidate,
+            version=version,
+            source=source,
+            target_id=target_id,
+            target_sha256=target_sha256,
+            runtime=runtime,
+            manifest_sha256=sha256_file(manifest_path),
+        )
+        install_engine_group(
+            arguments,
+            source=source,
+            manifest_path=manifest_path,
+            manifest=manifest,
+            control_root=control_root,
+            receipt=receipt,
+            release_identity=release_identity,
+            resolved_topology=(identity, node_graph, choice.placement),
+        )
+        completed += 1
+    print(
+        f"REPLICA POOL {arguments.model} groups={completed} "
+        f"nodes={','.join(install_nodes)}"
+    )
+    return 0
+
+
+def scale_command(arguments: argparse.Namespace) -> int:
+    """Converge one logical model service to an exact number of groups."""
+    replicas = arguments.replicas
+    if not isinstance(replicas, int) or isinstance(replicas, bool) or replicas not in range(1, 129):
+        raise LetsInferError("--replicas must be from 1 through 128")
+    location = resolved_catalog_location(arguments.catalog)
+    if location is None:
+        raise LetsInferError(
+            "replica scaling requires --catalog or LETSINFER_CATALOG"
+        )
+    try:
+        catalog = CatalogManager(location).load().document
+    except (CatalogError, RuntimePackError) as error:
+        raise LetsInferError(str(error)) from error
+
+    with _site_store() as store:
+        placements = {row["placement_id"]: row for row in store.placements()}
+        current = [
+            row
+            for row in store.engine_groups()
+            if row["state"] != "removed"
+            and row["desired_state"] != "removed"
+            and row["placement_id"] in placements
+            and placements[row["placement_id"]]["model"] == arguments.model
+        ]
+    if len(current) > replicas:
+        removable = sorted(
+            current,
+            key=lambda row: (
+                row["state"] == "running",
+                row["updated_at_unix"],
+                row["group_id"],
+            ),
+        )[: len(current) - replicas]
+        _remove_engine_groups_by_id([row["group_id"] for row in removable])
+        current = [row for row in current if row not in removable]
+
+    while len(current) < replicas:
+        identity, graph = _fresh_site_topology()
+        try:
+            release, choice = _catalog_site_release(
+                dict(catalog),
+                arguments.model,
+                arguments.runtime,
+                topology=(identity, graph),
+            )
+        except LetsInferError as error:
+            raise LetsInferError(
+                f"replica pool reached {len(current)}/{replicas}; "
+                f"no unallocated qualified target remains: {error}"
+            ) from error
+        target_id, target_sha256, candidate, version, source = release
+        manifest_path, manifest, control_root, receipt = prepare_runtime_install(
+            source,
+            policy=f"runtime:{candidate}" if arguments.runtime else "recommended",
+            requested_runtime=arguments.runtime,
+            requested_target=target_id,
+            expected_version=version,
+            expected_target_contract_sha256=target_sha256,
+        )
+        runtime = verify_descriptor(pathlib.Path(receipt["object_root"]))
+        release_identity = _group_release_identity(
+            catalog_release_value=catalog_release_record(
+                dict(catalog), arguments.model, target_id, candidate, version
+            ),
+            candidate_id=candidate,
+            version=version,
+            source=source,
+            target_id=target_id,
+            target_sha256=target_sha256,
+            runtime=runtime,
+            manifest_sha256=sha256_file(manifest_path),
+        )
+        install_engine_group(
+            arguments,
+            source=source,
+            manifest_path=manifest_path,
+            manifest=manifest,
+            control_root=control_root,
+            receipt=receipt,
+            release_identity=release_identity,
+            resolved_topology=(identity, graph, choice.placement),
+        )
+        with _site_store() as store:
+            placements = {row["placement_id"]: row for row in store.placements()}
+            current = [
+                row
+                for row in store.engine_groups()
+                if row["state"] != "removed"
+                and row["desired_state"] != "removed"
+                and row["placement_id"] in placements
+                and placements[row["placement_id"]]["model"] == arguments.model
+            ]
+    print(f"REPLICA POOL {arguments.model} groups={len(current)} desired={replicas}")
+    return 0
+
+
 def install(arguments: argparse.Namespace) -> int:
+    catalog_install = _install_catalog_nodes(arguments)
+    if catalog_install is not None:
+        return catalog_install
     catalog_value = getattr(arguments, "catalog", None)
     if not isinstance(catalog_value, str):
         catalog_value = None
@@ -7835,6 +8421,7 @@ def install(arguments: argparse.Namespace) -> int:
             runtime_source[2],
             runtime_source[3],
             runtime_source[4],
+            runtime_source[5],
         )
     (
         source,
@@ -7842,10 +8429,12 @@ def install(arguments: argparse.Namespace) -> int:
         expected_version,
         selected_target,
         selected_target_sha256,
+        catalog_qualified,
     ) = runtime_source
     manifest_path, manifest, release_root, prepared_receipt = prepare_runtime_install(
         source,
         policy=policy,
+        qualified=catalog_qualified,
         requested_runtime=getattr(arguments, "runtime", None),
         requested_target=selected_target,
         expected_version=expected_version,
@@ -7915,16 +8504,13 @@ def install(arguments: argparse.Namespace) -> int:
             "boot-persistent user service requires lingering; run "
             f"sudo loginctl enable-linger {getpass.getuser()} and retry"
         )
-    placement_strategy = target_contract(manifest)["placement"]["strategy"]
-    if placement_strategy != "single":
-        return install_engine_group(
-            arguments,
-            source=str(selected_receipt["source"]),
-            manifest_path=manifest_path,
-            manifest=manifest,
-            control_root=release_root,
-            receipt=selected_receipt,
-        )
+    raise LetsInferError(
+        "qualified runtime activation requires its signed catalog release; "
+        "install by logical model name instead of a local or bare OCI source"
+    )
+    # Unqualified development runs retain the isolated candidate path above.
+    # Every qualified runtime below this boundary is represented by a durable
+    # engine group, including an ordinary one-device runtime.
     manifest_sha = sha256_file(manifest_path)
     placement = resolve_service_placement(manifest, manifest_sha)
     control_root, installed_manifest_path = install_control_bundle(
@@ -8264,7 +8850,7 @@ def _local_controller_telemetry(
     *,
     preferred_member_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Read the site agent's live aggregate without consuming a Watchdog slot."""
+    """Read the node agent's live aggregate without consuming a Watchdog slot."""
 
     controller_ca = expanded_path(
         str(config.get("watchdog_controller_ca_file"))
@@ -8376,7 +8962,7 @@ def status(arguments: argparse.Namespace) -> int:
         raise LetsInferError("a model cannot be combined with --name or --config")
     if arguments.name is None and arguments.config is None and site_identity_path().exists():
         identity = read_site_identity()
-        if identity.role == "coordinator":
+        if identity.role == "main":
             groups = _engine_group_status(model)
             if groups:
                 if arguments.json:
@@ -8396,7 +8982,7 @@ def status(arguments: argparse.Namespace) -> int:
                 return 0
         elif model is not None:
             raise LetsInferError(
-                "site-wide engine-group status is available from the coordinator"
+                "node-wide engine-group status is available from the main node"
             )
     config_path = absolute_user_path(
         arguments.config or active_service_config_path()
@@ -8419,18 +9005,18 @@ def status(arguments: argparse.Namespace) -> int:
         if not site_identity_path().exists():
             raise LetsInferError("no service configuration exists; specify --name")
         identity = read_site_identity()
-        site_enabled, site_active, site_memory_bytes = _service_state(
-            SITE_SERVICE_NAME
+        node_enabled, node_active, node_memory_bytes = _service_state(
+            NODE_SERVICE_NAME
         )
         gateway_enabled, gateway_active, gateway_memory_bytes = _service_state(
             GATEWAY_SERVICE_NAME
         )
-        coordinator = identity.role == "coordinator"
+        is_main = identity.role == "main"
         gateway_health = False
         gateway_auth_required = False
         gateway_authenticated = False
         endpoint = None
-        if coordinator:
+        if is_main:
             gateway_config_path = site_config_root() / "gateway.json"
             gateway_port = 8000
             if gateway_config_path.is_file():
@@ -8456,9 +9042,9 @@ def status(arguments: argparse.Namespace) -> int:
             "identity": identity_json(identity),
             "endpoint": endpoint,
             "services": {
-                "site_enabled": site_enabled,
-                "site_active": site_active,
-                "site_memory_current_bytes": site_memory_bytes,
+                "node_enabled": node_enabled,
+                "node_active": node_active,
+                "node_memory_current_bytes": node_memory_bytes,
                 "gateway_enabled": gateway_enabled,
                 "gateway_active": gateway_active,
                 "gateway_memory_current_bytes": gateway_memory_bytes,
@@ -8471,13 +9057,13 @@ def status(arguments: argparse.Namespace) -> int:
         if arguments.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         elif ui.Terminal(sys.stdout).interactive:
-            ui.site_status(payload)
+            ui.node_status(payload)
         else:
             print(
-                f"site={site_active} enabled={site_enabled} "
-                f"role={identity.role} member={identity.member_id}"
+                f"node={node_active} enabled={node_enabled} "
+                f"role={identity.role} node_id={identity.member_id}"
             )
-            if coordinator:
+            if is_main:
                 print(
                     f"gateway={gateway_active} health={str(gateway_health).lower()} "
                     f"auth={str(gateway_auth_required and gateway_authenticated).lower()}"
@@ -8486,9 +9072,9 @@ def status(arguments: argparse.Namespace) -> int:
             print("runtime=not-installed")
         return (
             0
-            if site_active == "active"
+            if node_active == "active"
             and (
-                not coordinator
+                not is_main
                 or (
                     gateway_active == "active"
                     and gateway_health
@@ -8545,7 +9131,7 @@ def status(arguments: argparse.Namespace) -> int:
             )
 
     engine_enabled, engine_active, _ = _service_state(ENGINE_SERVICE_NAME)
-    site_enabled, site_active, site_memory_bytes = _service_state(SITE_SERVICE_NAME)
+    node_enabled, node_active, node_memory_bytes = _service_state(NODE_SERVICE_NAME)
     gateway_enabled, gateway_active, gateway_memory_bytes = _service_state(
         GATEWAY_SERVICE_NAME
     )
@@ -8609,13 +9195,13 @@ def status(arguments: argparse.Namespace) -> int:
             "engine_service": ENGINE_SERVICE_NAME,
             "engine_enabled": engine_enabled,
             "engine_active": engine_active,
-            "site_service": SITE_SERVICE_NAME,
-            "site_enabled": site_enabled,
-            "site_active": site_active,
-            "site_memory_current_bytes": site_memory_bytes,
-            "site_memory_limit_bytes": SITE_AGENT_MEMORY_LIMIT_BYTES,
-            "site_within_memory_limit": site_memory_bytes is not None
-            and site_memory_bytes < SITE_AGENT_MEMORY_LIMIT_BYTES,
+            "node_service": NODE_SERVICE_NAME,
+            "node_enabled": node_enabled,
+            "node_active": node_active,
+            "node_memory_current_bytes": node_memory_bytes,
+            "node_memory_limit_bytes": NODE_AGENT_MEMORY_LIMIT_BYTES,
+            "site_within_memory_limit": node_memory_bytes is not None
+            and node_memory_bytes < NODE_AGENT_MEMORY_LIMIT_BYTES,
             "gateway_service": GATEWAY_SERVICE_NAME,
             "gateway_enabled": gateway_enabled,
             "gateway_active": gateway_active,
@@ -8696,9 +9282,9 @@ def status(arguments: argparse.Namespace) -> int:
                 or inventory.get("product_name")
             )
             site_summary["uptime_seconds"] = inventory.get("uptime_seconds")
-        payload["site"] = site_summary
+        payload["node"] = site_summary
     except (OSError, SiteError, StopIteration):
-        payload["site"] = None
+        payload["node"] = None
     payload["lifecycle"] = runtime_lifecycle(payload)
     payload["telemetry"] = _local_controller_telemetry(
         config,
@@ -8874,12 +9460,12 @@ def _doctor_engine_groups(
 
     identity = read_site_identity()
     record(
-        "site-role", identity.role == "coordinator",
+        "site-role", identity.role == "main",
         f"role={identity.role} coordinator={identity.coordinator_id}",
     )
     record("user-lingering", user_lingering_enabled(), getpass.getuser())
     for unit, limit in (
-        (SITE_SERVICE_NAME, SITE_AGENT_MEMORY_LIMIT_BYTES),
+        (NODE_SERVICE_NAME, NODE_AGENT_MEMORY_LIMIT_BYTES),
         (SERVICE_NAME, CONTROL_PLANE_MEMORY_LIMIT_BYTES),
         (GATEWAY_SERVICE_NAME, GATEWAY_MEMORY_LIMIT_BYTES),
     ):
@@ -9058,13 +9644,13 @@ def doctor(arguments: argparse.Namespace) -> int:
     model = model_value if isinstance(model_value, str) else None
     if arguments.config is None and site_identity_path().exists():
         identity = read_site_identity()
-        if identity.role == "coordinator":
+        if identity.role == "main":
             groups = _engine_group_status(model)
             if groups:
                 return _doctor_engine_groups(arguments, groups)
         elif model is not None:
             raise LetsInferError(
-                "site-wide engine-group doctor is available from the coordinator"
+                "node-wide engine-group doctor is available from the main node"
             )
 
     config_path = absolute_user_path(
@@ -9311,13 +9897,13 @@ def doctor(arguments: argparse.Namespace) -> int:
         f"current={memory_bytes} limit<{CONTROL_PLANE_MEMORY_LIMIT_BYTES}",
     )
     engine_enabled, engine_active = _unit_enabled_active(ENGINE_SERVICE_NAME)
-    site_enabled, site_active, site_memory_bytes = _service_state(SITE_SERVICE_NAME)
-    record("site-service-enabled", site_enabled == "enabled", site_enabled)
-    record("site-service-active", site_active == "active", site_active)
+    node_enabled, node_active, node_memory_bytes = _service_state(NODE_SERVICE_NAME)
+    record("node-service-enabled", node_enabled == "enabled", node_enabled)
+    record("node-service-active", node_active == "active", node_active)
     record(
-        "site-service-memory",
-        site_memory_bytes is not None and site_memory_bytes < SITE_AGENT_MEMORY_LIMIT_BYTES,
-        f"current={site_memory_bytes} limit<{SITE_AGENT_MEMORY_LIMIT_BYTES}",
+        "node-service-memory",
+        node_memory_bytes is not None and node_memory_bytes < NODE_AGENT_MEMORY_LIMIT_BYTES,
+        f"current={node_memory_bytes} limit<{NODE_AGENT_MEMORY_LIMIT_BYTES}",
     )
     gateway_enabled, gateway_active, gateway_memory_bytes = _service_state(
         GATEWAY_SERVICE_NAME
@@ -9488,7 +10074,7 @@ def _installed_runtime_image_references() -> set[str]:
             continue
         try:
             runtime = json.loads(descriptor_path.read_text(encoding="utf-8"))
-            manifest = runtime_execution_manifest(runtime)
+            manifest = runtime_execution_manifest(runtime, qualified=False)
         except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError, LetsInferError):
             # Corrupt local metadata is deleted with the runtime object, but must
             # never be trusted to select a Docker image for removal.
@@ -9555,14 +10141,14 @@ def _remove_linux_services(config: dict[str, Any] | None) -> None:
         RECOVERY_TIMER_NAME,
         ENGINE_SERVICE_NAME,
         GATEWAY_SERVICE_NAME,
-        SITE_SERVICE_NAME,
+        NODE_SERVICE_NAME,
         SERVICE_NAME,
     ):
         run(["systemctl", "--user", "disable", "--now", name], check=False)
     unit_dir = pathlib.Path.home() / ".config/systemd/user"
     for name in (
         SERVICE_NAME,
-        SITE_SERVICE_NAME,
+        NODE_SERVICE_NAME,
         ENGINE_SERVICE_NAME,
         GATEWAY_SERVICE_NAME,
         RECOVERY_SERVICE_NAME,
@@ -9585,7 +10171,7 @@ def _remove_linux_services(config: dict[str, Any] | None) -> None:
 
 
 def _remove_macos_services() -> None:
-    for label in (macos_services.GATEWAY_LABEL, macos_services.SITE_LABEL):
+    for label in (macos_services.GATEWAY_LABEL, macos_services.NODE_LABEL):
         try:
             macos_services.remove_launch_agent(label)
         except macos_services.MacOSServiceError as error:
@@ -9812,7 +10398,6 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
                 available = [
                     (version, release)
                     for version, release in candidate_record["releases"].items()
-                    if release["qualified"] and not release["revoked"]
                 ]
                 available.sort(
                     key=functools.cmp_to_key(
@@ -9840,7 +10425,8 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
                             "model_uri": release["model_uri"],
                             "benchmark_id": benchmark["id"],
                             "benchmark_score": benchmark["score"],
-                            "benchmark_evidence": benchmark["evidence"],
+                            "verification": release["verification"],
+                            "provenance": release["provenance"],
                             "recommended": recommended,
                             "installed": (model, target, candidate, version)
                             in installed,
@@ -9879,14 +10465,21 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
         print(f"No qualified runtimes are available{suffix}.")
         return 0
 
-    headings = ("MODEL", "AUTHOR", "VERSION", "ENGINE", "TARGET", "STATUS")
+    headings = (
+        "MODEL", "AUTHOR", "VERSION", "ENGINE", "TARGET", "VERIFIED", "STATUS"
+    )
     rendered = [
         (
             row["model"],
-            ", ".join(row["authors"]),
+            ", ".join(author["github_login"] for author in row["authors"]),
             row["version"],
             row["engine"],
             row["target"],
+            (
+                str(len(row["verification"]["verifiers"]))
+                if row["verification"]["method"] == "community-consensus-v1"
+                else "legacy"
+            ),
             " · ".join(
                 label
                 for enabled, label in (
@@ -9950,6 +10543,25 @@ def inspect_runtime(arguments: argparse.Namespace) -> int:
     )
     receipt = runtime_receipt_for_manifest(manifest_path)
     launch = launch_for(manifest, manifest["serving"], arguments.port)
+    publication: dict[str, Any] | None = None
+    publication_error: str | None = None
+    if receipt is not None:
+        try:
+            catalog = CatalogManager(arguments.catalog).load(
+                refresh=False, allow_stale=True
+            ).document
+            publication = (
+                catalog.get("models", {})
+                .get(receipt["logical_model"], {})
+                .get("targets", {})
+                .get(receipt["target"], {})
+                .get("candidates", {})
+                .get(receipt["candidate_id"], {})
+                .get("releases", {})
+                .get(receipt["version"])
+            )
+        except CatalogError as error:
+            publication_error = str(error)
     if arguments.json:
         print(
             json.dumps(
@@ -9961,6 +10573,8 @@ def inspect_runtime(arguments: argparse.Namespace) -> int:
                     "status": manifest["status"],
                     "serving": manifest["serving"],
                     "command": list(launch.command),
+                    "publication": publication,
+                    "publication_error": publication_error,
                 },
                 indent=2,
                 sort_keys=True,
@@ -9977,6 +10591,26 @@ def inspect_runtime(arguments: argparse.Namespace) -> int:
             f"{runtime_name}\tengine={adapter_for(manifest).name}\t"
             f"version={version}\tstatus={manifest['status']}\tdigest={digest}"
         )
+        if publication is not None:
+            verification = publication["verification"]
+            benchmark = publication["benchmark"]
+            provenance = publication["provenance"]
+            verifiers = ", ".join(
+                f"@{item['github_login']}" for item in verification["verifiers"]
+            ) or "maintainer migration"
+            print(
+                f"verification={verification['method']}\t"
+                f"verifiers={verifiers}\t"
+                f"score={benchmark['score'] if benchmark is not None else 'unscored'}"
+            )
+            if verification["method"] == "community-consensus-v1":
+                print(
+                    f"subject={provenance['execution_sha256']}\t"
+                    f"consensus={verification['consensus_path']}\t"
+                    f"consensus_sha256={verification['consensus_sha256']}"
+                )
+        elif publication_error is not None:
+            print(f"verification=unavailable\treason={publication_error}")
     return 0
 
 
@@ -10109,115 +10743,409 @@ def _retain_runtime_history(active_digest: str, previous: dict[str, Any]) -> Non
         ) from error
 
 
+def _group_upgrade_placement(
+    identity: Any,
+    graph: TopologyGraph,
+    *,
+    member_ids: Sequence[str],
+    target: Mapping[str, Any],
+) -> tuple[TopologyGraph, Placement]:
+    """Resolve an updated target only on the group's existing machines."""
+    wanted = tuple(member_ids)
+    if not wanted or len(wanted) != len(set(wanted)) or set(wanted) - set(graph.members):
+        raise LetsInferError("engine-group update has invalid node identities")
+    try:
+        constrained = TopologyGraph(
+            [graph.members[member_id] for member_id in wanted],
+            allocated_devices={
+                member_id: tuple(graph.allocated_devices.get(member_id, ()))
+                for member_id in wanted
+            },
+        )
+        placement = constrained.resolve(
+            target,
+            coordinator_id=identity.coordinator_id,
+        )
+    except TopologyError as error:
+        raise LetsInferError(
+            "updated runtime no longer fits the engine group's existing nodes: "
+            f"{error}"
+        ) from error
+    if set(placement.member_ids) != set(wanted):
+        raise LetsInferError(
+            "updated runtime changes the engine-group node count; install it as a new group"
+        )
+    return constrained, placement
+
+
+def _group_member_ids(group: Mapping[str, Any]) -> tuple[str, ...]:
+    members = group.get("plan", {}).get("members")
+    if (
+        not isinstance(members, list)
+        or not members
+        or any(not isinstance(item, Mapping) for item in members)
+    ):
+        raise LetsInferError("engine group has an incomplete immutable node plan")
+    values = tuple(str(item.get("member_id", "")) for item in members)
+    if any(not re.fullmatch(r"[0-9a-f]{32}", value) for value in values):
+        raise LetsInferError("engine group has an invalid immutable node plan")
+    return values
+
+
+def _cleanup_failed_group_release(
+    source: str,
+    member_ids: Sequence[str],
+) -> None:
+    """Remove a partially installed replacement before restoring its predecessor."""
+    wanted = set(member_ids)
+    with _site_store() as store:
+        candidates = [
+            row["group_id"]
+            for row in store.engine_groups()
+            if row["source"] == source
+            and row["state"] != "removed"
+            and row["desired_state"] != "removed"
+            and set(_group_member_ids(row)) == wanted
+        ]
+    if candidates:
+        _remove_engine_groups_by_id(candidates)
+
+
+def _stop_engine_group_by_id(group_id: str) -> None:
+    """Stop one exact group without affecting its replica siblings."""
+    with _site_store() as store:
+        row = next(
+            (item for item in store.engine_groups() if item["group_id"] == group_id),
+            None,
+        )
+        if row is None or row["state"] == "removed":
+            raise LetsInferError("engine group disappeared before it could be stopped")
+        if row["state"] == "stopped" and row["desired_state"] == "stopped":
+            return
+        orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
+        stopped = orchestrator.stop()
+        _sync_group_placement(store, stopped)
+
+
+def _active_group_id_for_release(
+    source: str,
+    member_ids: Sequence[str],
+) -> str:
+    wanted = set(member_ids)
+    with _site_store() as store:
+        matches = [
+            row
+            for row in store.engine_groups()
+            if row["source"] == source
+            and row["state"] != "removed"
+            and row["desired_state"] != "removed"
+            and set(_group_member_ids(row)) == wanted
+        ]
+    if len(matches) != 1:
+        raise LetsInferError("restored engine-group identity is ambiguous")
+    return str(matches[0]["group_id"])
+
+
+def _install_retained_group_release(
+    arguments: argparse.Namespace,
+    *,
+    release: Mapping[str, Any],
+    member_ids: Sequence[str],
+) -> str:
+    """Recreate one exact historical group on the same physical nodes."""
+    try:
+        manifest_path, manifest, control_root, receipt = prepare_runtime_install(
+            str(release["source"]),
+            policy=f"runtime:{release['candidate_id']}",
+            requested_runtime=str(release["candidate_id"]),
+            requested_target=str(release["target_id"]),
+            expected_version=str(release["version"]),
+            expected_target_contract_sha256=str(
+                release["target_contract_sha256"]
+            ),
+        )
+        runtime = verify_descriptor(pathlib.Path(receipt["object_root"]))
+        if (
+            runtime.digest != release["runtime_digest"]
+            or sha256_file(manifest_path) != release["manifest_sha256"]
+        ):
+            raise LetsInferError("retained engine-group release bytes changed")
+        identity, graph = _fresh_site_topology()
+        constrained, placement = _group_upgrade_placement(
+            identity,
+            graph,
+            member_ids=member_ids,
+            target=target_contract(manifest),
+        )
+        install_engine_group(
+            arguments,
+            source=str(release["source"]),
+            manifest_path=manifest_path,
+            manifest=manifest,
+            control_root=control_root,
+            receipt=receipt,
+            release_identity=dict(release),
+            resolved_topology=(identity, constrained, placement),
+        )
+    except (KeyError, RuntimePackError) as error:
+        raise LetsInferError(f"retained engine-group release is invalid: {error}") from error
+    return _active_group_id_for_release(str(release["source"]), member_ids)
+
+
 def upgrade_runtime(arguments: argparse.Namespace) -> int:
-    receipt = _matching_runtime_receipt(
-        arguments.runtime, getattr(arguments, "target", None)
-    )
-    expected_version: str | None = None
-    expected_target_sha256: str | None = None
+    """Roll each replica group to its candidate's latest signed release."""
+    model = arguments.runtime
     if arguments.to:
-        source = arguments.to
-        policy = "pinned" if REGISTRY_DIGEST_RE.fullmatch(source) else "local"
-    else:
-        policy = receipt["policy"]
-        if policy not in {"recommended", f"runtime:{receipt['candidate_id']}"}:
-            raise LetsInferError(
-                f"runtime policy {policy!r} is pinned; use --to with an explicit runtime source"
-            )
-        location = resolved_catalog_location(arguments.catalog)
-        if location is None:
-            raise LetsInferError("runtime upgrade requires --catalog or LETSINFER_CATALOG")
-        try:
-            catalog = CatalogManager(location).load().document
-            selected_runtime = None if policy == "recommended" else receipt["candidate_id"]
+        raise LetsInferError(
+            "qualified engine groups update only from the signed catalog; --to is unsupported"
+        )
+    location = resolved_catalog_location(arguments.catalog)
+    if location is None:
+        raise LetsInferError("runtime upgrade requires --catalog or LETSINFER_CATALOG")
+    try:
+        catalog = CatalogManager(location).load().document
+    except (CatalogError, RuntimePackError) as error:
+        raise LetsInferError(str(error)) from error
+    with _site_store() as store:
+        placements = {row["placement_id"]: row for row in store.placements()}
+        groups = sorted(
             (
-                _,
-                expected_target_sha256,
-                _,
-                expected_version,
+                row
+                for row in store.engine_groups()
+                if row["state"] != "removed"
+                and row["desired_state"] != "removed"
+                and row["placement_id"] in placements
+                and placements[row["placement_id"]]["model"] == model
+            ),
+            key=lambda row: row["group_id"],
+        )
+    if not groups:
+        raise LetsInferError(f"no installed engine group serves model {model!r}")
+
+    planned: list[dict[str, Any]] = []
+    for group in groups:
+        release = group["plan"].get("release")
+        if not isinstance(release, Mapping):
+            raise LetsInferError(
+                f"engine group {group['group_id']} has no immutable release identity"
+            )
+        candidate_id = str(release.get("candidate_id", ""))
+        target_id = str(release.get("target_id", ""))
+        try:
+            (
+                selected_target,
+                target_sha256,
+                selected_candidate,
+                version,
                 source,
             ) = catalog_release(
-                catalog,
-                receipt["logical_model"],
-                selected_runtime,
-                receipt["target"],
+                dict(catalog), model, candidate_id, target_id, device=None
             )
-            if expected_target_sha256 != receipt["target_contract_sha256"]:
-                raise LetsInferError(
-                    "catalog changed an existing target contract; publish a new target ID"
-                )
-        except (CatalogError, RuntimePackError) as error:
+            record = catalog_release_record(
+                dict(catalog), model, selected_target, selected_candidate, version
+            )
+            target = catalog_target_contract(dict(catalog), selected_target)
+        except RuntimePackError as error:
             raise LetsInferError(str(error)) from error
-    try:
-        with materialize(source) as candidate:
-            candidate_digest = candidate.digest
-            candidate_name = candidate.runtime["id"]
-            candidate_version = candidate.runtime["version"]
-            candidate_model = candidate.runtime["logical_model"]
-            candidate_engine = candidate.runtime["engine"]["id"]
-            candidate_target = candidate.runtime["target"]["id"]
-    except RuntimePackError as error:
-        raise LetsInferError(str(error)) from error
-    if expected_version is not None and candidate_version != expected_version:
-        raise LetsInferError(
-            "runtime catalog version does not match the immutable artifact "
-            f"({expected_version!r} != {candidate_version!r})"
+        if (
+            selected_target != target_id
+            or selected_candidate != candidate_id
+            or target_sha256 != release.get("target_contract_sha256")
+        ):
+            raise LetsInferError(
+                f"catalog changed immutable target identity for group {group['group_id']}"
+            )
+        planned.append(
+            {
+                "group": group,
+                "current": dict(release),
+                "target": target,
+                "target_sha256": target_sha256,
+                "record": record,
+                "candidate_id": candidate_id,
+                "version": version,
+                "source": source,
+            }
         )
-    if candidate_model != receipt["logical_model"]:
-        raise LetsInferError(
-            f"upgrade runtime model changed ({receipt['logical_model']!r} -> {candidate_model!r})"
+        state = "current" if source == release.get("source") else "update"
+        print(
+            f"{state.upper()} group={group['group_id']} candidate={candidate_id} "
+            f"{release.get('version')} -> {version}"
         )
-    if candidate_target != receipt["target"]:
-        raise LetsInferError(
-            f"upgrade runtime target changed ({receipt['target']!r} -> {candidate_target!r})"
-        )
-    if policy.startswith("runtime:") and candidate_name != policy.split(":", 1)[1]:
-        raise LetsInferError(
-            f"runtime-pinned installation cannot upgrade to {candidate_name!r}"
-        )
-    print(
-        f"UPGRADE {receipt['candidate_id']} {receipt['version']}@sha256:{receipt['digest']} "
-        f"-> {candidate_name} {candidate_version}@sha256:{candidate_digest}"
-    )
-    if candidate_digest == receipt["digest"]:
-        print("CURRENT already-installed=true")
+    changes = [item for item in planned if item["source"] != item["current"]["source"]]
+    if not changes:
+        print(f"CURRENT model={model} groups={len(groups)}")
         return 0
     if arguments.dry_run:
+        print(f"DRY RUN model={model} groups={len(changes)}")
         return 0
-    install(_upgrade_install_arguments(source, policy, expected_target_sha256))
-    _retain_runtime_history(candidate_digest, receipt)
+
+    completed = 0
+    for item in changes:
+        old_group = item["group"]
+        old_release = item["current"]
+        member_ids = tuple(
+            member["member_id"] for member in old_group["plan"]["members"]
+        )
+        manifest_path, manifest, control_root, receipt = prepare_runtime_install(
+            item["source"],
+            policy=f"runtime:{item['candidate_id']}",
+            requested_runtime=item["candidate_id"],
+            requested_target=old_release["target_id"],
+            expected_version=item["version"],
+            expected_target_contract_sha256=item["target_sha256"],
+        )
+        runtime = verify_descriptor(pathlib.Path(receipt["object_root"]))
+        release_identity = _group_release_identity(
+            catalog_release_value=item["record"],
+            candidate_id=item["candidate_id"],
+            version=item["version"],
+            source=item["source"],
+            target_id=old_release["target_id"],
+            target_sha256=item["target_sha256"],
+            runtime=runtime,
+            manifest_sha256=sha256_file(manifest_path),
+        )
+        _remove_engine_groups_by_id([old_group["group_id"]])
+        try:
+            identity, graph = _fresh_site_topology()
+            constrained, placement = _group_upgrade_placement(
+                identity,
+                graph,
+                member_ids=member_ids,
+                target=item["target"],
+            )
+            install_engine_group(
+                arguments,
+                source=item["source"],
+                manifest_path=manifest_path,
+                manifest=manifest,
+                control_root=control_root,
+                receipt=receipt,
+                release_identity=release_identity,
+                resolved_topology=(identity, constrained, placement),
+            )
+            updated_group_id = _active_group_id_for_release(
+                item["source"], member_ids
+            )
+            if old_group["desired_state"] == "stopped":
+                _stop_engine_group_by_id(updated_group_id)
+        except BaseException as update_error:
+            try:
+                _cleanup_failed_group_release(item["source"], member_ids)
+                restored_group_id = _install_retained_group_release(
+                    arguments,
+                    release=old_release,
+                    member_ids=member_ids,
+                )
+                if old_group["desired_state"] == "stopped":
+                    _stop_engine_group_by_id(restored_group_id)
+            except BaseException as rollback_error:
+                raise LetsInferError(
+                    f"group {old_group['group_id']} update failed and rollback failed: "
+                    f"{type(rollback_error).__name__}"
+                ) from update_error
+            raise LetsInferError(
+                f"group {old_group['group_id']} update failed; previous release restored"
+            ) from update_error
+        completed += 1
+        print(
+            f"UPDATED {completed}/{len(changes)} candidate={item['candidate_id']} "
+            f"version={item['version']}"
+        )
+    print(f"UPDATED model={model} groups={completed}")
     return 0
 
 
 def rollback_runtime(arguments: argparse.Namespace) -> int:
-    receipt = _matching_runtime_receipt(
-        arguments.runtime, getattr(arguments, "target", None)
-    )
-    history = receipt.get("history")
-    if not isinstance(history, list) or not history:
-        raise LetsInferError(f"runtime has no retained rollback receipt: {receipt['candidate_id']}")
-    target = history[-1]
-    object_root = pathlib.Path(target["object_root"]).expanduser()
-    try:
-        pack = verify_descriptor(object_root)
-    except RuntimePackError as error:
-        raise LetsInferError(str(error)) from error
-    if pack.digest != target["digest"]:
-        raise LetsInferError("rollback runtime object does not match its retained receipt")
-    print(
-        f"ROLLBACK {receipt['candidate_id']} {receipt['version']}@sha256:{receipt['digest']} "
-        f"-> {target['candidate_id']} {target['version']}@sha256:{target['digest']}"
-    )
+    """Roll every current replica back to its most recently removed release."""
+    model = arguments.runtime
+    with _site_store() as store:
+        placements = {row["placement_id"]: row for row in store.placements()}
+        all_groups = store.engine_groups()
+    current = [
+        row
+        for row in all_groups
+        if row["state"] != "removed"
+        and row["desired_state"] != "removed"
+        and row["placement_id"] in placements
+        and placements[row["placement_id"]]["model"] == model
+        and (
+            getattr(arguments, "target", None) is None
+            or placements[row["placement_id"]]["target"] == arguments.target
+        )
+    ]
+    if not current:
+        raise LetsInferError(f"no installed engine group serves model {model!r}")
+    planned: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for group in sorted(current, key=lambda row: row["group_id"]):
+        release = group["plan"].get("release")
+        if not isinstance(release, Mapping):
+            raise LetsInferError("current engine group has no immutable release")
+        member_ids = set(_group_member_ids(group))
+        candidates = [
+            row
+            for row in all_groups
+            if row["state"] == "removed"
+            and row["desired_state"] == "removed"
+            and row["source"] != group["source"]
+            and set(_group_member_ids(row)) == member_ids
+            and isinstance(row["plan"].get("release"), Mapping)
+            and row["plan"]["release"].get("candidate_id")
+            == release.get("candidate_id")
+            and row["plan"]["release"].get("target_id")
+            == release.get("target_id")
+        ]
+        if not candidates:
+            raise LetsInferError(
+                f"engine group {group['group_id']} has no retained previous release"
+            )
+        previous = max(
+            candidates,
+            key=lambda row: (int(row["updated_at_unix"]), str(row["group_id"])),
+        )
+        planned.append((group, previous))
+        old = previous["plan"]["release"]
+        print(
+            f"ROLLBACK group={group['group_id']} {release['version']} -> "
+            f"{old['version']} nodes={len(member_ids)}"
+        )
     if arguments.dry_run:
         return 0
-    install(
-        _upgrade_install_arguments(
-            str(object_root),
-            target["policy"],
-            target["target_contract_sha256"],
-        )
-    )
-    _retain_runtime_history(target["digest"], receipt)
+    completed = 0
+    for group, previous in planned:
+        current_release = dict(group["plan"]["release"])
+        previous_release = dict(previous["plan"]["release"])
+        member_ids = _group_member_ids(group)
+        _remove_engine_groups_by_id([group["group_id"]])
+        try:
+            restored_group_id = _install_retained_group_release(
+                arguments,
+                release=previous_release,
+                member_ids=member_ids,
+            )
+            if group["desired_state"] == "stopped":
+                _stop_engine_group_by_id(restored_group_id)
+        except BaseException as rollback_error:
+            try:
+                _cleanup_failed_group_release(previous_release["source"], member_ids)
+                current_group_id = _install_retained_group_release(
+                    arguments,
+                    release=current_release,
+                    member_ids=member_ids,
+                )
+                if group["desired_state"] == "stopped":
+                    _stop_engine_group_by_id(current_group_id)
+            except BaseException as restore_error:
+                raise LetsInferError(
+                    f"group {group['group_id']} rollback failed and current release "
+                    f"could not be restored: {type(restore_error).__name__}"
+                ) from rollback_error
+            raise LetsInferError(
+                f"group {group['group_id']} rollback failed; current release restored"
+            ) from rollback_error
+        completed += 1
+    print(f"ROLLED BACK model={model} groups={completed}")
     return 0
 
 
@@ -10393,12 +11321,16 @@ def _benchmark_job_snapshot(*, machine: bool = False) -> int:
         state
     )
     if state.get("state") in benchmark_jobs.ACTIVE_STATES and not active:
+        if state.get("kind") == "verification":
+            _recover_interrupted_verification(state)
+            state = benchmark_jobs.read_state() or state
         try:
-            state = benchmark_jobs.mark(
-                state["job_id"],
-                "failed",
-                error="benchmark worker exited without recording a terminal state",
-            )
+            if state.get("state") in benchmark_jobs.ACTIVE_STATES:
+                state = benchmark_jobs.mark(
+                    state["job_id"],
+                    "failed",
+                    error="benchmark worker exited without recording a terminal state",
+                )
         except benchmark_jobs.BenchmarkJobError as error:
             raise LetsInferError(str(error)) from error
     elapsed = (
@@ -10608,8 +11540,660 @@ def _mark_benchmark_job(
         raise LetsInferError(str(failure)) from failure
 
 
-def benchmark_runtime(arguments: argparse.Namespace) -> int:
-    """Run the generic sealed matrix for one installed runtime."""
+def _verification_progress(job_id: str, phase: str, message: str) -> None:
+    try:
+        benchmark_jobs.update_progress(
+            job_id,
+            {
+                "phase": phase,
+                "message": message,
+                "verification": True,
+            },
+        )
+    except benchmark_jobs.BenchmarkJobError as error:
+        raise LetsInferError(str(error)) from error
+
+
+def _gateway_is_idle() -> None:
+    """Fail before downloads or runtime replacement when clients are active."""
+
+    path = default_gateway_telemetry_path()
+    if not path.exists():
+        return
+    if path.is_symlink() or not path.is_file():
+        raise LetsInferError(f"gateway telemetry is unsafe: {path}")
+    values: dict[str, int] = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            key, separator, raw = line.partition("=")
+            if separator and key in {"active_requests", "queued_requests"}:
+                values[key] = int(raw)
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        raise LetsInferError(f"gateway telemetry is unreadable: {error}") from error
+    active = values.get("active_requests", 0)
+    queued = values.get("queued_requests", 0)
+    if active or queued:
+        raise LetsInferError(
+            f"verification requires an idle gateway; active={active} queued={queued}"
+        )
+
+
+def _interactive_github_identity() -> benchmark_verification.GitHubIdentity:
+    interactive = sys.stdin.isatty() and sys.stderr.isatty()
+    if benchmark_verification.gh_version() is None:
+        command = benchmark_verification.gh_install_command()
+        instruction = (
+            " ".join(command)
+            if command is not None
+            else "install GitHub CLI from https://cli.github.com/"
+        )
+        if not interactive or command is None:
+            raise LetsInferError(
+                f"GitHub CLI is required; run `{instruction}` and retry"
+            )
+        print(
+            f"GitHub CLI is required. Press Enter to run `{instruction}`; "
+            "Ctrl-C cancels.",
+            file=sys.stderr,
+        )
+        input()
+        try:
+            benchmark_verification.ensure_gh(interactive=True, install=True)
+        except benchmark_verification.VerificationError as error:
+            raise LetsInferError(str(error)) from error
+    try:
+        return benchmark_verification.github_identity(interactive=False)
+    except benchmark_verification.VerificationError as error:
+        if "not authenticated" not in str(error) or not interactive:
+            raise LetsInferError(str(error)) from error
+    print(
+        "Press Enter to authenticate GitHub CLI. GitHub CLI will show the browser "
+        "or device-code URL; Ctrl-C cancels.",
+        file=sys.stderr,
+    )
+    input()
+    try:
+        identity = benchmark_verification.github_identity(
+            interactive=True, authenticate=True
+        )
+    except benchmark_verification.VerificationError as error:
+        raise LetsInferError(str(error)) from error
+    print(
+        f"GitHub account: @{identity.login} ({identity.numeric_id})",
+        file=sys.stderr,
+    )
+    return identity
+
+
+def _verification_self_command(
+    arguments: argparse.Namespace, executable: pathlib.Path
+) -> list[str]:
+    command = [
+        str(executable),
+        "benchmark",
+        "verify",
+        arguments.verification_target,
+    ]
+    if arguments.candidate is not None:
+        command.extend(["--candidate", arguments.candidate])
+    return command
+
+
+def _verification_job_snapshot(*, machine: bool = False) -> int:
+    state = benchmark_jobs.read_state()
+    if state is None or state.get("kind") != "verification":
+        if machine:
+            print(compact_json({"active": False, "state": "none", "kind": "verification"}))
+        else:
+            ui.Terminal(sys.stdout).status("No runtime verification has been started")
+        return 0
+    active = (
+        state.get("state") in benchmark_jobs.ACTIVE_STATES
+        and benchmark_jobs.is_alive(state)
+    )
+    if state.get("state") in benchmark_jobs.ACTIVE_STATES and not active:
+        _recover_interrupted_verification(state)
+    if machine:
+        return _benchmark_job_snapshot(machine=True)
+    if active:
+        _follow_benchmark_job(state["job_id"])
+        return 0
+    return _benchmark_job_snapshot()
+
+
+def _verification_stop() -> int:
+    state = benchmark_jobs.active_state()
+    if state is None or state.get("kind") != "verification":
+        raise LetsInferError("no runtime verification is active")
+    return _benchmark_stop()
+
+
+def _selected_receipt(logical_model: str) -> dict[str, Any] | None:
+    try:
+        return next(
+            (
+                receipt
+                for receipt in selections()
+                if receipt["logical_model"] == logical_model
+            ),
+            None,
+        )
+    except RuntimePackError as error:
+        raise LetsInferError(str(error)) from error
+
+
+def _prepare_verification_runtime(
+    source: str,
+    *,
+    policy: str,
+    requested_runtime: str | None = None,
+    expected_version: str | None = None,
+    requested_target: str | None = None,
+    expected_target_contract_sha256: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    """Resolve and validate all candidate bytes without changing selection."""
+
+    manifest_path, manifest, release_root, prepared = prepare_runtime_install(
+        source,
+        policy=policy,
+        qualified=False,
+        requested_runtime=requested_runtime,
+        requested_target=requested_target,
+        expected_version=expected_version,
+        expected_target_contract_sha256=expected_target_contract_sha256,
+    )
+    verify_runtime_sources(manifest, release_root)
+    verify_host_target(manifest)
+    runtime_root = pathlib.Path(prepared["object_root"]).expanduser()
+    model_cache = requested_model_cache(None)
+    ensure_install_dependencies(
+        manifest,
+        model_cache=model_cache,
+        runtime_artifact_root=runtime_root,
+        download=True,
+        build_image=True,
+    )
+    verify_installed_runtime(manifest, model_cache=model_cache)
+    previous = _selected_receipt(prepared["logical_model"])
+    return manifest, prepared, previous
+
+
+def _publish_verification_runtime(
+    prepared: dict[str, Any], previous: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Atomically select a fully prepared candidate with exact rollback state."""
+
+    published = False
+    try:
+        write_selection(prepared)
+        published = True
+        current = _selected_receipt(prepared["logical_model"])
+        if current is None or current["digest"] != prepared["digest"]:
+            raise LetsInferError("verification runtime selection was not published")
+    except BaseException:
+        if published:
+            selected = _selected_receipt(prepared["logical_model"])
+            if selected is not None and selected.get("digest") == prepared["digest"]:
+                _restore_verification_selection(selected, previous)
+        raise
+    return current
+
+
+def _restore_verification_selection(
+    replacement: dict[str, Any], previous: dict[str, Any] | None
+) -> None:
+    try:
+        restore_selection(replacement, previous)
+    except RuntimePackError as error:
+        raise LetsInferError(str(error)) from error
+
+
+def _restoration_receipt_path(state: Mapping[str, Any]) -> pathlib.Path:
+    return pathlib.Path(str(state["output_directory"])) / "restoration-receipt.json"
+
+
+def _write_restoration_receipt(
+    state: Mapping[str, Any],
+    *,
+    logical_model: str,
+    original: dict[str, Any],
+    replacement: dict[str, Any] | None,
+    restored: bool,
+) -> None:
+    path = _restoration_receipt_path(state)
+    atomic_json(
+        path,
+        {
+            "schema_version": 1,
+            "job_id": state["job_id"],
+            "logical_model": logical_model,
+            "original_selection": original,
+            "replacement_digest": (
+                None if replacement is None else replacement["digest"]
+            ),
+            "restored": restored,
+            "updated_unix_ns": time.time_ns(),
+        },
+    )
+    path.chmod(0o600)
+
+
+def _recover_interrupted_verification(state: Mapping[str, Any]) -> None:
+    """Use the persisted receipt after worker death or a machine reboot."""
+
+    path = _restoration_receipt_path(state)
+    if not path.is_file() or path.is_symlink():
+        benchmark_jobs.mark(
+            str(state["job_id"]),
+            "failed",
+            error="verification worker exited before publishing a restoration receipt",
+        )
+        return
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LetsInferError(f"verification restoration receipt is invalid: {error}") from error
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("schema_version") != 1
+        or receipt.get("job_id") != state.get("job_id")
+        or not isinstance(receipt.get("logical_model"), str)
+        or not isinstance(receipt.get("original_selection"), dict)
+        or type(receipt.get("restored")) is not bool
+    ):
+        raise LetsInferError("verification restoration receipt has an invalid schema")
+    if not receipt["restored"]:
+        current = _selected_receipt(receipt["logical_model"])
+        original = receipt["original_selection"]
+        replacement_digest = receipt.get("replacement_digest")
+        if current is None:
+            raise LetsInferError("verification runtime selection disappeared before recovery")
+        if current["digest"] == original.get("digest"):
+            pass
+        elif current["digest"] == replacement_digest:
+            _restore_verification_selection(current, original)
+        else:
+            raise LetsInferError(
+                "runtime selection changed outside the interrupted verification; "
+                "automatic restoration refused"
+            )
+        if qualification_service_config_path().is_file():
+            _retire_qualification_candidate(remove_container=True)
+        _write_restoration_receipt(
+            state,
+            logical_model=receipt["logical_model"],
+            original=original,
+            replacement=None,
+            restored=True,
+        )
+    benchmark_jobs.mark(
+        str(state["job_id"]),
+        "failed",
+        error="verification worker exited; exact resident selection was restored",
+    )
+
+
+def _nested_benchmark_arguments(
+    runtime: str, output: pathlib.Path, job_id: str
+) -> argparse.Namespace:
+    arguments = parser().parse_args(
+        [
+            "benchmark",
+            runtime,
+            "--output-directory",
+            str(output),
+            "--job-worker",
+            "--job-id",
+            job_id,
+        ]
+    )
+    arguments.nested_verification = True
+    return arguments
+
+
+def _run_verification_benchmark(
+    runtime: str, output: pathlib.Path, job_id: str, label: str
+) -> dict[str, Any]:
+    _verification_progress(job_id, f"benchmark:{label}", f"Benchmarking {label}")
+    benchmark_runtime(_nested_benchmark_arguments(runtime, output, job_id))
+    path = output / "benchmark.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LetsInferError(f"{label} benchmark evidence is unavailable: {error}") from error
+    try:
+        benchmark_record_contract.validate_record(value)
+    except benchmark_record_contract.BenchmarkRecordError as error:
+        raise LetsInferError(f"{label} benchmark evidence is invalid: {error}") from error
+    return value
+
+
+def _verification_failure(error: BaseException, phase: str) -> dict[str, str]:
+    """Map an execution failure to the bounded public verification taxonomy."""
+
+    message = " ".join(str(error).split())[:500] or type(error).__name__
+    lowered = message.lower()
+    if "out of memory" in lowered or "oom" in lowered or "memory exhausted" in lowered:
+        category = "out_of_memory"
+    elif "protection" in lowered or "safety trip" in lowered:
+        category = "protection_trip"
+    elif "restor" in lowered:
+        category = "restoration"
+    elif "output" in lowered and ("invalid" in lowered or "validation" in lowered):
+        category = "output_validation"
+    elif "incomplete" in lowered or "workload" in lowered:
+        category = "incomplete_workload"
+    else:
+        category = "crash"
+    return {"category": category, "phase": phase[:128], "message": message}
+
+
+def _run_verification_worker(arguments: argparse.Namespace) -> int:
+    job_id = arguments.job_id
+    if not isinstance(job_id, str) or not job_id:
+        raise LetsInferError("verification worker has no job identity")
+    state = _mark_benchmark_job(job_id, "running")
+    metadata = state.get("metadata")
+    if not isinstance(metadata, dict):
+        raise LetsInferError("verification job metadata is unavailable")
+    output = pathlib.Path(state["output_directory"])
+    ensure_private_directory(output)
+    previous_term = signal.getsignal(signal.SIGTERM)
+    previous_int = signal.getsignal(signal.SIGINT)
+    baseline_current: dict[str, Any] | None = None
+    candidate_current: dict[str, Any] | None = None
+    candidate_previous: dict[str, Any] | None = None
+    logical_model: str | None = None
+    restoration: dict[str, Any] = {"passed": False}
+    gh: str | None = None
+    pr: benchmark_verification.PullRequest | None = None
+    identity: benchmark_verification.GitHubIdentity | None = None
+    subject: dict[str, Any] | None = None
+    baseline: dict[str, Any] | None = None
+    candidate_record: dict[str, Any] | None = None
+    candidate_execution_started = False
+    failure_phase = "preflight"
+    runtime_author_ids: set[int] = set()
+
+    def cancel(_signal: int, _frame: Any) -> None:
+        raise _BenchmarkCancelled("verification cancellation requested")
+
+    signal.signal(signal.SIGTERM, cancel)
+    signal.signal(signal.SIGINT, cancel)
+    error: BaseException | None = None
+    cancelled = False
+    try:
+        _verification_progress(job_id, "github", "Confirming pull-request identity")
+        failure_phase = "github"
+        gh = benchmark_verification.ensure_gh(interactive=False)
+        pr = benchmark_verification.pull_request(arguments.verification_target, gh=gh)
+        if pr.head_sha != metadata.get("observed_head_sha"):
+            raise LetsInferError("pull-request head changed after verification started")
+        if "benchmark-ready" not in pr.labels:
+            raise LetsInferError("runtime PR is no longer benchmark-ready")
+        identity = benchmark_verification.github_identity(interactive=False)
+        if identity.document() != metadata.get("verifier"):
+            raise LetsInferError("authenticated GitHub identity changed during verification")
+        candidate = benchmark_verification.select_candidate(pr, arguments.candidate)
+        if candidate != metadata.get("candidate"):
+            raise LetsInferError("pull-request candidate changed during verification")
+
+        _verification_progress(job_id, "source", "Downloading the exact pull-request head")
+        failure_phase = "source"
+        checkout = benchmark_verification.fetch_pull_request(
+            pr, output / "candidate-source", gh=gh
+        )
+        candidate_root = checkout / candidate
+        runtime_path = candidate_root / "runtime.json"
+        if not runtime_path.is_file() or runtime_path.is_symlink():
+            raise LetsInferError("pull-request candidate runtime.json is unavailable")
+        runtime = read_json(runtime_path)
+        release_path = candidate_root / "release.json"
+        if not release_path.is_file() or release_path.is_symlink():
+            raise LetsInferError("pull-request candidate release.json is unavailable")
+        release = read_json(release_path)
+        authors = release.get("authors")
+        if not isinstance(authors, list) or not authors:
+            raise LetsInferError("pull-request runtime authors are unavailable")
+        for author in authors:
+            author_id = author.get("github_id") if isinstance(author, dict) else None
+            if (
+                not isinstance(author_id, int)
+                or isinstance(author_id, bool)
+                or author_id <= 0
+            ):
+                raise LetsInferError("pull-request runtime author identity is invalid")
+            runtime_author_ids.add(author_id)
+        logical_model = runtime.get("logical_model")
+        if not isinstance(logical_model, str):
+            raise LetsInferError("pull-request candidate logical model is invalid")
+        if {"qualified", "blocked_by"}.intersection(runtime.get("serving", {})):
+            raise LetsInferError(
+                "a pull-request runtime cannot grant its own qualification"
+            )
+        adapter = candidate_root / "adapter" / "engine-adapter"
+        if adapter.is_symlink() or not adapter.is_file():
+            raise LetsInferError("pull-request Engine adapter is unavailable")
+        # Do not execute PR-controlled adapter code in the verifier's host
+        # credential context. The immutable runtime/Engine container performs
+        # protocol readiness later without GitHub credentials mounted.
+        pack_path = output / f"{candidate}.letsinfer"
+        try:
+            pack = build_archive(candidate_root, pack_path)
+        except RuntimePackError as pack_error:
+            raise LetsInferError(str(pack_error)) from pack_error
+        subject = benchmark_verification.execution_subject(
+            runtime,
+            pack_sha256=sha256_file(pack_path),
+            pack_bytes=pack_path.stat().st_size,
+        )
+        _verification_progress(job_id, "preflight", "Resolving baseline and dependencies")
+        failure_phase = "preflight"
+        source, policy, expected_version, selected_target, selected_target_sha, _qualified = (
+            _runtime_source_for_install(logical_model, None, None)
+        )
+        baseline_current = _selected_receipt(logical_model)
+        if (
+            baseline_current is None
+            or baseline_current.get("source") != source
+            or baseline_current.get("version") != expected_version
+            or baseline_current.get("target") != selected_target
+            or baseline_current.get("target_contract_sha256")
+            != selected_target_sha
+        ):
+            raise LetsInferError(
+                "community verification requires the current catalog recommendation "
+                f"as its exact baseline; run `letsinfer install {logical_model}` "
+                "before retrying"
+            )
+        candidate_manifest, candidate_prepared, candidate_previous = (
+            _prepare_verification_runtime(
+                str(pack_path),
+                policy="community-verification",
+                requested_runtime=candidate,
+            )
+        )
+        if candidate_manifest["model"]["alias"] != logical_model:
+            raise LetsInferError("candidate logical model changed while preparing")
+        if (
+            candidate_previous is None
+            or candidate_previous.get("digest") != baseline_current.get("digest")
+        ):
+            raise LetsInferError("candidate preparation did not bind the exact baseline")
+        _write_restoration_receipt(
+            state,
+            logical_model=logical_model,
+            original=baseline_current,
+            replacement=None,
+            restored=False,
+        )
+        failure_phase = "benchmark:baseline"
+        baseline = _run_verification_benchmark(
+            baseline_current["candidate_id"], output / "baseline", job_id, "baseline"
+        )
+
+        candidate_current = _publish_verification_runtime(
+            candidate_prepared, candidate_previous
+        )
+        candidate_execution_started = True
+        _write_restoration_receipt(
+            state,
+            logical_model=logical_model,
+            original=baseline_current,
+            replacement=candidate_current,
+            restored=False,
+        )
+        failure_phase = "benchmark:candidate"
+        candidate_record = _run_verification_benchmark(
+            candidate, output / "candidate", job_id, "candidate"
+        )
+
+        _verification_progress(job_id, "restore", "Restoring the resident runtime")
+        failure_phase = "restore"
+        _restore_verification_selection(candidate_current, candidate_previous)
+        candidate_current = None
+        resident_digest = baseline_current.get("digest")
+        restoration = {
+            "passed": True,
+            "resident_runtime_digest": resident_digest,
+            "qualification_slot_retired": not qualification_service_config_path().exists(),
+        }
+        if not restoration["qualification_slot_retired"]:
+            _retire_qualification_candidate(remove_container=True)
+            restoration["qualification_slot_retired"] = True
+        _write_restoration_receipt(
+            state,
+            logical_model=logical_model,
+            original=baseline_current,
+            replacement=None,
+            restored=True,
+        )
+
+        device = benchmark_verification.device_identity()
+        record = benchmark_verification.verification_record(
+            pr=pr,
+            verifier=identity,
+            device=device,
+            subject=subject,
+            candidate_benchmark=candidate_record,
+            baseline_benchmark=baseline,
+            restoration=restoration,
+            runtime_author_ids=runtime_author_ids,
+        )
+        evidence_path = output / "verification-benchmark.json"
+        atomic_json(evidence_path, record)
+        evidence_path.chmod(0o600)
+        body = benchmark_verification.build_comment(record, device)
+        comment_path = output / "github-comment.md"
+        _atomic_private_text(comment_path, body)
+        _verification_progress(job_id, "submit", "Posting signed verification evidence")
+        comment_url = benchmark_verification.post_comment(pr, body, gh=gh)
+        receipt = {
+            "schema_version": 1,
+            "verification_id": record["verification_id"],
+            "comment_url": comment_url,
+            "evidence_sha256": sha256_file(evidence_path),
+            "restoration": restoration,
+        }
+        atomic_json(output / "submission.json", receipt)
+        _mark_benchmark_job(job_id, "completed")
+        return 0
+    except _BenchmarkCancelled as caught:
+        error = caught
+        cancelled = True
+    except BaseException as caught:
+        error = caught
+    finally:
+        restore_errors: list[str] = []
+        if candidate_current is not None:
+            try:
+                _restore_verification_selection(candidate_current, candidate_previous)
+            except BaseException as restore_error:
+                restore_errors.append(f"candidate selection: {restore_error}")
+        if qualification_service_config_path().is_file():
+            try:
+                _retire_qualification_candidate(remove_container=True)
+            except BaseException as restore_error:
+                restore_errors.append(f"qualification slot: {restore_error}")
+        if (
+            not restore_errors
+            and logical_model is not None
+            and baseline_current is not None
+            and _restoration_receipt_path(state).is_file()
+        ):
+            try:
+                _write_restoration_receipt(
+                    state,
+                    logical_model=logical_model,
+                    original=baseline_current,
+                    replacement=None,
+                    restored=True,
+                )
+            except BaseException as restore_error:
+                restore_errors.append(f"restoration receipt: {restore_error}")
+        signal.signal(signal.SIGTERM, previous_term)
+        signal.signal(signal.SIGINT, previous_int)
+        if restore_errors:
+            error = LetsInferError(
+                "verification restoration was incomplete: " + "; ".join(restore_errors)
+            )
+            cancelled = False
+            restoration = {
+                "passed": False,
+                "errors": restore_errors,
+                "qualification_slot_retired": not qualification_service_config_path().exists(),
+            }
+        elif logical_model is not None and baseline_current is not None:
+            restoration = {
+                "passed": True,
+                "resident_runtime_digest": baseline_current.get("digest"),
+                "qualification_slot_retired": not qualification_service_config_path().exists(),
+            }
+    if cancelled:
+        _mark_benchmark_job(job_id, "cancelled")
+        return 0
+    assert error is not None
+    if (
+        candidate_execution_started
+        and pr is not None
+        and identity is not None
+        and subject is not None
+        and gh is not None
+    ):
+        try:
+            failure = _verification_failure(error, failure_phase)
+            if failure["category"] == "restoration":
+                restoration = {**restoration, "passed": False}
+            device = benchmark_verification.device_identity()
+            record = benchmark_verification.verification_record(
+                pr=pr,
+                verifier=identity,
+                device=device,
+                subject=subject,
+                candidate_benchmark=candidate_record,
+                baseline_benchmark=baseline,
+                restoration=restoration,
+                failure=failure,
+                runtime_author_ids=runtime_author_ids,
+            )
+            evidence_path = output / "verification-benchmark.json"
+            atomic_json(evidence_path, record)
+            evidence_path.chmod(0o600)
+            body = benchmark_verification.build_comment(record, device)
+            _atomic_private_text(output / "github-comment.md", body)
+            benchmark_verification.post_comment(pr, body, gh=gh)
+        except BaseException as submission_error:
+            error = LetsInferError(
+                f"{error}; blocking evidence could not be posted: {submission_error}"
+            )
+    _mark_benchmark_job(
+        job_id, "failed", error=f"{type(error).__name__}: {error}"
+    )
+    raise error
+
+
+def _benchmark_verify(arguments: argparse.Namespace) -> int:
+    target = arguments.verification_target
     selectors = any(
         getattr(arguments, name)
         for name in ("c1", "c2", "c4", "c8", "c16")
@@ -10617,6 +12201,100 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         getattr(arguments, f"context_{context}")
         for context in ("32k", "64k", "128k", "256k")
     )
+    if selectors or arguments.list or arguments.detach:
+        raise LetsInferError(
+            "runtime verification uses the complete standardized benchmark contract"
+        )
+    if arguments.yes:
+        raise LetsInferError("--yes cannot authorize GitHub authentication")
+    if target is None or target == "status":
+        return _verification_job_snapshot(machine=arguments.json)
+    if target == "stop":
+        if arguments.json:
+            raise LetsInferError("benchmark verify stop does not accept --json")
+        return _verification_stop()
+    if arguments.json:
+        raise LetsInferError("--json is available only for benchmark verify status")
+    if arguments.job_worker:
+        return _run_verification_worker(arguments)
+
+    _gateway_is_idle()
+    identity = _interactive_github_identity()
+    try:
+        gh = benchmark_verification.ensure_gh(interactive=False)
+        pr = benchmark_verification.pull_request(target, gh=gh)
+        candidate = benchmark_verification.select_candidate(pr, arguments.candidate)
+        if "benchmark-ready" not in pr.labels:
+            raise benchmark_verification.VerificationError(
+                "runtime PR is not benchmark-ready; wait for source and supply-chain review"
+            )
+    except benchmark_verification.VerificationError as error:
+        raise LetsInferError(str(error)) from error
+    active = benchmark_jobs.active_state()
+    if active is not None:
+        raise LetsInferError(
+            f"benchmark {active['job_id']} is already active; stop it first"
+        )
+    executable = _contained_regular_file(source_root(), "bin/letsinfer")
+    output = (
+        benchmarks_root()
+        / "verifications"
+        / f"pr-{pr.number}-{candidate}-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    )
+    worker = _verification_self_command(arguments, executable)
+    try:
+        state = benchmark_jobs.start(
+            worker,
+            runtime=candidate,
+            output_directory=str(output),
+            kind="verification",
+            metadata={
+                "pull_request": pr.number,
+                "pull_request_url": pr.url,
+                "observed_head_sha": pr.head_sha,
+                "candidate": candidate,
+                "verifier": identity.document(),
+                "pull_request_author": pr.author.document(),
+            },
+        )
+    except benchmark_jobs.BenchmarkJobError as error:
+        raise LetsInferError(str(error)) from error
+    ui.Terminal(sys.stderr).status(
+        f"Verification started · job {state['job_id'][:8]} · @{identity.login}"
+    )
+    _follow_benchmark_job(state["job_id"])
+    return 0
+
+
+def benchmark_runtime(arguments: argparse.Namespace) -> int:
+    """Run the generic sealed matrix for one installed runtime."""
+    try:
+        prior_job = benchmark_jobs.read_state()
+    except benchmark_jobs.BenchmarkJobError as error:
+        raise LetsInferError(str(error)) from error
+    if (
+        prior_job is not None
+        and prior_job.get("kind") == "verification"
+        and prior_job.get("state") in benchmark_jobs.ACTIVE_STATES
+        and not benchmark_jobs.is_alive(prior_job)
+    ):
+        _recover_interrupted_verification(prior_job)
+    selectors = any(
+        getattr(arguments, name)
+        for name in ("c1", "c2", "c4", "c8", "c16")
+    ) or any(
+        getattr(arguments, f"context_{context}")
+        for context in ("32k", "64k", "128k", "256k")
+    )
+    if arguments.runtime == "verify":
+        return _benchmark_verify(arguments)
+    if (
+        getattr(arguments, "verification_target", None) is not None
+        or getattr(arguments, "candidate", None) is not None
+    ):
+        raise LetsInferError(
+            "the second benchmark argument is available only after `benchmark verify`"
+        )
     if arguments.runtime is None:
         if (
             selectors
@@ -10820,15 +12498,20 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
     elif arguments.job_worker:
         if not isinstance(arguments.job_id, str) or not arguments.job_id:
             raise LetsInferError("benchmark worker has no job identity")
-        _mark_benchmark_job(arguments.job_id, "running")
+        nested_verification = bool(
+            getattr(arguments, "nested_verification", False)
+        )
+        if not nested_verification:
+            _mark_benchmark_job(arguments.job_id, "running")
         previous_term = signal.getsignal(signal.SIGTERM)
         previous_int = signal.getsignal(signal.SIGINT)
 
         def cancel_benchmark(_signal: int, _frame: Any) -> None:
             raise _BenchmarkCancelled("benchmark cancellation requested")
 
-        signal.signal(signal.SIGTERM, cancel_benchmark)
-        signal.signal(signal.SIGINT, cancel_benchmark)
+        if not nested_verification:
+            signal.signal(signal.SIGTERM, cancel_benchmark)
+            signal.signal(signal.SIGINT, cancel_benchmark)
         try:
             _run_benchmark_with_service_isolation(
                 command,
@@ -10841,20 +12524,24 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                 ],
             )
         except _BenchmarkCancelled:
-            _mark_benchmark_job(arguments.job_id, "cancelled")
+            if not nested_verification:
+                _mark_benchmark_job(arguments.job_id, "cancelled")
             return 0
         except BaseException as error:
-            _mark_benchmark_job(
-                arguments.job_id,
-                "failed",
-                error=f"{type(error).__name__}: {error}",
-            )
+            if not nested_verification:
+                _mark_benchmark_job(
+                    arguments.job_id,
+                    "failed",
+                    error=f"{type(error).__name__}: {error}",
+                )
             raise
         else:
-            _mark_benchmark_job(arguments.job_id, "completed")
+            if not nested_verification:
+                _mark_benchmark_job(arguments.job_id, "completed")
         finally:
-            signal.signal(signal.SIGTERM, previous_term)
-            signal.signal(signal.SIGINT, previous_int)
+            if not nested_verification:
+                signal.signal(signal.SIGTERM, previous_term)
+                signal.signal(signal.SIGINT, previous_int)
     else:
         assert output is not None
         worker_command = _benchmark_self_command(arguments, letsinfer_bin, output)
@@ -11200,7 +12887,7 @@ def rebind_core_services(_: argparse.Namespace) -> int:
     if config_path.is_file():
         previous = read_service_config(config_path)
         model = previous.get("model")
-    site_state = _unit_enabled_active(SITE_SERVICE_NAME)
+    site_state = _unit_enabled_active(NODE_SERVICE_NAME)
     gateway_state = _unit_enabled_active(GATEWAY_SERVICE_NAME)
     watchdog_state = _unit_enabled_active(SERVICE_NAME)
     if all(
@@ -11209,7 +12896,7 @@ def rebind_core_services(_: argparse.Namespace) -> int:
     ):
         print(f"CORE {PRODUCT_VERSION} services=none runtimes=unchanged")
         return 0
-    include_gateway = identity.role == "coordinator"
+    include_gateway = identity.role == "main"
     runtime_state = install_core_plane_services(
         identity, include_gateway=include_gateway
     )
@@ -11406,7 +13093,7 @@ def setup_command(arguments: argparse.Namespace) -> int:
         identity = setup_site(arguments.name, arguments.address)
     except SiteError as error:
         raise LetsInferError(str(error)) from error
-    if identity.role == "member":
+    if identity.role == "child":
         if not arguments.no_service and platform.system() == "Linux":
             ensure_core_watchdog_tls()
         facts_error: LetsInferError | None = None
@@ -11421,12 +13108,12 @@ def setup_command(arguments: argparse.Namespace) -> int:
             print(json.dumps(value, sort_keys=True))
         else:
             print(
-                f"SITE {identity.display_name} id={identity.site_id} "
-                f"role={identity.role} member={identity.member_id}"
+                f"NODE {identity.display_name} id={identity.site_id} "
+                f"role={identity.role} machine={identity.member_id}"
             )
         if facts_error is not None:
             print(
-                "WARNING member facts will retry through the site service: "
+                "WARNING child facts will retry through the node service: "
                 f"{facts_error}",
                 file=sys.stderr,
             )
@@ -11484,8 +13171,8 @@ def setup_command(arguments: argparse.Namespace) -> int:
         print(json.dumps(value, sort_keys=True))
     else:
         print(
-            f"SITE {identity.display_name} id={identity.site_id} "
-            f"role={identity.role} member={identity.member_id}"
+            f"NODE {identity.display_name} id={identity.site_id} "
+            f"role={identity.role} machine={identity.member_id}"
         )
         print(f"API key stored privately at {local_key_path}")
         print(f"API endpoint {value['inference_endpoint']}")
@@ -11496,9 +13183,9 @@ def site_status_command(arguments: argparse.Namespace) -> int:
     try:
         identity = read_site_identity()
         value = identity_json(identity)
-        if identity.role == "coordinator":
+        if identity.role == "main":
             with SiteStore(identity=identity) as store:
-                value["members"] = [
+                value["machines"] = [
                     dict(row)
                     for row in store.connection.execute(
                         "SELECT member_id,display_name,role,address,state,updated_at_unix "
@@ -11507,7 +13194,7 @@ def site_status_command(arguments: argparse.Namespace) -> int:
                 ]
                 value["audit"] = store.verify_audit()
         else:
-            value["members"] = None
+            value["machines"] = None
             value["audit"] = None
     except SiteError as error:
         raise LetsInferError(str(error)) from error
@@ -11516,8 +13203,8 @@ def site_status_command(arguments: argparse.Namespace) -> int:
     else:
         print(
             f"{value['display_name']}\t{value['role']}\t"
-            f"site={value['site_id']}\tmember={value['member_id']}\t"
-            f"coordinator={value['coordinator_id']}@{value['coordinator_address']}"
+            f"node={value['node_id']}\tmachine={value['machine_id']}\t"
+            f"main={value['main_id']}@{value['main_address']}"
         )
     return 0
 
@@ -11530,28 +13217,28 @@ def site_move_command(arguments: argparse.Namespace) -> int:
     if not arguments.apply:
         with _site_store() as store:
             store.record_action(
-                "site.move", identity.site_id, "success", "plan_only"
+                "node.move", identity.site_id, "success", "plan_only"
             )
         print(json.dumps(document, sort_keys=True, indent=None if arguments.json else 2))
         return 0
     if arguments.source_site_id != identity.site_id:
-        raise LetsInferError("--source-site-id must exactly confirm the current site")
+        raise LetsInferError("--source-node-id must exactly confirm the current node")
     if plan.blocking_reasons:
-        raise LetsInferError("site move is blocked: " + "; ".join(plan.blocking_reasons))
+        raise LetsInferError("node move is blocked: " + "; ".join(plan.blocking_reasons))
     required = {
         "endpoint": arguments.endpoint,
         "invite": arguments.invite,
-        "coordinator certificate": arguments.coordinator_certificate_sha256,
+        "main certificate": arguments.coordinator_certificate_sha256,
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
-        raise LetsInferError("site move requires " + ", ".join(missing))
+        raise LetsInferError("node move requires " + ", ".join(missing))
     code = arguments.code
     if code is None:
         try:
             code = getpass.getpass("Destination membership code: ")
         except (EOFError, KeyboardInterrupt) as error:
-            raise LetsInferError("site move code entry was cancelled") from error
+            raise LetsInferError("node move code entry was cancelled") from error
     code = re.sub(r"[- ]", "", code)
     if re.fullmatch(r"[0-9]{8}", code) is None:
         raise LetsInferError("destination membership code must contain eight digits")
@@ -11560,12 +13247,12 @@ def site_move_command(arguments: argparse.Namespace) -> int:
     prior_unit_files: dict[str, tuple[str, int] | None] = {}
     if not arguments.no_service:
         if platform.system().lower() != "linux":
-            raise LetsInferError("persistent site moves require Linux user systemd")
+            raise LetsInferError("persistent node moves require Linux user systemd")
         if not user_lingering_enabled():
-            raise LetsInferError("user-systemd lingering is required before a site move")
+            raise LetsInferError("user-systemd lingering is required before a node move")
         for unit in (
             SERVICE_NAME,
-            SITE_SERVICE_NAME,
+            NODE_SERVICE_NAME,
             ENGINE_SERVICE_NAME,
             GATEWAY_SERVICE_NAME,
             RECOVERY_TIMER_NAME,
@@ -11581,20 +13268,20 @@ def site_move_command(arguments: argparse.Namespace) -> int:
         ]
         if active_work:
             raise LetsInferError(
-                "site move requires inference and gateway services to be stopped first: "
+                "node move requires inference and gateway services to be stopped first: "
                 + ",".join(active_work)
             )
 
     with _site_store() as store:
         store.record_action(
-            "site.move",
+            "node.move",
             str(arguments.endpoint),
             "success",
             "source_authorized_membership_replacement",
         )
     try:
         if not arguments.no_service:
-            for unit in (RECOVERY_TIMER_NAME, SITE_SERVICE_NAME, SERVICE_NAME):
+            for unit in (RECOVERY_TIMER_NAME, NODE_SERVICE_NAME, SERVICE_NAME):
                 if prior_units[unit][1] == "active":
                     run_passthrough(["systemctl", "--user", "stop", unit])
         with LocalMoveTransaction(identity) as transaction:
@@ -11610,7 +13297,7 @@ def site_move_command(arguments: argparse.Namespace) -> int:
             )
             if not arguments.no_service:
                 ensure_core_watchdog_tls()
-                install_site_service_only()
+                install_node_service_only()
                 install_core_watchdog_service(enrollment.identity)
             replacement = transaction.commit()
         if not arguments.no_service:
@@ -11638,7 +13325,7 @@ def site_move_command(arguments: argparse.Namespace) -> int:
                 rollback_errors.append(str(rollback_error))
             if rollback_errors:
                 raise LetsInferError(
-                    "site move failed and service rollback was incomplete: "
+                    "node move failed and service rollback was incomplete: "
                     + "; ".join(rollback_errors)
                 ) from failure
         raise
@@ -11646,8 +13333,8 @@ def site_move_command(arguments: argparse.Namespace) -> int:
     result = identity_json(replacement)
     result.update(
         {
-            "source_site_id": identity.site_id,
-            "membership_state": enrollment.state,
+            "source_node_id": identity.site_id,
+            "child_state": enrollment.state,
             "approval_expires_at_unix": enrollment.approval_expires_at_unix,
             "comparison_code": enrollment.comparison_code,
         }
@@ -11657,7 +13344,7 @@ def site_move_command(arguments: argparse.Namespace) -> int:
     else:
         print(
             f"MOVED source={identity.site_id} destination={replacement.site_id} "
-            f"member={replacement.member_id} state={enrollment.state}"
+            f"child={replacement.member_id} state={enrollment.state}"
         )
         if enrollment.comparison_code is not None:
             print(f"COMPARE {enrollment.comparison_code}")
@@ -11673,7 +13360,7 @@ def _site_store() -> SiteStore:
 
 def member_list_command(arguments: argparse.Namespace) -> int:
     identity = read_site_identity()
-    if identity.role != "coordinator":
+    if identity.role != "main":
         rows = [{
             "member_id": identity.member_id,
             "display_name": socket.gethostname(),
@@ -11738,11 +13425,11 @@ def member_join_command(arguments: argparse.Namespace) -> int:
         raise LetsInferError(str(error)) from error
     if not arguments.no_service:
         ensure_core_watchdog_tls()
-        install_site_service_only()
+        install_node_service_only()
         install_core_watchdog_service(enrollment.identity)
     identity = enrollment.identity
     value = identity_json(identity)
-    value["membership_state"] = enrollment.state
+    value["child_state"] = enrollment.state
     value["approval_expires_at_unix"] = enrollment.approval_expires_at_unix
     value["comparison_code"] = enrollment.comparison_code
     if arguments.json:
@@ -11750,8 +13437,8 @@ def member_join_command(arguments: argparse.Namespace) -> int:
     else:
         label = "JOINED" if enrollment.state == "active" else "PENDING"
         print(
-            f"{label} {identity.display_name} site={identity.site_id} "
-            f"member={identity.member_id} coordinator="
+            f"{label} {identity.display_name} node={identity.site_id} "
+            f"child={identity.member_id} main="
             f"{identity.coordinator_id}@{identity.coordinator_address}"
         )
         if enrollment.comparison_code is not None:
@@ -11803,7 +13490,7 @@ def member_invite_command(arguments: argparse.Namespace) -> int:
         f"[{endpoint_address}]" if ":" in endpoint_address else endpoint_address
     )
     invite["endpoint"] = f"https://{endpoint_host}:{SITE_CONTROL_PORT}"
-    invite["coordinator_certificate_sha256"] = certificate_sha256(
+    invite["main_certificate_sha256"] = certificate_sha256(
         site_member_certificate_path()
     )
     if arguments.json:
@@ -11835,7 +13522,18 @@ def member_approve_command(arguments: argparse.Namespace) -> int:
 def _site_control_endpoint(address: str) -> str:
     if "://" in address:
         return address
-    host = f"[{address}]" if ":" in address and not address.startswith("[") else address
+    if address.startswith("["):
+        parsed = urllib.parse.urlsplit(f"https://{address}")
+        return (
+            f"https://{address}"
+            if parsed.port is not None
+            else f"https://{address}:{SITE_CONTROL_PORT}"
+        )
+    if address.count(":") == 1:
+        _host, separator, port = address.rpartition(":")
+        if separator and port.isdecimal():
+            return f"https://{address}"
+    host = f"[{address}]" if ":" in address else address
     return f"https://{host}:{SITE_CONTROL_PORT}"
 
 
@@ -11844,15 +13542,15 @@ def member_sync_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(result, sort_keys=True))
     else:
-        print(f"SYNCED {len(result['refreshed'])} member(s)")
+        print(f"SYNCED {len(result['refreshed'])} machine(s)")
         for failure in result["failed"]:
             print(f"FAILED {failure}", file=sys.stderr)
     if result["failed"]:
         with _site_store() as store:
             store.record_action(
-                "member.sync", "member.sync", "failed", "member_control_unavailable"
+                "child.sync", "child.sync", "failed", "child_control_unavailable"
             )
-        raise LetsInferError("one or more members could not publish authenticated facts")
+        raise LetsInferError("one or more child nodes could not publish authenticated facts")
     return 0
 
 
@@ -11879,7 +13577,7 @@ def _synchronize_member_facts() -> dict[str, list[str]]:
                     signed["facts"],
                     signed["signature"],
                     actor_type="system",
-                    origin_interface="member-control",
+                    origin_interface="child-control",
                 )
                 refreshed.append(member_id)
             except (ControlError, SiteError) as error:
@@ -12151,6 +13849,7 @@ class LocalEngineGroupExecutor:
             manifest_path, manifest, control_root, receipt = prepare_runtime_install(
                 str(job["source"]),
                 policy="site-group",
+                qualified=True,
                 requested_runtime=None,
             )
             if (
@@ -12164,10 +13863,20 @@ class LocalEngineGroupExecutor:
                 runtime.runtime.get("orchestration"),
                 target_contract(manifest)["placement"],
             )
-            if contract is None:
-                raise LetsInferError("engine-group runtime has no orchestration contract")
             role = job["role"]
-            expected_role = contract["roles"].get(role["name"])
+            expected_role = (
+                {
+                    "port_count": 1,
+                    "launcher": "manifest",
+                    "environment": {},
+                    "inference_endpoint": True,
+                    "readiness": {"kind": "manifest"},
+                }
+                if contract is None and role.get("name") == "engine"
+                else None
+                if contract is None
+                else contract["roles"].get(role["name"])
+            )
             expected_job_role = None if expected_role is None else {
                 "name": role["name"],
                 "rank": role["rank"],
@@ -12179,6 +13888,7 @@ class LocalEngineGroupExecutor:
                 "environment": dict(expected_role["environment"]),
                 "inference_endpoint": expected_role["inference_endpoint"],
                 "readiness": dict(expected_role["readiness"]),
+                "device_uuids": list(role["device_uuids"]),
             }
             if expected_job_role != role:
                 raise LetsInferError("engine-group job role differs from the runtime contract")
@@ -12188,6 +13898,8 @@ class LocalEngineGroupExecutor:
                 group["strategy"] != placement["strategy"]
                 or group["engine_strategy"] != placement["engine_strategy"]
                 or len(group["members"]) != placement["member_count"]
+                or len(role["device_uuids"])
+                != target_contract(manifest)["accelerator"]["count"]
             ):
                 raise LetsInferError("engine-group plan differs from the release target")
             model_cache = default_model_cache_root()
@@ -12504,8 +14216,8 @@ class LocalEngineGroupExecutor:
 def _refresh_site_links_once() -> dict[str, list[str]]:
     """Renew every configured directional link proof without changing topology."""
     identity = read_site_identity()
-    if identity.role != "coordinator":
-        raise LetsInferError("site link renewal is coordinator-only")
+    if identity.role != "main":
+        raise LetsInferError("node link renewal runs on the main node")
     with _site_store() as store:
         members = {
             row["member_id"]: row
@@ -12520,10 +14232,10 @@ def _refresh_site_links_once() -> dict[str, list[str]]:
             continue
         links = facts.get("network", {}).get("links", [])
         if not isinstance(links, list):
-            raise LetsInferError(f"member {subject_id} link facts are invalid")
+            raise LetsInferError(f"child {subject_id} link facts are invalid")
         for link in links:
             if not isinstance(link, dict):
-                raise LetsInferError(f"member {subject_id} link facts are invalid")
+                raise LetsInferError(f"child {subject_id} link facts are invalid")
             peer = members.get(link.get("peer_member_id"))
             if peer is not None:
                 tasks.append((subject, peer, link))
@@ -12592,10 +14304,68 @@ def _current_controller_placements(
     return [current[model][1] for model in sorted(current)]
 
 
-def site_agent_command(arguments: argparse.Namespace) -> int:
+def _gateway_group_activity() -> dict[str, Any] | None:
+    """Read the gateway's atomic dynamic group snapshot without trusting links."""
+    path = default_gateway_group_telemetry_path()
+    try:
+        details = path.lstat()
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or details.st_uid != os.getuid()
+            or details.st_mode & 0o022
+            or details.st_size < 2
+            or details.st_size > 1024 * 1024
+        ):
+            return None
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            raw = os.read(descriptor, 1024 * 1024 + 1)
+        finally:
+            os.close(descriptor)
+        value = json.loads(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "unix_ms", "models", "groups"}
+        or value.get("schema_version") != 1
+        or not isinstance(value.get("unix_ms"), int)
+        or isinstance(value.get("unix_ms"), bool)
+        or not isinstance(value.get("models"), dict)
+        or not isinstance(value.get("groups"), dict)
+        or not 0 <= int(time.time() * 1000) - value["unix_ms"] <= 5_000
+    ):
+        return None
+    for placement_id, row in value["groups"].items():
+        if (
+            not isinstance(placement_id, str)
+            or not ID_RE.fullmatch(placement_id)
+            or not isinstance(row, dict)
+            or not isinstance(row.get("active_requests"), int)
+            or isinstance(row.get("active_requests"), bool)
+            or row["active_requests"] < 0
+        ):
+            return None
+    for model, row in value["models"].items():
+        if (
+            not isinstance(model, str)
+            or not model
+            or not isinstance(row, dict)
+            or not isinstance(row.get("queued_requests"), int)
+            or isinstance(row.get("queued_requests"), bool)
+            or row["queued_requests"] < 0
+        ):
+            return None
+    return value
+
+
+def node_agent_command(arguments: argparse.Namespace) -> int:
     identity = read_site_identity()
     link_store = LinkStore(identity)
-    telemetry = TelemetryAggregator() if identity.role == "coordinator" else None
+    telemetry = TelemetryAggregator() if identity.role == "main" else None
     try:
         group_executor = LocalEngineGroupExecutor(identity.member_id)
         member_agent = MemberAgent(
@@ -12646,7 +14416,7 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
 
     def adoption_completed(result: Mapping[str, Any]) -> None:
         _controller_administration_completed(
-            "site.move.commit", {"move": {"move_id": result.get("move_id")}}
+            "node.move.commit", {"move": {"move_id": result.get("move_id")}}
         )
 
     state = SiteControlState(
@@ -12655,18 +14425,21 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
         link_store=link_store,
         telemetry=telemetry,
         member_agent=member_agent,
-        adoption_provider=(adopt_fresh_member if identity.role == "coordinator" else None),
+        adoption_provider=(adopt_fresh_member if identity.role == "main" else None),
         adoption_completed_provider=(
-            adoption_completed if identity.role == "coordinator" else None
+            adoption_completed if identity.role == "main" else None
         ),
     )
 
     def controller_site_document() -> dict[str, Any]:
         if telemetry is None:
-            raise ControllerError("site aggregation is unavailable on a member")
+            raise ControllerError("node aggregation is available only on the main node")
         with _site_store() as store:
             rows = store.members()
-            placements = _current_controller_placements(store.placements())
+            placements = store.placements()
+            model_services = store.model_services()
+            engine_groups = store.engine_groups()
+            allocations = store.device_allocations(active_only=True)
             plans = store.topology_plans()
             exposure = store.exposure()
         telemetry.reconcile_members(
@@ -12687,7 +14460,7 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
             }
             for row in rows
         ]
-        safe_placements = []
+        safe_placements: list[dict[str, Any]] = []
         for placement in placements:
             safe = dict(placement)
             safe["endpoints"] = [
@@ -12703,6 +14476,72 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
                 for endpoint in placement["endpoints"]
             ]
             safe_placements.append(safe)
+        placements_by_id = {
+            placement["placement_id"]: placement for placement in safe_placements
+        }
+        allocations_by_group: dict[str, list[dict[str, Any]]] = {}
+        for allocation in allocations:
+            allocations_by_group.setdefault(allocation["group_id"], []).append(
+                {
+                    "machine_id": allocation["member_id"],
+                    "device_uuid": allocation["device_uuid"],
+                    "state": allocation["state"],
+                }
+            )
+        activity = _gateway_group_activity()
+        group_activity = activity["groups"] if activity is not None else {}
+        model_activity = activity["models"] if activity is not None else {}
+        groups_by_service: dict[str, list[dict[str, Any]]] = {}
+        for group in engine_groups:
+            placement = placements_by_id.get(group["placement_id"])
+            if placement is None or group["state"] == "removed":
+                continue
+            release = group["plan"].get("release")
+            service_id = group["plan"].get("service_id")
+            if not isinstance(service_id, str) or not isinstance(release, dict):
+                raise ControllerError("engine-group service identity is incomplete")
+            groups_by_service.setdefault(service_id, []).append(
+                {
+                    **placement,
+                    "group_id": group["group_id"],
+                    "release": release,
+                    "failure_policy": group["failure_policy"],
+                    "member_assignments": group["plan"]["members"],
+                    "device_allocations": allocations_by_group.get(
+                        group["group_id"], []
+                    ),
+                    "desired_state": group["desired_state"],
+                    "last_error": group["last_error"],
+                    "telemetry": group_activity.get(group["placement_id"]),
+                }
+            )
+        services = [
+            {
+                **service,
+                "groups": sorted(
+                    groups_by_service.get(service["service_id"], []),
+                    key=lambda group: group["group_id"],
+                ),
+                "telemetry": {
+                    "active_requests": sum(
+                        int(
+                            (group_activity.get(group["placement_id"]) or {}).get(
+                                "active_requests", 0
+                            )
+                        )
+                        for group in groups_by_service.get(service["service_id"], [])
+                    ),
+                    "queued_requests": int(
+                        (model_activity.get(service["model"]) or {}).get(
+                            "queued_requests", 0
+                        )
+                    ),
+                    "available": activity is not None,
+                },
+            }
+            for service in model_services
+            if service["desired_state"] != "removed"
+        ]
         active = [row for row in rows if row["state"] == "active" and row["facts"]]
         try:
             graph = TopologyGraph(
@@ -12717,11 +14556,11 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
         except TopologyError as error:
             topology_document = {"valid": False, "error": str(error)}
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "identity": identity_json(identity),
-            "members": members,
+            "machines": members,
             "topology": topology_document,
-            "placements": safe_placements,
+            "services": services,
             "pending_topology_plans": plans,
             "exposure": exposure or {
                 "provider": "tailscale-funnel",
@@ -12737,7 +14576,7 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
     controller_state: ControllerState | None = None
     controller_thread: threading.Thread | None = None
     site_administration: SiteAdministration | None = None
-    if identity.role == "coordinator":
+    if identity.role == "main":
         controller_paths = (
             default_watchdog_cert_path(),
             default_watchdog_key_path(),
@@ -12791,7 +14630,7 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
         except InventoryError:
             direct_connectx = False
         adoptable = False
-        if identity.role == "coordinator" and direct_connectx:
+        if identity.role == "main" and direct_connectx:
             with _site_store() as store:
                 adoptable = bool(store.adoption()["eligible"])
         publisher = DiscoveryPublisher(
@@ -12823,11 +14662,11 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
                     state, document, member_id
                 )
             )
-            if identity.role == "coordinator"
+            if identity.role == "main"
             else None,
             endpoint=(
                 None
-                if identity.role == "coordinator"
+                if identity.role == "main"
                 else _site_control_endpoint(identity.coordinator_address)
             ),
         )
@@ -12847,11 +14686,11 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
                     document, requester_member_id=member_id
                 )
             )
-            if identity.role == "coordinator"
+            if identity.role == "main"
             else None,
             endpoint=(
                 None
-                if identity.role == "coordinator"
+                if identity.role == "main"
                 else _site_control_endpoint(identity.coordinator_address)
             ),
         )
@@ -12880,7 +14719,7 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
     update_poller.start()
 
     def monitor_site_links() -> None:
-        if identity.role != "coordinator":
+        if identity.role != "main":
             return
         while not stopped.wait(10.0):
             try:
@@ -12903,7 +14742,7 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
     link_thread.start()
 
     def monitor_engine_groups() -> None:
-        if identity.role != "coordinator":
+        if identity.role != "main":
             return
         while not stopped.wait(10.0):
             try:
@@ -12968,10 +14807,10 @@ def site_agent_command(arguments: argparse.Namespace) -> int:
         update_poller.join(timeout=2)
         member_agent.close()
     if publisher_failed:
-        raise LetsInferError("DNS-SD publisher exited while the site agent was active")
+        raise LetsInferError("DNS-SD publisher exited while the node agent was active")
     if telemetry_failed:
         raise LetsInferError(
-            "Watchdog telemetry publisher exited while the site agent was active: "
+            "Watchdog telemetry publisher exited while the node agent was active: "
             + telemetry_failed[-1]
         )
     if orchestration_failed:
@@ -13188,7 +15027,7 @@ def _require_public_gateway() -> dict[str, Any]:
     try:
         config = read_json(config_path)
     except (OSError, json.JSONDecodeError) as error:
-        raise LetsInferError("the coordinator gateway is not configured") from error
+        raise LetsInferError("the main-node gateway is not configured") from error
     required = {
         "schema_version", "gateway_listen", "gateway_protocol", "gateway_port",
         "gateway_max_connections", "gateway_queue_timeout_seconds",
@@ -13202,12 +15041,12 @@ def _require_public_gateway() -> dict[str, Any]:
         or config.get("gateway_listen") != "0.0.0.0"
         or config.get("gateway_protocol") != "http"
     ):
-        raise LetsInferError("the coordinator gateway configuration is not public-edge safe")
+        raise LetsInferError("the main-node gateway configuration is not public-edge safe")
     _, active = _unit_enabled_active(GATEWAY_SERVICE_NAME)
     if active != "active":
-        raise LetsInferError("the coordinator gateway must be active before exposure")
+        raise LetsInferError("the main-node gateway must be active before exposure")
     if api_status(8000, "/health", None) != 200:
-        raise LetsInferError("the coordinator gateway health check failed")
+        raise LetsInferError("the main-node gateway health check failed")
     return config
 
 
@@ -13598,7 +15437,7 @@ def _authorize_command(arguments: argparse.Namespace) -> tuple[Any, Any]:
         except SiteError as error:
             if metadata.requires_site:
                 raise LetsInferError(
-                    "this command requires a configured site; run `letsinfer setup` first"
+                    "this command requires a configured node; run `letsinfer setup` first"
                 ) from error
     if identity is not None:
         allowed = (
@@ -13608,9 +15447,9 @@ def _authorize_command(arguments: argparse.Namespace) -> tuple[Any, Any]:
         if not allowed:
             reason = (
                 f"command scope is {metadata.scope.value}; local role is {identity.role}; "
-                f"coordinator={identity.coordinator_id}@{identity.coordinator_address}"
+                f"main={identity.coordinator_id}@{identity.coordinator_address}"
             )
-            if identity.role == "coordinator":
+            if identity.role == "main":
                 try:
                     with SiteStore(identity=identity) as store:
                         store.record_denied(action_id, action_id, reason)
@@ -13621,20 +15460,20 @@ def _authorize_command(arguments: argparse.Namespace) -> tuple[Any, Any]:
 
 
 _HANDLER_AUDITED_ACTIONS = {
-    "setup": {"site.setup"},
-    "site.move": {"site.move"},
+    "setup": {"node.setup"},
+    "node.move": {"node.move"},
     "pair": {"pair"},
     "controllers.forget": {"controllers.forget"},
     "key.create": {"key.create"},
     "key.rotate": {"key.rotate"},
     "key.revoke": {"key.revoke"},
     "key.policy": {"key.policy"},
-    "member.invite": {"member.invite"},
-    "member.approve": {"member.approve"},
-    "member.sync": {"member.sync"},
-    "member.drain": {"member.drain"},
-    "member.resume": {"member.resume"},
-    "member.remove": {"member.remove"},
+    "child.invite": {"child.invite"},
+    "child.approve": {"child.approve"},
+    "child.sync": {"child.sync"},
+    "child.drain": {"child.drain"},
+    "child.resume": {"child.resume"},
+    "child.remove": {"child.remove"},
     "expose": {"exposure.enable"},
     "unexpose": {"exposure.disable"},
 }
@@ -13643,7 +15482,7 @@ _HANDLER_AUDITED_ACTIONS = {
 def _audit_marker(metadata: Any, identity: Any) -> int | None:
     if (
         identity is None
-        or identity.role != "coordinator"
+        or identity.role != "main"
         or metadata.audit is AuditPolicy.NONE
     ):
         return None
@@ -13654,7 +15493,7 @@ def _audit_marker(metadata: Any, identity: Any) -> int | None:
             ).fetchone()
     except SiteError as error:
         raise LetsInferError(
-            "mandatory site audit is unavailable before command execution"
+            "mandatory node audit is unavailable before command execution"
         ) from error
     return int(row[0])
 
@@ -13667,7 +15506,7 @@ def _audit_command_result(
     reason: str | None = None,
     after_sequence: int | None = None,
 ) -> None:
-    if identity is None or identity.role != "coordinator":
+    if identity is None or identity.role != "main":
         return
     if metadata.audit is AuditPolicy.NONE:
         return
@@ -13689,7 +15528,7 @@ def _audit_command_result(
     except SiteError as error:
         if outcome == "success":
             raise LetsInferError(
-                "command completed but its mandatory site audit event failed"
+                "command completed but its mandatory node audit event failed"
             ) from error
 
 
@@ -13702,54 +15541,56 @@ def parser() -> argparse.ArgumentParser:
     subcommands = root.add_subparsers(dest="command", required=True)
 
     setup = subcommands.add_parser(
-        "setup", help=help_label("create this machine's Let's Infer site", "setup")
+        "setup", help=help_label("create this machine's Let's Infer node", "setup")
     )
     setup.add_argument("--name", default="Home")
     setup.add_argument("--address")
     setup.add_argument(
         "--no-service",
         action="store_true",
-        help="create a local development identity without a persistent site service",
+        help="create a local development identity without a persistent node service",
     )
     setup.add_argument("--json", action="store_true")
     setup.set_defaults(action=setup_command, action_id="setup")
 
     site_command = subcommands.add_parser(
-        "site", help="inspect the logical Let's Infer site"
+        "node", help="inspect this Let's Infer node"
     )
     site_operations = site_command.add_subparsers(dest="site_operation", required=True)
     site_show = site_operations.add_parser(
-        "status", help=help_label("show site identity and role", "site.status")
+        "status", help=help_label("show node identity and role", "node.status")
     )
     site_show.add_argument("--json", action="store_true")
-    site_show.set_defaults(action=site_status_command, action_id="site.status")
+    site_show.set_defaults(action=site_status_command, action_id="node.status")
     site_move = site_operations.add_parser(
-        "move", help=help_label("plan or apply a move into another site", "site.move")
+        "move", help=help_label("plan or apply a move into another node", "node.move")
     )
     site_move.add_argument("--apply", action="store_true")
-    site_move.add_argument("--source-site-id")
+    site_move.add_argument("--source-node-id", dest="source_site_id")
     site_move.add_argument("--endpoint")
     site_move.add_argument("--invite")
-    site_move.add_argument("--coordinator-certificate-sha256")
+    site_move.add_argument(
+        "--main-certificate-sha256", dest="coordinator_certificate_sha256"
+    )
     site_move.add_argument("--code")
     site_move.add_argument("--name")
     site_move.add_argument("--address")
     site_move.add_argument("--no-service", action="store_true", help=argparse.SUPPRESS)
     site_move.add_argument("--json", action="store_true")
-    site_move.set_defaults(action=site_move_command, action_id="site.move")
+    site_move.set_defaults(action=site_move_command, action_id="node.move")
 
-    topology_group = subcommands.add_parser("topology", help="inspect verified site topology")
+    topology_group = subcommands.add_parser("topology", help="inspect verified node topology")
     topology_operations = topology_group.add_subparsers(
         dest="topology_operation", required=True
     )
     topology_show = topology_operations.add_parser(
-        "show", help=help_label("show verified site topology", "topology.show")
+        "show", help=help_label("show verified node topology", "topology.show")
     )
     topology_show.add_argument("--json", action="store_true")
     topology_show.set_defaults(action=topology_command, action_id="topology.show")
     topology_probe = topology_operations.add_parser(
         "probe",
-        help=help_label("prove a bidirectional physical member link", "topology.probe"),
+        help=help_label("prove a bidirectional child-node link", "topology.probe"),
     )
     topology_probe.add_argument("left")
     topology_probe.add_argument("right")
@@ -13772,24 +15613,28 @@ def parser() -> argparse.ArgumentParser:
     topology_plan.add_argument("--json", action="store_true")
     topology_plan.set_defaults(action=topology_plan_command, action_id="topology.plan")
 
-    member_command = subcommands.add_parser("member", help="manage site membership")
+    member_command = subcommands.add_parser("child", help="manage child nodes")
     member_operations = member_command.add_subparsers(dest="member_operation", required=True)
     member_list = member_operations.add_parser(
-        "list", help=help_label("list active site members", "member.list")
+        "list", help=help_label("list the main and child nodes", "child.list")
     )
     member_list.add_argument("--json", action="store_true")
-    member_list.set_defaults(action=member_list_command, action_id="member.list")
+    member_list.set_defaults(action=member_list_command, action_id="child.list")
     member_prepare = member_operations.add_parser(
-        "prepare", help=help_label("create this machine's pending member identity", "member.prepare")
+        "prepare", help=help_label("create this machine's pending child identity", "child.prepare")
     )
     member_prepare.add_argument("--json", action="store_true")
-    member_prepare.set_defaults(action=member_prepare_command, action_id="member.prepare")
+    member_prepare.set_defaults(action=member_prepare_command, action_id="child.prepare")
     member_join = member_operations.add_parser(
-        "join", help=help_label("join an authorized Let's Infer site", "member.join")
+        "join", help=help_label("join an authorized main node as a child", "child.join")
     )
     member_join.add_argument("endpoint")
     member_join.add_argument("--invite", required=True)
-    member_join.add_argument("--coordinator-certificate-sha256", required=True)
+    member_join.add_argument(
+        "--main-certificate-sha256",
+        dest="coordinator_certificate_sha256",
+        required=True,
+    )
     member_join.add_argument("--code")
     member_join.add_argument("--connectx", action="store_true")
     member_join.add_argument("--name")
@@ -13797,12 +15642,12 @@ def parser() -> argparse.ArgumentParser:
     member_join.add_argument(
         "--no-service",
         action="store_true",
-        help="join for local protocol development without installing the site service",
+        help="join for local protocol development without installing the node service",
     )
     member_join.add_argument("--json", action="store_true")
-    member_join.set_defaults(action=member_join_command, action_id="member.join")
+    member_join.set_defaults(action=member_join_command, action_id="child.join")
     member_invite = member_operations.add_parser(
-        "invite", help=help_label("authorize one bounded membership attempt", "member.invite")
+        "invite", help=help_label("authorize one bounded child join", "child.invite")
     )
     member_invite.add_argument("--mode", choices=("lan", "remote", "connectx"), required=True)
     member_invite.add_argument("--candidate-fingerprint")
@@ -13810,37 +15655,37 @@ def parser() -> argparse.ArgumentParser:
     member_invite.add_argument("--interface")
     member_invite.add_argument("--expires-in", type=int, default=180)
     member_invite.add_argument("--json", action="store_true")
-    member_invite.set_defaults(action=member_invite_command, action_id="member.invite")
+    member_invite.set_defaults(action=member_invite_command, action_id="child.invite")
     member_approve = member_operations.add_parser(
-        "approve", help=help_label("approve a matching member comparison code", "member.approve")
+        "approve", help=help_label("approve a matching child comparison code", "child.approve")
     )
     member_approve.add_argument("member")
     member_approve.add_argument("comparison_code")
     member_approve.add_argument("--json", action="store_true")
-    member_approve.set_defaults(action=member_approve_command, action_id="member.approve")
+    member_approve.set_defaults(action=member_approve_command, action_id="child.approve")
     member_sync = member_operations.add_parser(
-        "sync", help=help_label("refresh authenticated member facts", "member.sync")
+        "sync", help=help_label("refresh authenticated child facts", "child.sync")
     )
     member_sync.add_argument("--json", action="store_true")
-    member_sync.set_defaults(action=member_sync_command, action_id="member.sync")
+    member_sync.set_defaults(action=member_sync_command, action_id="child.sync")
     member_drain = member_operations.add_parser(
-        "drain", help=help_label("stop assigning new requests to a member", "member.drain")
+        "drain", help=help_label("stop assigning new work to a child", "child.drain")
     )
     member_drain.add_argument("member")
     member_drain.add_argument("--json", action="store_true")
-    member_drain.set_defaults(action=member_drain_command, action_id="member.drain")
+    member_drain.set_defaults(action=member_drain_command, action_id="child.drain")
     member_resume = member_operations.add_parser(
-        "resume", help=help_label("resume assigning requests to a drained member", "member.resume")
+        "resume", help=help_label("resume assigning work to a drained child", "child.resume")
     )
     member_resume.add_argument("member")
     member_resume.add_argument("--json", action="store_true")
-    member_resume.set_defaults(action=member_resume_command, action_id="member.resume")
+    member_resume.set_defaults(action=member_resume_command, action_id="child.resume")
     member_remove = member_operations.add_parser(
-        "remove", help=help_label("remove an inactive site member", "member.remove")
+        "remove", help=help_label("remove an inactive child", "child.remove")
     )
     member_remove.add_argument("member")
     member_remove.add_argument("--json", action="store_true")
-    member_remove.set_defaults(action=member_remove_command, action_id="member.remove")
+    member_remove.set_defaults(action=member_remove_command, action_id="child.remove")
 
     alias_command = subcommands.add_parser("alias", help="manage stable model aliases")
     alias_operations = alias_command.add_subparsers(dest="alias_operation", required=True)
@@ -13921,6 +15766,7 @@ def parser() -> argparse.ArgumentParser:
     )
     inspecting.add_argument("runtime")
     inspecting.add_argument("--target")
+    inspecting.add_argument("--catalog")
     inspecting.add_argument("--port", type=int, default=8000)
     inspecting.add_argument("--command", action="store_true")
     inspecting.add_argument("--json", action="store_true")
@@ -13971,8 +15817,18 @@ def parser() -> argparse.ArgumentParser:
         nargs="?",
         help=(
             "installed runtime, `stop` to cancel the active benchmark, or "
-            "`clean` to remove local benchmark data"
+            "`clean` to remove local benchmark data; use `verify PR_URL` for "
+            "community qualification"
         ),
+    )
+    benchmarking.add_argument(
+        "verification_target",
+        nargs="?",
+        help="pull-request URL, `status`, or `stop` after `benchmark verify`",
+    )
+    benchmarking.add_argument(
+        "--candidate",
+        help="select one exact changed candidate when a verification PR is ambiguous",
     )
     benchmarking.add_argument("--base-url")
     benchmarking.add_argument("--output-directory", type=pathlib.Path)
@@ -14015,6 +15871,21 @@ def parser() -> argparse.ArgumentParser:
     installing.add_argument("model")
     installing.add_argument("--runtime", help="select an exact runtime candidate ID")
     installing.add_argument("--catalog")
+    installing.add_argument(
+        "--node",
+        action="append",
+        help="install on this child or main node; repeat to create replicas",
+    )
+    installing.add_argument(
+        "--all-nodes",
+        action="store_true",
+        help="install one compatible target-specific replica on every active node",
+    )
+    installing.add_argument(
+        "--replace-existing",
+        action="store_true",
+        help="confirm replacement of model groups occupying selected devices",
+    )
     installing.add_argument("--port", type=int, default=8000)
     installing.add_argument("--engine-port", type=int, default=18000, help=argparse.SUPPRESS)
     installing.add_argument("--gateway-listen", default="0.0.0.0")
@@ -14065,6 +15936,15 @@ def parser() -> argparse.ArgumentParser:
     )
     installing.set_defaults(action=install, action_id="install", download_dependencies=True)
 
+    scaling = subcommands.add_parser(
+        "scale", help="set the number of independent engine groups for one model"
+    )
+    scaling.add_argument("model")
+    scaling.add_argument("--replicas", type=int, required=True)
+    scaling.add_argument("--runtime", help="select an exact runtime candidate ID")
+    scaling.add_argument("--catalog")
+    scaling.set_defaults(action=scale_command, action_id="scale")
+
     serving = subcommands.add_parser("serve", help="start an installed runtime")
     serving.add_argument("model")
     serving.add_argument("--target")
@@ -14095,7 +15975,7 @@ def parser() -> argparse.ArgumentParser:
     serving.add_argument("--protection-config", help=argparse.SUPPRESS)
     serving.set_defaults(action=serve, action_id="serve")
 
-    showing = subcommands.add_parser("status", help="show site runtime or managed-container status")
+    showing = subcommands.add_parser("status", help="show node runtime or managed-container status")
     showing.add_argument("model", nargs="?")
     showing.add_argument("--name")
     showing.add_argument("--config")
@@ -14122,14 +16002,14 @@ def parser() -> argparse.ArgumentParser:
     logging.set_defaults(action=logs, action_id="logs")
 
     starting = subcommands.add_parser(
-        "start", help=help_label("start a stopped site runtime", "start")
+        "start", help=help_label("start a stopped node runtime", "start")
     )
     starting.add_argument("model", nargs="?")
     starting.add_argument("--config")
     starting.set_defaults(action=start_service, action_id="start")
 
     restarting = subcommands.add_parser(
-        "restart", help=help_label("restart a site runtime", "restart")
+        "restart", help=help_label("restart a node runtime", "restart")
     )
     restarting.add_argument("model", nargs="?")
     restarting.add_argument("--config")
@@ -14138,7 +16018,7 @@ def parser() -> argparse.ArgumentParser:
     recovering = subcommands.add_parser(
         "recover",
         help=help_label(
-            "acknowledge protection trips and recover a site runtime", "recover"
+            "acknowledge protection trips and recover a node runtime", "recover"
         ),
     )
     recovering.add_argument("model", nargs="?")
@@ -14262,7 +16142,7 @@ def parser() -> argparse.ArgumentParser:
     key_policy.add_argument("--json", action="store_true")
     key_policy.set_defaults(action=key_policy_command, action_id="key.policy")
 
-    audit_command = subcommands.add_parser("audit", help="inspect the site audit chain")
+    audit_command = subcommands.add_parser("audit", help="inspect the node audit chain")
     audit_operations = audit_command.add_subparsers(dest="audit_operation", required=True)
     audit_list = audit_operations.add_parser(
         "list", help=help_label("list audit events", "audit.list")
@@ -14288,7 +16168,7 @@ def parser() -> argparse.ArgumentParser:
     audit_export.set_defaults(action=audit_export_command, action_id="audit.export")
 
     stopping = subcommands.add_parser(
-        "stop", help=help_label("stop a site runtime", "stop")
+        "stop", help=help_label("stop a node runtime", "stop")
     )
     stopping.add_argument("model", nargs="?")
     stopping.add_argument(
@@ -14328,10 +16208,10 @@ def parser() -> argparse.ArgumentParser:
     gateway.add_argument("--queue-timeout", type=int, default=0)
     gateway.add_argument("--max-connections", type=int, default=128)
     gateway.set_defaults(action=gateway_command, action_id="gateway")
-    site_agent = subcommands.add_parser("site-agent", help=argparse.SUPPRESS)
-    site_agent.add_argument("--listen", default="0.0.0.0")
-    site_agent.add_argument("--port", type=int, default=SITE_CONTROL_PORT)
-    site_agent.set_defaults(action=site_agent_command, action_id="site-agent")
+    node_agent = subcommands.add_parser("node-agent", help=argparse.SUPPRESS)
+    node_agent.add_argument("--listen", default="0.0.0.0")
+    node_agent.add_argument("--port", type=int, default=SITE_CONTROL_PORT)
+    node_agent.set_defaults(action=node_agent_command, action_id="node-agent")
     core_rebind = subcommands.add_parser("core-rebind", help=argparse.SUPPRESS)
     core_rebind.set_defaults(action=rebind_core_services, action_id="core-rebind")
 
@@ -14344,7 +16224,7 @@ def parser() -> argparse.ArgumentParser:
         "service-start",
         "service-stop",
         "gateway",
-        "site-agent",
+        "node-agent",
         "core-rebind",
     }
     subcommands._choices_actions[:] = [

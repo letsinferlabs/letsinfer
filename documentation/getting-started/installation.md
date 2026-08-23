@@ -39,7 +39,7 @@ Useful installer options:
 ```
 
 Use `--no-setup` only when you want to install files without initializing a
-site.
+node.
 
 ## Choose the data directory
 
@@ -79,7 +79,7 @@ A normal model install is complete only when the local API is ready:
 2. your hardware is matched to the best qualified runtime;
 3. exact model artifacts, the runtime pack, and Engine OCI are acquired and
    deduplicated;
-4. persistent site, gateway, Watchdog, recovery, and engine services are
+4. persistent node, gateway, Watchdog, recovery, and engine services are
    installed;
 5. the model starts; and
 6. the command waits for the OpenAI-compatible endpoint to become ready.
@@ -111,7 +111,7 @@ letsinfer doctor
 letsinfer key create my-app
 ```
 
-Your coordinator advertises its LAN endpoint with mDNS:
+Your main node advertises its LAN endpoint with mDNS:
 
 ```text
 http://<hostname>.local:8000/v1

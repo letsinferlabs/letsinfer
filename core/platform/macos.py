@@ -17,7 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from ..paths import logs_root as canonical_logs_root
 
 LABEL_PREFIX = "ai.letsinfer."
-SITE_LABEL = f"{LABEL_PREFIX}site"
+NODE_LABEL = f"{LABEL_PREFIX}node"
 GATEWAY_LABEL = f"{LABEL_PREFIX}gateway"
 LABEL_RE = re.compile(r"^ai\.letsinfer\.[a-z][a-z0-9.-]{0,63}$")
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]

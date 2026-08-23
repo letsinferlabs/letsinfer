@@ -63,7 +63,7 @@ class ControllerStateTests(unittest.TestCase):
         )
         principal = controller.authorize(self.certificate(), der)
         self.assertEqual(principal.role, "viewer")
-        self.assertEqual(controller.site(principal)["site"]["site_id"], identity.site_id)
+        self.assertEqual(controller.node(principal)["node"]["site_id"], identity.site_id)
         with self.assertRaisesRegex(ControllerError, "cannot perform"):
             controller.authorize(self.certificate(), der, minimum_role="operator")
         with SiteStore(identity=identity) as store:
@@ -254,24 +254,24 @@ class ControllerStateTests(unittest.TestCase):
         operator = ControllerPrincipal(CONTROLLER, "operator", "1" * 64)
         with self.assertRaisesRegex(ControllerError, "cannot administer"):
             controller.administer(
-                operator, action="site.move.plan", payload={}
+                operator, action="node.move.plan", payload={}
             )
         administrator = ControllerPrincipal(
             CONTROLLER, "administrator", "1" * 64
         )
         result = controller.administer(
-            administrator, action="site.move.plan", payload={}
+            administrator, action="node.move.plan", payload={}
         )
         self.assertEqual(result["result"]["plan"]["source_site_id"], identity.site_id)
-        self.assertEqual(calls, [(CONTROLLER, "site.move.plan", {})])
-        controller.administration_completed("site.move.plan", result["result"])
-        self.assertEqual(completed[0][0], "site.move.plan")
+        self.assertEqual(calls, [(CONTROLLER, "node.move.plan", {})])
+        controller.administration_completed("node.move.plan", result["result"])
+        self.assertEqual(completed[0][0], "node.move.plan")
         controller.administer(
             administrator,
-            action="member.adopt",
+            action="child.adopt",
             payload={"source_site_id": "2" * 32},
         )
-        self.assertEqual(calls[-1][1], "member.adopt")
+        self.assertEqual(calls[-1][1], "child.adopt")
         with self.assertRaisesRegex(ControllerError, "invalid"):
             controller.administer(
                 administrator, action="shell", payload={}

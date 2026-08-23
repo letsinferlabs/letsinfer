@@ -71,9 +71,7 @@ def allocate_group_ports(
     result: dict[str, int] = {}
     for member_id in member_ids:
         role = (
-            "replica"
-            if validated["strategy"] == "replicated"
-            else "engine-coordinator"
+            "engine-coordinator"
             if member_id == engine_coordinator_id
             else "engine-member"
         )
@@ -147,6 +145,7 @@ def group_job(
             "environment": dict(assignment.environment),
             "inference_endpoint": assignment.inference_endpoint,
             "readiness": dict(assignment.readiness),
+            "device_uuids": list(assignment.device_uuids),
         },
         "group": group,
     }
@@ -167,7 +166,7 @@ class EngineGroupOrchestrator:
         status: FetchStatus,
         job_status: FetchJob,
         actor_type: str = "system",
-        actor_id: str = "coordinator",
+        actor_id: str = "main",
         origin_interface: str = "orchestrator",
         correlation_id: str | None = None,
         engine_credential: str | None = None,
@@ -402,9 +401,26 @@ class EngineGroupOrchestrator:
             if isinstance(error, GroupOrchestrationError):
                 raise
             raise GroupOrchestrationError(f"engine-group start failed: {type(error).__name__}") from error
-        return self._persist(action="group.start", desired_state="running", state="running")
+        result = self._persist(action="group.start", desired_state="running", state="running")
+        self.store.set_group_allocation_state(
+            self.plan.group_id,
+            "active",
+            actor_type=self.actor_type,
+            actor_id=self.actor_id,
+            origin_interface=self.origin_interface,
+            correlation_id=self.correlation_id,
+        )
+        return result
 
     def stop(self) -> dict[str, Any]:
+        self.store.set_group_allocation_state(
+            self.plan.group_id,
+            "draining",
+            actor_type=self.actor_type,
+            actor_id=self.actor_id,
+            origin_interface=self.origin_interface,
+            correlation_id=self.correlation_id,
+        )
         self._persist(action="group.stop", desired_state="stopped", state="stopping")
         failures: list[str] = []
         for assignment in self._role_order(reverse=True):
@@ -423,7 +439,16 @@ class EngineGroupOrchestrator:
             raise GroupOrchestrationError(
                 "engine-group stop failed on member(s): " + ",".join(failures)
             )
-        return self._persist(action="group.stop", desired_state="stopped", state="stopped")
+        result = self._persist(action="group.stop", desired_state="stopped", state="stopped")
+        self.store.set_group_allocation_state(
+            self.plan.group_id,
+            "reserved",
+            actor_type=self.actor_type,
+            actor_id=self.actor_id,
+            origin_interface=self.origin_interface,
+            correlation_id=self.correlation_id,
+        )
+        return result
 
     def remove(self) -> dict[str, Any]:
         self._persist(action="group.remove", desired_state="removed", state="removing")
@@ -444,7 +469,16 @@ class EngineGroupOrchestrator:
             raise GroupOrchestrationError(
                 "engine-group removal failed on member(s): " + ",".join(failures)
             )
-        return self._persist(action="group.remove", desired_state="removed", state="removed")
+        result = self._persist(action="group.remove", desired_state="removed", state="removed")
+        self.store.set_group_allocation_state(
+            self.plan.group_id,
+            "released",
+            actor_type=self.actor_type,
+            actor_id=self.actor_id,
+            origin_interface=self.origin_interface,
+            correlation_id=self.correlation_id,
+        )
+        return result
 
     def reconcile(self) -> dict[str, Any]:
         previous_states = {
@@ -477,8 +511,6 @@ class EngineGroupOrchestrator:
                 self.protection_trips[assignment.member_id] = False
         if running == len(self.plan.assignments):
             group_state = "running"
-        elif self.plan.strategy == "replicated" and running >= self.plan.minimum_healthy_members:
-            group_state = "degraded"
         else:
             group_state = "failed"
         if self.persisted_state == group_state and previous_states == self.states:
@@ -547,36 +579,15 @@ class EngineGroupOrchestrator:
             raise GroupOrchestrationError(
                 f"engine-group recovery failed: {type(error).__name__}"
             ) from error
-        return self._persist(
+        result = self._persist(
             action="group.recover", desired_state="running", state="running"
         )
-
-    def recover_replicas(self) -> dict[str, Any]:
-        """Restore only reachable failed replicas without disturbing healthy peers."""
-        if self.plan.strategy != "replicated":
-            raise GroupOrchestrationError(
-                "independent recovery is valid only for replicated groups"
-            )
-        targets = [
-            item
-            for item in self.plan.assignments
-            if self.states[item.member_id]["state"]
-            not in {"running", "unreachable"}
-            and not self.protection_trips[item.member_id]
-        ]
-        if not targets:
-            return self.reconcile()
-        self._persist(
-            action="group.recover", desired_state="running", state="recovering"
+        self.store.set_group_allocation_state(
+            self.plan.group_id,
+            "active",
+            actor_type=self.actor_type,
+            actor_id=self.actor_id,
+            origin_interface=self.origin_interface,
+            correlation_id=self.correlation_id,
         )
-        for assignment in targets:
-            try:
-                self._invoke(assignment, "stop")
-                self._invoke(assignment, "start")
-            except BaseException as error:
-                self.states[assignment.member_id]["state"] = "failed"
-                self.states[assignment.member_id]["error"] = type(error).__name__
-        self._persist(
-            action="group.recover", desired_state="running", state="recovering"
-        )
-        return self.reconcile()
+        return result

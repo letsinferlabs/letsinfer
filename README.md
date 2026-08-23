@@ -27,6 +27,8 @@ No engine hunting. No model-file plumbing. No hardware-specific install path.
   after reboot, and recover ordinary engine failures.
 - **One API, every engine** — keep the same OpenAI-compatible endpoint while
   Let's Infer handles concurrency, backpressure, and memory-aware queueing.
+- **Replication across your hardware** — run one model on compatible main and
+  child nodes, with target-specific runtimes behind one load-balanced API.
 - **Live observability** — watch requests, throughput, context, cache,
   utilization, temperatures, power, network, and lifecycle in one command.
 - **Built-in protection** — Watchdog tracks the exact engine process, unified
@@ -37,6 +39,9 @@ No engine hunting. No model-file plumbing. No hardware-specific install path.
   without silently changing the others.
 - **Reproducible benchmarks** — durable, isolated code-and-prose runs capture
   TTFT, throughput, cache state, hardware telemetry, and validated JSON.
+- **Community-qualified runtimes** — independent users can verify an exact
+  runtime PR; signed full evidence, transparent consensus, and verifier
+  identities determine qualification without granting upload credentials.
 - **Secure by default** — scoped API keys, audit records, mDNS discovery,
   private controller mTLS, and optional inference-only public exposure.
 
@@ -44,7 +49,7 @@ No engine hunting. No model-file plumbing. No hardware-specific install path.
 
 ## Quick start
 
-Install Let's Infer and initialize your local site:
+Install Let's Infer and initialize your local node:
 
 ```bash
 curl -fsSL https://letsinfer.ai/install.sh | sh
@@ -95,6 +100,9 @@ independent runtime candidates—without adding model-specific code to core.
 | Inspect hardware | `letsinfer hardware` |
 | Discover compatible runtimes | `letsinfer list` |
 | Install a model | `letsinfer install MODEL` |
+| Replicate on every compatible node | `letsinfer install MODEL --all-nodes` |
+| Set the replica count | `letsinfer scale MODEL --replicas N` |
+| Inspect the node topology | `letsinfer topology show` |
 | Watch live status | `letsinfer status` |
 | Create an API key | `letsinfer key create my-app` |
 | Check for updates | `letsinfer update check` |
@@ -102,6 +110,7 @@ independent runtime candidates—without adding model-specific code to core.
 | Upgrade a runtime | `letsinfer upgrade MODEL` |
 | Roll back a runtime | `letsinfer rollback MODEL` |
 | Run the C1 benchmark | `letsinfer benchmark MODEL --c1` |
+| Verify a runtime PR | `letsinfer benchmark verify PR_URL` |
 | Verify an installation | `letsinfer doctor` |
 | Remove everything | `letsinfer uninstall` |
 
@@ -111,7 +120,7 @@ silently moves a running model.
 ## How it works
 
 ```text
-model name + detected hardware
+model name + verified node topology
               │
               ▼
        signed runtime catalog
@@ -132,7 +141,7 @@ model- and engine-agnostic.
 - [Features](documentation/features.md)
 - [Installation](documentation/getting-started/installation.md)
 - [CLI reference](documentation/reference/cli.md)
-- [Sites and security](documentation/concepts/sites.md)
+- [Nodes, replication, and trust](documentation/concepts/sites.md)
 - [Runtime development](documentation/reference/runtime-format.md)
 - [Updates and rollback](documentation/operations/upgrades-and-rollback.md)
 - [Watchdog](documentation/operations/watchdog.md)

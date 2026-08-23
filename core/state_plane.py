@@ -84,14 +84,14 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
         unit_states = (
             service.get("active") == "active",
             service.get("gateway_active") == "active",
-            service.get("site_active") == "active",
+            service.get("node_active") == "active",
         )
     else:
         unit_states = (
             service.get("active") == "active",
             service.get("engine_active") == "active",
             service.get("gateway_active") == "active",
-            service.get("site_active") == "active",
+            service.get("node_active") == "active",
             service.get("recovery_timer_active") == "active",
         )
     ready_units = sum(unit_states)

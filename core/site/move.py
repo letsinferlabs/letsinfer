@@ -152,12 +152,12 @@ def prepare_local_move(
 ) -> PreparedMove:
     """Enroll the preserved physical identity without replacing local state yet."""
     source = read_identity()
-    if source.role != "coordinator":
+    if source.role != "main":
         raise SiteError("only a coordinator can move its machine into another site")
     with SiteStore(identity=source) as store:
         plan = plan_local_move(store)
     if plan.blocking_reasons:
-        raise SiteError("site move is blocked: " + "; ".join(plan.blocking_reasons))
+        raise SiteError("node move is blocked: " + "; ".join(plan.blocking_reasons))
     try:
         package = request_membership(
             endpoint,
@@ -171,7 +171,7 @@ def prepare_local_move(
     except ControlError as error:
         raise SiteError(str(error)) from error
     if package.document.get("site_id") == source.site_id:
-        raise SiteError("site move destination is the current site")
+        raise SiteError("node move destination is the current node")
     if (
         package.document.get("member_id") != source.member_id
         or package.document.get("installation_id") != source.installation_id
@@ -180,12 +180,12 @@ def prepare_local_move(
         or package.document.get("member_public_key_sha256")
         != source.member_public_key_sha256
     ):
-        raise SiteError("prepared site move changed the physical installation identity")
+        raise SiteError("prepared node move changed the physical installation identity")
     now = int(time.time()) if now_unix is None else now_unix
     remote_expiry = package.approval_expires_at_unix
     expires = min(now + 600, remote_expiry) if remote_expiry is not None else now + 600
     if expires <= now:
-        raise SiteError("prepared site move already expired")
+        raise SiteError("prepared node move already expired")
     return PreparedMove(
         move_id=uuid.uuid4().hex,
         source=source,
@@ -208,7 +208,7 @@ def apply_prepared_move(
     """Verify destination approval, then atomically replace local site authority."""
     now = int(time.time()) if now_unix is None else now_unix
     if now > prepared.expires_at_unix:
-        raise SiteError("prepared site move expired")
+        raise SiteError("prepared node move expired")
     current = read_identity()
     if current != prepared.source:
         raise SiteError("source site identity changed after move preparation")
@@ -253,7 +253,7 @@ class LocalMoveTransaction:
     )
 
     def __init__(self, source: SiteIdentity) -> None:
-        if source.role != "coordinator":
+        if source.role != "main":
             raise SiteError("only a coordinator can move its machine into another site")
         self.source = source
         self.config = config_root()
@@ -276,7 +276,7 @@ class LocalMoveTransaction:
             or self.secrets_backup.exists()
             or self.data_backup.exists()
         ):
-            raise SiteError("site move staging path already exists")
+            raise SiteError("node move staging path already exists")
         member_key = _private_file(member_key_path(), minimum_bytes=128)
         member_public = _private_file(member_public_key_path(), minimum_bytes=128)
         self.config.rename(self.config_backup)
@@ -318,7 +318,7 @@ class LocalMoveTransaction:
                 if not source.exists():
                     continue
                 if source.is_symlink():
-                    raise SiteError(f"site move state cannot be a symlink: {source}")
+                    raise SiteError(f"node move state cannot be a symlink: {source}")
                 destination = self.data_backup / relative
                 destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 source.rename(destination)
@@ -330,12 +330,12 @@ class LocalMoveTransaction:
 
     def commit(self) -> SiteIdentity:
         if not self.started:
-            raise SiteError("site move transaction has not started")
+            raise SiteError("node move transaction has not started")
         replacement = read_identity()
-        if replacement.role != "member":
-            raise SiteError("site move destination did not install a member identity")
+        if replacement.role != "child":
+            raise SiteError("node move destination did not install a child identity")
         if replacement.site_id == self.source.site_id:
-            raise SiteError("site move destination is the current site")
+            raise SiteError("node move destination is the current node")
         if (
             replacement.member_id != self.source.member_id
             or replacement.installation_id != self.source.installation_id
@@ -343,7 +343,7 @@ class LocalMoveTransaction:
             or replacement.member_public_key_sha256
             != self.source.member_public_key_sha256
         ):
-            raise SiteError("site move changed the physical installation identity")
+            raise SiteError("node move changed the physical installation identity")
         self.committed = True
         shutil.rmtree(self.config_backup)
         shutil.rmtree(self.secrets_backup)
