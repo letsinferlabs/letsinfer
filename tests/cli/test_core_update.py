@@ -116,7 +116,8 @@ class CoreUpdateTests(unittest.TestCase):
         self.assertIn(("run", [str(launcher), "core-rebind"]), events)
         self.assertIn(("run", [str(launcher), "--help"]), events)
         self.assertIn(("run", [str(launcher), "core-prune", "--quiet"]), events)
-        self.assertEqual(events[-1], ("success", "Core updated"))
+        self.assertEqual(events[-1], "progress:end")
+        self.assertNotIn(("success", "Core updated"), events)
 
     def _installed_tree(
         self, root: pathlib.Path

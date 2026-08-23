@@ -11,6 +11,16 @@ user_install=0
 run_setup=1
 progress_active=0
 progress_enabled=1
+interactive_output=0
+brand_mark=">"
+success_mark="+"
+failure_mark="x"
+badge_text=">  LET'S INFER"
+blue=""
+green=""
+red=""
+dim=""
+reset=""
 
 clear_progress() {
     if [ "$progress_active" -eq 1 ]; then
@@ -22,8 +32,9 @@ progress() {
     percent=$1
     message=$2
     if [ "$progress_active" -eq 1 ]; then
-        printf '\r\033[2K\033[1;33mϟ\033[0m  Installing Let\047s Infer  %3s%%  %s' \
-            "$percent" "$message" >&2
+        printf '\r\033[2K%s  %sINSTALL%s  %s%3s%%%s  %s' \
+            "$badge_text" "$blue" "$reset" "$blue" "$percent" "$reset" \
+            "$message" >&2
     fi
 }
 
@@ -47,7 +58,14 @@ EOF
 
 fail() {
     clear_progress
-    printf 'letsinfer install: %s\n' "$*" >&2
+    progress_active=0
+    if [ "$interactive_output" -eq 1 ]; then
+        printf '%s  %sINSTALL%s\n\n%s%s  Installation failed%s\n   %s\n' \
+            "$badge_text" "$red" "$reset" "$red" "$failure_mark" \
+            "$reset" "$*" >&2
+    else
+        printf 'letsinfer install: %s\n' "$*" >&2
+    fi
     exit 1
 }
 
@@ -114,11 +132,31 @@ export LETSINFER_HOME
 case "${TERM:-}" in
     ""|dumb) ;;
     *)
-        if [ "$progress_enabled" -eq 1 ] && [ -t 2 ]; then
-            progress_active=1
+        if [ -t 2 ]; then
+            interactive_output=1
+            if [ "$progress_enabled" -eq 1 ]; then
+                progress_active=1
+            fi
         fi
         ;;
 esac
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*)
+        brand_mark="ϟ"
+        success_mark="✓"
+        failure_mark="✗"
+        ;;
+esac
+if [ "$interactive_output" -eq 1 ] && [ -z "${NO_COLOR+x}" ]; then
+    reset=$(printf '\033[0m')
+    blue=$(printf '\033[1;38;2;0;156;223m')
+    green=$(printf '\033[1;38;2;97;187;70m')
+    red=$(printf '\033[1;38;2;226;56;56m')
+    dim=$(printf '\033[2m')
+    badge_text=$(printf '\033[1;38;2;30;30;30;48;2;247;247;247m %s  LET\047S INFER \033[0m' "$brand_mark")
+else
+    badge_text="$brand_mark  LET'S INFER"
+fi
 
 case "$(uname -s)" in
     Linux) platform_os="linux" ;;
@@ -335,28 +373,73 @@ fi
 umask 077
 
 if [ "$run_setup" -eq 1 ]; then
-    setup_log="$temporary/setup.log"
+    setup_json="$temporary/setup.json"
+    setup_log="$temporary/setup.stderr"
+    setup_summary="$temporary/setup.summary"
     progress 80 "Initializing services"
-    if ! "$command_path" setup >"$setup_log" 2>&1; then
+    if ! "$command_path" setup --json >"$setup_json" 2>"$setup_log"; then
         clear_progress
-        sed -n '1,$p' "$setup_log" >&2
+        progress_active=0
+        if [ -s "$setup_log" ]; then
+            tail -n 80 "$setup_log" >&2
+        fi
         fail "site initialization failed"
+    fi
+    if ! python3 - "$setup_json" >"$setup_summary" <<'PY'
+import json
+import pathlib
+import sys
+
+try:
+    value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(value, dict):
+    raise SystemExit(1)
+
+def safe_field(name, *, required=False):
+    item = value.get(name)
+    if item is None and not required:
+        return None
+    if not isinstance(item, str) or not item.strip():
+        raise SystemExit(1)
+    if any(ord(character) < 32 or ord(character) == 127 for character in item):
+        raise SystemExit(1)
+    return item
+
+node = safe_field("display_name", required=True)
+endpoint = safe_field("inference_endpoint")
+key_file = safe_field("api_key_file")
+print(f"   Node      {node}")
+if endpoint:
+    print(f"   API       {endpoint}")
+if key_file:
+    print(f"   API key   {key_file}")
+PY
+    then
+        fail "site initialization result is invalid"
     fi
 fi
 
 finish_progress
-
-if [ "$run_setup" -eq 1 ] && [ -s "$setup_log" ]; then
-    sed -n '1,240p' "$setup_log" >&2
-fi
 
 if [ "$run_setup" -eq 1 ]; then
     completion="installed and initialized"
 else
     completion="installed"
 fi
-printf 'Let\047s Infer %s %s for %s/%s.\n' \
-    "$version" "$completion" "$platform_os" "$platform_arch" >&2
+if [ "$interactive_output" -eq 1 ]; then
+    printf '%s  %s%s%s  Let\047s Infer %s %s\n' \
+        "$badge_text" "$green" "$success_mark" "$reset" "$version" \
+        "$completion" >&2
+    printf '   %s%s/%s%s\n' "$dim" "$platform_os" "$platform_arch" "$reset" >&2
+else
+    printf 'Let\047s Infer %s %s for %s/%s.\n' \
+        "$version" "$completion" "$platform_os" "$platform_arch" >&2
+fi
+if [ "$run_setup" -eq 1 ]; then
+    sed -n '1,$p' "$setup_summary" >&2
+fi
 if [ "$user_install" -eq 1 ]; then
     case ":$current_path:" in
         *":$prefix/bin:"*) ;;
