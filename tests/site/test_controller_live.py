@@ -292,7 +292,7 @@ class LiveControllerTests(unittest.TestCase):
         status, denied, _ = self._call(
             self.viewer_tls,
             "POST",
-            "/control/v1/members/drain",
+            "/control/v1/children/drain",
             {"member_id": self.identity.member_id},
         )
         self.assertEqual(status, 403)
@@ -300,7 +300,7 @@ class LiveControllerTests(unittest.TestCase):
         status, drained, _ = self._call(
             self.admin_tls,
             "POST",
-            "/control/v1/members/drain",
+            "/control/v1/children/drain",
             {"member_id": self.identity.member_id},
         )
         self.assertEqual(status, 200)
@@ -308,7 +308,7 @@ class LiveControllerTests(unittest.TestCase):
         status, resumed, _ = self._call(
             self.admin_tls,
             "POST",
-            "/control/v1/members/resume",
+            "/control/v1/children/resume",
             {"member_id": self.identity.member_id},
         )
         self.assertEqual(status, 200)
