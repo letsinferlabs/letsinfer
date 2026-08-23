@@ -75,7 +75,7 @@ Core assigns no semantics to those names.
 ## Pin the Engine OCI
 
 The Engine OCI contains one upstream engine version and the matching adapter.
-Its adapter must implement Engine protocol 1. Pin both the OCI manifest digest
+Its adapter must implement Engine protocol 2. Pin both the OCI manifest digest
 and image configuration digest.
 
 Keep tokenizer logic, exact token counting, native cache integration,
@@ -97,10 +97,20 @@ behavior, safety floor, and benchmark matrix that were measured together.
 Never silently fall back to another checkpoint, quantization, engine, kernel,
 attention backend, cache format, or recipe.
 
+For a parallel target, set `target.placement.strategy` to `parallel`, declare
+the exact `node_count`, GPUs per node, memory, and interconnect, then add a
+schema-3 `orchestration` contract. Declare one generic `task-N` per node, one
+endpoint owner, phased startup order, bounded ports, shell-free argv,
+environment, and readiness. Do not put TP/PP ranks, collective names,
+rendezvous schemes, or engine semantics in core-facing fields. Map task IDs to
+all private roles, ranks, stages, transports, and engine flags inside the
+runtime and Engine OCI. One-node parallel candidates can consume multiple
+assigned GPU UUIDs through `task-0`.
+
 ## Validate and package
 
-1. Validate runtime schema 4 and the generated root manifest.
-2. Run `engine-adapter verify --protocol 1` in the exact Engine OCI.
+1. Validate runtime schema 5 and the generated root manifest.
+2. Run `engine-adapter verify --protocol 2` in the exact Engine OCI.
 3. Run every patch, kernel, model, and target-specific test.
 4. Verify every external image and model reference is immutable and the
    candidate README contains every declared Hugging Face artifact link plus an
@@ -112,6 +122,9 @@ attention backend, cache format, or recipe.
    arguments, mounts, and receipts.
 8. Launch an unqualified candidate only in qualification mode with new
    evidence.
+9. For a parallel candidate, verify exact allocation, simultaneous task-phase
+   startup, complete-group readiness, one endpoint, atomic failure/recovery,
+   restart reconstruction, and replication of the complete group.
 
 ## Qualify
 

@@ -13,6 +13,7 @@ import unittest
 from core.orchestration.member import (
     MemberAgent,
     MemberJobError,
+    MemberJobStore,
     PROTOCOL,
     canonical_bytes,
     validate_group_job,
@@ -32,7 +33,6 @@ class MemberJobTests(unittest.TestCase):
             member_id=self.member_id,
             member_address="member.local:9770",
             device_uuids=["GPU-fixture"],
-            engine_strategy="single",
             topology_sha256="4" * 64,
             manifest_sha256="5" * 64,
             runtime_digest="6" * 64,
@@ -55,16 +55,14 @@ class MemberJobTests(unittest.TestCase):
             "engine_credential_sha256": credential_sha256(self.credential),
             "expires_at_unix": int(time.time()) + 60,
             "source": release["source"] if action == "stage" else None,
-            "role": {
-                "name": assignment.role,
-                "rank": assignment.rank,
-                "role_rank": assignment.role_rank,
+            "task": {
+                "task_id": assignment.task_id,
                 "launcher": assignment.launcher,
                 "port_base": assignment.port_base,
                 "port_count": assignment.port_count,
                 "command": list(assignment.command),
                 "environment": dict(assignment.environment),
-                "inference_endpoint": assignment.inference_endpoint,
+                "endpoint_owner": assignment.endpoint_owner,
                 "readiness": dict(assignment.readiness),
                 "device_uuids": list(assignment.device_uuids),
             },
@@ -75,7 +73,7 @@ class MemberJobTests(unittest.TestCase):
         value = self.job()
         self.assertIs(validate_group_job(value, expected_member_id=self.member_id), value)
         changed = self.job()
-        changed["group"]["members"][0]["address"] = "changed.local:9770"
+        changed["group"]["resources"][0]["address"] = "changed.local:9770"
         with self.assertRaisesRegex(MemberJobError, "identity does not match"):
             validate_group_job(changed, expected_member_id=self.member_id)
         changed = self.job()
@@ -100,6 +98,21 @@ class MemberJobTests(unittest.TestCase):
             changed = {**job, "expires_at_unix": job["expires_at_unix"] + 1}
             with self.assertRaisesRegex(MemberJobError, "different bytes"):
                 agent.execute(changed, engine_credential=self.credential)
+
+    def test_legacy_role_storage_is_renamed_to_generic_task_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = pathlib.Path(directory) / "jobs.sqlite3"
+            with MemberJobStore(database) as store:
+                store.connection.execute(
+                    "ALTER TABLE groups RENAME COLUMN task_json TO role_json"
+                )
+            with MemberJobStore(database) as store:
+                columns = {
+                    str(row["name"])
+                    for row in store.connection.execute("PRAGMA table_info(groups)")
+                }
+            self.assertIn("task_json", columns)
+            self.assertNotIn("role_json", columns)
 
     def test_lifecycle_requires_stage_and_stop_before_remove(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -270,7 +270,6 @@ def facts_sha256(value: dict[str, Any]) -> str:
 class Placement:
     strategy: str
     member_ids: tuple[str, ...]
-    engine_coordinator_id: str
     device_uuids: Mapping[str, tuple[str, ...]]
     topology_sha256: str
     reason: str
@@ -475,7 +474,7 @@ class TopologyGraph:
             member_id for member_id, facts in self.members.items() if self._member_matches(facts, target)
         )
         strategy = placement["strategy"]
-        count = placement["member_count"]
+        count = placement["node_count"]
         if strategy == "single":
             count = 1
         if len(compatible) < count:
@@ -494,7 +493,6 @@ class TopologyGraph:
         # Prefer keeping the site coordinator in the placement, then stable IDs.
         candidates.sort(key=lambda selected: (coordinator_id not in selected, selected))
         selected = candidates[0]
-        engine_coordinator = coordinator_id if coordinator_id in selected else selected[0]
         devices_per_member = target["accelerator"]["count"]
         device_uuids = {
             member_id: self.available_devices(member_id)[:devices_per_member]
@@ -503,7 +501,6 @@ class TopologyGraph:
         return Placement(
             strategy=strategy,
             member_ids=selected,
-            engine_coordinator_id=engine_coordinator,
             device_uuids=device_uuids,
             topology_sha256=self.sha256(),
             reason=f"qualified {strategy} target {target['id']}",
@@ -565,6 +562,26 @@ class TopologyGraph:
             chosen = str(addresses[0])
             result[member_id] = f"[{chosen}]" if addresses[0].version == 6 else chosen
         return result
+
+    def placement_connections(self, placement: Placement) -> list[dict[str, Any]]:
+        """Return the verified link facts connecting one exact placement."""
+        if (
+            placement.topology_sha256 != self.sha256()
+            or set(placement.member_ids) - set(self.members)
+        ):
+            raise TopologyError("connection facts require this exact placement")
+        selected = set(placement.member_ids)
+        return [
+            {
+                "nodes": list(key),
+                "kind": link["kind"],
+                "speed_mbps": link["speed_mbps"],
+                "mtu": link["mtu"],
+                "rdma": link["rdma"],
+            }
+            for key, link in sorted(self.links.items())
+            if set(key) <= selected
+        ]
 
     def resolve_catalog_targets(
         self,

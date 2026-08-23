@@ -207,6 +207,10 @@ struct SitePlacementRecord: Decodable, Equatable, Identifiable, Sendable {
     let endpoints: [SitePlacementEndpoint]
     let capacity: SitePlacementCapacity?
     let release: SiteRuntimeRelease?
+    let endpointOwner: String?
+    let resourceAssignments: [SiteResourceAssignment]
+    let taskStates: [SiteTaskState]
+    let connections: [SiteGroupConnection]
     let deviceAllocations: [SiteDeviceAllocation]
     let telemetry: SiteGroupTelemetry?
     let updatedAtUnix: Int
@@ -216,6 +220,10 @@ struct SitePlacementRecord: Decodable, Equatable, Identifiable, Sendable {
         case placementID = "placement_id"
         case model, runtime, target, strategy, state, members, endpoints, capacity
         case release
+        case endpointOwner = "endpoint_owner"
+        case resourceAssignments = "resource_assignments"
+        case taskStates = "task_states"
+        case connections
         case deviceAllocations = "device_allocations"
         case telemetry
         case updatedAtUnix = "updated_at_unix"
@@ -241,6 +249,18 @@ struct SitePlacementRecord: Decodable, Equatable, Identifiable, Sendable {
         release = try container.decodeIfPresent(
             SiteRuntimeRelease.self, forKey: .release
         )
+        endpointOwner = try container.decodeIfPresent(
+            String.self, forKey: .endpointOwner
+        )
+        resourceAssignments = try container.decodeIfPresent(
+            [SiteResourceAssignment].self, forKey: .resourceAssignments
+        ) ?? []
+        taskStates = try container.decodeIfPresent(
+            [SiteTaskState].self, forKey: .taskStates
+        ) ?? []
+        connections = try container.decodeIfPresent(
+            [SiteGroupConnection].self, forKey: .connections
+        ) ?? []
         deviceAllocations = try container.decodeIfPresent(
             [SiteDeviceAllocation].self, forKey: .deviceAllocations
         ) ?? []
@@ -250,6 +270,50 @@ struct SitePlacementRecord: Decodable, Equatable, Identifiable, Sendable {
         updatedAtUnix = try container.decodeIfPresent(
             Int.self, forKey: .updatedAtUnix
         ) ?? 0
+    }
+}
+
+struct SiteResourceAssignment: Decodable, Equatable, Sendable {
+    let nodeID: String
+    let address: String
+    let taskID: String
+    let portBase: Int
+    let portCount: Int
+    let deviceUUIDs: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case nodeID = "node_id"
+        case address
+        case taskID = "task_id"
+        case portBase = "port_base"
+        case portCount = "port_count"
+        case deviceUUIDs = "device_uuids"
+    }
+}
+
+struct SiteTaskState: Decodable, Equatable, Sendable {
+    let nodeID: String
+    let taskID: String
+    let state: String
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case nodeID = "node_id"
+        case taskID = "task_id"
+        case state, error
+    }
+}
+
+struct SiteGroupConnection: Decodable, Equatable, Sendable {
+    let nodes: [String]
+    let kind: String
+    let speedMbps: Int
+    let mtu: Int
+    let rdma: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case nodes, kind, mtu, rdma
+        case speedMbps = "speed_mbps"
     }
 }
 

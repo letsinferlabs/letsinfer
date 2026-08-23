@@ -97,7 +97,6 @@ class EngineGroupInstallTests(unittest.TestCase):
         placement = types.SimpleNamespace(
             strategy="single",
             member_ids=member_ids,
-            engine_coordinator_id=member_ids[0],
             topology_sha256="4" * 64,
             device_uuids={member_ids[0]: ("GPU-fixture",)},
         )
@@ -163,7 +162,7 @@ class EngineGroupInstallTests(unittest.TestCase):
             "id": "one-node",
             "placement": {
                 "strategy": "single",
-                "engine_strategy": "single",
+                "node_count": 1,
                 "interconnect": {"kind": "none"},
             },
         }

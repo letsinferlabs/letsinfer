@@ -156,6 +156,9 @@ installation, prompt set, and contract. They are evidence, not a prose claim.
 Replication reuses independently qualified target runtimes. Distributed TP/PP
 execution requires a runtime that explicitly qualifies the complete topology;
 Let's Infer never reinterprets a single-device benchmark as a parallel result.
+Core supplies generic allocation, verified connection facts, phased launch,
+atomic recovery, and one endpoint per complete group. Runtime authors retain
+full control over ranks, stages, transports, kernels, and engine configuration.
 
 ## A runtime platform, not an engine fork
 

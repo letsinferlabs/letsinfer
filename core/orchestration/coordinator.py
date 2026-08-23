@@ -8,6 +8,7 @@ import hashlib
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Callable, Mapping
 from typing import Any, Optional
 
@@ -15,7 +16,7 @@ from core.site.state import SiteError, SiteStore
 
 from .contracts import (
     GroupPlan,
-    RoleAssignment,
+    TaskAssignment,
     validate_group_document,
     validate_orchestration_contract,
 )
@@ -54,28 +55,21 @@ def allocate_group_ports(
     contract: Mapping[str, Any],
     *,
     member_ids: tuple[str, ...],
-    engine_coordinator_id: str,
     occupied: Mapping[str, tuple[tuple[int, int], ...]],
 ) -> dict[str, int]:
     """Allocate deterministic non-overlapping member-local port ranges."""
     validated = validate_orchestration_contract(dict(contract))
     if (
-        len(member_ids) != validated["member_count"]
+        len(member_ids) != len(validated["tasks"])
         or len(set(member_ids)) != len(member_ids)
-        or engine_coordinator_id not in member_ids
         or any(not ID_RE.fullmatch(item) for item in member_ids)
     ):
         raise GroupOrchestrationError("port allocation members are invalid")
     if set(occupied) - set(member_ids):
         raise GroupOrchestrationError("port allocation contains an unrelated member")
     result: dict[str, int] = {}
-    for member_id in member_ids:
-        role = (
-            "engine-coordinator"
-            if member_id == engine_coordinator_id
-            else "engine-member"
-        )
-        count = validated["roles"][role]["port_count"]
+    for index, member_id in enumerate(member_ids):
+        count = validated["tasks"][index]["port_count"]
         ranges = list(occupied.get(member_id, ()))
         for base, length in ranges:
             if (
@@ -101,7 +95,7 @@ def allocate_group_ports(
 
 def group_job(
     plan: GroupPlan,
-    assignment: RoleAssignment,
+    assignment: TaskAssignment,
     *,
     action: str,
     source: str | None,
@@ -134,16 +128,14 @@ def group_job(
         "engine_credential_sha256": engine_credential_sha256,
         "expires_at_unix": (int(time.time()) if now is None else now) + JOB_LIFETIME_SECONDS,
         "source": source,
-        "role": {
-            "name": assignment.role,
-            "rank": assignment.rank,
-            "role_rank": assignment.role_rank,
+        "task": {
+            "task_id": assignment.task_id,
             "port_base": assignment.port_base,
             "port_count": assignment.port_count,
             "launcher": assignment.launcher,
             "command": list(assignment.command),
             "environment": dict(assignment.environment),
-            "inference_endpoint": assignment.inference_endpoint,
+            "endpoint_owner": assignment.endpoint_owner,
             "readiness": dict(assignment.readiness),
             "device_uuids": list(assignment.device_uuids),
         },
@@ -211,8 +203,7 @@ class EngineGroupOrchestrator:
         self.states = {
             item.member_id: {
                 "member_id": item.member_id,
-                "role": item.role,
-                "rank": item.rank,
+                "task_id": item.task_id,
                 "state": "pending",
                 "operation_id": None,
                 "error": None,
@@ -254,7 +245,7 @@ class EngineGroupOrchestrator:
         except SiteError as persistence_error:
             raise GroupOrchestrationError(str(persistence_error)) from persistence_error
 
-    def _invoke(self, assignment: RoleAssignment, action: str) -> Mapping[str, Any]:
+    def _invoke(self, assignment: TaskAssignment, action: str) -> Mapping[str, Any]:
         operation_id = uuid.uuid4().hex
         state = self.states[assignment.member_id]
         state["operation_id"] = operation_id
@@ -332,7 +323,7 @@ class EngineGroupOrchestrator:
 
     def stage(self) -> dict[str, Any]:
         self._persist(action="group.stage", desired_state="running", state="staging")
-        completed: list[RoleAssignment] = []
+        completed: list[TaskAssignment] = []
         try:
             for assignment in self.plan.assignments:
                 self._invoke(assignment, "stage")
@@ -361,33 +352,91 @@ class EngineGroupOrchestrator:
             raise GroupOrchestrationError(f"engine-group staging failed: {type(error).__name__}") from error
         return self._persist(action="group.stage", desired_state="running", state="staged")
 
-    def _role_order(self, *, reverse: bool = False) -> list[RoleAssignment]:
-        role_order = list(self.plan.startup_order)
+    def _task_order(self, *, reverse: bool = False) -> list[TaskAssignment]:
+        return [item for phase in self._task_phases(reverse=reverse) for item in phase]
+
+    def _task_phases(self, *, reverse: bool = False) -> list[list[TaskAssignment]]:
+        phases = list(self.plan.startup_order)
         if reverse:
-            role_order.reverse()
-        assignments: list[RoleAssignment] = []
-        for role in role_order:
-            same_role = [item for item in self.plan.assignments if item.role == role]
-            same_role.sort(key=lambda item: item.role_rank, reverse=reverse)
-            assignments.extend(same_role)
-        return assignments
+            phases.reverse()
+        by_task = {item.task_id: item for item in self.plan.assignments}
+        result: list[list[TaskAssignment]] = []
+        for phase in phases:
+            task_ids = tuple(reversed(phase)) if reverse else phase
+            result.append([by_task[task_id] for task_id in task_ids])
+        return result
+
+    def _invoke_phase(
+        self,
+        assignments: list[TaskAssignment],
+        action: str,
+    ) -> tuple[list[TaskAssignment], list[tuple[TaskAssignment, BaseException]]]:
+        """Invoke one runtime-declared phase concurrently and await every task."""
+        completed: list[TaskAssignment] = []
+        failures: list[tuple[TaskAssignment, BaseException]] = []
+        with ThreadPoolExecutor(
+            max_workers=len(assignments),
+            thread_name_prefix=f"letsinfer-group-{action}",
+        ) as executor:
+            futures = {
+                executor.submit(self._invoke, assignment, action): assignment
+                for assignment in assignments
+            }
+            for future in as_completed(futures):
+                assignment = futures[future]
+                try:
+                    future.result()
+                    completed.append(assignment)
+                except BaseException as error:
+                    member_state = self.states[assignment.member_id]
+                    member_state["state"] = "failed"
+                    member_state["error"] = type(error).__name__
+                    failures.append((assignment, error))
+        completed.sort(key=lambda item: item.task_id)
+        failures.sort(key=lambda item: item[0].task_id)
+        return completed, failures
+
+    def _run_phases(
+        self,
+        action: str,
+        *,
+        reverse: bool = False,
+        audit_action: str,
+        desired_state: str,
+        state: str,
+        stop_on_failure: bool = True,
+    ) -> tuple[list[TaskAssignment], list[tuple[TaskAssignment, BaseException]]]:
+        completed: list[TaskAssignment] = []
+        failures: list[tuple[TaskAssignment, BaseException]] = []
+        for phase in self._task_phases(reverse=reverse):
+            phase_completed, phase_failures = self._invoke_phase(phase, action)
+            completed.extend(phase_completed)
+            failures.extend(phase_failures)
+            self._persist(
+                action=audit_action,
+                desired_state=desired_state,
+                state=state,
+            )
+            if phase_failures and stop_on_failure:
+                break
+        return completed, failures
 
     def start(self) -> dict[str, Any]:
         self._persist(action="group.start", desired_state="running", state="starting")
-        started: list[RoleAssignment] = []
+        started: list[TaskAssignment] = []
         try:
-            for assignment in self._role_order():
-                self._invoke(assignment, "start")
-                started.append(assignment)
-                self._persist(action="group.start", desired_state="running", state="starting")
-        except BaseException as error:
-            failing = next(
-                (item for item in self.plan.assignments if self.states[item.member_id]["state"] == "starting"),
-                None,
+            started, failures = self._run_phases(
+                "start",
+                audit_action="group.start",
+                desired_state="running",
+                state="starting",
             )
-            if failing is not None:
-                self.states[failing.member_id]["state"] = "failed"
-                self.states[failing.member_id]["error"] = type(error).__name__
+            if failures:
+                raise GroupOrchestrationError(
+                    "engine-group start failed on task(s): "
+                    + ",".join(item.task_id for item, _error in failures)
+                )
+        except BaseException as error:
             for assignment in reversed(started):
                 try:
                     self._invoke(assignment, "stop")
@@ -422,22 +471,22 @@ class EngineGroupOrchestrator:
             correlation_id=self.correlation_id,
         )
         self._persist(action="group.stop", desired_state="stopped", state="stopping")
-        failures: list[str] = []
-        for assignment in self._role_order(reverse=True):
-            try:
-                self._invoke(assignment, "stop")
-            except BaseException as error:
-                self.states[assignment.member_id]["state"] = "failed"
-                self.states[assignment.member_id]["error"] = type(error).__name__
-                failures.append(assignment.member_id)
-            self._persist(action="group.stop", desired_state="stopped", state="stopping")
+        _completed, failures = self._run_phases(
+            "stop",
+            reverse=True,
+            audit_action="group.stop",
+            desired_state="stopped",
+            state="stopping",
+            stop_on_failure=False,
+        )
         if failures:
             self._persist(
                 action="group.stop", desired_state="stopped", state="failed",
                 error="member_stop_failed",
             )
             raise GroupOrchestrationError(
-                "engine-group stop failed on member(s): " + ",".join(failures)
+                "engine-group stop failed on task(s): "
+                + ",".join(item.task_id for item, _error in failures)
             )
         result = self._persist(action="group.stop", desired_state="stopped", state="stopped")
         self.store.set_group_allocation_state(
@@ -452,22 +501,22 @@ class EngineGroupOrchestrator:
 
     def remove(self) -> dict[str, Any]:
         self._persist(action="group.remove", desired_state="removed", state="removing")
-        failures: list[str] = []
-        for assignment in self._role_order(reverse=True):
-            try:
-                self._invoke(assignment, "remove")
-            except BaseException as error:
-                self.states[assignment.member_id]["state"] = "failed"
-                self.states[assignment.member_id]["error"] = type(error).__name__
-                failures.append(assignment.member_id)
-            self._persist(action="group.remove", desired_state="removed", state="removing")
+        _completed, failures = self._run_phases(
+            "remove",
+            reverse=True,
+            audit_action="group.remove",
+            desired_state="removed",
+            state="removing",
+            stop_on_failure=False,
+        )
         if failures:
             self._persist(
                 action="group.remove", desired_state="removed", state="failed",
                 error="member_remove_failed",
             )
             raise GroupOrchestrationError(
-                "engine-group removal failed on member(s): " + ",".join(failures)
+                "engine-group removal failed on task(s): "
+                + ",".join(item.task_id for item, _error in failures)
             )
         result = self._persist(action="group.remove", desired_state="removed", state="removed")
         self.store.set_group_allocation_state(
@@ -539,29 +588,21 @@ class EngineGroupOrchestrator:
         self._persist(action="group.recover", desired_state="running", state="recovering")
         self.stop()
         self._persist(action="group.recover", desired_state="running", state="recovering")
-        started: list[RoleAssignment] = []
+        started: list[TaskAssignment] = []
         action = "recover" if acknowledge_trips else "start"
         try:
-            for assignment in self._role_order():
-                self._invoke(assignment, action)
-                started.append(assignment)
-                self._persist(
-                    action="group.recover",
-                    desired_state="running",
-                    state="recovering",
+            started, failures = self._run_phases(
+                action,
+                audit_action="group.recover",
+                desired_state="running",
+                state="recovering",
+            )
+            if failures:
+                raise GroupOrchestrationError(
+                    "engine-group recovery failed on task(s): "
+                    + ",".join(item.task_id for item, _error in failures)
                 )
         except BaseException as error:
-            failing = next(
-                (
-                    item
-                    for item in self.plan.assignments
-                    if self.states[item.member_id]["state"] == "starting"
-                ),
-                None,
-            )
-            if failing is not None:
-                self.states[failing.member_id]["state"] = "failed"
-                self.states[failing.member_id]["error"] = type(error).__name__
             for assignment in reversed(started):
                 try:
                     self._invoke(assignment, "stop")
