@@ -368,14 +368,14 @@ class UpdateManager:
     def cached(self) -> UpdateSnapshot:
         """Return only records bound to the currently installed identities."""
         try:
-            installed = {
-                (component.kind, component.subject): component
-                for component in self._installed()
-            }
             connection = self._connect(create=False)
             if connection is None:
                 return UpdateSnapshot(())
             try:
+                installed = {
+                    (component.kind, component.subject): component
+                    for component in self._installed()
+                }
                 rows = connection.execute(
                     """SELECT kind, subject, installed_version, installed_identity,
                               available_version, available_identity, available_source,

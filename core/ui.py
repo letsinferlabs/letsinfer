@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import contextlib
 import os
 import re
 import sys
+import textwrap
 import threading
 import time
 from types import TracebackType
@@ -84,6 +86,10 @@ class Terminal:
         width = self.environ.get("COLUMNS", "")
         if width.isdecimal() and int(width) > 0:
             self.width = int(width)
+        elif not self.interactive:
+            # Redirected output has no terminal geometry. Avoid a syscall on
+            # every argparse formatter and use the stable plain-output width.
+            self.width = 80
         else:
             try:
                 self.width = os.get_terminal_size(self.stream.fileno()).columns
@@ -106,6 +112,25 @@ class Terminal:
         if width <= len(suffix):
             return suffix[:width]
         return plain[: width - len(suffix)].rstrip() + suffix
+
+    def wrap(self, value: str, width: int) -> list[str]:
+        """Wrap human prose without ever truncating actionable information."""
+
+        width = max(1, width)
+        lines: list[str] = []
+        for paragraph in value.splitlines() or [""]:
+            lines.extend(
+                textwrap.wrap(
+                    paragraph,
+                    width=width,
+                    replace_whitespace=False,
+                    drop_whitespace=True,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+                or [""]
+            )
+        return lines
 
     def logo(self, section: str | None = None) -> str:
         lockup = self.paint(
@@ -157,6 +182,59 @@ class Terminal:
         self.line("error", message)
 
 
+def _section(value: str) -> str:
+    """Turn an action identifier into the quiet command breadcrumb."""
+
+    return value.replace(".", " / ").replace("-", " ")
+
+
+def command_header(
+    action: str,
+    *,
+    stream: TextIO | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """Open one human command surface with the status lockup.
+
+    The caller chooses the stream. Redirected and machine-readable commands
+    deliberately get no frame, so stdout remains a stable data contract.
+    """
+
+    target = sys.stderr if stream is None else stream
+    terminal = Terminal(target, environ=environ)
+    if not terminal.interactive:
+        return False
+    target.write(f"{terminal.logo(_section(action))}\n\n")
+    target.flush()
+    return True
+
+
+def confirm(
+    message: str,
+    *,
+    stream: TextIO | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """Render one consistent destructive-choice prompt and read its answer."""
+
+    # Prompts take terminal ownership.  Clear any delayed activity line first
+    # so typed input can never land inside an animation frame.
+    before_external_output()
+    target = sys.stderr if stream is None else stream
+    terminal = Terminal(target, environ=environ)
+    target.write(
+        f"{terminal.paint('?', BOLD, YELLOW)} "
+        f"{terminal.paint(message, BOLD)} "
+        f"{terminal.paint('[y/N]', DIM)} "
+    )
+    target.flush()
+    try:
+        answer = builtins.input()
+    except EOFError:
+        return False
+    return answer.strip().lower() in {"y", "yes"}
+
+
 def home(
     *,
     stream: TextIO | None = None,
@@ -200,14 +278,33 @@ def update_notice(
     *,
     stream: TextIO | None = None,
     environ: Mapping[str, str] | None = None,
+    cleared: bool = False,
+    attention: bool = False,
 ) -> None:
-    """Render verified cached availability without touching the network."""
+    """Render a verified availability change without touching the network.
+
+    ``cleared`` is used only after a background refresh replaced a previously
+    rendered availability notice with an empty verified set. Terminal
+    scrollback cannot retract the old line, so emit an explicit correction.
+    """
     target = sys.stderr if stream is None else stream
     terminal = Terminal(target, environ=environ)
     if not terminal.interactive:
         return
+    if cleared and attention:
+        raise ValueError("an update refresh cannot be both current and unresolved")
     labels = update_labels(records)
     if not labels:
+        if cleared:
+            terminal.success("Update state refreshed · installed components are current")
+        elif attention:
+            terminal.warning("Update state changed · verification needs attention")
+            target.write(
+                terminal.paint(
+                    "  Run `letsinfer update check` for verified details.\n", DIM
+                )
+            )
+            target.flush()
         return
     terminal.warning("Update available · " + " · ".join(labels))
     target.write(
@@ -304,6 +401,7 @@ class Spinner:
         message: str,
         *,
         done: str | None = None,
+        section: str | None = None,
         delay: float = 0.18,
         interval: float = 0.08,
         clock: Callable[[], float] = time.monotonic,
@@ -311,6 +409,7 @@ class Spinner:
         self.terminal = terminal
         self.message = message
         self.done = done
+        self.section = section
         self.delay = max(0.0, delay)
         self.interval = max(0.01, interval)
         self._clock = clock
@@ -318,14 +417,6 @@ class Spinner:
         self._thread: threading.Thread | None = None
         self._started_at = 0.0
         self._rendered = False
-        lowered = message.lower()
-        self._section = (
-            "install"
-            if lowered.startswith("install")
-            else "update"
-            if lowered.startswith("updat")
-            else None
-        )
 
     @property
     def enabled(self) -> bool:
@@ -335,9 +426,9 @@ class Spinner:
         if not self.enabled:
             return self
         self._started_at = self._clock()
-        if self._section is not None:
+        if self.section is not None:
             self.terminal.stream.write(
-                f"{self.terminal.logo(self._section)}\n"
+                f"{self.terminal.logo(_section(self.section))}\n"
                 f"   {self.terminal.paint(self.message, DIM)}\n\n"
             )
             self.terminal.stream.flush()
@@ -356,7 +447,7 @@ class Spinner:
         frame_index = 0
         while not self._stop.is_set():
             elapsed = self._clock() - self._started_at
-            frame = self.terminal.paint(frames[frame_index % len(frames)], GREEN)
+            frame = self.terminal.paint(frames[frame_index % len(frames)], BLUE)
             suffix = self.terminal.paint(f"{elapsed:0.1f}s", DIM)
             try:
                 self.terminal.stream.write(
@@ -410,6 +501,7 @@ class StepProgress:
         steps: Iterable[str],
         *,
         section: str,
+        show_header: bool = True,
         interval: float = 0.08,
     ) -> None:
         self.terminal = terminal
@@ -417,6 +509,7 @@ class StepProgress:
         if not self.steps:
             raise ValueError("step progress requires at least one step")
         self.section = section
+        self.show_header = show_header
         self.interval = max(0.01, interval)
         self.current = 0
         self.failed = False
@@ -433,7 +526,10 @@ class StepProgress:
     def __enter__(self) -> StepProgress:
         if not self.enabled:
             return self
-        self.terminal.stream.write(f"{self.terminal.logo(self.section)}\n\n")
+        if self.show_header:
+            self.terminal.stream.write(
+                f"{self.terminal.logo(_section(self.section))}\n\n"
+            )
         with self._lock:
             self._render()
         self._thread = threading.Thread(
@@ -456,7 +552,7 @@ class StepProgress:
                 f"{self.terminal.paint('Failed', BOLD, RED)}"
             )
         if index == self.current and self.current < len(self.steps):
-            return f"{self.terminal.paint(frame, GREEN)}  {self.terminal.paint(label, BOLD)}"
+            return f"{self.terminal.paint(frame, BLUE)}  {self.terminal.paint(label, BOLD)}"
         mark = "○" if self.terminal.unicode else "o"
         return f"{self.terminal.paint(mark, DIM)}  {self.terminal.paint(label, DIM)}"
 
@@ -554,6 +650,27 @@ def before_external_output() -> None:
 class HelpFormatter(argparse.RawDescriptionHelpFormatter):
     """Raw formatter used beneath the terminal-aware parser presentation."""
 
+    _width_key: tuple[object, ...] | None = None
+    _cached_width = 78
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        stream = sys.stdout
+        key = (
+            id(stream),
+            _isatty(stream),
+            os.environ.get("COLUMNS", ""),
+            os.environ.get("TERM", ""),
+        )
+        if key != type(self)._width_key:
+            # Argparse otherwise calls ``shutil.get_terminal_size`` for every
+            # formatter it creates—hundreds of syscalls for this command tree.
+            # One capability snapshot preserves responsive TTY help without
+            # charging that cost per subparser/action.
+            type(self)._cached_width = max(20, Terminal(stream).width - 2)
+            type(self)._width_key = key
+        kwargs.setdefault("width", type(self)._cached_width)
+        super().__init__(*args, **kwargs)
+
 
 class ArgumentParser(argparse.ArgumentParser):
     """Parser which propagates the branded formatter to every subcommand."""
@@ -584,11 +701,35 @@ class ArgumentParser(argparse.ArgumentParser):
             value = value.replace(source, replacement)
         return banner + value
 
+    def error(self, message: str) -> None:
+        terminal = Terminal(sys.stderr)
+        if not terminal.interactive:
+            super().error(message)
+        command = self.prog.removeprefix("letsinfer ").strip()
+        section = command if command and command != "letsinfer" else "command"
+        usage = super().format_usage().replace(
+            "usage:", terminal.paint("Usage:", BOLD, CYAN), 1
+        )
+        detail = "\n".join(
+            f"   {terminal.paint(line, DIM)}"
+            for line in terminal.wrap(message, terminal.width - 3)
+        )
+        sys.stderr.write(
+            f"{terminal.logo(_section(section))}\n\n"
+            f"{usage}\n"
+            f"{terminal.paint('✗' if terminal.unicode else 'ERROR', BOLD, RED)}  "
+            f"{terminal.paint('FAILED', BOLD, RED)}\n"
+            f"{detail}\n"
+        )
+        sys.stderr.flush()
+        raise SystemExit(2)
+
 
 def progress(
     message: str,
     *,
     done: str | None = None,
+    section: str | None = None,
     stream: TextIO | None = None,
     environ: Mapping[str, str] | None = None,
     enabled: bool = True,
@@ -598,20 +739,28 @@ def progress(
         terminal.interactive = False
         terminal.color = False
         terminal.unicode = False
-    return Spinner(terminal, message, done=done)
+    return Spinner(terminal, message, done=done, section=section)
 
 
-def fatal(message: str, *, stream: TextIO | None = None) -> None:
+def fatal(
+    message: str,
+    *,
+    stream: TextIO | None = None,
+    section: str | None = None,
+) -> None:
     """Write the existing FATAL contract, styling only its TTY label."""
     target = sys.stderr if stream is None else stream
     terminal = Terminal(target)
     if terminal.interactive:
+        if section is not None:
+            target.write(f"{terminal.logo(_section(section))}\n\n")
         mark = "✗" if terminal.unicode else "ERROR"
         target.write(
             f"{terminal.paint(mark, BOLD, RED)}  "
             f"{terminal.paint('FAILED', BOLD, RED)}\n"
-            f"   {terminal.paint(terminal.clip(message, terminal.width - 3), DIM)}\n"
         )
+        for line in terminal.wrap(message, terminal.width - 3):
+            target.write(f"   {terminal.paint(line, DIM)}\n")
     else:
         target.write(f"FATAL: {message}\n")
     target.flush()

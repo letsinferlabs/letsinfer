@@ -14,6 +14,7 @@ from unittest import mock
 from core import cli as letsinfer
 from core import status_ui, ui
 from core.actions import ACTIONS, AuditPolicy, CommandScope, MutationClass
+from core.ui_contracts import ProgressKind, UI_CONTRACTS
 
 
 class FakeStream(io.StringIO):
@@ -1146,23 +1147,23 @@ class MainOutputTests(unittest.TestCase):
         )
         self.assertEqual(stderr.getvalue(), "")
 
-    def test_every_public_mutation_has_compact_activity_language(self) -> None:
+    def test_every_bounded_progress_contract_has_activity_language(self) -> None:
         mutations = {
             name
-            for name, action in ACTIONS.items()
-            if action.mutation in {MutationClass.LOCAL, MutationClass.NODE}
+            for name, presentation in UI_CONTRACTS.items()
+            if presentation.progress in {ProgressKind.SPINNER, ProgressKind.STEPS}
+            and ACTIONS[name].mutation is not MutationClass.INTERNAL
         }
-        self.assertEqual(
-            mutations - {"benchmark"}, set(letsinfer.ACTION_PROGRESS) - {"verify"}
-        )
-        self.assertNotIn("key.list", letsinfer.ACTION_PROGRESS)
-        self.assertNotIn("key.show", letsinfer.ACTION_PROGRESS)
+        language = set(letsinfer.ACTION_PROGRESS) | set(letsinfer.READ_PROGRESS)
+        self.assertEqual(mutations, language & mutations)
+        self.assertNotIn("key.list", mutations)
+        self.assertNotIn("key.show", mutations)
 
     def test_key_secret_and_warning_keep_their_stream_contracts(self) -> None:
         token = "li_once_secret"
 
         def action(_arguments: argparse.Namespace) -> int:
-            print("KEY app id=fixture")
+            print("KEY app id=fixture", file=os.sys.stderr)
             print(token)
             print("This token is shown once. Store it now.", file=os.sys.stderr)
             return 0
@@ -1193,10 +1194,13 @@ class MainOutputTests(unittest.TestCase):
         ):
             result = letsinfer.main(["key", "create", "app"])
         self.assertEqual(result, 0)
-        self.assertEqual(stdout.getvalue(), f"KEY app id=fixture\n{token}\n")
+        self.assertEqual(stdout.getvalue(), f"{token}\n")
+        self.assertIn("KEY app id=fixture", stderr.getvalue())
         self.assertIn("This token is shown once. Store it now.", stderr.getvalue())
         self.assertIn("API key created", stderr.getvalue())
-        self.assertNotIn("LET'S INFER", stderr.getvalue())
+        self.assertIn("LET'S INFER", stderr.getvalue())
+        self.assertIn("Create API Key", ui.ANSI.sub("", stderr.getvalue()))
+        self.assertNotIn(token, stderr.getvalue())
 
     def test_read_result_is_unadorned_and_non_tty_mutation_is_byte_stable(self) -> None:
         for name, output in (
@@ -1266,10 +1270,9 @@ class MainOutputTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(stdout.getvalue(), "INSTALLED RUNTIME fixture\n")
         self.assertIn("Installing the runtime", stderr.getvalue())
-        self.assertIn(
-            "LET'S INFER  /  INSTALL",
-            ui.ANSI.sub("", stderr.getvalue()),
-        )
+        header = ui.ANSI.sub("", stderr.getvalue()).splitlines()[0]
+        self.assertIn("Install Runtime", header)
+        self.assertIn("LET'S INFER", header)
         self.assertIn("Runtime installed", stderr.getvalue())
         self.assertIn(ui.CLEAR_LINE, stderr.getvalue())
 
@@ -1299,9 +1302,7 @@ class MainOutputTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(letsinfer.main(["update"]), 0)
-        progress.assert_called_once_with(
-            "Updating Let's Infer core", done="Core updated", enabled=False
-        )
+        progress.assert_not_called()
 
     def test_non_tty_error_contract_is_unchanged(self) -> None:
         arguments = argparse.Namespace(
@@ -1338,6 +1339,22 @@ class MainOutputTests(unittest.TestCase):
         self.assertIn("runtime is unavailable", plain)
         self.assertNotIn("FATAL:", plain)
         self.assertIn("\033[38;2;226;56;56m", stream.getvalue())
+
+    def test_non_tty_parser_snapshots_help_width_without_terminal_syscalls(self) -> None:
+        previous_key = ui.HelpFormatter._width_key
+        previous_width = ui.HelpFormatter._cached_width
+        stream = FakeStream(tty=False)
+        try:
+            ui.HelpFormatter._width_key = None
+            with (
+                contextlib.redirect_stdout(stream),
+                mock.patch.object(os, "get_terminal_size", wraps=os.get_terminal_size) as size,
+            ):
+                letsinfer.parser()
+            self.assertEqual(size.call_count, 0)
+        finally:
+            ui.HelpFormatter._width_key = previous_key
+            ui.HelpFormatter._cached_width = previous_width
 
 
 if __name__ == "__main__":
