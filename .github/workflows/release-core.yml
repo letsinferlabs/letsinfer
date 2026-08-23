@@ -41,10 +41,7 @@ jobs:
       - name: Run Python tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          for suite in cli benchmarks gateway orchestration site; do
-            python3 -m unittest discover -s "tests/$suite" -p 'test_*.py'
-          done
+        run: python3 -m tools.core_regression
       - name: Build and test Watchdog
         run: |
           cmake -S watchdog -B "$RUNNER_TEMP/watchdog-build" -DCMAKE_BUILD_TYPE=Release
