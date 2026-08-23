@@ -34,7 +34,7 @@ from core.paths import config_root, data_root, runtime_root
 RUNTIME_CONFIG = "runtime.json"
 RUNTIME_DESCRIPTOR = "letsinfer-runtime.json"
 RUNTIME_SCHEMA_VERSION = 4
-ENGINE_PROTOCOL_VERSION = 1
+ENGINE_PROTOCOL_VERSION = 2
 ARTIFACT_SCHEMA_VERSION = 4
 CATALOG_SCHEMA_VERSION = 6
 DEFAULT_CATALOG_URL = (
@@ -248,7 +248,7 @@ def validate_target_contract(value: Any, where: str = "target") -> dict[str, Any
             "engine_strategy, and interconnect"
         )
     strategy = placement.get("strategy")
-    if strategy not in {"single", "replicated", "distributed"}:
+    if strategy not in {"single", "parallel"}:
         raise RuntimePackError(f"{where}.placement.strategy is invalid")
     member_count = placement.get("member_count")
     if (
@@ -260,8 +260,8 @@ def validate_target_contract(value: Any, where: str = "target") -> dict[str, Any
         raise RuntimePackError(f"{where}.placement.member_count must be between 1 and 64")
     if strategy == "single" and member_count != 1:
         raise RuntimePackError(f"{where}.placement single strategy requires one member")
-    if strategy in {"replicated", "distributed"} and member_count < 2:
-        raise RuntimePackError(f"{where}.placement {strategy} strategy requires multiple members")
+    if strategy == "parallel" and member_count < 1:
+        raise RuntimePackError(f"{where}.placement parallel strategy requires at least one member")
     engine_strategy = placement.get("engine_strategy")
     if not isinstance(engine_strategy, str) or not SAFE_NAME_RE.fullmatch(engine_strategy):
         raise RuntimePackError(f"{where}.placement.engine_strategy is invalid")
@@ -281,14 +281,14 @@ def validate_target_contract(value: Any, where: str = "target") -> dict[str, Any
         amount = interconnect.get(key)
         if not isinstance(amount, int) or isinstance(amount, bool) or amount < 0:
             raise RuntimePackError(f"{where}.placement.interconnect.{key} must be non-negative")
-    if strategy != "distributed" and (
+    if strategy != "parallel" and (
         interconnect["rdma_required"]
         or interconnect["minimum_speed_mbps"]
         or interconnect["minimum_mtu"]
         or interconnect["kind"] != "any"
     ):
         raise RuntimePackError(
-            f"{where}.placement interconnect constraints require distributed strategy"
+            f"{where}.placement interconnect constraints require parallel strategy"
         )
     return value
 
@@ -306,9 +306,11 @@ def target_matches(contract: dict[str, Any], device: dict[str, Any]) -> bool:
         actual_count = actual_accelerator.get("count")
         if not isinstance(actual_count, int) or isinstance(actual_count, bool):
             return False
-        for key in ("vendor", "architecture", "count", "partitioning"):
+        for key in ("vendor", "architecture", "partitioning"):
             if expected_accelerator[key] != actual_accelerator[key]:
                 return False
+        if actual_count < expected_accelerator["count"]:
+            return False
         accelerator_floor = expected_accelerator.get("minimum_memory_gib")
         if accelerator_floor is not None:
             actual_floor = actual_accelerator.get("minimum_memory_gib")

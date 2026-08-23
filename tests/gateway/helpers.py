@@ -110,7 +110,7 @@ def insert_member(store: state.SiteStore, member_id: str, *, facts: dict | None 
             certificate_sha256,certificate_pem,state,approval_code_hash,
             approval_expires_at_unix,facts_json,facts_signature_base64,
             facts_sha256,joined_at_unix,updated_at_unix)
-           VALUES(?,?,'member',?,?,?,?,?,'active',NULL,NULL,?,NULL,?,?,?)""",
+           VALUES(?,?,'child',?,?,?,?,?,'active',NULL,NULL,?,NULL,?,?,?)""",
         (
             member_id,
             "Synthetic member",

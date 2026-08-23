@@ -22,7 +22,7 @@ def member_identity() -> SiteIdentity:
         member_id="2" * 32,
         installation_id="3" * 64,
         display_name="Home",
-        role="member",
+        role="child",
         coordinator_id="4" * 32,
         coordinator_address="coordinator.local",
         site_public_key_sha256="5" * 64,

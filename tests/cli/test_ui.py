@@ -204,7 +204,7 @@ class TerminalTests(unittest.TestCase):
                 "gateway_authenticated": True,
                 "gateway_model_identity": True,
                 "gateway_endpoint": "http://homeai.local:8000/v1",
-                "site_active": "active",
+                "node_active": "active",
                 "recovery_timer_active": "active",
                 "memory_current_bytes": 19 * 1024 * 1024,
                 "memory_limit_bytes": 30 * 1024 * 1024,
@@ -281,7 +281,7 @@ class TerminalTests(unittest.TestCase):
                     "gateway_auth_required": True,
                     "gateway_authenticated": True,
                     "gateway_model_identity": True,
-                    "site_active": "active",
+                    "node_active": "active",
                     "recovery_timer_active": "active",
                     "memory_current_bytes": 1,
                     "memory_limit_bytes": 2,
@@ -504,7 +504,7 @@ class TerminalTests(unittest.TestCase):
                 "gateway_authenticated": True,
                 "gateway_model_identity": False,
                 "gateway_endpoint": "http://homeai.local:8000/v1",
-                "site_active": "active",
+                "node_active": "active",
                 "recovery_timer_active": "active",
                 "memory_current_bytes": 19 * 1024 * 1024,
                 "memory_limit_bytes": 30 * 1024 * 1024,
@@ -558,7 +558,7 @@ class TerminalTests(unittest.TestCase):
                 "gateway_authenticated": True,
                 "gateway_model_identity": True,
                 "gateway_endpoint": "http://homeai.local:8000/v1",
-                "site_active": "active",
+                "node_active": "active",
                 "recovery_timer_active": "inactive",
                 "runtime_mode": "qualification",
                 "memory_current_bytes": 19 * 1024 * 1024,
@@ -615,7 +615,7 @@ class TerminalTests(unittest.TestCase):
                 "gateway_authenticated": True,
                 "gateway_model_identity": True,
                 "gateway_endpoint": "http://homeai.local:8000/v1",
-                "site_active": "active",
+                "node_active": "active",
                 "recovery_timer_active": "inactive",
                 "runtime_mode": "qualification",
             },
@@ -662,7 +662,7 @@ class TerminalTests(unittest.TestCase):
                 "gateway_auth_required": True,
                 "gateway_authenticated": True,
                 "gateway_model_identity": False,
-                "site_active": "active",
+                "node_active": "active",
                 "runtime_mode": "qualification",
             },
             "container": {
@@ -708,7 +708,7 @@ class TerminalTests(unittest.TestCase):
                 "gateway_authenticated": True,
                 "gateway_model_identity": True,
                 "gateway_endpoint": "http://homeai.local:8000/v1",
-                "site_active": "active",
+                "node_active": "active",
                 "recovery_timer_active": "inactive",
                 "runtime_mode": "qualification",
                 "memory_pressure": True,
@@ -771,7 +771,7 @@ class TerminalTests(unittest.TestCase):
                 "gateway_auth_required": True,
                 "gateway_authenticated": True,
                 "gateway_model_identity": True,
-                "site_active": "active",
+                "node_active": "active",
                 "recovery_timer_active": "active",
                 "memory_current_bytes": 19 * 1024 * 1024,
                 "memory_limit_bytes": 30 * 1024 * 1024,
@@ -817,7 +817,7 @@ class TerminalTests(unittest.TestCase):
                 "gateway_auth_required": True,
                 "gateway_authenticated": True,
                 "gateway_model_identity": True,
-                "site_active": "active",
+                "node_active": "active",
                 "recovery_timer_active": "active",
                 "memory_current_bytes": 19 * 1024 * 1024,
                 "memory_limit_bytes": 30 * 1024 * 1024,
@@ -929,7 +929,7 @@ class TerminalTests(unittest.TestCase):
                 "gateway_model_identity": True,
                 "runtime_metadata_ready": False,
                 "gateway_endpoint": "http://homeai.local:8000/v1",
-                "site_active": "active",
+                "node_active": "active",
                 "recovery_timer_active": "active",
                 "memory_current_bytes": 19 * 1024 * 1024,
                 "memory_limit_bytes": 30 * 1024 * 1024,
@@ -958,18 +958,18 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("ATTENTION", rendered)
         self.assertNotIn("API          Unavailable", rendered)
 
-    def test_site_status_is_branded_without_claiming_a_runtime(self) -> None:
+    def test_node_status_is_branded_without_claiming_a_runtime(self) -> None:
         stream = FakeStream(tty=True)
-        ui.site_status(
+        ui.node_status(
             {
                 "identity": {
                     "display_name": "Home",
-                    "role": "coordinator",
-                    "member_id": "homeai",
+                    "role": "main",
+                    "machine_id": "homeai",
                 },
                 "endpoint": "http://homeai.local:8000/v1",
                 "services": {
-                    "site_active": "active",
+                    "node_active": "active",
                     "gateway_active": "active",
                     "gateway_health": True,
                     "gateway_auth_required": True,
@@ -1005,7 +1005,7 @@ class TerminalTests(unittest.TestCase):
                     "gateway_auth_required": True,
                     "gateway_authenticated": True,
                     "gateway_model_identity": True,
-                    "site_active": "active",
+                    "node_active": "active",
                     "recovery_timer_active": "active",
                     "memory_current_bytes": 19 * 1024 * 1024,
                     "memory_limit_bytes": 30 * 1024 * 1024,
@@ -1048,7 +1048,7 @@ class HelpTests(unittest.TestCase):
             result = letsinfer.main([])
         self.assertEqual(result, 0)
         self.assertIn("LET'S INFER", stdout.getvalue())
-        self.assertIn("Your inference site is ready", stdout.getvalue())
+        self.assertIn("Your inference node is ready", stdout.getvalue())
         self.assertIn("letsinfer install <model>", stdout.getvalue())
         self.assertNotIn("Usage:", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
@@ -1103,8 +1103,8 @@ class MainOutputTests(unittest.TestCase):
     def _metadata(self, name: str = "setup") -> object:
         return argparse.Namespace(
             name=name,
-            scope=CommandScope.COORDINATOR,
-            mutation=MutationClass.SITE,
+            scope=CommandScope.MAIN,
+            mutation=MutationClass.NODE,
             audit=AuditPolicy.NONE,
         )
 
@@ -1150,7 +1150,7 @@ class MainOutputTests(unittest.TestCase):
         mutations = {
             name
             for name, action in ACTIONS.items()
-            if action.mutation in {MutationClass.NODE, MutationClass.SITE}
+            if action.mutation in {MutationClass.LOCAL, MutationClass.NODE}
         }
         self.assertEqual(
             mutations - {"benchmark"}, set(letsinfer.ACTION_PROGRESS) - {"verify"}
@@ -1201,7 +1201,7 @@ class MainOutputTests(unittest.TestCase):
     def test_read_result_is_unadorned_and_non_tty_mutation_is_byte_stable(self) -> None:
         for name, output in (
             ("key.list", "fixture\tactive\n"),
-            ("member.approve", "APPROVED fixture\n"),
+            ("child.approve", "APPROVED fixture\n"),
         ):
             with self.subTest(name=name):
                 arguments = argparse.Namespace(

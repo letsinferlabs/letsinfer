@@ -108,7 +108,7 @@ Pin one Engine OCI and provide its opaque upstream settings:
 {
   "engine": {
     "id": "sglang",
-    "protocol": {"version": 1},
+    "protocol": {"version": 2},
     "oci": {
       "reference": "ghcr.io/org/image@sha256:<manifest-digest>",
       "immutable_id": "sha256:<image-config-digest>",
@@ -134,6 +134,13 @@ Changing the Engine OCI identity invalidates qualification.
 Describe your target by capabilities: platform, accelerator vendor and
 architecture, device count and partitioning, memory topology and minimum, and
 placement/interconnect requirements. Do not use a hostname as a target.
+
+Set `target.placement.strategy` to `single` for an independent group. Core may
+replicate that group across compatible nodes and load-balance the resulting
+endpoints. Set it to `parallel` only when this runtime qualifies an exact TP/PP
+topology. In that case the runtime owns rank layout, engine configuration,
+interconnect requirements, kernels, and adapter inputs; core allocates the
+declared devices and treats the complete group as one endpoint.
 
 Use `container` for measured resource and startup bounds. Use `serving` for
 the measured maximum connections, active requests, context, and optional
@@ -169,7 +176,7 @@ runtime pack.
 
 Keep candidate-specific kernels, patches, engine source, image recipes,
 adapters, tests, and qualification helpers beside `runtime.json`. Generic CLI,
-gateway, Watchdog, benchmark runners, prompts, and site orchestration belong to
+gateway, Watchdog, benchmark runners, prompts, and node orchestration belong to
 core and must not be copied into your candidate.
 
 The root runtimes `manifest.json` is generated from candidates. Do not edit it

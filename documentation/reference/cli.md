@@ -5,19 +5,19 @@
 Run `letsinfer COMMAND --help` for the exact options in your installed version.
 The commands below describe the stable public workflow.
 
-## Set up your site
+## Set up your node
 
 ```bash
 letsinfer setup
-letsinfer site status
+letsinfer node status
 letsinfer hardware
 ```
 
-The first machine becomes the coordinator. It owns the stable inference
-gateway, runtime selection, API-key registry, audit chain, and site scheduling.
+The first machine becomes the main node. It owns the stable inference gateway,
+runtime selection, API-key registry, audit chain, and replica scheduling.
 
-Use `topology` and `member` to inspect or manage additional machines. Every
-command's help shows its execution scope: `coordinator`, `member`, or `all`.
+Use `topology` and `child` to inspect or manage additional nodes. Every
+command has an execution scope: `main`, `child`, or `all`.
 
 ## Install a model
 
@@ -35,6 +35,20 @@ inspect other hardware, `--refresh` to require a fresh signed catalog, and
 Let's Infer detects your target and installs the recommended qualified
 candidate from the signed catalog. The runtime downloads its exact model and
 Engine OCI automatically.
+
+On a main node with children, an interactive install can offer to replicate
+the model. You can also select nodes explicitly:
+
+```bash
+letsinfer install qwen3.8-27b --node Home --node Workshop
+letsinfer install qwen3.8-27b --all-nodes
+letsinfer scale qwen3.8-27b --replicas 3
+```
+
+Each selected node independently resolves the fastest qualified runtime for
+its hardware. Let's Infer shows incompatible nodes and replacement impact
+before making changes. Use `--replace-existing` only after reviewing that
+impact.
 
 To pin one exact candidate:
 
@@ -93,7 +107,7 @@ letsinfer key rotate KEY_ID
 letsinfer key revoke KEY_ID
 ```
 
-Key mutations are coordinator-only and enter the site audit chain. Secret key
+Key mutations are main-only and enter the node audit chain. Secret key
 material is shown once. Do not place it in source, logs, benchmark evidence, or
 shell history.
 

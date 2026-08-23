@@ -61,7 +61,7 @@ def target(strategy: str, count: int) -> dict:
             "interconnect": {
                 "kind": "connectx", "rdma_required": True,
                 "minimum_speed_mbps": 100_000, "minimum_mtu": 9000,
-            } if strategy == "distributed" else {
+            } if strategy == "parallel" else {
                 "kind": "any", "rdma_required": False,
                 "minimum_speed_mbps": 0, "minimum_mtu": 0,
             },
@@ -287,21 +287,21 @@ class TopologyTests(unittest.TestCase):
             self.assertTrue(pressured["health"]["memory_pressure"])
             self.assertEqual(pressured["health"]["state"], "healthy")
 
-    def test_distributed_requires_bidirectional_verified_link(self) -> None:
+    def test_parallel_requires_bidirectional_verified_link(self) -> None:
         left, right = "1" * 32, "2" * 32
         graph = TopologyGraph([facts(left, right), facts(right, left)])
-        placement = graph.resolve(target("distributed", 2), coordinator_id=left)
+        placement = graph.resolve(target("parallel", 2), coordinator_id=left)
         self.assertEqual(placement.member_ids, (left, right))
         self.assertEqual(
             graph.engine_addresses(
-                placement, target("distributed", 2)["placement"]["interconnect"]
+                placement, target("parallel", 2)["placement"]["interconnect"]
             ),
             {left: "192.0.2.10", right: "192.0.2.10"},
         )
         broken = facts(right)
         with self.assertRaisesRegex(TopologyError, "no topology-compatible"):
             TopologyGraph([facts(left, right), broken]).resolve(
-                target("distributed", 2), coordinator_id=left
+                target("parallel", 2), coordinator_id=left
             )
 
     def test_links_are_bound_to_enrolled_peer_certificates_and_interfaces(self) -> None:
@@ -335,24 +335,23 @@ class TopologyTests(unittest.TestCase):
         with self.assertRaisesRegex(TopologyError, "stale"):
             TopologyGraph([stale])
 
-    def test_catalog_selection_prefers_distributed_then_replicated_then_single(self) -> None:
+    def test_catalog_selection_prefers_parallel_then_single(self) -> None:
         left, right = "1" * 32, "2" * 32
         graph = TopologyGraph([facts(left, right), facts(right, left)])
         targets = {
             candidate["id"]: candidate
             for candidate in (
                 target("single", 1),
-                target("replicated", 2),
-                target("distributed", 2),
+                target("parallel", 2),
             )
         }
         selected = graph.resolve_catalog_targets(targets, coordinator_id=left)
-        self.assertEqual(selected.target_id, "fixture-distributed")
+        self.assertEqual(selected.target_id, "fixture-parallel")
         self.assertEqual(selected.placement.member_ids, (left, right))
 
-        del targets["fixture-distributed"]
+        del targets["fixture-parallel"]
         selected = graph.resolve_catalog_targets(targets, coordinator_id=left)
-        self.assertEqual(selected.target_id, "fixture-replicated")
+        self.assertEqual(selected.target_id, "fixture-single")
 
     def test_catalog_selection_rejects_same_strategy_ambiguity(self) -> None:
         member_id = "1" * 32

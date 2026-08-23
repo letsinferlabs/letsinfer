@@ -127,7 +127,7 @@ class LiveControllerTests(unittest.TestCase):
             time.sleep(0.05)
             started = time.monotonic()
             status, body, _ = self._call(
-                self.viewer_tls, "GET", "/control/v1/site"
+                self.viewer_tls, "GET", "/control/v1/node"
             )
             self.assertEqual(status, 200)
             self.assertEqual(body["controller"]["role"], "viewer")
@@ -233,7 +233,7 @@ class LiveControllerTests(unittest.TestCase):
 
     def test_mtls_rbac_actions_and_one_time_key_secret(self) -> None:
         status, body, _ = self._call(
-            self.viewer_tls, "GET", "/control/v1/site"
+            self.viewer_tls, "GET", "/control/v1/node"
         )
         self.assertEqual(status, 200)
         self.assertEqual(body["controller"]["role"], "viewer")
@@ -292,7 +292,7 @@ class LiveControllerTests(unittest.TestCase):
         status, denied, _ = self._call(
             self.viewer_tls,
             "POST",
-            "/control/v1/members/drain",
+            "/control/v1/children/drain",
             {"member_id": self.identity.member_id},
         )
         self.assertEqual(status, 403)
@@ -300,7 +300,7 @@ class LiveControllerTests(unittest.TestCase):
         status, drained, _ = self._call(
             self.admin_tls,
             "POST",
-            "/control/v1/members/drain",
+            "/control/v1/children/drain",
             {"member_id": self.identity.member_id},
         )
         self.assertEqual(status, 200)
@@ -308,7 +308,7 @@ class LiveControllerTests(unittest.TestCase):
         status, resumed, _ = self._call(
             self.admin_tls,
             "POST",
-            "/control/v1/members/resume",
+            "/control/v1/children/resume",
             {"member_id": self.identity.member_id},
         )
         self.assertEqual(status, 200)
@@ -321,7 +321,7 @@ class LiveControllerTests(unittest.TestCase):
         anonymous.minimum_version = ssl.TLSVersion.TLSv1_3
         anonymous.maximum_version = ssl.TLSVersion.TLSv1_3
         with self.assertRaises((ssl.SSLError, OSError)):
-            self._call(anonymous, "GET", "/control/v1/site")
+            self._call(anonymous, "GET", "/control/v1/node")
 
 
 if __name__ == "__main__":

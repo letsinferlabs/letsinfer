@@ -100,10 +100,10 @@ class SiteControlTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.temporary.name)
         self.coordinator_environment = {
-            "LETSINFER_HOME": str(self.root / "coordinator"),
+            "LETSINFER_HOME": str(self.root / "main"),
         }
         self.member_environment = {
-            "LETSINFER_HOME": str(self.root / "member"),
+            "LETSINFER_HOME": str(self.root / "child"),
         }
 
     def tearDown(self) -> None:
@@ -184,7 +184,7 @@ class SiteControlTests(unittest.TestCase):
                 response["document"], response["signature"], response["site_public_key"],
                 response["site_ca_certificate"], response["member_certificate"],
             )
-            self.assertEqual(joined.role, "member")
+            self.assertEqual(joined.role, "child")
             self.assertFalse(state.site_key_path().exists())
             self.assertTrue(state.member_key_path().exists())
             self.assertTrue(state.member_certificate_path().exists())
@@ -310,7 +310,7 @@ class SiteControlTests(unittest.TestCase):
             coordinator = state.setup_site("Fresh", "192.0.2.20")
             completed: list[dict] = []
             result = {
-                "protocol": "letsinfer-site-adoption-v1",
+                "protocol": "letsinfer-node-adoption-v1",
                 "state": "committed",
                 "source_site_id": coordinator.site_id,
                 "destination_site_id": "a" * 32,

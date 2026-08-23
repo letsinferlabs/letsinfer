@@ -192,7 +192,7 @@ def dashboard_lines(
     telemetry = _mapping(payload.get("telemetry"))
     rates = _mapping(telemetry.get("rates"))
     system = _mapping(telemetry.get("system"))
-    site = _mapping(payload.get("site"))
+    site = _mapping(payload.get("node"))
     history = session_history or {}
     width = max(42, min(terminal.width, 76) - 6)
 

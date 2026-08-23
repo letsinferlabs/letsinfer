@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Bounded TLS enrollment and authenticated member-control transport."""
+"""Bounded TLS enrollment and authenticated child-control transport."""
 
 from __future__ import annotations
 
@@ -48,8 +48,8 @@ from .telemetry import PROTOCOL as TELEMETRY_PROTOCOL
 from .telemetry import TelemetryAggregator, TelemetryError, validate_sample
 
 
-PROTOCOL = "letsinfer-site-control-v1"
-LINK_PROTOCOL = "letsinfer-site-link-v1"
+PROTOCOL = "letsinfer-node-control-v1"
+LINK_PROTOCOL = "letsinfer-node-link-v1"
 DEFAULT_PORT = 9770
 MAX_BODY_BYTES = 16 * 1024
 REQUEST_TIMEOUT_SECONDS = 15
@@ -191,7 +191,7 @@ def enrollment_transcript(
     } or type(candidate.get("schema_version")) is not int or candidate.get("schema_version") != 1:
         raise ControlError("pending member identity is invalid")
     return {
-        "contract": "letsinfer-member-enrollment-v1",
+        "contract": "letsinfer-child-enrollment-v1",
         "site_id": challenge["site_id"],
         "invite_id": challenge["invite_id"],
         "nonce": challenge["nonce"],
@@ -271,7 +271,7 @@ def request_membership(
     if not ID_RE.fullmatch(invite_id):
         raise ControlError("membership invite identity is invalid")
     client = PinnedHTTPS(parsed.hostname, port, coordinator_certificate_sha256)
-    challenge = client.request("GET", f"/site/v1/enroll/{invite_id}")
+    challenge = client.request("GET", f"/node/v1/enroll/{invite_id}")
     if challenge.get("coordinator_certificate_sha256") != coordinator_certificate_sha256:
         raise ControlError("membership challenge does not match the pinned coordinator")
     if challenge.get("mode") != "connectx" and code is None:
@@ -288,7 +288,7 @@ def request_membership(
     proof = member_proof(transcript)
     response = client.request(
         "POST",
-        "/site/v1/enroll",
+        "/node/v1/enroll",
         {
             "protocol": PROTOCOL,
             "invite_id": invite_id,
@@ -385,7 +385,7 @@ def fetch_candidate_membership(
         raise ControlError("membership endpoint contains unsupported components")
     if not SHA256_RE.fullmatch(coordinator_certificate_sha256):
         raise ControlError("coordinator certificate fingerprint is invalid")
-    with tempfile.TemporaryDirectory(prefix="letsinfer-membership-status-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="letsinfer-child-status-") as temporary:
         root = pathlib.Path(temporary)
         ca = root / "site-ca.crt"
         certificate = root / "member.crt"
@@ -417,7 +417,7 @@ def fetch_candidate_membership(
             if observed != coordinator_certificate_sha256:
                 raise ControlError("coordinator TLS certificate fingerprint changed")
             connection.request(
-                "GET", "/site/v1/membership", headers={"Accept": "application/json"}
+                "GET", "/node/v1/membership", headers={"Accept": "application/json"}
             )
             response = connection.getresponse()
             raw = response.read(MAX_BODY_BYTES + 1)
@@ -459,9 +459,9 @@ def fetch_member_facts(
 ) -> dict[str, Any]:
     parsed = urllib.parse.urlsplit(endpoint)
     if parsed.scheme != "https" or not parsed.hostname or parsed.path not in {"", "/"}:
-        raise ControlError("member control endpoint must be an HTTPS origin")
+        raise ControlError("child control endpoint must be an HTTPS origin")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ControlError("member control endpoint contains unsupported components")
+        raise ControlError("child control endpoint contains unsupported components")
     if not ID_RE.fullmatch(expected_member_id) or not SHA256_RE.fullmatch(
         expected_certificate_sha256
     ):
@@ -489,11 +489,11 @@ def fetch_member_facts(
         peer = connection.sock.getpeercert()
         if _member_id_from_certificate(peer) != expected_member_id:
             raise ControlError("member TLS identity does not match the enrolled member")
-        connection.request("GET", "/site/v1/facts", headers={"Accept": "application/json"})
+        connection.request("GET", "/node/v1/facts", headers={"Accept": "application/json"})
         response = connection.getresponse()
         raw = response.read(MAX_BODY_BYTES + 1)
     except (OSError, ssl.SSLError, http.client.HTTPException) as error:
-        raise ControlError(f"member control connection failed: {error}") from error
+        raise ControlError(f"child control connection failed: {error}") from error
     finally:
         connection.close()
     if len(raw) > MAX_BODY_BYTES:
@@ -556,7 +556,7 @@ def post_member_facts(
             raise ControlError("member facts TLS peer is not the site coordinator")
         connection.request(
             "POST",
-            "/site/v1/facts",
+            "/node/v1/facts",
             body=payload,
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
@@ -597,7 +597,7 @@ class FactsPublisher:
         self.stop_event = threading.Event()
         self.last_error: str | None = None
         self.thread = threading.Thread(
-            target=self._run, name="letsinfer-site-facts", daemon=True
+            target=self._run, name="letsinfer-node-facts", daemon=True
         )
 
     def start(self) -> None:
@@ -686,7 +686,7 @@ def probe_member_link(
         ).encode("utf-8")
         connection.request(
             "POST",
-            "/site/v1/link-challenge",
+            "/node/v1/link-challenge",
             body=payload,
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
@@ -783,7 +783,7 @@ def request_member_link_probe(
         if _member_id_from_certificate(connection.sock.getpeercert()) != expected_member_id:
             raise ControlError("member link-control identity changed")
         connection.request(
-            "POST", "/site/v1/link-probe", body=payload,
+            "POST", "/node/v1/link-probe", body=payload,
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
         response = connection.getresponse()
@@ -829,11 +829,11 @@ def _member_control_request(
         or parsed.query
         or parsed.fragment
         or method not in {"GET", "POST"}
-        or not path.startswith("/site/v1/")
+        or not path.startswith("/node/v1/")
     ):
-        raise ControlError("member control request is invalid")
+        raise ControlError("child control request is invalid")
     if not ID_RE.fullmatch(expected_member_id) or not SHA256_RE.fullmatch(expected_certificate_sha256):
-        raise ControlError("member control identity is invalid")
+        raise ControlError("child control identity is invalid")
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.minimum_version = ssl.TLSVersion.TLSv1_3
     context.maximum_version = ssl.TLSVersion.TLSv1_3
@@ -849,38 +849,38 @@ def _member_control_request(
     )
     payload = None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
     if payload is not None and len(payload) > MAX_BODY_BYTES:
-        raise ControlError("member control request is too large")
+        raise ControlError("child control request is too large")
     headers = {"Accept": "application/json"}
     if payload is not None:
         headers["Content-Type"] = "application/json"
     if engine_credential is not None:
-        if path != "/site/v1/group-job" or not re.fullmatch(r"[A-Za-z0-9_-]{43}", engine_credential):
+        if path != "/node/v1/group-job" or not re.fullmatch(r"[A-Za-z0-9_-]{43}", engine_credential):
             raise ControlError("engine-group credential is invalid")
         headers["X-Letsinfer-Engine-Credential"] = engine_credential
     try:
         connection.connect()
         if connection.sock is None:
-            raise ControlError("member control TLS connection is unavailable")
+            raise ControlError("child control TLS connection is unavailable")
         if certificate_sha256_der(connection.sock.getpeercert(binary_form=True)) != expected_certificate_sha256:
-            raise ControlError("member control certificate fingerprint changed")
+            raise ControlError("child control certificate fingerprint changed")
         if _member_id_from_certificate(connection.sock.getpeercert()) != expected_member_id:
-            raise ControlError("member control TLS identity changed")
+            raise ControlError("child control TLS identity changed")
         connection.request(method, path, body=payload, headers=headers)
         response = connection.getresponse()
         raw = response.read(MAX_BODY_BYTES + 1)
     except (OSError, ssl.SSLError, http.client.HTTPException) as error:
-        raise ControlError(f"member control request failed: {error}") from error
+        raise ControlError(f"child control request failed: {error}") from error
     finally:
         connection.close()
     if len(raw) > MAX_BODY_BYTES:
-        raise ControlError("member control response is too large")
+        raise ControlError("child control response is too large")
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ControlError("member control response is not valid JSON") from error
+        raise ControlError("child control response is not valid JSON") from error
     if response.status != 200 or not isinstance(value, dict):
         detail = value.get("error") if isinstance(value, dict) else None
-        raise ControlError(str(detail or "member control request was rejected"))
+        raise ControlError(str(detail or "child control request was rejected"))
     return value
 
 
@@ -898,7 +898,7 @@ def submit_member_group_job(
         expected_member_id=expected_member_id,
         expected_certificate_sha256=expected_certificate_sha256,
         method="POST",
-        path="/site/v1/group-job",
+        path="/node/v1/group-job",
         body=job,
         engine_credential=engine_credential,
     )
@@ -930,7 +930,7 @@ def fetch_member_job_status(
         expected_member_id=expected_member_id,
         expected_certificate_sha256=expected_certificate_sha256,
         method="GET",
-        path=f"/site/v1/jobs/{operation_id}",
+        path=f"/node/v1/jobs/{operation_id}",
     )
     if value.get("protocol") != GROUP_JOB_PROTOCOL or set(value) != {"protocol", "job"}:
         raise ControlError("member job-status response schema is invalid")
@@ -962,7 +962,7 @@ def fetch_member_group_status(
         expected_member_id=expected_member_id,
         expected_certificate_sha256=expected_certificate_sha256,
         method="GET",
-        path=f"/site/v1/groups/{group_id}",
+        path=f"/node/v1/groups/{group_id}",
     )
     if value.get("protocol") != GROUP_JOB_PROTOCOL or set(value) != {"protocol", "group"}:
         raise ControlError("member group-status response schema is invalid")
@@ -1016,7 +1016,7 @@ class SiteControlState:
             direct_connectx = True
         except InventoryError:
             pass
-        if self.identity.role == "coordinator" and direct_connectx:
+        if self.identity.role == "main" and direct_connectx:
             try:
                 with SiteStore(identity=self.identity) as store:
                     adoption = store.adoption()
@@ -1042,8 +1042,8 @@ class SiteControlState:
     def challenge(
         self, invite_id: str, *, peer_address: str | None = None
     ) -> dict[str, Any]:
-        if self.identity.role != "coordinator":
-            raise ControlError("membership enrollment is coordinator-only")
+        if self.identity.role != "main":
+            raise ControlError("child enrollment is main-only")
         try:
             with SiteStore(identity=self.identity) as store:
                 invite = store.public_invite(invite_id)
@@ -1079,8 +1079,8 @@ class SiteControlState:
         }
         if set(payload) != required or payload.get("protocol") != PROTOCOL:
             raise ControlError("membership enrollment request schema is invalid")
-        if self.identity.role != "coordinator":
-            raise ControlError("membership enrollment is coordinator-only")
+        if self.identity.role != "main":
+            raise ControlError("child enrollment is main-only")
         try:
             with SiteStore(identity=self.identity) as store:
                 invite = store.public_invite(str(payload["invite_id"]))
@@ -1111,7 +1111,7 @@ class SiteControlState:
         self, payload: Mapping[str, Any], *, peer_address: str
     ) -> dict[str, Any]:
         """Authenticate and execute one fresh-site direct-link adoption."""
-        if self.identity.role != "coordinator" or self.adoption_provider is None:
+        if self.identity.role != "main" or self.adoption_provider is None:
             raise ControlError("fresh-site adoption is unavailable")
         from .adoption import AdoptionError, validate_adoption_request
 
@@ -1133,7 +1133,7 @@ class SiteControlState:
         if (
             not isinstance(result, Mapping)
             or set(result) != expected
-            or result.get("protocol") != "letsinfer-site-adoption-v1"
+            or result.get("protocol") != "letsinfer-node-adoption-v1"
             or result.get("state") != "committed"
             or result.get("source_site_id") != self.identity.site_id
             or result.get("destination_site_id")
@@ -1159,8 +1159,8 @@ class SiteControlState:
 
     def membership(self, requester_member_id: str) -> dict[str, Any]:
         """Return only the authenticated caller's coordinator membership state."""
-        if self.identity.role != "coordinator":
-            raise ControlError("membership status is coordinator-only")
+        if self.identity.role != "main":
+            raise ControlError("child status is main-only")
         try:
             with SiteStore(identity=self.identity) as store:
                 rows = [
@@ -1187,8 +1187,8 @@ class SiteControlState:
         *,
         requester_member_id: str,
     ) -> dict[str, Any]:
-        if self.identity.role != "coordinator":
-            raise ControlError("member fact aggregation is coordinator-only")
+        if self.identity.role != "main":
+            raise ControlError("child fact aggregation is main-only")
         if set(payload) != {"protocol", "facts", "signature"} or payload.get("protocol") != PROTOCOL:
             raise ControlError("member facts publication schema is invalid")
         try:
@@ -1260,8 +1260,8 @@ class SiteControlState:
         *,
         requester_member_id: str,
     ) -> dict[str, Any]:
-        if self.identity.role != "coordinator" or self.telemetry_aggregator is None:
-            raise ControlError("site telemetry aggregation is coordinator-only")
+        if self.identity.role != "main" or self.telemetry_aggregator is None:
+            raise ControlError("node telemetry aggregation is main-only")
         if set(payload) != {"protocol", "sample", "signature"} or payload.get("protocol") != TELEMETRY_PROTOCOL:
             raise ControlError("member telemetry schema is invalid")
         try:
@@ -1338,9 +1338,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _require_coordinator(self) -> None:
         certificate = self.connection.getpeercert()  # type: ignore[attr-defined]
         if not certificate:
-            raise ControlError("member control requires a client certificate")
+            raise ControlError("child control requires a client certificate")
         if _member_id_from_certificate(certificate) != self.state.identity.coordinator_id:
-            raise ControlError("member control is coordinator-only")
+            raise ControlError("child control is main-only")
 
     def _require_site_member(self) -> str:
         certificate = self.connection.getpeercert()  # type: ignore[attr-defined]
@@ -1355,10 +1355,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         try:
-            if self.path == "/site/v1/discovery":
+            if self.path == "/node/v1/discovery":
                 self._respond(200, self.state.discovery())
                 return
-            prefix = "/site/v1/enroll/"
+            prefix = "/node/v1/enroll/"
             if self.path.startswith(prefix):
                 self._require_enrollment_capacity()
                 invite_id = self.path.removeprefix(prefix)
@@ -1371,17 +1371,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     ),
                 )
                 return
-            if self.path == "/site/v1/facts":
+            if self.path == "/node/v1/facts":
                 self._require_coordinator()
                 self._respond(200, self.state.facts())
                 return
-            if self.path == "/site/v1/membership":
+            if self.path == "/node/v1/membership":
                 self._respond(
                     200,
                     self.state.membership(self._require_site_member()),
                 )
                 return
-            group_prefix = "/site/v1/groups/"
+            group_prefix = "/node/v1/groups/"
             if self.path.startswith(group_prefix):
                 self._require_coordinator()
                 group_id = self.path.removeprefix(group_prefix)
@@ -1389,7 +1389,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     raise ControlError("engine-group identity is invalid")
                 self._respond(200, self.state.group_status(group_id))
                 return
-            job_prefix = "/site/v1/jobs/"
+            job_prefix = "/node/v1/jobs/"
             if self.path.startswith(job_prefix):
                 self._require_coordinator()
                 operation_id = self.path.removeprefix(job_prefix)
@@ -1405,14 +1405,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         if self.path not in {
-            "/site/v1/enroll", "/site/v1/link-challenge", "/site/v1/link-probe",
-            "/site/v1/telemetry", "/site/v1/facts", "/site/v1/group-job",
-            "/site/v1/adopt",
+            "/node/v1/enroll", "/node/v1/link-challenge", "/node/v1/link-probe",
+            "/node/v1/telemetry", "/node/v1/facts", "/node/v1/group-job",
+            "/node/v1/adopt",
         }:
             self._respond(404, {"error": "not found"})
             return
         try:
-            if self.path in {"/site/v1/enroll", "/site/v1/adopt"}:
+            if self.path in {"/node/v1/enroll", "/node/v1/adopt"}:
                 self._require_enrollment_capacity()
             content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
             if content_type != "application/json":
@@ -1423,26 +1423,26 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             value = json.loads(self.rfile.read(length))
             if not isinstance(value, dict):
                 raise ControlError("membership request is invalid")
-            if self.path == "/site/v1/enroll":
+            if self.path == "/node/v1/enroll":
                 response = self.state.enroll(
                     value, peer_address=str(self.client_address[0])
                 )
-            elif self.path == "/site/v1/adopt":
+            elif self.path == "/node/v1/adopt":
                 response = self.state.adopt(
                     value, peer_address=str(self.client_address[0])
                 )
-            elif self.path == "/site/v1/link-challenge":
+            elif self.path == "/node/v1/link-challenge":
                 response = self.state.link_challenge(
                     value, requester_member_id=self._require_site_member()
                 )
-            elif self.path == "/site/v1/link-probe":
+            elif self.path == "/node/v1/link-probe":
                 self._require_coordinator()
                 response = self.state.probe_link(value)
-            elif self.path == "/site/v1/facts":
+            elif self.path == "/node/v1/facts":
                 response = self.state.accept_facts(
                     value, requester_member_id=self._require_site_member()
                 )
-            elif self.path == "/site/v1/group-job":
+            elif self.path == "/node/v1/group-job":
                 self._require_coordinator()
                 response = self.state.execute_group_job(
                     value,
@@ -1455,7 +1455,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     value, requester_member_id=self._require_site_member()
                 )
             self._respond(200, response)
-            if self.path == "/site/v1/adopt":
+            if self.path == "/node/v1/adopt":
                 try:
                     self.state.adoption_completed(response)
                 except Exception:

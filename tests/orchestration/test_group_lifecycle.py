@@ -19,7 +19,7 @@ class _Store:
             "model": "example-model",
             "runtime": "example/runtime@1.0.0@sha256:" + "3" * 64,
             "target": "two-node",
-            "strategy": "distributed",
+            "strategy": "parallel",
             "state": "running",
             "topology_sha256": "4" * 64,
             "members": ["5" * 32, "6" * 32],
@@ -97,7 +97,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             mock.patch.object(
                 cli,
                 "read_site_identity",
-                return_value=types.SimpleNamespace(role="coordinator"),
+                return_value=types.SimpleNamespace(role="main"),
             ),
             mock.patch.object(cli, "_site_store", return_value=store),
             mock.patch.object(
@@ -129,7 +129,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             mock.patch.object(
                 cli,
                 "read_site_identity",
-                return_value=types.SimpleNamespace(role="coordinator"),
+                return_value=types.SimpleNamespace(role="main"),
             ),
             mock.patch.object(cli, "_site_store", return_value=store),
             mock.patch.object(
@@ -176,7 +176,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             mock.patch.object(
                 cli,
                 "read_site_identity",
-                return_value=types.SimpleNamespace(role="coordinator"),
+                return_value=types.SimpleNamespace(role="main"),
             ),
             mock.patch.object(cli, "_site_store", return_value=store),
             mock.patch.object(

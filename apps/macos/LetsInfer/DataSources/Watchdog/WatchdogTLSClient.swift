@@ -35,7 +35,7 @@ enum WatchdogClientError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .credentialsUnavailable:
-            "No paired Let's Infer controller identity is available for this site."
+            "No paired Let's Infer controller identity is available for this node."
         case .invalidCredentials:
             "The paired Let's Infer controller identity could not be loaded."
         case .invalidCertificate:

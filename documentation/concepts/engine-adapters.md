@@ -16,13 +16,13 @@ packages. It launches the fixed executable:
 ```
 
 The adapter receives the verified private execution view generated from
-`runtime.json` and implements Engine protocol 1. Core owns:
+`runtime.json` and implements Engine protocol 2. Core owns:
 
 - target detection and runtime selection;
 - OCI and model acquisition and verification;
-- secrets, API keys, gateway, and site topology;
+- secrets, API keys, gateway, and node topology;
 - admission, queuing, pressure state, and safety policy;
-- Watchdog and normalized site telemetry;
+- Watchdog and normalized node telemetry;
 - benchmark orchestration and evidence;
 - lifecycle, update, rollback, and audit.
 
@@ -37,7 +37,7 @@ The Engine OCI owns:
 - model-specific parsers and generation behavior;
 - engine patches, plugins, and compiled kernels.
 
-## Protocol 1
+## Protocol 2
 
 The adapter must expose:
 
@@ -86,7 +86,7 @@ compatibility branches to core.
 
 Before you qualify a runtime:
 
-1. run `engine-adapter verify --protocol 1` in the exact image;
+1. run `engine-adapter verify --protocol 2` in the exact image;
 2. verify exact model identity and token counting;
 3. verify health and normalized telemetry through capture and replay;
 4. verify admission and structured too-large-request errors;

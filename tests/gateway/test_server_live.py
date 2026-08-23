@@ -159,7 +159,9 @@ class LiveGatewayTests(unittest.TestCase):
             store.set_alias("fixture", MODEL)
             for index, _backend in enumerate(self.backends):
                 insert_member(store, f"{index + 1:032x}")
-            store.set_placement(self._placement(self.backends))
+            self.service_id = store.ensure_model_service(MODEL)["service_id"]
+            for placement in self._placements(self.backends):
+                store.set_placement(placement)
 
         self.gateway = server.GatewayServer(
             ("127.0.0.1", 0),
@@ -207,12 +209,21 @@ class LiveGatewayTests(unittest.TestCase):
         self.gateway_worker.start()
         self.assertEqual(self.gateway.server_port, port)
 
-    def _placement(self, backends: list[_Backend]) -> dict:
+    def _placements(self, backends: list[_Backend]) -> list[dict]:
         members = [f"{index + 1:032x}" for index in range(len(backends))]
-        endpoints = []
+        placements = []
         for index, backend in enumerate(backends):
-            endpoints.append(
-                {
+            placements.append({
+                "placement_id": f"{index + 1:032x}",
+                "service_id": self.service_id,
+                "model": MODEL,
+                "runtime": f"{MODEL}/fixture/target@1.0.0",
+                "target": "fixture-target",
+                "strategy": "single",
+                "state": "running",
+                "topology_sha256": f"{index + 1:064x}",
+                "members": [members[index]],
+                "endpoints": [{
                     "member_id": members[index],
                     "url": f"http://127.0.0.1:{backend.server_port}",
                     "credential_file": str(self.backend_token),
@@ -225,23 +236,13 @@ class LiveGatewayTests(unittest.TestCase):
                     "memory_pressure": False,
                     "temperature_c": 40.0 + index,
                     "prefix_keys": ["shared"] if index else [],
-                }
-            )
-        return {
-            "placement_id": f"{1:032x}",
-            "model": MODEL,
-            "runtime": f"{MODEL}/fixture/target@1.0.0",
-            "target": "fixture-target",
-            "strategy": "replicated",
-            "state": "running",
-            "topology_sha256": f"{1:064x}",
-            "members": members,
-            "endpoints": endpoints,
-            "capacity": {
-                "max_active_requests": len(backends),
-                "max_context_tokens": 256,
-            },
-        }
+                }],
+                "capacity": {
+                    "max_active_requests": 1,
+                    "max_context_tokens": 256,
+                },
+            })
+        return placements
 
     def _request(
         self,
@@ -457,7 +458,7 @@ class LiveGatewayTests(unittest.TestCase):
 
         for path in (
             "/control/v1/site",
-            "/site/v1/facts",
+            "/node/v1/facts",
             "/pair",
             "/watchdog/v1/status",
             "/v1/letsinfer/token-count",
@@ -551,9 +552,9 @@ class LiveGatewayTests(unittest.TestCase):
         backend = self.backends[0]
         backend.mode = "stream"
         with state.SiteStore(identity=self.identity) as store:
-            placement = self._placement(self.backends)
-            placement["runtime"] = f"{MODEL}/example-engine/target@1"
-            store.set_placement(placement)
+            for placement in self._placements(self.backends):
+                placement["runtime"] = f"{MODEL}/example-engine/target@1"
+                store.set_placement(placement)
         self.gateway.policy.reload(force=True)
 
         result: list[tuple[int, bytes]] = []

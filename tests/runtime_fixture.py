@@ -37,7 +37,7 @@ def runtime_candidate() -> dict[str, Any]:
         },
         "engine": {
             "id": "example-engine",
-            "protocol": {"version": 1},
+            "protocol": {"version": 2},
             "oci": {
                 "reference": "registry.example/engine@sha256:" + "1" * 64,
                 "immutable_id": "sha256:" + "2" * 64,
