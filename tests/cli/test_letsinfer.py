@@ -8,6 +8,7 @@ import contextlib
 import io
 import pathlib
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -49,6 +50,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 mock.patch.object(
                     cli, "_service_state", return_value=("enabled", "active", 1024)
                 ),
+                mock.patch.object(cli, "wait_for_core_plane_ready"),
                 mock.patch.object(cli, "render_engine_service", return_value="unit\n"),
                 mock.patch.object(cli, "render_gateway_service", return_value="unit\n"),
                 mock.patch.object(cli, "render_user_service", return_value="unit\n"),
@@ -102,6 +104,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 mock.patch.object(
                     cli, "_service_state", return_value=("enabled", "active", 1024)
                 ),
+                mock.patch.object(cli, "wait_for_core_plane_ready"),
                 mock.patch.object(cli, "container_inspect", return_value=None),
                 mock.patch.object(cli, "render_engine_service", return_value="unit\n"),
                 mock.patch.object(cli, "render_gateway_service", return_value="unit\n"),
@@ -121,6 +124,84 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 )
 
             self.assertEqual(events, ["selection", "restore"])
+
+    def test_service_placement_uses_gateway_runtime_contract(self) -> None:
+        identity = types.SimpleNamespace(member_id="1" * 32)
+        adapter = types.SimpleNamespace(
+            name="example-engine",
+            token_count_path="/v1/count_tokens",
+            token_count_protocol="engine-rendered-chat-count-v1",
+        )
+        config = {
+            "placement_id": "2" * 32,
+            "placement_strategy": "single",
+            "placement_members": [identity.member_id],
+            "topology_sha256": "3" * 64,
+            "runtime_version": "1.2.3",
+            "runtime_digest": "4" * 64,
+            "engine_port": 18000,
+            "engine_api_key_file": "/secrets/engine.key",
+            "tls_cert_file": "/config/server.crt",
+            "release": "runtime-release",
+            "manifest_sha256": "5" * 64,
+        }
+        manifest = {
+            "model": {"alias": "example-model"},
+            "serving": {
+                "max_connections": 16,
+                "max_active_requests": 8,
+                "max_context_tokens": 65536,
+            },
+        }
+        with (
+            mock.patch.object(cli, "read_site_identity", return_value=identity),
+            mock.patch.object(cli, "adapter_for", return_value=adapter),
+            mock.patch.object(
+                cli, "target_contract", return_value={"id": "fixture-target"}
+            ),
+        ):
+            placement = cli.service_placement_document(config, manifest, "running")
+
+        self.assertEqual(
+            placement["runtime"],
+            "example-model/example-engine/fixture-target@1.2.3@sha256:" + "4" * 64,
+        )
+
+    def test_core_prune_retains_installed_runtime_and_rollback_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            control = root / "control"
+            current = control / ("1" * 64)
+            previous = control / ("2" * 64)
+            receipt = {
+                "control_root": str(current),
+                "history": [{"control_root": str(previous)}],
+            }
+            with (
+                mock.patch.object(cli, "default_control_parent", return_value=control),
+                mock.patch.object(
+                    cli, "default_service_config_path", return_value=root / "service.json"
+                ),
+                mock.patch.object(
+                    cli,
+                    "qualification_service_config_path",
+                    return_value=root / "qualification.json",
+                ),
+                mock.patch.object(
+                    cli, "default_engine_group_root", return_value=root / "groups"
+                ),
+                mock.patch.object(cli, "selections", return_value=[receipt]),
+                mock.patch.object(
+                    cli, "core_watchdog_source_identity", return_value="3" * 64
+                ),
+            ):
+                controls, watchdogs = cli._core_artifact_references()
+
+            self.assertEqual(
+                controls,
+                {current.resolve(strict=False), previous.resolve(strict=False)},
+            )
+            self.assertEqual(watchdogs, {"3" * 64})
 
     def test_tls_generation_supports_split_config_and_secret_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

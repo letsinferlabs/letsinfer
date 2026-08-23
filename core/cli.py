@@ -4929,11 +4929,12 @@ def service_placement_document(
         "temperature_c": -1,
         "prefix_keys": [],
     }
+    runtime_version = config.get("runtime_version", config["release"])
+    runtime_digest = config.get("runtime_digest", config["manifest_sha256"])
     runtime_identity = (
-        f"{config['runtime_name']}@{config['runtime_version']}"
-        f"@sha256:{config['runtime_digest']}"
-        if "runtime_name" in config
-        else f"{config['release']}@sha256:{config['manifest_sha256']}"
+        f"{manifest['model']['alias']}/{adapter.name}/"
+        f"{target_contract(manifest)['id']}@{runtime_version}"
+        f"@sha256:{runtime_digest}"
     )
     return {
         "placement_id": config["placement_id"],
@@ -6510,6 +6511,7 @@ def install_user_service(
                 )
             run_passthrough(["systemctl", "--user", "start", ENGINE_SERVICE_NAME])
             run_passthrough(["systemctl", "--user", "start", GATEWAY_SERVICE_NAME])
+            wait_for_core_plane_ready(include_gateway=True)
             run(["systemctl", "--user", "restart", RECOVERY_TIMER_NAME])
     except BaseException as failure:
         rollback_errors: list[str] = []
@@ -11093,6 +11095,24 @@ def _core_artifact_references() -> tuple[set[pathlib.Path], set[str]]:
                 pass
             else:
                 control_roots.add(source)
+    try:
+        runtime_receipts = selections()
+    except RuntimePackError as error:
+        raise LetsInferError(str(error)) from error
+    for receipt in runtime_receipts:
+        retained = [receipt, *receipt.get("history", [])]
+        for record in retained:
+            if not isinstance(record, dict):
+                continue
+            source_value = record.get("control_root")
+            if not isinstance(source_value, str):
+                continue
+            source = pathlib.Path(source_value).expanduser().resolve(strict=False)
+            try:
+                source.relative_to(control_parent)
+            except ValueError:
+                continue
+            control_roots.add(source)
     return control_roots, watchdog_identities
 
 
