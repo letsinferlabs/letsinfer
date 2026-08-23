@@ -53,6 +53,20 @@ class _Store:
 
 
 class EngineGroupInstallTests(unittest.TestCase):
+    def test_site_control_endpoint_preserves_ports_and_brackets_ipv6(self) -> None:
+        self.assertEqual(
+            cli._site_control_endpoint("child.example:9770"),
+            "https://child.example:9770",
+        )
+        self.assertEqual(
+            cli._site_control_endpoint("2001:db8::1"),
+            "https://[2001:db8::1]:9770",
+        )
+        self.assertEqual(
+            cli._site_control_endpoint("[2001:db8::1]:9771"),
+            "https://[2001:db8::1]:9771",
+        )
+
     def test_normal_install_delegates_to_signed_catalog_node_planner(self) -> None:
         arguments = argparse.Namespace(
             model="example-model",

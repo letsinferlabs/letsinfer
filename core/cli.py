@@ -13522,7 +13522,18 @@ def member_approve_command(arguments: argparse.Namespace) -> int:
 def _site_control_endpoint(address: str) -> str:
     if "://" in address:
         return address
-    host = f"[{address}]" if ":" in address and not address.startswith("[") else address
+    if address.startswith("["):
+        parsed = urllib.parse.urlsplit(f"https://{address}")
+        return (
+            f"https://{address}"
+            if parsed.port is not None
+            else f"https://{address}:{SITE_CONTROL_PORT}"
+        )
+    if address.count(":") == 1:
+        _host, separator, port = address.rpartition(":")
+        if separator and port.isdecimal():
+            return f"https://{address}"
+    host = f"[{address}]" if ":" in address else address
     return f"https://{host}:{SITE_CONTROL_PORT}"
 
 
