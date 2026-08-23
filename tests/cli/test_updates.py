@@ -84,8 +84,7 @@ def catalog(version: str = "0.1.0-rc.11", digest: str = NEXT_RUNTIME_DIGEST):
                     "memory": {"topology": "unified", "minimum_total_gib": 100},
                     "placement": {
                         "strategy": "single",
-                        "member_count": 1,
-                        "engine_strategy": "single",
+                        "node_count": 1,
                         "interconnect": {
                             "kind": "any",
                             "rdma_required": False,

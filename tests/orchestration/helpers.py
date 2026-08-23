@@ -38,7 +38,7 @@ def release_identity(
     }
 
 
-def parallel_contract(member_count: int = 3) -> dict[str, object]:
+def parallel_contract(node_count: int = 3) -> dict[str, object]:
     readiness = {
         "kind": "exec",
         "command": ["/opt/runtime/ready"],
@@ -47,31 +47,35 @@ def parallel_contract(member_count: int = 3) -> dict[str, object]:
         "retries": 90,
     }
     return {
-        "schema_version": 2,
-        "strategy": "parallel",
-        "member_count": member_count,
-        "engine_strategy": "tensor-parallel",
+        "schema_version": 3,
         "failure_policy": "whole-group",
-        "minimum_healthy_members": member_count,
-        "startup_order": ["engine-member", "engine-coordinator"],
-        "roles": {
-            "engine-member": {
-                "assignment": "members",
+        "endpoint_owner": "task-0",
+        "startup_order": [
+            [f"task-{index}" for index in range(1, node_count)],
+            ["task-0"],
+        ] if node_count > 1 else [["task-0"]],
+        "tasks": [
+            {
+                "task_id": f"task-{index}",
                 "launcher": "runtime-command",
                 "port_count": 4,
-                "command": ["/opt/runtime/launch", "child"],
-                "environment": {"ENGINE_LOG_LEVEL": "info"},
-                "inference_endpoint": False,
+                "command": ["/opt/runtime/launch", f"task-{index}"],
+                "environment": {"ENGINE_LOG_LEVEL": "info"} if index else {},
                 "readiness": copy.deepcopy(readiness),
-            },
-            "engine-coordinator": {
-                "assignment": "engine-coordinator",
-                "launcher": "runtime-command",
-                "port_count": 4,
-                "command": ["/opt/runtime/launch", "main"],
-                "environment": {},
-                "inference_endpoint": True,
-                "readiness": copy.deepcopy(readiness),
-            },
-        },
+            }
+            for index in range(node_count)
+        ],
     }
+
+
+def parallel_connections(member_ids: tuple[str, ...]) -> list[dict[str, object]]:
+    return [
+        {
+            "nodes": sorted((member_ids[index - 1], member_ids[index])),
+            "kind": "connectx",
+            "speed_mbps": 200_000,
+            "mtu": 9000,
+            "rdma": True,
+        }
+        for index in range(1, len(member_ids))
+    ]

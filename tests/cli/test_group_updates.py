@@ -61,7 +61,7 @@ def _group(
         "updated_at_unix": updated_at_unix,
         "plan": {
             "release": dict(release),
-            "members": [{"member_id": member_digit * 32}],
+            "resources": [{"node_id": member_digit * 32}],
         },
     }
 

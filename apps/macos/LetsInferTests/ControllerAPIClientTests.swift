@@ -124,6 +124,29 @@ struct ControllerAPIClientTests {
               "target":"dgx-spark",
               "strategy":"single",
               "state":"running",
+              "group_id":"77777777777777777777777777777777",
+              "endpoint_owner":"task-0",
+              "resource_assignments":[{
+                "node_id":"33333333333333333333333333333333",
+                "address":"homeai.local:9770",
+                "task_id":"task-0",
+                "port_base":18000,
+                "port_count":2,
+                "device_uuids":["GPU-11111111-2222-3333-4444-555555555555"]
+              }],
+              "task_states":[{
+                "node_id":"33333333333333333333333333333333",
+                "task_id":"task-0",
+                "state":"running",
+                "error":null
+              }],
+              "connections":[{
+                "nodes":["33333333333333333333333333333333","77777777777777777777777777777777"],
+                "kind":"connectx",
+                "speed_mbps":200000,
+                "mtu":9000,
+                "rdma":true
+              }],
               "members":["33333333333333333333333333333333"],
               "endpoints":[{
                 "member_id":"33333333333333333333333333333333",
@@ -167,6 +190,10 @@ struct ControllerAPIClientTests {
         #expect(site.site.currentPlacements.count == 1)
         #expect(site.site.currentPlacements.first?.state == "running")
         #expect(site.site.currentPlacements.first?.capacity?.maxActiveRequests == 10)
+        #expect(site.site.currentPlacements.first?.endpointOwner == "task-0")
+        #expect(site.site.currentPlacements.first?.resourceAssignments.first?.taskID == "task-0")
+        #expect(site.site.currentPlacements.first?.taskStates.first?.state == "running")
+        #expect(site.site.currentPlacements.first?.connections.first?.rdma == true)
         #expect(site.site.activeMemberCount == 1)
         #expect(site.site.exposure.state == "disabled")
         #expect(site.site.members.first?.facts?.inventory?.hostname == "homeai")

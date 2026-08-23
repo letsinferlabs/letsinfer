@@ -16,11 +16,11 @@ manifest. After verification and installation, core generates its private
 
 ## Required schema
 
-Only runtime schema 4 is accepted. The top-level fields are:
+Only runtime schema 5 is accepted. The top-level fields are:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "id": "sglang--owner--model--dgx-spark",
   "version": "1.0.0",
   "logical_model": "model",
@@ -135,6 +135,21 @@ Describe your target by capabilities: platform, accelerator vendor and
 architecture, device count and partitioning, memory topology and minimum, and
 placement/interconnect requirements. Do not use a hostname as a target.
 
+```json
+{
+  "placement": {
+    "strategy": "parallel",
+    "node_count": 2,
+    "interconnect": {
+      "kind": "connectx",
+      "rdma_required": true,
+      "minimum_speed_mbps": 100000,
+      "minimum_mtu": 9000
+    }
+  }
+}
+```
+
 Set `target.placement.strategy` to `single` for an independent group. Core may
 replicate that group across compatible nodes and load-balance the resulting
 endpoints. Set it to `parallel` only when this runtime qualifies an exact TP/PP
@@ -143,9 +158,53 @@ interconnect requirements, kernels, and adapter inputs; core allocates the
 declared devices and treats the complete group as one endpoint.
 
 Use `container` for measured resource and startup bounds. Use `serving` for
-the measured maximum connections, active requests, context, and optional
-orchestration. Use `cache` for the selected provider and
+the measured maximum connections, active requests, and context. Use `cache`
+for the selected provider and
 replay contract; its implementation stays inside the Engine OCI.
+
+## Parallel execution
+
+An independent `single` target omits `orchestration`. A `parallel` target
+declares one bounded generic task per required node:
+
+```json
+{
+  "orchestration": {
+    "schema_version": 3,
+    "failure_policy": "whole-group",
+    "endpoint_owner": "task-0",
+    "startup_order": [["task-1"], ["task-0"]],
+    "tasks": [
+      {
+        "task_id": "task-0",
+        "launcher": "runtime-command",
+        "port_count": 4,
+        "command": ["/opt/runtime/launch", "task-0"],
+        "environment": {},
+        "readiness": {
+          "kind": "exec",
+          "command": ["/opt/runtime/ready"],
+          "interval_seconds": 2,
+          "timeout_seconds": 3,
+          "retries": 90
+        }
+      }
+    ]
+  }
+}
+```
+
+For a real two-node candidate, include both `task-0` and `task-1`. Core maps
+tasks deterministically to authenticated nodes, allocates exact GPU UUIDs and
+ports, and supplies verified addresses and connection facts. Tasks in one
+startup phase launch concurrently; later phases wait for complete readiness.
+The endpoint is published only after every required task is ready.
+
+The task identifier is deliberately opaque. Your Engine OCI maps it to any TP,
+PP, expert, sequence, data, or hybrid strategy; ranks, stages, rendezvous,
+collectives, and engine flags never enter core schemas. A one-node parallel
+runtime may receive multiple GPU UUIDs in `task-0`. Complete parallel groups
+may be replicated behind the gateway exactly like independent groups.
 
 ## Benchmark record
 
@@ -158,8 +217,8 @@ schema-4 benchmark records. The trusted bot aggregates accepted records into
 ## Deterministic runtime artifact
 
 `letsinfer pack CANDIDATE --output FILE` creates a deterministic artifact using
-runtime artifact schema 4 and media type
-`application/vnd.letsinfer.runtime.v4+tar`. The generated
+runtime artifact schema 5 and media type
+`application/vnd.letsinfer.runtime.v5+tar`. The generated
 `letsinfer-runtime.json` descriptor records every path, byte length, normalized
 mode, and SHA-256. Paths are sorted; ownership and timestamps are normalized.
 
