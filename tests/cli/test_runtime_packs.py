@@ -377,7 +377,6 @@ class RuntimePackTests(unittest.TestCase):
             "id": "example-engine--example--model--fixture-unified",
             "version": "1.2.3",
             "logical_model": "example-model",
-            "status": "candidate",
             "target": {
                 "id": "fixture-unified",
                 "platform": "linux/arm64",
@@ -432,13 +431,11 @@ class RuntimePackTests(unittest.TestCase):
                 "config": {},
             },
             "serving": {
-                "qualified": False,
-                "blocked_by": "fixture-qualification",
                 "max_connections": 8,
                 "max_active_requests": 4,
                 "max_context_tokens": 32768,
             },
-            "benchmark": {"contract": self._benchmark(), "record": None},
+            "benchmark": {"contract": self._benchmark()},
         }
         (source / "runtime.json").write_text(
             json.dumps(config), encoding="utf-8"
@@ -620,24 +617,16 @@ class RuntimePackTests(unittest.TestCase):
             with self.assertRaisesRegex(runtime_packs.RuntimePackError, "mode must be"):
                 runtime_packs.verify_descriptor(source)
 
-    def test_pack_rejects_invalid_public_benchmark_record(self) -> None:
+    def test_public_benchmark_record_is_not_executable_pack_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             source = self._source(root)
             benchmark_path = source / "benchmark.json"
             benchmark_path.write_text("{}\n", encoding="utf-8")
-            config_path = source / "runtime.json"
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["benchmark"]["record"] = {
-                "path": "benchmark.json",
-                "sha256": runtime_packs.sha256_file(benchmark_path),
-                "id": "0" * 64,
-            }
-            config_path.write_text(json.dumps(config), encoding="utf-8")
-            with self.assertRaisesRegex(
-                runtime_packs.RuntimePackError, "invalid runtime benchmark record"
-            ):
-                runtime_packs.build_archive(source, root / "runtime.letsinfer")
+            archive = root / "runtime.letsinfer"
+            runtime_packs.build_archive(source, archive)
+            with runtime_packs.materialize(archive) as installed:
+                self.assertFalse((installed.root / "benchmark.json").exists())
 
     def test_archive_member_count_is_bounded_during_extraction(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -680,6 +669,7 @@ class RuntimePackTests(unittest.TestCase):
                     hardware_sha, "1" * 64, installed_at_ns
                 ),
                 "policy": "recommended",
+                "authorization": {"qualified": True, "authority": "signed-catalog"},
                 "source": "registry/one@sha256:" + "1" * 64,
                 "history": [],
             }
@@ -729,6 +719,7 @@ class RuntimePackTests(unittest.TestCase):
                     hardware_sha, "1" * 64, installed_at_ns
                 ),
                 "policy": "recommended",
+                "authorization": {"qualified": True, "authority": "signed-catalog"},
                 "source": "registry/one@sha256:" + "1" * 64,
                 "history": [],
             }
@@ -775,6 +766,7 @@ class RuntimePackTests(unittest.TestCase):
                     hardware_sha, "1" * 64, installed_at_ns
                 ),
                 "policy": "recommended",
+                "authorization": {"qualified": True, "authority": "signed-catalog"},
                 "source": "registry/one@sha256:" + "1" * 64,
                 "history": [],
             }
@@ -839,11 +831,9 @@ class RuntimePackTests(unittest.TestCase):
                                         "latest": "1.2.3",
                                         "releases": {
                                             "1.2.3": {
-                                                "authors": ["example"],
+                                                "authors": [{"github_login": "example", "github_id": 1, "github_type": "User"}],
                                                 "license": "MIT",
                                                 "source": "ghcr.io/example/model@sha256:" + "a" * 64,
-                                                "qualified": True,
-                                                "revoked": False,
                                                 "engine": "example-engine",
                                                 "engine_oci": "ghcr.io/example/engine@sha256:" + "b" * 64,
                                                 "model_uri": "hf://example/model",
@@ -851,8 +841,16 @@ class RuntimePackTests(unittest.TestCase):
                                                     "id": "c" * 64,
                                                     "suite": "letsinfer-code-prose-v1",
                                                     "score": 1.0,
-                                                    "evidence": "ghcr.io/example/benchmark@sha256:" + "d" * 64,
                                                 },
+                                                "provenance": {
+                                                    "method": "maintainer-qualified-pre-community-v1",
+                                                    "repository": "letsinferlabs/runtimes",
+                                                    "pull_request": 1,
+                                                    "pull_request_url": "https://github.com/letsinferlabs/runtimes/pull/1",
+                                                    "proposal_head_sha": "e" * 40,
+                                                    "qualified_commit_sha": "f" * 40,
+                                                },
+                                                "verification": {"method": "maintainer-qualified-pre-community-v1", "verifiers": []},
                                             }
                                         },
                                     }
@@ -975,11 +973,9 @@ class RuntimePackTests(unittest.TestCase):
                                     "latest": "1.0.0",
                                     "releases": {
                                         "1.0.0": {
-                                            "authors": ["example"],
+                                            "authors": [{"github_login": "example", "github_id": 1, "github_type": "User"}],
                                             "license": "MIT",
                                             "source": "registry.example/runtime@sha256:" + "a" * 64,
-                                            "qualified": True,
-                                            "revoked": False,
                                             "engine": "example-engine",
                                             "engine_oci": "registry.example/engine@sha256:" + "b" * 64,
                                             "model_uri": "hf://example/model",
@@ -987,8 +983,16 @@ class RuntimePackTests(unittest.TestCase):
                                                 "id": "c" * 64,
                                                 "suite": "letsinfer-code-prose-v1",
                                                 "score": 1.0,
-                                                "evidence": "registry.example/benchmark@sha256:" + "d" * 64,
                                             },
+                                            "provenance": {
+                                                "method": "maintainer-qualified-pre-community-v1",
+                                                "repository": "letsinferlabs/runtimes",
+                                                "pull_request": 1,
+                                                "pull_request_url": "https://github.com/letsinferlabs/runtimes/pull/1",
+                                                "proposal_head_sha": "e" * 40,
+                                                "qualified_commit_sha": "f" * 40,
+                                            },
+                                            "verification": {"method": "maintainer-qualified-pre-community-v1", "verifiers": []},
                                         }
                                     },
                                 }

@@ -155,13 +155,23 @@ def active_state() -> dict[str, Any] | None:
 
 
 def _base_state(
-    *, job_id: str, runtime: str, command: Sequence[str], output_directory: str
+    *,
+    job_id: str,
+    runtime: str,
+    command: Sequence[str],
+    output_directory: str,
+    kind: str = "benchmark",
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if kind not in {"benchmark", "verification"}:
+        raise BenchmarkJobError(f"unsupported benchmark job kind: {kind}")
     return {
         "schema_version": SCHEMA_VERSION,
         "job_id": job_id,
         "state": "starting",
         "runtime": runtime,
+        "kind": kind,
+        "metadata": dict(metadata or {}),
         "pid": 0,
         "started_unix_ns": time.time_ns(),
         "updated_unix_ns": time.time_ns(),
@@ -173,7 +183,12 @@ def _base_state(
 
 
 def start(
-    command: Sequence[str], *, runtime: str, output_directory: str
+    command: Sequence[str],
+    *,
+    runtime: str,
+    output_directory: str,
+    kind: str = "benchmark",
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Start one detached worker, refusing a second live benchmark."""
     with _locked():
@@ -189,6 +204,8 @@ def start(
             runtime=runtime,
             command=worker_command,
             output_directory=output_directory,
+            kind=kind,
+            metadata=metadata,
         )
         _write_json(state_path(), state)
         if progress_path().exists():
@@ -219,6 +236,27 @@ def start(
         current.update(pid=process.pid, updated_unix_ns=time.time_ns())
         _write_json(state_path(), current)
         return current
+
+
+def update_progress(job_id: str, value: dict[str, Any]) -> dict[str, Any]:
+    """Atomically publish bounded progress for the active job owner."""
+
+    if not isinstance(value, dict):
+        raise BenchmarkJobError("benchmark progress must be an object")
+    document = {"schema_version": SCHEMA_VERSION, **value}
+    encoded = json.dumps(document, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    if len(encoded) > 64 << 10:
+        raise BenchmarkJobError("benchmark progress exceeds 64 KiB")
+    with _locked():
+        state = read_state()
+        if state is None or state.get("job_id") != job_id:
+            raise BenchmarkJobError("benchmark job identity changed")
+        if state.get("state") not in ACTIVE_STATES:
+            raise BenchmarkJobError("benchmark job is no longer active")
+        _write_json(progress_path(), document)
+    return document
 
 
 def mark(job_id: str, state_name: str, *, error: str | None = None) -> dict[str, Any]:
