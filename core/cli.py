@@ -10926,7 +10926,7 @@ def update_core(arguments: argparse.Namespace) -> int:
         elif not launcher.is_file():
             raise LetsInferError(f"updated core launcher is unavailable: {launcher}")
         run_passthrough([str(launcher), "core-rebind"])
-        run_passthrough([str(launcher), "--help"])
+        run([str(launcher), "--help"])
         run_passthrough([str(launcher), "core-prune", "--quiet"])
         return 0
 
@@ -11131,13 +11131,13 @@ def _core_user_artifact_prune_plan() -> dict[str, list[pathlib.Path]]:
                 raise LetsInferError(f"control bundle entry is unsafe: {candidate}")
             if not SHA256_RE.fullmatch(candidate.name):
                 continue
-            releases = sorted((candidate / "releases").glob("*.json"))
-            if len(releases) != 1:
+            runtime_manifest = candidate / "runtime-execution.json"
+            if runtime_manifest.is_symlink() or not runtime_manifest.is_file():
                 raise LetsInferError(
-                    f"stale control bundle has an invalid release set: {candidate}"
+                    f"stale control bundle has no trusted runtime manifest: {candidate}"
                 )
-            manifest_sha = sha256_file(releases[0])
-            validate_control_bundle(candidate, releases[0], manifest_sha)
+            manifest_sha = sha256_file(runtime_manifest)
+            validate_control_bundle(candidate, runtime_manifest, manifest_sha)
             stale_controls.append(candidate)
 
     stale_watchdogs: list[pathlib.Path] = []
