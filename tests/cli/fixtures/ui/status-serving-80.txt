@@ -1,0 +1,45 @@
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Home  ✓  Uptime —                                      ϟ  LET'S INFER   │
+│  Local inference node · local · node                                     │
+│                                                                          │
+│  State        ✓  SERVING                                                 │
+│  Model        deepseek-v4-flash557K context                              │
+│  Engine       dwarfstar                                                  │
+│  Version      0.11.0-rc.3                                                │
+│  API          ✓  homeai.local:8000/v1                                    │
+│  Guard        ✓                                                          │
+│                                                                          │
+│  Request path                                                            │
+│  ○  CLIENT                                                               │
+│  │                                                                       │
+│  ●  GATEWAY   API Ready  homeai.local:8000/v1                            │
+│  │                                                                       │
+│  ●  RUNTIME   SERVING    deepseek-v4-flash · dwarfstar                   │
+│  │                                                                       │
+│  ●  TARGET    READY      dgx-spark                                       │
+│                                                                          │
+│  Scheduler  128 max · dynamic admission                                  │
+│  Active       2 requests                                                 │
+│  Queue        1 waiting                                                  │
+│  Allocated    128 / 128                                                  │
+│                                                                          │
+│  Performance                                                             │
+│  Tokens       58.9 tok/s    27.1 decode · 219.4 prefill                  │
+│  Latency      —             — prefix hit                                 │
+│  Context      — / 557K      live usage unavailable                       │
+│  Requests     2 active · 1 queued                                        │
+│  Watchdog     19.0 / 30 MiB                                              │
+│                                                                          │
+│  System  last 5 min · 1 sec                                              │
+│  GPU          —             ························                     │
+│  Unified mem  —             ························                     │
+│  CPU          —             ························                     │
+│  NVMe         —             ························                     │
+│  Power        —             ························                     │
+│  Network      —             ························                     │
+│                                                                          │
+│  Temperature  last 5 min · 1 sec                                         │
+│  GPU          —             ························                     │
+│  CPU          —             ························                     │
+│  NVMe         —             ························                     │
+└──────────────────────────────────────────────────────────────────────────┘

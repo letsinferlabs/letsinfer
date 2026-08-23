@@ -127,10 +127,16 @@ from .runtime_packs import (
     verify_descriptor,
     write_selection,
 )
-from .updates import Component, UpdateManager, UpdatePoller
+from .updates import (
+    Component,
+    UpdateManager,
+    UpdatePoller,
+    request_background_refresh,
+)
 from .updates.manager import UpdateError, compare_versions
 from .catalog import CatalogError, CatalogManager
-from . import benchmark_jobs, benchmark_verification, ui
+from . import benchmark_jobs, benchmark_verification, command_ui, ui
+from .ui_contracts import OutputContract, ProgressKind, SurfaceKind, contract as ui_contract
 from .state_plane import runtime_lifecycle as derive_runtime_lifecycle
 from .platform import macos as macos_services
 from .site.state import (
@@ -266,9 +272,10 @@ CONTROLLER_CERTIFICATE_DAYS = 36500
 CONTROLLER_MAX = 64
 MIN_API_KEY_BYTES = 32
 
-# Full branding is reserved for help and health/status views. Public mutations
-# use one compact, interactive stderr activity/result line while their durable
-# result (including one-time secrets) remains byte-for-byte on stdout.
+# Every public human command opens with the same lockup and palette as status.
+# Long work adds a delayed activity indicator, while JSON, redirected output,
+# internal service commands, raw logs/exports, and one-time secrets retain
+# stable byte contracts. Status and benchmark own their complete live surfaces.
 ACTION_PROGRESS: Mapping[str, tuple[str, str]] = {
     "setup": ("Creating the node", "Node ready"),
     "update": ("Updating Let's Infer core", "Core updated"),
@@ -308,6 +315,130 @@ ACTION_PROGRESS: Mapping[str, tuple[str, str]] = {
     "uninstall": ("Removing the service", "Service removed"),
 }
 
+READ_PROGRESS: Mapping[str, tuple[str, str]] = {
+    "node.status": ("Reading the node identity", "Node identity loaded"),
+    "hardware": ("Inspecting local hardware", "Hardware inspected"),
+    "update.check": ("Checking for updates", "Update check complete"),
+    "topology.show": ("Reading the verified topology", "Topology loaded"),
+    "child.list": ("Reading node membership", "Node membership loaded"),
+    "alias.list": ("Reading model aliases", "Model aliases loaded"),
+    "list": ("Loading available runtimes", "Available runtimes loaded"),
+    "runtimes": ("Loading installed runtimes", "Installed runtimes loaded"),
+    "inspect": ("Inspecting the runtime", "Runtime inspected"),
+    "doctor": ("Checking node readiness", "Readiness check complete"),
+    "exposure.status": ("Checking public exposure", "Exposure checked"),
+    "controllers.list": ("Reading paired controllers", "Controllers loaded"),
+    "key.list": ("Reading API keys", "API keys loaded"),
+    "key.show": ("Reading the API key policy", "API key policy loaded"),
+    "audit.list": ("Reading the audit chain", "Audit events loaded"),
+    "audit.show": ("Reading the audit event", "Audit event loaded"),
+    "audit.verify": ("Verifying the audit chain", "Audit chain verified"),
+    "audit.export": ("Exporting the audit chain", "Audit chain exported"),
+}
+
+# Named progress is handler-owned only when the handler can advance every
+# declared boundary at the point where it actually completes. ``update`` owns
+# its established StepProgress directly; these handlers use
+# ``_command_step_progress`` below. Everything else uses one truthful spinner.
+HANDLER_STEP_PROGRESS = frozenset({"topology.probe"})
+POST_PROMPT_PROGRESS = frozenset(
+    {"node.move", "child.join", "install", "upgrade", "rollback", "pair", "uninstall"}
+)
+
+
+def _human_presenter(
+    stream: Any = None,
+) -> command_ui.CommandUI | None:
+    """Return the shared presenter only when the complete human surface is a TTY."""
+
+    target = sys.stdout if stream is None else stream
+    if not (
+        ui.Terminal(sys.stdout).interactive
+        and ui.Terminal(sys.stderr).interactive
+        and ui.Terminal(target).interactive
+    ):
+        return None
+    return command_ui.CommandUI(target)
+
+
+def _raw_ui_variant(presentation: Any, arguments: argparse.Namespace) -> bool:
+    """Resolve an explicitly declared raw selector without inference."""
+
+    for selector in presentation.raw_variants:
+        name, separator, expected = selector.partition("=")
+        if not separator:
+            raise LetsInferError(
+                f"invalid raw UI selector for {presentation.action_id}: {selector}"
+            )
+        actual = getattr(arguments, name, None)
+        wanted: object
+        if expected == "true":
+            wanted = True
+        elif expected == "false":
+            wanted = False
+        elif expected == "none":
+            wanted = None
+        else:
+            wanted = expected
+        if actual == wanted:
+            return True
+    return False
+
+
+def _command_step_progress(arguments: argparse.Namespace) -> ui.StepProgress:
+    """Build a handler-owned step surface without touching machine output."""
+
+    presentation = ui_contract(arguments.action_id)
+    if presentation.progress is not ProgressKind.STEPS:
+        raise RuntimeError(
+            f"{arguments.action_id} does not declare handler-owned step progress"
+        )
+    terminal = ui.Terminal(sys.stderr)
+    human = (
+        not bool(getattr(arguments, "json", False))
+        and not _raw_ui_variant(presentation, arguments)
+        and _human_presenter() is not None
+    )
+    if not human:
+        terminal.interactive = False
+        terminal.color = False
+        terminal.unicode = False
+    return ui.StepProgress(
+        terminal,
+        presentation.steps,
+        section=presentation.action_id,
+        show_header=False,
+    )
+
+
+def _command_activity(
+    arguments: argparse.Namespace,
+    message: str | None = None,
+    *,
+    action_id: str | None = None,
+) -> ui.Spinner:
+    """Return a handler-owned spinner which never contaminates machine output."""
+
+    resolved_action_id = action_id or getattr(arguments, "action_id", None)
+    if not isinstance(resolved_action_id, str):
+        raise RuntimeError("handler-owned activity requires an action identifier")
+    presentation = ui_contract(resolved_action_id)
+    progress_message = ACTION_PROGRESS.get(resolved_action_id) or READ_PROGRESS.get(
+        resolved_action_id
+    )
+    if message is None:
+        if progress_message is None:
+            raise RuntimeError(
+                f"{resolved_action_id} has no declared activity language"
+            )
+        message = progress_message[0]
+    enabled = (
+        not bool(getattr(arguments, "json", False))
+        and not _raw_ui_variant(presentation, arguments)
+        and _human_presenter() is not None
+    )
+    return ui.progress(message, stream=sys.stderr, enabled=enabled)
+
 
 class LetsInferError(RuntimeError):
     """A user-actionable release or launch error."""
@@ -346,6 +477,7 @@ def source_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1]
 
 
+@functools.lru_cache(maxsize=1)
 def _core_update_identity() -> str:
     """Bind cached advice to the exact immutable core directory in use."""
     root = source_root().resolve(strict=False)
@@ -1606,14 +1738,97 @@ def require_memory_reserve(
     return snapshot
 
 
+_SENSITIVE_ARGUMENT_NAMES = frozenset(
+    {
+        "authorization",
+        "code",
+        "cookie",
+        "credential",
+        "password",
+        "secret",
+        "token",
+    }
+)
+_LABELED_SECRET_RE = re.compile(
+    r"(?i)\b(api[_-]?key|authorization|cookie|credential|password|secret|token)"
+    r"(\s*[:=]\s*)(?:bearer\s+)?([^\s,;]+)"
+)
+
+
+def _safe_diagnostic(value: str, *, max_lines: int = 24, max_chars: int = 4096) -> str:
+    """Bound and neutralize untrusted child output before terminal display."""
+
+    # Strip complete ANSI control sequences before scanning for labeled
+    # credentials.  Replacing ESC alone can leave a trailing ``m`` adjacent to
+    # ``Authorization`` and defeat the word-boundary match.
+    value = ui.ANSI.sub("", value)
+    redacted = _LABELED_SECRET_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+        value,
+    )
+    neutral = "".join(
+        character
+        if character in {"\n", "\t"}
+        or unicodedata.category(character) not in {"Cc", "Cf"}
+        else "?"
+        for character in redacted
+    )
+    lines = neutral.splitlines()[-max_lines:]
+    bounded = []
+    for line in lines:
+        if len(line) > 512:
+            line = line[:248] + " … " + line[-248:]
+        bounded.append(line)
+    result = "\n".join(bounded).strip()
+    if len(result) > max_chars:
+        result = "[diagnostic truncated]\n" + result[-(max_chars - 23) :]
+    return result
+
+
+def _display_command(command: Sequence[str]) -> str:
+    """Return a bounded command description with credential values removed."""
+
+    rendered: list[str] = []
+    redact_next = False
+    for raw in command:
+        value = str(raw)
+        if redact_next:
+            rendered.append("[REDACTED]")
+            redact_next = False
+            continue
+        if value.startswith("--"):
+            name, separator, inline = value[2:].partition("=")
+            normalized = name.lower().replace("_", "-")
+            words = set(normalized.split("-"))
+            sensitive = bool(words & _SENSITIVE_ARGUMENT_NAMES) or "api-key" in normalized
+            location_only = normalized.endswith(
+                ("-file", "-path", "-dir", "-directory")
+            )
+            if sensitive and not location_only:
+                if separator:
+                    rendered.append(f"--{name}=[REDACTED]")
+                else:
+                    rendered.append(value)
+                    redact_next = True
+                continue
+        safe = _safe_diagnostic(value, max_lines=1, max_chars=512)
+        rendered.append(safe or "?")
+    return shlex.join(rendered)
+
+
 def run(command: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(command, text=True, capture_output=True, check=check)
     except FileNotFoundError as error:
-        raise LetsInferError(f"required command is unavailable: {command[0]}") from error
+        raise LetsInferError(
+            f"required command is unavailable: {_display_command(command[:1])}"
+        ) from error
     except subprocess.CalledProcessError as error:
-        detail = (error.stderr or error.stdout or "").strip()
-        raise LetsInferError(f"command failed: {shlex.join(command)}: {detail}") from error
+        detail = _safe_diagnostic(error.stderr or error.stdout or "")
+        suffix = f": {detail}" if detail else ""
+        raise LetsInferError(
+            f"command failed: {_display_command(command)}{suffix}"
+        ) from error
 
 
 def atomic_json(path: pathlib.Path, value: Any) -> None:
@@ -3337,32 +3552,88 @@ def pair_controller(arguments: argparse.Namespace) -> int:
     server.tls_context = tls  # type: ignore[attr-defined]
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
-    print(f"PAIR CODE {format_pairing_code(setup_code)}")
-    print(
-        f"Listening for one controller on port {CONTROLLER_PAIRING_PORT} "
-        f"for {arguments.timeout}s."
-    )
+    presenter = _human_presenter()
+    pairing_code = format_pairing_code(setup_code)
+    if presenter is not None:
+        presenter.result(
+            "Pairing is ready",
+            semantic=command_ui.Semantic.INFO,
+            detail=(
+                f"Listening for one controller on port {CONTROLLER_PAIRING_PORT} "
+                f"for {arguments.timeout} seconds"
+            ),
+        )
+        presenter.verbatim(pairing_code, label="Pair code", copyable=True)
+    else:
+        print(f"PAIR CODE {pairing_code}")
+        print(
+            f"Listening for one controller on port {CONTROLLER_PAIRING_PORT} "
+            f"for {arguments.timeout}s."
+        )
     try:
+        waiting = _command_activity(
+            arguments, "Waiting for a controller", action_id="pair"
+        )
+        with waiting, ui.protect_stdout(waiting):
+            with state.condition:
+                while (
+                    state.candidate is None
+                    and state.error is None
+                    and time.monotonic() < state.deadline
+                ):
+                    state.condition.wait(
+                        timeout=max(0.1, state.deadline - time.monotonic())
+                    )
+                if state.candidate is None:
+                    raise LetsInferError(state.error or "controller pairing timed out")
+                candidate = state.candidate
+        verification_code = (
+            f"{candidate['confirmation_code'][:3]}-"
+            f"{candidate['confirmation_code'][3:]}"
+        )
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow("Controller", candidate["name"]),
+                    command_ui.RecordRow(
+                        "Verify",
+                        verification_code,
+                        semantic=command_ui.Semantic.WARNING,
+                    ),
+                )
+            )
+        else:
+            print(f"Controller: {candidate['name']}")
+            print(f"VERIFY {verification_code}")
         with state.condition:
-            while state.candidate is None and state.error is None and time.monotonic() < state.deadline:
-                state.condition.wait(timeout=max(0.1, state.deadline - time.monotonic()))
-            if state.candidate is None:
-                raise LetsInferError(state.error or "controller pairing timed out")
-            candidate = state.candidate
-        print(f"Controller: {candidate['name']}")
-        print(f"VERIFY {candidate['confirmation_code'][:3]}-{candidate['confirmation_code'][3:]}")
-        try:
-            answer = input("Does this verification code match the Mac? [y/N] ")
-        except EOFError:
-            answer = ""
-        with state.condition:
-            state.approved = answer.strip().lower() in {"y", "yes"}
+            state.approved = ui.confirm(
+                "Does this verification code match the Mac?"
+            )
             state.condition.notify_all()
-            while not state.completed and state.error is None and time.monotonic() < state.deadline:
-                state.condition.wait(timeout=max(0.1, state.deadline - time.monotonic()))
-            if not state.completed:
-                raise LetsInferError(state.error or "controller pairing was not completed")
-        print(f"PAIRED {candidate['name']} controller={candidate['id']}")
+            completing = _command_activity(
+                arguments, "Completing controller pairing", action_id="pair"
+            )
+            with completing, ui.protect_stdout(completing):
+                while (
+                    not state.completed
+                    and state.error is None
+                    and time.monotonic() < state.deadline
+                ):
+                    state.condition.wait(
+                        timeout=max(0.1, state.deadline - time.monotonic())
+                    )
+                if not state.completed:
+                    raise LetsInferError(
+                        state.error or "controller pairing was not completed"
+                    )
+        if presenter is not None:
+            presenter.result(
+                f"Paired {candidate['name']}",
+                semantic=command_ui.Semantic.SUCCESS,
+                detail=candidate["id"],
+            )
+        else:
+            print(f"PAIRED {candidate['name']} controller={candidate['id']}")
         return 0
     finally:
         server.shutdown()
@@ -3414,19 +3685,55 @@ def controllers(arguments: argparse.Namespace) -> int:
                 expanded_path(config["watchdog_controller_allowlist_file"]),
             )
             _reload_controller_authorization(config)
-            print(
-                f"FORGOT {matches[0]['name']} "
-                f"controller={matches[0]['controller_id']}"
-            )
+            result = {
+                "controller_id": matches[0]["controller_id"],
+                "name": matches[0]["name"],
+                "revoked": True,
+            }
+            if arguments.json:
+                print(json.dumps(result, sort_keys=True))
+                return 0
+            presenter = _human_presenter()
+            if presenter is not None:
+                presenter.result(
+                    f"Controller {matches[0]['name']} revoked",
+                    semantic=command_ui.Semantic.SUCCESS,
+                    detail=matches[0]["controller_id"],
+                )
+            else:
+                print(
+                    f"FORGOT {matches[0]['name']} "
+                    f"controller={matches[0]['controller_id']}"
+                )
             return 0
     if arguments.json:
         print(json.dumps({"installation_id": config["installation_id"], "controllers": rows}, indent=2))
     else:
-        for row in rows:
-            print(
-                f"{row['controller_id']}  {row['role']:<13}  {row['name']}  "
-                f"paired={dt.datetime.fromtimestamp(row['created_at_unix']).astimezone().isoformat()}"
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.table(
+                (
+                    command_ui.TableColumn("name", "NAME", min_width=8),
+                    command_ui.TableColumn("role", "ROLE", min_width=6),
+                    command_ui.TableColumn("controller_id", "CONTROLLER", min_width=12),
+                    command_ui.TableColumn(
+                        "created_at_unix",
+                        "PAIRED",
+                        min_width=10,
+                        formatter=lambda value, _row: dt.datetime.fromtimestamp(
+                            int(value)
+                        ).astimezone().isoformat(),
+                    ),
+                ),
+                rows,
+                empty_message="No controllers are paired",
             )
+        else:
+            for row in rows:
+                print(
+                    f"{row['controller_id']}  {row['role']:<13}  {row['name']}  "
+                    f"paired={dt.datetime.fromtimestamp(row['created_at_unix']).astimezone().isoformat()}"
+                )
     return 0
 
 
@@ -3768,14 +4075,57 @@ def verify_installed_runtime(
     return actual_image_id
 
 
-def run_passthrough(command: Sequence[str]) -> None:
-    ui.before_external_output()
+def run_passthrough(
+    command: Sequence[str],
+    *,
+    visible: bool = False,
+) -> None:
+    """Run a child without letting routine build output take over the TTY.
+
+    Human commands keep their progress owner active and receive a concise tail
+    only when the child fails. Raw commands and authentication prompts opt into
+    direct terminal ownership. Redirected/noninteractive execution retains the
+    original byte-for-byte passthrough behavior.
+    """
+
+    interactive = _human_presenter() is not None
+    direct = visible or not interactive or pathlib.Path(command[0]).name == "sudo"
+    if direct:
+        ui.before_external_output()
+        try:
+            subprocess.run(command, text=True, check=True)
+        except FileNotFoundError as error:
+            raise LetsInferError(
+                f"required command is unavailable: {_display_command(command[:1])}"
+            ) from error
+        except subprocess.CalledProcessError as error:
+            raise LetsInferError(
+                f"command failed: {_display_command(command)}"
+            ) from error
+        return
+
     try:
-        subprocess.run(command, text=True, check=True)
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as output:
+            result = subprocess.run(
+                command,
+                text=True,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            if result.returncode == 0:
+                return
+            output.seek(0)
+            lines = output.read().splitlines()
     except FileNotFoundError as error:
-        raise LetsInferError(f"required command is unavailable: {command[0]}") from error
-    except subprocess.CalledProcessError as error:
-        raise LetsInferError(f"command failed: {shlex.join(command)}") from error
+        raise LetsInferError(
+            f"required command is unavailable: {_display_command(command[:1])}"
+        ) from error
+    tail = _safe_diagnostic("\n".join(lines))
+    detail = f"\n{tail}" if tail else ""
+    raise LetsInferError(
+        f"command failed ({result.returncode}): {_display_command(command)}{detail}"
+    )
 
 
 def _runtime_image_context(artifact_root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path] | None:
@@ -4378,6 +4728,7 @@ def serve(
     resolved_release: tuple[pathlib.Path, dict[str, Any]] | None = None,
     release_root: pathlib.Path | None = None,
 ) -> int:
+    presenter = None if arguments.dry_run else _human_presenter()
     manifest_path, manifest = resolved_release or resolve_model(
         arguments.model,
         target=getattr(arguments, "target", None),
@@ -4394,11 +4745,21 @@ def serve(
         evidence_dir=arguments.evidence_dir,
     )
     if qualification_mode and not serving["qualified"]:
-        print(
-            "WARNING: qualification launch of unqualified serving configuration: "
-            f"{serving['blocked_by']}",
-            file=sys.stderr,
-        )
+        if presenter is not None:
+            presenter.result(
+                "Unqualified runtime",
+                semantic=command_ui.Semantic.WARNING,
+                detail=f"Qualification mode: {serving['blocked_by']}",
+            )
+        else:
+            print(
+                "WARNING: qualification launch of unqualified serving configuration: "
+                f"{serving['blocked_by']}",
+                file=sys.stderr,
+            )
+    resume_progress = (
+        qualification_mode and not serving["qualified"] and presenter is not None
+    )
 
     name = arguments.name or f"letsinfer-{adapter_for(manifest).name.replace('.', '-')}"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
@@ -4487,15 +4848,53 @@ def serve(
         )
         return 0
 
-    host = verify_host_target(manifest)
-    ensure_image(
-        manifest,
-        build=qualification_mode,
-        artifact_root=runtime_artifact_root,
-    )
-    actual_image_id = verify_installed_runtime(
-        manifest, model_cache=model_cache
-    )
+    def prepare_launch() -> tuple[dict[str, Any], str]:
+        host_value = verify_host_target(manifest)
+        ensure_image(
+            manifest,
+            build=qualification_mode,
+            artifact_root=runtime_artifact_root,
+        )
+        return host_value, verify_installed_runtime(
+            manifest, model_cache=model_cache
+        )
+
+    if resume_progress:
+        preparing = _command_activity(
+            arguments,
+            "Preparing the qualification runtime",
+            action_id="serve",
+        )
+        with preparing, ui.protect_stdout(preparing):
+            host, actual_image_id = prepare_launch()
+    else:
+        host, actual_image_id = prepare_launch()
+
+    def await_runtime() -> None:
+        wait_for_ready(
+            name,
+            port,
+            manifest["container"]["startup_timeout_seconds"],
+            tls_cert_file,
+            manifest,
+        )
+        if not model_identity_ready(
+            manifest, port, tls_cert_file, api_key_file
+        ):
+            raise LetsInferError(
+                "authenticated model identity does not match the release manifest"
+            )
+        prewarm(manifest, name, port, tls_cert_file, api_key_file)
+
+    def wait_for_runtime() -> None:
+        if not resume_progress:
+            await_runtime()
+            return
+        waiting = _command_activity(
+            arguments, "Waiting for inference readiness", action_id="serve"
+        )
+        with waiting, ui.protect_stdout(waiting):
+            await_runtime()
     api_key = read_api_key(api_key_file)
     validate_tls_material(tls_cert_file, tls_key_file)
     evidence = expanded_path(
@@ -4572,20 +4971,7 @@ def serve(
                     "starting",
                     inspection=inspection,
                 )
-            wait_for_ready(
-                name,
-                port,
-                manifest["container"]["startup_timeout_seconds"],
-                tls_cert_file,
-                manifest,
-            )
-            if not model_identity_ready(
-                manifest, port, tls_cert_file, api_key_file
-            ):
-                raise LetsInferError(
-                    "authenticated model identity does not match the release manifest"
-                )
-            prewarm(manifest, name, port, tls_cert_file, api_key_file)
+            wait_for_runtime()
             require_memory_reserve(manifest, phase="runtime")
             if protection_config:
                 current = container_inspect(name)
@@ -4597,7 +4983,24 @@ def serve(
                     "armed",
                     inspection=current,
                 )
-            print(f"HEALTHY {name} existing=true")
+            if presenter is not None:
+                presenter.records(
+                    (
+                        command_ui.RecordRow(
+                            "Runtime",
+                            manifest["model"]["alias"],
+                            semantic=command_ui.Semantic.SUCCESS,
+                        ),
+                        command_ui.RecordRow("Container", name, "Existing"),
+                        command_ui.RecordRow("Port", port),
+                        command_ui.RecordRow(
+                            "Guard",
+                            "Armed" if protection_config else "Not configured",
+                        ),
+                    )
+                )
+            else:
+                print(f"HEALTHY {name} existing=true")
             return 0
         except BaseException:
             if protection_config and not protection_trip_latched(protection_config):
@@ -4656,20 +5059,7 @@ def serve(
                 inspection=inspection,
             )
 
-        wait_for_ready(
-            name,
-            port,
-            manifest["container"]["startup_timeout_seconds"],
-            tls_cert_file,
-            manifest,
-        )
-        if not model_identity_ready(
-            manifest, port, tls_cert_file, api_key_file
-        ):
-            raise LetsInferError(
-                "authenticated model identity does not match the release manifest"
-            )
-        prewarm(manifest, name, port, tls_cert_file, api_key_file)
+        wait_for_runtime()
         launch["runtime_memory"] = require_memory_reserve(
             manifest, phase="runtime"
         )
@@ -4717,7 +5107,24 @@ def serve(
                     _restore_resident_runtime_after_qualification(resident_handoff)
         raise
 
-    print(f"HEALTHY {name} evidence={evidence}")
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow(
+                    "Runtime",
+                    manifest["model"]["alias"],
+                    semantic=command_ui.Semantic.SUCCESS,
+                ),
+                command_ui.RecordRow("Container", name, "Healthy"),
+                command_ui.RecordRow("Port", port),
+                command_ui.RecordRow(
+                    "Guard", "Armed" if protection_config else "Not configured"
+                ),
+            )
+        )
+        presenter.verbatim(evidence, label="Evidence", copyable=True)
+    else:
+        print(f"HEALTHY {name} evidence={evidence}")
     return 0
 
 
@@ -5279,7 +5686,21 @@ def _qualification_candidate_lifecycle(
         if inspection.get("State", {}).get("Running", False):
             run(["docker", "stop", "--time", "120", config["name"]])
         update_service_placement(config, manifest, "stopped")
-        print(f"STOPPED {config['name']} candidate=preserved")
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow(
+                        "Runtime",
+                        config.get("model", manifest["model"]["alias"]),
+                        semantic=command_ui.Semantic.SUCCESS,
+                    ),
+                    command_ui.RecordRow("Container", config["name"], "Stopped"),
+                    command_ui.RecordRow("Candidate", "Preserved"),
+                )
+            )
+        else:
+            print(f"STOPPED {config['name']} candidate=preserved")
         return 0
 
     if action == "recover":
@@ -5362,10 +5783,29 @@ def _qualification_candidate_lifecycle(
         except BaseException:
             pass
         raise
-    print(
-        f"{action.upper()} {config['name']} candidate=active "
-        f"protection_trip_cleared={str(cleared_trip).lower()}"
-    )
+    presenter = _human_presenter()
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow(
+                    "Runtime",
+                    config.get("model", manifest["model"]["alias"]),
+                    semantic=command_ui.Semantic.SUCCESS,
+                ),
+                command_ui.RecordRow("Container", config["name"], "Active"),
+                command_ui.RecordRow("Action", action.title()),
+                command_ui.RecordRow(
+                    "Guard",
+                    "Recovered" if cleared_trip else "Armed",
+                    "Protection trip cleared" if cleared_trip else "",
+                ),
+            )
+        )
+    else:
+        print(
+            f"{action.upper()} {config['name']} candidate=active "
+            f"protection_trip_cleared={str(cleared_trip).lower()}"
+        )
     return 0
 
 
@@ -7276,11 +7716,27 @@ def install_engine_group(
         raise
     if receipt_path is None:
         raise LetsInferError("engine-group runtime receipt was not persisted")
-    print(
-        f"INSTALLED GROUP {runtime_identity} group={plan.group_id} "
-        f"placement={placement_id} members={len(plan.assignments)} "
-        f"receipt={receipt_path}"
-    )
+    presenter = _human_presenter()
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow(
+                    "Runtime",
+                    runtime_identity,
+                    semantic=command_ui.Semantic.SUCCESS,
+                ),
+                command_ui.RecordRow("Group", plan.group_id),
+                command_ui.RecordRow("Placement", placement_id),
+                command_ui.RecordRow("Members", len(plan.assignments)),
+            )
+        )
+        presenter.verbatim(receipt_path, label="Receipt", copyable=True)
+    else:
+        print(
+            f"INSTALLED GROUP {runtime_identity} group={plan.group_id} "
+            f"placement={placement_id} members={len(plan.assignments)} "
+            f"receipt={receipt_path}"
+        )
     return 0
 
 
@@ -8116,10 +8572,9 @@ def _selected_install_node_ids(
                 selected.append(member_id)
         return tuple(selected)
     if len(active) > 1 and sys.stdin.isatty():
-        answer = input(
-            f"Replicate this model across all {len(active)} compatible nodes? [y/N] "
-        ).strip().lower()
-        if answer in {"y", "yes"}:
+        if ui.confirm(
+            f"Replicate this model across all {len(active)} compatible nodes?"
+        ):
             return tuple(sorted(by_id))
     return (identity.member_id,)
 
@@ -8187,7 +8642,10 @@ def _install_catalog_nodes(
     install_nodes: list[str] = []
     replacements: dict[str, list[str]] = {}
     planned: dict[str, tuple[tuple[str, str, str, str, str], TargetPlacement]] = {}
+    presenter = _human_presenter()
+    plan_rows: list[dict[str, Any]] = []
     for member_id in selected:
+        display_name = member_rows[member_id]["display_name"]
         resident = groups_by_node[member_id]
         resident_models = {
             placements[row["placement_id"]]["model"]
@@ -8199,9 +8657,17 @@ def _install_catalog_nodes(
             and resident_models == {arguments.model}
             and getattr(arguments, "runtime", None) is None
         ):
-            print(
-                f"✓ {member_rows[member_id]['display_name']}  already serving {arguments.model}"
-            )
+            if presenter is not None:
+                plan_rows.append(
+                    {
+                        "node": display_name,
+                        "state": "Serving",
+                        "detail": f"Already serving {arguments.model}",
+                        "_semantic": command_ui.Semantic.SUCCESS,
+                    }
+                )
+            else:
+                print(f"OK {display_name}  already serving {arguments.model}")
             continue
         try:
             release, choice, _node_graph = _catalog_release_for_node(
@@ -8214,21 +8680,56 @@ def _install_catalog_nodes(
                 ignore_allocations=bool(resident),
             )
         except LetsInferError as error:
-            print(f"✕ {member_rows[member_id]['display_name']}  {error}")
+            if presenter is not None:
+                plan_rows.append(
+                    {
+                        "node": display_name,
+                        "state": "Unsupported",
+                        "detail": str(error),
+                        "_semantic": command_ui.Semantic.ERROR,
+                    }
+                )
+            else:
+                print(f"ERROR {display_name}  {error}")
             continue
         planned[member_id] = (release, choice)
         install_nodes.append(member_id)
         if resident:
             replacements[member_id] = [row["group_id"] for row in resident]
             names = ", ".join(sorted(resident_models)) or "an installed runtime"
-            print(
-                f"! {member_rows[member_id]['display_name']}  supported; replaces {names}"
-            )
+            if presenter is not None:
+                plan_rows.append(
+                    {
+                        "node": display_name,
+                        "state": "Replace",
+                        "detail": f"{release[2]}@{release[3]} replaces {names}",
+                        "_semantic": command_ui.Semantic.WARNING,
+                    }
+                )
+            else:
+                print(f"WARNING {display_name}  supported; replaces {names}")
         else:
-            print(
-                f"✓ {member_rows[member_id]['display_name']}  supported; "
-                f"{release[2]}@{release[3]}"
-            )
+            if presenter is not None:
+                plan_rows.append(
+                    {
+                        "node": display_name,
+                        "state": "Ready",
+                        "detail": f"{release[2]}@{release[3]}",
+                        "_semantic": command_ui.Semantic.SUCCESS,
+                    }
+                )
+            else:
+                print(f"OK {display_name}  supported; {release[2]}@{release[3]}")
+    if presenter is not None:
+        presenter.table(
+            (
+                command_ui.TableColumn("node", "NODE", min_width=6),
+                command_ui.TableColumn("state", "STATE", min_width=7),
+                command_ui.TableColumn("detail", "RUNTIME", min_width=10),
+            ),
+            plan_rows,
+            empty_message="No compatible nodes were selected",
+        )
     if not install_nodes:
         if any(
             placements[row["placement_id"]]["model"] == arguments.model
@@ -8243,64 +8744,86 @@ def _install_catalog_nodes(
             raise LetsInferError(
                 "installation would replace running groups; retry with --replace-existing"
             )
-        answer = input("Replace the listed running model groups? [y/N] ").strip().lower()
-        if answer not in {"y", "yes"}:
+        if not ui.confirm("Replace the listed running model groups?"):
             raise LetsInferError("installation cancelled before replacement")
-    if replacements:
-        _remove_engine_groups_by_id(
-            [group_id for values in replacements.values() for group_id in values]
+    activity = _command_activity(arguments, action_id="install")
+    with activity, ui.protect_stdout(activity):
+        if replacements:
+            _remove_engine_groups_by_id(
+                [group_id for values in replacements.values() for group_id in values]
+            )
+        completed = 0
+        for member_id in install_nodes:
+            # Refresh after every launch so the next plan observes the newly sealed
+            # GPU allocation and cannot overlap it.
+            identity, graph = _fresh_site_topology()
+            release, choice, node_graph = _catalog_release_for_node(
+                catalog,
+                arguments.model,
+                getattr(arguments, "runtime", None),
+                identity=identity,
+                graph=graph,
+                member_id=member_id,
+            )
+            target_id, target_sha256, candidate, version, source = release
+            manifest_path, manifest, control_root, receipt = prepare_runtime_install(
+                source,
+                policy=(
+                    f"runtime:{candidate}"
+                    if getattr(arguments, "runtime", None)
+                    else "recommended"
+                ),
+                requested_runtime=getattr(arguments, "runtime", None),
+                requested_target=target_id,
+                expected_version=version,
+                expected_target_contract_sha256=target_sha256,
+            )
+            runtime = verify_descriptor(pathlib.Path(receipt["object_root"]))
+            release_record = catalog_release_record(
+                dict(catalog), arguments.model, target_id, candidate, version
+            )
+            release_identity = _group_release_identity(
+                catalog_release_value=release_record,
+                candidate_id=candidate,
+                version=version,
+                source=source,
+                target_id=target_id,
+                target_sha256=target_sha256,
+                runtime=runtime,
+                manifest_sha256=sha256_file(manifest_path),
+            )
+            install_engine_group(
+                arguments,
+                source=source,
+                manifest_path=manifest_path,
+                manifest=manifest,
+                control_root=control_root,
+                receipt=receipt,
+                release_identity=release_identity,
+                resolved_topology=(identity, node_graph, choice.placement),
+            )
+            completed += 1
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow(
+                    "Runtime", arguments.model, semantic=command_ui.Semantic.SUCCESS
+                ),
+                command_ui.RecordRow("Groups", completed),
+                command_ui.RecordRow(
+                    "Nodes",
+                    ", ".join(
+                        member_rows[member_id]["display_name"]
+                        for member_id in install_nodes
+                    ),
+                ),
+            )
         )
-    completed = 0
-    for member_id in install_nodes:
-        # Refresh after every launch so the next plan observes the newly sealed
-        # GPU allocation and cannot overlap it.
-        identity, graph = _fresh_site_topology()
-        release, choice, node_graph = _catalog_release_for_node(
-            catalog,
-            arguments.model,
-            getattr(arguments, "runtime", None),
-            identity=identity,
-            graph=graph,
-            member_id=member_id,
+    else:
+        print(
+            f"REPLICA POOL {arguments.model} groups={completed} "
+            f"nodes={','.join(install_nodes)}"
         )
-        target_id, target_sha256, candidate, version, source = release
-        manifest_path, manifest, control_root, receipt = prepare_runtime_install(
-            source,
-            policy=f"runtime:{candidate}" if getattr(arguments, "runtime", None) else "recommended",
-            requested_runtime=getattr(arguments, "runtime", None),
-            requested_target=target_id,
-            expected_version=version,
-            expected_target_contract_sha256=target_sha256,
-        )
-        runtime = verify_descriptor(pathlib.Path(receipt["object_root"]))
-        release_record = catalog_release_record(
-            dict(catalog), arguments.model, target_id, candidate, version
-        )
-        release_identity = _group_release_identity(
-            catalog_release_value=release_record,
-            candidate_id=candidate,
-            version=version,
-            source=source,
-            target_id=target_id,
-            target_sha256=target_sha256,
-            runtime=runtime,
-            manifest_sha256=sha256_file(manifest_path),
-        )
-        install_engine_group(
-            arguments,
-            source=source,
-            manifest_path=manifest_path,
-            manifest=manifest,
-            control_root=control_root,
-            receipt=receipt,
-            release_identity=release_identity,
-            resolved_topology=(identity, node_graph, choice.placement),
-        )
-        completed += 1
-    print(
-        f"REPLICA POOL {arguments.model} groups={completed} "
-        f"nodes={','.join(install_nodes)}"
-    )
     return 0
 
 
@@ -8397,7 +8920,19 @@ def scale_command(arguments: argparse.Namespace) -> int:
                 and row["placement_id"] in placements
                 and placements[row["placement_id"]]["model"] == arguments.model
             ]
-    print(f"REPLICA POOL {arguments.model} groups={len(current)} desired={replicas}")
+    presenter = _human_presenter()
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow(
+                    "Runtime", arguments.model, semantic=command_ui.Semantic.SUCCESS
+                ),
+                command_ui.RecordRow("Groups", len(current)),
+                command_ui.RecordRow("Desired", replicas),
+            )
+        )
+    else:
+        print(f"REPLICA POOL {arguments.model} groups={len(current)} desired={replicas}")
     return 0
 
 
@@ -8492,12 +9027,34 @@ def install(arguments: argparse.Namespace) -> int:
             receipt_path = write_selection(prepared_receipt)
         except RuntimePackError as error:
             raise LetsInferError(str(error)) from error
-        print(
-            f"INSTALLED RUNTIME {prepared_receipt['candidate_id']} "
-            f"version={prepared_receipt['version']} digest=sha256:{prepared_receipt['digest']} "
-            f"activation=blocked receipt={receipt_path}"
-        )
-        print(f"  blocked_by: {serving['blocked_by']}")
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow(
+                        "Runtime",
+                        prepared_receipt["candidate_id"],
+                        prepared_receipt["version"],
+                        command_ui.Semantic.WARNING,
+                    ),
+                    command_ui.RecordRow(
+                        "Activation", "Blocked", serving["blocked_by"]
+                    ),
+                )
+            )
+            presenter.verbatim(
+                f"sha256:{prepared_receipt['digest']}",
+                label="Digest",
+                copyable=True,
+            )
+            presenter.verbatim(receipt_path, label="Receipt", copyable=True)
+        else:
+            print(
+                f"INSTALLED RUNTIME {prepared_receipt['candidate_id']} "
+                f"version={prepared_receipt['version']} digest=sha256:{prepared_receipt['digest']} "
+                f"activation=blocked receipt={receipt_path}"
+            )
+            print(f"  blocked_by: {serving['blocked_by']}")
         return 0
     if not arguments.no_service and not user_lingering_enabled():
         raise LetsInferError(
@@ -8716,10 +9273,27 @@ def install(arguments: argparse.Namespace) -> int:
             raise LetsInferError(
                 f"runtime activated but its selection receipt could not be written: {error}"
             ) from error
-    print(
-        f"INSTALLED {manifest['release']} "
-        f"config={config_path} service={'disabled' if arguments.no_service else 'enabled'}"
-    )
+    presenter = _human_presenter()
+    if presenter is not None:
+        service_state = "Disabled" if arguments.no_service else "Enabled"
+        if not arguments.no_service and arguments.no_start:
+            service_state = "Installed, not started"
+        presenter.records(
+            (
+                command_ui.RecordRow(
+                    "Runtime",
+                    manifest["release"],
+                    semantic=command_ui.Semantic.SUCCESS,
+                ),
+                command_ui.RecordRow("Service", service_state),
+            )
+        )
+        presenter.verbatim(config_path, label="Configuration", copyable=True)
+    else:
+        print(
+            f"INSTALLED {manifest['release']} "
+            f"config={config_path} service={'disabled' if arguments.no_service else 'enabled'}"
+        )
     return 0
 
 
@@ -8728,7 +9302,15 @@ def _stop_managed_container(
 ) -> int:
     inspection = container_inspect(name)
     if inspection is None:
-        print(f"STOPPED {name} already-absent=true")
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                "Runtime already stopped",
+                semantic=command_ui.Semantic.INFO,
+                detail=name,
+            )
+        else:
+            print(f"STOPPED {name} already-absent=true")
         return 0
     labels = inspection.get("Config", {}).get("Labels") or {}
     if labels.get(MANAGED_LABEL) != "true":
@@ -8758,7 +9340,18 @@ def _stop_managed_container(
     if inspection.get("State", {}).get("Running", False):
         run(["docker", "stop", "--time", "120", name])
     run(["docker", "rm", name])
-    print(f"STOPPED {name} evidence={evidence}")
+    presenter = _human_presenter()
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow(
+                    "Container", name, "Stopped", command_ui.Semantic.SUCCESS
+                ),
+            )
+        )
+        presenter.verbatim(evidence, label="Evidence", copyable=True)
+    else:
+        print(f"STOPPED {name} evidence={evidence}")
     return 0
 
 
@@ -8790,10 +9383,31 @@ def stop(arguments: argparse.Namespace) -> int:
     if arguments.name is None and arguments.config is None:
         group = _engine_group_lifecycle(model, "stop")
         if group is not None:
-            print(
-                f"STOPPED group={group['group_id']} "
-                f"members={len(group['member_states'])}"
+            groups = group.get("groups")
+            members = (
+                sum(len(item["member_states"]) for item in groups)
+                if isinstance(groups, list)
+                else len(group["member_states"])
             )
+            presenter = _human_presenter()
+            if presenter is not None:
+                presenter.records(
+                    (
+                        command_ui.RecordRow(
+                            "Runtime",
+                            model or "All installed runtimes",
+                            semantic=command_ui.Semantic.SUCCESS,
+                        ),
+                        command_ui.RecordRow("Group", group["group_id"]),
+                        command_ui.RecordRow("Members", members),
+                        command_ui.RecordRow("State", "Stopped"),
+                    )
+                )
+            else:
+                print(
+                    f"STOPPED group={group['group_id']} "
+                    f"members={members}"
+                )
             return 0
     if arguments.name is not None:
         qualification_path = qualification_service_config_path()
@@ -8831,7 +9445,20 @@ def stop(arguments: argparse.Namespace) -> int:
             run_passthrough(
                 ["systemctl", "--user", "stop", ENGINE_SERVICE_NAME]
             )
-            print(f"STOPPED {ENGINE_SERVICE_NAME}")
+            presenter = _human_presenter()
+            if presenter is not None:
+                presenter.records(
+                    (
+                        command_ui.RecordRow(
+                            "Service",
+                            ENGINE_SERVICE_NAME,
+                            "Stopped",
+                            command_ui.Semantic.SUCCESS,
+                        ),
+                    )
+                )
+            else:
+                print(f"STOPPED {ENGINE_SERVICE_NAME}")
             return 0
     if config is not None:
         disarm_before_planned_stop(config)
@@ -9349,7 +9976,7 @@ def logs(arguments: argparse.Namespace) -> int:
     if arguments.follow:
         command.append("--follow")
     command.append(config["name"])
-    run_passthrough(command)
+    run_passthrough(command, visible=True)
     return 0
 
 
@@ -9374,11 +10001,41 @@ def _run_engine_service_action(
     if arguments.config is None:
         group = _engine_group_lifecycle(model, action)
         if group is not None:
-            print(
-                f"{action.upper()} group={group['group_id']} "
-                f"members={len(group['member_states'])} "
-                f"protection_trips_acknowledged={str(action == 'recover').lower()}"
+            groups = group.get("groups")
+            members = (
+                sum(len(item["member_states"]) for item in groups)
+                if isinstance(groups, list)
+                else len(group["member_states"])
             )
+            presenter = _human_presenter()
+            if presenter is not None:
+                presenter.records(
+                    (
+                        command_ui.RecordRow(
+                            "Runtime",
+                            model or "All installed runtimes",
+                            semantic=command_ui.Semantic.SUCCESS,
+                        ),
+                        command_ui.RecordRow("Group", group["group_id"]),
+                        command_ui.RecordRow("Members", members),
+                        command_ui.RecordRow("Action", action.title()),
+                        command_ui.RecordRow(
+                            "Guard",
+                            "Recovered" if action == "recover" else "Armed",
+                            (
+                                "Protection trips acknowledged"
+                                if action == "recover"
+                                else ""
+                            ),
+                        ),
+                    )
+                )
+            else:
+                print(
+                    f"{action.upper()} group={group['group_id']} "
+                    f"members={members} "
+                    f"protection_trips_acknowledged={str(action == 'recover').lower()}"
+                )
             return 0
     config_path = absolute_user_path(
         arguments.config or default_service_config_path()
@@ -9409,10 +10066,29 @@ def _run_engine_service_action(
     systemd_action = "start" if action == "start" else "restart"
     run_passthrough(["systemctl", "--user", systemd_action, ENGINE_SERVICE_NAME])
     run(["systemctl", "--user", "restart", RECOVERY_TIMER_NAME])
-    print(
-        f"{action.upper()} {ENGINE_SERVICE_NAME} protection_trip_cleared="
-        f"{str(cleared_trip).lower()}"
-    )
+    presenter = _human_presenter()
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow(
+                    "Runtime",
+                    config["model"],
+                    semantic=command_ui.Semantic.SUCCESS,
+                ),
+                command_ui.RecordRow("Service", ENGINE_SERVICE_NAME, "Active"),
+                command_ui.RecordRow("Action", action.title()),
+                command_ui.RecordRow(
+                    "Guard",
+                    "Recovered" if cleared_trip else "Armed",
+                    "Protection trip cleared" if cleared_trip else "",
+                ),
+            )
+        )
+    else:
+        print(
+            f"{action.upper()} {ENGINE_SERVICE_NAME} protection_trip_cleared="
+            f"{str(cleared_trip).lower()}"
+        )
     return 0
 
 
@@ -9590,12 +10266,43 @@ def _doctor_engine_groups(
     if arguments.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        for item in checks:
-            print(
-                f"{'PASS' if item['passed'] else 'FAIL'} {item['name']}: "
-                f"{item['detail']}"
+        presenter = _human_presenter()
+        if presenter is not None:
+            rendered = [
+                {
+                    **item,
+                    "result": "PASS" if item["passed"] else "FAIL",
+                    "_semantic": (
+                        command_ui.Semantic.SUCCESS
+                        if item["passed"]
+                        else command_ui.Semantic.ERROR
+                    ),
+                }
+                for item in checks
+            ]
+            presenter.table(
+                (
+                    command_ui.TableColumn("result", "RESULT", min_width=6),
+                    command_ui.TableColumn("name", "CHECK", min_width=12),
+                    command_ui.TableColumn("detail", "DETAIL", min_width=18),
+                ),
+                rendered,
             )
-        print(f"operational_ready={str(operational_ready).lower()}")
+            presenter.result(
+                "Node is operational" if operational_ready else "Node needs attention",
+                semantic=(
+                    command_ui.Semantic.SUCCESS
+                    if operational_ready
+                    else command_ui.Semantic.ERROR
+                ),
+            )
+        else:
+            for item in checks:
+                print(
+                    f"{'PASS' if item['passed'] else 'FAIL'} {item['name']}: "
+                    f"{item['detail']}"
+                )
+            print(f"operational_ready={str(operational_ready).lower()}")
     return 0 if operational_ready else 1
 
 
@@ -10035,13 +10742,68 @@ def doctor(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        for item in checks:
-            state = "PASS" if item["passed"] else ("FAIL" if item["required"] else "INFO")
-            print(f"{state:4} {item['name']}: {item['detail']}")
-        print(
-            f"READY operational={str(operational_ready).lower()} "
-            f"publication={str(publication_ready).lower()}"
-        )
+        presenter = _human_presenter()
+        if presenter is not None:
+            rendered = []
+            for item in checks:
+                state = (
+                    "PASS"
+                    if item["passed"]
+                    else "FAIL"
+                    if item["required"]
+                    else "INFO"
+                )
+                rendered.append(
+                    {
+                        **item,
+                        "result": state,
+                        "_semantic": (
+                            command_ui.Semantic.SUCCESS
+                            if state == "PASS"
+                            else command_ui.Semantic.ERROR
+                            if state == "FAIL"
+                            else command_ui.Semantic.INFO
+                        ),
+                    }
+                )
+            presenter.table(
+                (
+                    command_ui.TableColumn("result", "RESULT", min_width=6),
+                    command_ui.TableColumn("name", "CHECK", min_width=12),
+                    command_ui.TableColumn("detail", "DETAIL", min_width=18),
+                ),
+                rendered,
+            )
+            presenter.records(
+                (
+                    command_ui.RecordRow(
+                        "Operational",
+                        "Ready" if operational_ready else "Attention",
+                        semantic=(
+                            command_ui.Semantic.SUCCESS
+                            if operational_ready
+                            else command_ui.Semantic.ERROR
+                        ),
+                    ),
+                    command_ui.RecordRow(
+                        "Publication",
+                        "Ready" if publication_ready else "Not ready",
+                        semantic=(
+                            command_ui.Semantic.SUCCESS
+                            if publication_ready
+                            else command_ui.Semantic.WARNING
+                        ),
+                    ),
+                )
+            )
+        else:
+            for item in checks:
+                state = "PASS" if item["passed"] else ("FAIL" if item["required"] else "INFO")
+                print(f"{state:4} {item['name']}: {item['detail']}")
+            print(
+                f"READY operational={str(operational_ready).lower()} "
+                f"publication={str(publication_ready).lower()}"
+            )
     return 0 if operational_ready else 1
 
 
@@ -10276,47 +11038,89 @@ def uninstall(arguments: argparse.Namespace) -> int:
         assume_yes=False,
         noninteractive_flag=None,
     ):
-        print("Uninstall cancelled")
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                "Uninstall cancelled",
+                semantic=command_ui.Semantic.INFO,
+                detail="No managed data was removed",
+            )
+        else:
+            print("Uninstall cancelled")
+        arguments.suppress_completion = True
         return 0
 
-    runtime_images = _installed_runtime_image_references()
-    try:
-        active_benchmark = benchmark_jobs.active_state()
-    except benchmark_jobs.BenchmarkJobError as error:
-        raise LetsInferError(str(error)) from error
-    if active_benchmark is not None:
-        state = benchmark_jobs.request_stop()
-        if not benchmark_jobs.wait_for_exit(
-            state["pid"],
-            timeout_seconds=_benchmark_stop_timeout_seconds(),
-        ):
-            raise LetsInferError("active benchmark did not stop; uninstall aborted")
+    cleanup = ui.progress(
+        "Stopping services and removing runtime data",
+        stream=sys.stderr,
+        enabled=_human_presenter() is not None,
+    )
+    with cleanup, ui.protect_stdout(cleanup):
+        runtime_images = _installed_runtime_image_references()
+        try:
+            active_benchmark = benchmark_jobs.active_state()
+        except benchmark_jobs.BenchmarkJobError as error:
+            raise LetsInferError(str(error)) from error
+        if active_benchmark is not None:
+            state = benchmark_jobs.request_stop()
+            if not benchmark_jobs.wait_for_exit(
+                state["pid"],
+                timeout_seconds=_benchmark_stop_timeout_seconds(),
+            ):
+                raise LetsInferError("active benchmark did not stop; uninstall aborted")
 
-    _remove_public_exposure()
-    if site_identity_path().is_file() and config is not None:
-        _remove_all_engine_groups()
-    _retire_qualification_candidate(remove_container=True)
-    system = platform.system()
-    if system == "Linux":
-        _remove_linux_services(config)
-    elif system == "Darwin":
-        _remove_macos_services()
-    else:
-        raise LetsInferError(f"unsupported uninstall platform: {system}")
-    containers, images = _remove_managed_containers(runtime_images)
+        _remove_public_exposure()
+        if site_identity_path().is_file() and config is not None:
+            _remove_all_engine_groups()
+        _retire_qualification_candidate(remove_container=True)
+        system = platform.system()
+        if system == "Linux":
+            _remove_linux_services(config)
+        elif system == "Darwin":
+            _remove_macos_services()
+        else:
+            raise LetsInferError(f"unsupported uninstall platform: {system}")
+        containers, images = _remove_managed_containers(runtime_images)
 
     def finalize() -> int:
-        core_removed = _remove_installed_core()
-        _remove_managed_home(
-            keep_models=arguments.keep_models,
-            configured_model_cache=models,
+        removal = ui.progress(
+            "Removing the core and managed data",
+            stream=sys.stderr,
+            enabled=_human_presenter() is not None,
         )
-        print(
-            "UNINSTALLED Let's Infer "
-            f"core_removed={str(core_removed).lower()} "
-            f"containers={containers} images={images} "
-            f"models={'preserved' if arguments.keep_models else 'removed'}"
-        )
+        with removal, ui.protect_stdout(removal):
+            core_removed = _remove_installed_core()
+            _remove_managed_home(
+                keep_models=arguments.keep_models,
+                configured_model_cache=models,
+            )
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow(
+                        "Let's Infer",
+                        "Removed",
+                        semantic=command_ui.Semantic.SUCCESS,
+                    ),
+                    command_ui.RecordRow(
+                        "Core", "Removed" if core_removed else "Not installed"
+                    ),
+                    command_ui.RecordRow("Containers", containers),
+                    command_ui.RecordRow("Images", images),
+                    command_ui.RecordRow(
+                        "Models",
+                        "Preserved" if arguments.keep_models else "Removed",
+                    ),
+                )
+            )
+        else:
+            print(
+                "UNINSTALLED Let's Infer "
+                f"core_removed={str(core_removed).lower()} "
+                f"containers={containers} images={images} "
+                f"models={'preserved' if arguments.keep_models else 'removed'}"
+            )
         return 0
 
     arguments.after_audit = finalize
@@ -10331,10 +11135,22 @@ def pack_runtime(arguments: argparse.Namespace) -> int:
         )
     except RuntimePackError as error:
         raise LetsInferError(str(error)) from error
-    print(
-        f"PACKED {pack.runtime['id']} version={pack.runtime['version']} "
-        f"digest=sha256:{pack.digest} artifact={pathlib.Path(arguments.output).resolve()}"
-    )
+    artifact = pathlib.Path(arguments.output).resolve()
+    presenter = _human_presenter()
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow("Runtime", pack.runtime["id"]),
+                command_ui.RecordRow("Version", pack.runtime["version"]),
+            )
+        )
+        presenter.verbatim(f"sha256:{pack.digest}", label="Digest", copyable=True)
+        presenter.verbatim(artifact, label="Artifact", copyable=True)
+    else:
+        print(
+            f"PACKED {pack.runtime['id']} version={pack.runtime['version']} "
+            f"digest=sha256:{pack.digest} artifact={artifact}"
+        )
     return 0
 
 
@@ -10343,12 +11159,27 @@ def list_runtimes(_: argparse.Namespace) -> int:
         receipts = selections()
     except RuntimePackError as error:
         raise LetsInferError(str(error)) from error
-    for receipt in sorted(receipts, key=lambda item: item["logical_model"]):
-        print(
-            f"{receipt['logical_model']}\truntime={receipt['candidate_id']}\tengine={receipt['engine']}\ttarget={receipt['target']}\t"
-            f"version={receipt['version']}\tdigest=sha256:{receipt['digest']}\t"
-            f"policy={receipt['policy']}"
+    ordered = sorted(receipts, key=lambda item: item["logical_model"])
+    presenter = _human_presenter()
+    if presenter is not None:
+        presenter.table(
+            (
+                command_ui.TableColumn("logical_model", "MODEL", min_width=8),
+                command_ui.TableColumn("candidate_id", "RUNTIME", min_width=8),
+                command_ui.TableColumn("engine", "ENGINE", min_width=6),
+                command_ui.TableColumn("target", "TARGET", min_width=6),
+                command_ui.TableColumn("version", "VERSION", min_width=7),
+            ),
+            ordered,
+            empty_message="No runtimes are installed",
         )
+    else:
+        for receipt in ordered:
+            print(
+                f"{receipt['logical_model']}\truntime={receipt['candidate_id']}\tengine={receipt['engine']}\ttarget={receipt['target']}\t"
+                f"version={receipt['version']}\tdigest=sha256:{receipt['digest']}\t"
+                f"policy={receipt['policy']}"
+            )
     return 0
 
 
@@ -10460,9 +11291,16 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
         )
         return 0
 
+    presenter = _human_presenter()
     if not rows:
         suffix = "" if arguments.all_targets else " for this hardware"
-        print(f"No qualified runtimes are available{suffix}.")
+        if presenter is not None:
+            presenter.empty(
+                "No qualified runtimes are available",
+                detail=suffix.removeprefix(" for ") or None,
+            )
+        else:
+            print(f"No qualified runtimes are available{suffix}.")
         return 0
 
     headings = (
@@ -10492,15 +11330,41 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
         )
         for row in rows
     ]
-    widths = [
-        max(len(headings[index]), *(len(row[index]) for row in rendered))
-        for index in range(len(headings))
-    ]
-    print("  ".join(value.ljust(widths[index]) for index, value in enumerate(headings)))
-    for row in rendered:
-        print("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
-    if snapshot.stale:
-        print("\nUsing the last verified catalog; refresh is temporarily unavailable.")
+    if presenter is not None:
+        presenter.table(
+            tuple(
+                command_ui.TableColumn(
+                    str(index), heading, min_width=5 if index else 8
+                )
+                for index, heading in enumerate(headings)
+            ),
+            rendered,
+            empty_message="No qualified runtimes are available",
+        )
+        if snapshot.stale:
+            presenter.result(
+                "Using the last verified catalog",
+                semantic=command_ui.Semantic.WARNING,
+                detail="refresh is temporarily unavailable",
+            )
+    else:
+        widths = [
+            max(len(headings[index]), *(len(row[index]) for row in rendered))
+            for index in range(len(headings))
+        ]
+        print(
+            "  ".join(
+                value.ljust(widths[index]) for index, value in enumerate(headings)
+            )
+        )
+        for row in rendered:
+            print(
+                "  ".join(
+                    value.ljust(widths[index]) for index, value in enumerate(row)
+                )
+            )
+        if snapshot.stale:
+            print("\nUsing the last verified catalog; refresh is temporarily unavailable.")
     return 0
 
 
@@ -10527,13 +11391,39 @@ def hardware(arguments: argparse.Namespace) -> int:
         accelerator = fingerprint["accelerator"]
         memory = fingerprint["memory"]
         target_text = selected_target or ("ambiguous" if matches else "unmatched")
-        print(
-            f"{fingerprint['platform']}\t{accelerator['vendor']}/"
-            f"{accelerator['architecture']}\tdevices={accelerator['count']}\t"
-            f"partitioning={accelerator['partitioning']}\t"
-            f"memory={memory['topology']}/{memory['total_gib']}GiB\t"
-            f"target={target_text}"
-        )
+        presenter = _human_presenter()
+        if presenter is not None:
+            target_semantic = (
+                command_ui.Semantic.SUCCESS
+                if selected_target is not None
+                else command_ui.Semantic.WARNING
+            )
+            presenter.records(
+                (
+                    command_ui.RecordRow("Platform", fingerprint["platform"]),
+                    command_ui.RecordRow(
+                        "Accelerator",
+                        f"{accelerator['vendor']}/{accelerator['architecture']}",
+                        f"{accelerator['count']} device(s) · {accelerator['partitioning']}",
+                    ),
+                    command_ui.RecordRow(
+                        "Memory",
+                        f"{memory['total_gib']} GiB",
+                        memory["topology"],
+                    ),
+                    command_ui.RecordRow(
+                        "Target", target_text, semantic=target_semantic
+                    ),
+                )
+            )
+        else:
+            print(
+                f"{fingerprint['platform']}\t{accelerator['vendor']}/"
+                f"{accelerator['architecture']}\tdevices={accelerator['count']}\t"
+                f"partitioning={accelerator['partitioning']}\t"
+                f"memory={memory['topology']}/{memory['total_gib']}GiB\t"
+                f"target={target_text}"
+            )
     return 0
 
 
@@ -10587,10 +11477,23 @@ def inspect_runtime(arguments: argparse.Namespace) -> int:
         runtime_name = receipt["candidate_id"] if receipt else manifest["model"]["alias"]
         digest = f"sha256:{receipt['digest']}" if receipt else "unpacked-source"
         version = receipt["version"] if receipt else manifest["release"].rsplit("@", 1)[-1]
-        print(
-            f"{runtime_name}\tengine={adapter_for(manifest).name}\t"
-            f"version={version}\tstatus={manifest['status']}\tdigest={digest}"
-        )
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow("Runtime", runtime_name),
+                    command_ui.RecordRow("Engine", adapter_for(manifest).name),
+                    command_ui.RecordRow("Version", version),
+                    command_ui.RecordRow("Status", manifest["status"]),
+                ),
+                value_width=20,
+            )
+            presenter.verbatim(digest, label="Digest", copyable=True)
+        else:
+            print(
+                f"{runtime_name}\tengine={adapter_for(manifest).name}\t"
+                f"version={version}\tstatus={manifest['status']}\tdigest={digest}"
+            )
         if publication is not None:
             verification = publication["verification"]
             benchmark = publication["benchmark"]
@@ -10598,19 +11501,60 @@ def inspect_runtime(arguments: argparse.Namespace) -> int:
             verifiers = ", ".join(
                 f"@{item['github_login']}" for item in verification["verifiers"]
             ) or "maintainer migration"
-            print(
-                f"verification={verification['method']}\t"
-                f"verifiers={verifiers}\t"
-                f"score={benchmark['score'] if benchmark is not None else 'unscored'}"
-            )
-            if verification["method"] == "community-consensus-v1":
-                print(
-                    f"subject={provenance['execution_sha256']}\t"
-                    f"consensus={verification['consensus_path']}\t"
-                    f"consensus_sha256={verification['consensus_sha256']}"
+            if presenter is not None:
+                presenter.records(
+                    (
+                        command_ui.RecordRow(
+                            "Verification", verification["method"], verifiers
+                        ),
+                        command_ui.RecordRow(
+                            "Score",
+                            benchmark["score"] if benchmark is not None else "unscored",
+                        ),
+                    ),
+                    value_width=24,
                 )
+            else:
+                print(
+                    f"verification={verification['method']}\t"
+                    f"verifiers={verifiers}\t"
+                    f"score={benchmark['score'] if benchmark is not None else 'unscored'}"
+                )
+            if verification["method"] == "community-consensus-v1":
+                if presenter is not None:
+                    presenter.records(
+                        (
+                            command_ui.RecordRow(
+                                "Consensus", verification["consensus_path"]
+                            ),
+                        ),
+                        value_width=28,
+                    )
+                    presenter.verbatim(
+                        provenance["execution_sha256"],
+                        label="Subject",
+                        copyable=True,
+                    )
+                    presenter.verbatim(
+                        verification["consensus_sha256"],
+                        label="Consensus SHA",
+                        copyable=True,
+                    )
+                else:
+                    print(
+                        f"subject={provenance['execution_sha256']}\t"
+                        f"consensus={verification['consensus_path']}\t"
+                        f"consensus_sha256={verification['consensus_sha256']}"
+                    )
         elif publication_error is not None:
-            print(f"verification=unavailable\treason={publication_error}")
+            if presenter is not None:
+                presenter.result(
+                    "Verification unavailable",
+                    semantic=command_ui.Semantic.WARNING,
+                    detail=publication_error,
+                )
+            else:
+                print(f"verification=unavailable\treason={publication_error}")
     return 0
 
 
@@ -10922,7 +11866,9 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
     if not groups:
         raise LetsInferError(f"no installed engine group serves model {model!r}")
 
+    presenter = _human_presenter()
     planned: list[dict[str, Any]] = []
+    plan_rows: list[dict[str, Any]] = []
     for group in groups:
         release = group["plan"].get("release")
         if not isinstance(release, Mapping):
@@ -10968,16 +11914,58 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
             }
         )
         state = "current" if source == release.get("source") else "update"
-        print(
-            f"{state.upper()} group={group['group_id']} candidate={candidate_id} "
-            f"{release.get('version')} -> {version}"
+        if presenter is not None:
+            plan_rows.append(
+                {
+                    "group": group["group_id"],
+                    "state": state.title(),
+                    "runtime": candidate_id,
+                    "version": (
+                        f"{release.get('version')} "
+                        f"{'→' if presenter.terminal.unicode else '->'} {version}"
+                    ),
+                    "_semantic": (
+                        command_ui.Semantic.INFO
+                        if state == "current"
+                        else command_ui.Semantic.WARNING
+                    ),
+                }
+            )
+        else:
+            print(
+                f"{state.upper()} group={group['group_id']} candidate={candidate_id} "
+                f"{release.get('version')} -> {version}"
+            )
+    if presenter is not None:
+        presenter.table(
+            (
+                command_ui.TableColumn("group", "GROUP", min_width=8),
+                command_ui.TableColumn("state", "STATE", min_width=7),
+                command_ui.TableColumn("runtime", "RUNTIME", min_width=8),
+                command_ui.TableColumn("version", "VERSION", min_width=9),
+            ),
+            plan_rows,
         )
     changes = [item for item in planned if item["source"] != item["current"]["source"]]
     if not changes:
-        print(f"CURRENT model={model} groups={len(groups)}")
+        if presenter is not None:
+            presenter.result(
+                "Runtime is current",
+                semantic=command_ui.Semantic.SUCCESS,
+                detail=f"{model} · {len(groups)} group(s)",
+            )
+        else:
+            print(f"CURRENT model={model} groups={len(groups)}")
         return 0
     if arguments.dry_run:
-        print(f"DRY RUN model={model} groups={len(changes)}")
+        if presenter is not None:
+            presenter.result(
+                "Dry run complete",
+                semantic=command_ui.Semantic.INFO,
+                detail=f"{model} · {len(changes)} group(s) would be upgraded",
+            )
+        else:
+            print(f"DRY RUN model={model} groups={len(changes)}")
         return 0
 
     completed = 0
@@ -10987,14 +11975,20 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
         member_ids = tuple(
             member["member_id"] for member in old_group["plan"]["members"]
         )
-        manifest_path, manifest, control_root, receipt = prepare_runtime_install(
-            item["source"],
-            policy=f"runtime:{item['candidate_id']}",
-            requested_runtime=item["candidate_id"],
-            requested_target=old_release["target_id"],
-            expected_version=item["version"],
-            expected_target_contract_sha256=item["target_sha256"],
+        resolving = _command_activity(
+            arguments,
+            f"Preparing upgrade {completed + 1} of {len(changes)}",
+            action_id="upgrade",
         )
+        with resolving, ui.protect_stdout(resolving):
+            manifest_path, manifest, control_root, receipt = prepare_runtime_install(
+                item["source"],
+                policy=f"runtime:{item['candidate_id']}",
+                requested_runtime=item["candidate_id"],
+                requested_target=old_release["target_id"],
+                expected_version=item["version"],
+                expected_target_contract_sha256=item["target_sha256"],
+            )
         runtime = verify_descriptor(pathlib.Path(receipt["object_root"]))
         release_identity = _group_release_identity(
             catalog_release_value=item["record"],
@@ -11015,16 +12009,22 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
                 member_ids=member_ids,
                 target=item["target"],
             )
-            install_engine_group(
+            applying = _command_activity(
                 arguments,
-                source=item["source"],
-                manifest_path=manifest_path,
-                manifest=manifest,
-                control_root=control_root,
-                receipt=receipt,
-                release_identity=release_identity,
-                resolved_topology=(identity, constrained, placement),
+                f"Applying upgrade {completed + 1} of {len(changes)}",
+                action_id="upgrade",
             )
+            with applying, ui.protect_stdout(applying):
+                install_engine_group(
+                    arguments,
+                    source=item["source"],
+                    manifest_path=manifest_path,
+                    manifest=manifest,
+                    control_root=control_root,
+                    receipt=receipt,
+                    release_identity=release_identity,
+                    resolved_topology=(identity, constrained, placement),
+                )
             updated_group_id = _active_group_id_for_release(
                 item["source"], member_ids
             )
@@ -11049,11 +12049,28 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
                 f"group {old_group['group_id']} update failed; previous release restored"
             ) from update_error
         completed += 1
-        print(
-            f"UPDATED {completed}/{len(changes)} candidate={item['candidate_id']} "
-            f"version={item['version']}"
+        if presenter is not None:
+            presenter.result(
+                f"Upgraded group {completed} of {len(changes)}",
+                semantic=command_ui.Semantic.SUCCESS,
+                detail=f"{item['candidate_id']} · {item['version']}",
+            )
+        else:
+            print(
+                f"UPDATED {completed}/{len(changes)} candidate={item['candidate_id']} "
+                f"version={item['version']}"
+            )
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow(
+                    "Runtime", model, semantic=command_ui.Semantic.SUCCESS
+                ),
+                command_ui.RecordRow("Groups", completed, "Upgraded"),
+            )
         )
-    print(f"UPDATED model={model} groups={completed}")
+    else:
+        print(f"UPDATED model={model} groups={completed}")
     return 0
 
 
@@ -11077,7 +12094,9 @@ def rollback_runtime(arguments: argparse.Namespace) -> int:
     ]
     if not current:
         raise LetsInferError(f"no installed engine group serves model {model!r}")
+    presenter = _human_presenter()
     planned: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    plan_rows: list[dict[str, Any]] = []
     for group in sorted(current, key=lambda row: row["group_id"]):
         release = group["plan"].get("release")
         if not isinstance(release, Mapping):
@@ -11106,11 +12125,42 @@ def rollback_runtime(arguments: argparse.Namespace) -> int:
         )
         planned.append((group, previous))
         old = previous["plan"]["release"]
-        print(
-            f"ROLLBACK group={group['group_id']} {release['version']} -> "
-            f"{old['version']} nodes={len(member_ids)}"
+        if presenter is not None:
+            plan_rows.append(
+                {
+                    "group": group["group_id"],
+                    "version": (
+                        f"{release['version']} "
+                        f"{'→' if presenter.terminal.unicode else '->'} "
+                        f"{old['version']}"
+                    ),
+                    "nodes": len(member_ids),
+                    "_semantic": command_ui.Semantic.WARNING,
+                }
+            )
+        else:
+            print(
+                f"ROLLBACK group={group['group_id']} {release['version']} -> "
+                f"{old['version']} nodes={len(member_ids)}"
+            )
+    if presenter is not None:
+        presenter.table(
+            (
+                command_ui.TableColumn("group", "GROUP", min_width=8),
+                command_ui.TableColumn("version", "VERSION", min_width=9),
+                command_ui.TableColumn(
+                    "nodes", "NODES", min_width=5, align="right"
+                ),
+            ),
+            plan_rows,
         )
     if arguments.dry_run:
+        if presenter is not None:
+            presenter.result(
+                "Dry run complete",
+                semantic=command_ui.Semantic.INFO,
+                detail=f"{model} · {len(planned)} group(s) would be rolled back",
+            )
         return 0
     completed = 0
     for group, previous in planned:
@@ -11119,11 +12169,17 @@ def rollback_runtime(arguments: argparse.Namespace) -> int:
         member_ids = _group_member_ids(group)
         _remove_engine_groups_by_id([group["group_id"]])
         try:
-            restored_group_id = _install_retained_group_release(
+            applying = _command_activity(
                 arguments,
-                release=previous_release,
-                member_ids=member_ids,
+                f"Rolling back group {completed + 1} of {len(planned)}",
+                action_id="rollback",
             )
+            with applying, ui.protect_stdout(applying):
+                restored_group_id = _install_retained_group_release(
+                    arguments,
+                    release=previous_release,
+                    member_ids=member_ids,
+                )
             if group["desired_state"] == "stopped":
                 _stop_engine_group_by_id(restored_group_id)
         except BaseException as rollback_error:
@@ -11145,7 +12201,23 @@ def rollback_runtime(arguments: argparse.Namespace) -> int:
                 f"group {group['group_id']} rollback failed; current release restored"
             ) from rollback_error
         completed += 1
-    print(f"ROLLED BACK model={model} groups={completed}")
+        if presenter is not None:
+            presenter.result(
+                f"Rolled back group {completed} of {len(planned)}",
+                semantic=command_ui.Semantic.SUCCESS,
+                detail=str(previous_release["version"]),
+            )
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow(
+                    "Runtime", model, semantic=command_ui.Semantic.SUCCESS
+                ),
+                command_ui.RecordRow("Groups", completed, "Rolled back"),
+            )
+        )
+    else:
+        print(f"ROLLED BACK model={model} groups={completed}")
     return 0
 
 
@@ -11158,17 +12230,41 @@ def verify(arguments: argparse.Namespace) -> int:
         model_cache = requested_model_cache(arguments.model_cache)
         verify_installed_runtime(manifest, model_cache=model_cache)
     adapter = adapter_for(manifest)
-    print(
-        f"VERIFIED {manifest['release']} ({manifest['status']}) "
-        f"engine={adapter.name} format={adapter.model_format}"
-    )
     serving = manifest["serving"]
     state = "qualified" if serving["qualified"] else "blocked"
-    print(
-        f"  serving: {state}, connections<={serving['max_connections']}, "
-        f"active<={serving['max_active_requests']}, "
-        f"context<={serving['max_context_tokens']}"
-    )
+    presenter = _human_presenter()
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow("Release", manifest["release"]),
+                command_ui.RecordRow("Status", manifest["status"]),
+                command_ui.RecordRow("Engine", adapter.name, adapter.model_format),
+                command_ui.RecordRow(
+                    "Serving",
+                    state.title(),
+                    (
+                        f"{serving['max_connections']} connections · "
+                        f"{serving['max_active_requests']} active · "
+                        f"{serving['max_context_tokens']} context"
+                    ),
+                    (
+                        command_ui.Semantic.SUCCESS
+                        if serving["qualified"]
+                        else command_ui.Semantic.WARNING
+                    ),
+                ),
+            )
+        )
+    else:
+        print(
+            f"VERIFIED {manifest['release']} ({manifest['status']}) "
+            f"engine={adapter.name} format={adapter.model_format}"
+        )
+        print(
+            f"  serving: {state}, connections<={serving['max_connections']}, "
+            f"active<={serving['max_active_requests']}, "
+            f"context<={serving['max_context_tokens']}"
+        )
     return 0
 
 
@@ -11184,16 +12280,45 @@ def acquire(arguments: argparse.Namespace) -> int:
     except LetsInferError:
         snapshot = acquire_model_snapshot(manifest, model_cache)
         existing = False
-    print(
-        f"ACQUIRED {manifest['release']} engine={adapter_for(manifest).name} "
-        f"existing={str(existing).lower()} snapshot={snapshot} "
-        f"manifest_sha256={sha256_file(manifest_path)}"
-    )
+    manifest_digest = sha256_file(manifest_path)
+    presenter = _human_presenter()
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow("Release", manifest["release"]),
+                command_ui.RecordRow("Engine", adapter_for(manifest).name),
+                command_ui.RecordRow(
+                    "Snapshot", "Already present" if existing else "Downloaded"
+                ),
+            )
+        )
+        presenter.verbatim(snapshot, label="Model snapshot", copyable=True)
+        presenter.verbatim(
+            manifest_digest,
+            label="Manifest SHA-256",
+            copyable=True,
+        )
+    else:
+        print(
+            f"ACQUIRED {manifest['release']} engine={adapter_for(manifest).name} "
+            f"existing={str(existing).lower()} snapshot={snapshot} "
+            f"manifest_sha256={manifest_digest}"
+        )
     return 0
 
 
 class _BenchmarkCancelled(Exception):
     """An explicit benchmark stop requested graceful worker cleanup."""
+
+
+def _benchmark_presenter() -> command_ui.CommandUI | None:
+    """Open one non-dashboard benchmark surface with cached update context."""
+
+    presenter = _human_presenter()
+    if presenter is not None:
+        presenter.header("Benchmark")
+        ui.update_notice(_update_manager().cached().available)
+    return presenter
 
 
 def _duration(seconds: float) -> str:
@@ -11213,6 +12338,7 @@ def _benchmark_dashboard(
     elapsed: float,
     terminal: ui.Terminal,
     frame: str,
+    updates: Iterable[object] = (),
 ) -> str:
     """Render one bounded live benchmark frame."""
     progress = progress if isinstance(progress, dict) else {}
@@ -11227,6 +12353,23 @@ def _benchmark_dashboard(
         f"{terminal.paint(status, ui.BOLD, color)}  "
         f"{terminal.paint(str(state.get('runtime') or 'unknown runtime'), ui.BOLD)}",
     ]
+    update_labels = ui.update_labels(updates)
+    if update_labels:
+        update_text = " · ".join(update_labels)
+        wrapped_updates = terminal.wrap(
+            update_text,
+            max(1, terminal.width - 22),
+        )
+        lines.extend(
+            [
+                f"  {terminal.paint('↑ UPDATE AVAILABLE', ui.BOLD, ui.YELLOW)}  "
+                f"{terminal.paint(wrapped_updates[0], ui.DIM)}",
+                *(
+                    f"                      {terminal.paint(part, ui.DIM)}"
+                    for part in wrapped_updates[1:]
+                ),
+            ]
+        )
     message = progress.get("message")
     if not isinstance(message, str) or not message:
         message = "Waiting for benchmark worker"
@@ -11295,9 +12438,12 @@ def _benchmark_dashboard(
         and all(isinstance(value, int) and not isinstance(value, bool) for value in expected)
     ):
         lines.append(f"  EXPECTED  {expected[0]}–{expected[1]} min")
-    lines.append(
-        f"  EVIDENCE  {terminal.clip(str(state.get('output_directory') or 'pending'), terminal.width - 12)}"
+    evidence = terminal.wrap(
+        str(state.get("output_directory") or "pending"),
+        max(1, terminal.width - 12),
     )
+    lines.append(f"  EVIDENCE  {evidence[0]}")
+    lines.extend(f"            {part}" for part in evidence[1:])
     if active:
         lines.extend(["", "  Ctrl-C detaches; `letsinfer benchmark stop` cancels."])
     elif state.get("error"):
@@ -11315,7 +12461,15 @@ def _benchmark_job_snapshot(*, machine: bool = False) -> int:
         if machine:
             print(compact_json({"active": False, "state": "none"}))
         else:
-            ui.Terminal(sys.stdout).status("No benchmark has been started")
+            presenter = _benchmark_presenter()
+            if presenter is not None:
+                presenter.result(
+                    "No benchmark has been started",
+                    semantic=command_ui.Semantic.MUTED,
+                    detail="Run `letsinfer benchmark <runtime>` to start one",
+                )
+            else:
+                ui.Terminal(sys.stdout).status("No benchmark has been started")
         return 0
     active = state.get("state") in benchmark_jobs.ACTIVE_STATES and benchmark_jobs.is_alive(
         state
@@ -11352,7 +12506,16 @@ def _benchmark_job_snapshot(*, machine: bool = False) -> int:
         else "✓" if state.get("state") == "completed" and terminal.unicode
         else "*"
     )
-    terminal.stream.write(_benchmark_dashboard(state, progress, elapsed, terminal, frame))
+    terminal.stream.write(
+        _benchmark_dashboard(
+            state,
+            progress,
+            elapsed,
+            terminal,
+            frame,
+            _update_manager().cached().available,
+        )
+    )
     terminal.stream.flush()
     return 0
 
@@ -11366,6 +12529,8 @@ def _follow_benchmark_job(job_id: str) -> None:
     frame_index = 0
     detached = False
     terminal_state = False
+    updates: tuple[object, ...] = ()
+    next_update_read = 0.0
     terminal.stream.write("\033[?1049h\033[?25l")
     terminal.stream.flush()
     try:
@@ -11380,10 +12545,21 @@ def _follow_benchmark_job(job_id: str) -> None:
             elapsed = (
                 time.time_ns() - state.get("started_unix_ns", time.time_ns())
             ) / 1_000_000_000
+            now = time.monotonic()
+            if now >= next_update_read:
+                updates = tuple(_update_manager().cached().available)
+                next_update_read = now + 5.0
             frame = frames[frame_index % len(frames)] if terminal.unicode else "*"
             terminal.stream.write(
                 "\033[H\033[2J"
-                + _benchmark_dashboard(state, progress, elapsed, terminal, frame)
+                + _benchmark_dashboard(
+                    state,
+                    progress,
+                    elapsed,
+                    terminal,
+                    frame,
+                    updates,
+                )
             )
             terminal.stream.flush()
             frame_index += 1
@@ -11402,6 +12578,7 @@ def _follow_benchmark_job(job_id: str) -> None:
 
 
 def _benchmark_stop() -> int:
+    presenter = _benchmark_presenter()
     try:
         state = benchmark_jobs.request_stop()
     except benchmark_jobs.BenchmarkJobError as error:
@@ -11419,7 +12596,13 @@ def _benchmark_stop() -> int:
             f"benchmark did not stop within {timeout_seconds} seconds; "
             "its worker remains isolated"
         )
-    terminal.success("Benchmark stopped")
+    if presenter is not None:
+        presenter.result(
+            "Benchmark stopped",
+            semantic=command_ui.Semantic.SUCCESS,
+        )
+    else:
+        terminal.success("Benchmark stopped")
     return 0
 
 
@@ -11438,11 +12621,7 @@ def _confirmed(
             else ""
         )
         raise LetsInferError(f"interactive confirmation is required{suffix}")
-    try:
-        response = input(f"{message} [y/N] ").strip().lower()
-    except EOFError:
-        return False
-    return response in {"y", "yes"}
+    return ui.confirm(message)
 
 
 def _remove_user_tree(path: pathlib.Path, *, label: str) -> bool:
@@ -11463,6 +12642,7 @@ def _remove_user_tree(path: pathlib.Path, *, label: str) -> bool:
 
 
 def _benchmark_clean(*, assume_yes: bool) -> int:
+    presenter = _benchmark_presenter()
     try:
         active = benchmark_jobs.active_state()
     except benchmark_jobs.BenchmarkJobError as error:
@@ -11475,11 +12655,34 @@ def _benchmark_clean(*, assume_yes: bool) -> int:
         "Delete all locally generated benchmark results and job logs?",
         assume_yes=assume_yes,
     ):
-        print("Benchmark cleanup cancelled")
+        if presenter is not None:
+            presenter.result(
+                "Benchmark cleanup cancelled",
+                semantic=command_ui.Semantic.INFO,
+                detail="No benchmark data was removed",
+            )
+        else:
+            print("Benchmark cleanup cancelled")
         return 0
     removed = int(_remove_user_tree(benchmarks_root(), label="benchmark evidence"))
     removed += int(_remove_user_tree(benchmark_jobs.root(), label="benchmark job state"))
-    print(f"CLEANED local benchmark data roots={removed}; sealed runtime results preserved")
+    if presenter is not None:
+        presenter.records(
+            (
+                command_ui.RecordRow(
+                    "Benchmark data",
+                    "Removed",
+                    semantic=command_ui.Semantic.SUCCESS,
+                ),
+                command_ui.RecordRow("Data roots", removed),
+                command_ui.RecordRow("Sealed results", "Preserved"),
+            )
+        )
+    else:
+        print(
+            f"CLEANED local benchmark data roots={removed}; "
+            "sealed runtime results preserved"
+        )
     return 0
 
 
@@ -11580,6 +12783,17 @@ def _gateway_is_idle() -> None:
 
 def _interactive_github_identity() -> benchmark_verification.GitHubIdentity:
     interactive = sys.stdin.isatty() and sys.stderr.isatty()
+    presenter = (
+        _benchmark_presenter()
+        if interactive
+        else command_ui.CommandUI(sys.stderr)
+    )
+    # The dashboard presenter requires stdout, stderr, and stdin to share a
+    # human terminal. GitHub authentication still has a valid interactive
+    # control channel when stdout is redirected, so retain a stderr-owned
+    # prompt surface without contaminating captured stdout.
+    if presenter is None:
+        presenter = command_ui.CommandUI(sys.stderr)
     if benchmark_verification.gh_version() is None:
         command = benchmark_verification.gh_install_command()
         instruction = (
@@ -11591,14 +12805,21 @@ def _interactive_github_identity() -> benchmark_verification.GitHubIdentity:
             raise LetsInferError(
                 f"GitHub CLI is required; run `{instruction}` and retry"
             )
-        print(
-            f"GitHub CLI is required. Press Enter to run `{instruction}`; "
-            "Ctrl-C cancels.",
-            file=sys.stderr,
+        presenter.result(
+            "GitHub CLI is required",
+            semantic=command_ui.Semantic.WARNING,
+            detail=f"Installer: {instruction}",
         )
-        input()
         try:
+            if not presenter.prompt.confirm(
+                "Install GitHub CLI now?",
+                default=True,
+                require_tty=True,
+            ):
+                raise LetsInferError("GitHub CLI installation was cancelled")
             benchmark_verification.ensure_gh(interactive=True, install=True)
+        except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+            raise LetsInferError("GitHub CLI installation was cancelled") from error
         except benchmark_verification.VerificationError as error:
             raise LetsInferError(str(error)) from error
     try:
@@ -11606,21 +12827,34 @@ def _interactive_github_identity() -> benchmark_verification.GitHubIdentity:
     except benchmark_verification.VerificationError as error:
         if "not authenticated" not in str(error) or not interactive:
             raise LetsInferError(str(error)) from error
-    print(
-        "Press Enter to authenticate GitHub CLI. GitHub CLI will show the browser "
-        "or device-code URL; Ctrl-C cancels.",
-        file=sys.stderr,
+    presenter.result(
+        "GitHub authentication is required",
+        semantic=command_ui.Semantic.WARNING,
+        detail="GitHub CLI will show the browser or device-code URL",
     )
-    input()
     try:
+        if not presenter.prompt.confirm(
+            "Authenticate with GitHub now?",
+            default=True,
+            require_tty=True,
+        ):
+            raise LetsInferError("GitHub authentication was cancelled")
         identity = benchmark_verification.github_identity(
             interactive=True, authenticate=True
         )
+    except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+        raise LetsInferError("GitHub authentication was cancelled") from error
     except benchmark_verification.VerificationError as error:
         raise LetsInferError(str(error)) from error
-    print(
-        f"GitHub account: @{identity.login} ({identity.numeric_id})",
-        file=sys.stderr,
+    presenter.records(
+        (
+            command_ui.RecordRow(
+                "GitHub",
+                f"@{identity.login}",
+                str(identity.numeric_id),
+                command_ui.Semantic.SUCCESS,
+            ),
+        )
     )
     return identity
 
@@ -11645,7 +12879,20 @@ def _verification_job_snapshot(*, machine: bool = False) -> int:
         if machine:
             print(compact_json({"active": False, "state": "none", "kind": "verification"}))
         else:
-            ui.Terminal(sys.stdout).status("No runtime verification has been started")
+            presenter = _benchmark_presenter()
+            if presenter is not None:
+                presenter.result(
+                    "No runtime verification has been started",
+                    semantic=command_ui.Semantic.MUTED,
+                    detail=(
+                        "Run `letsinfer benchmark verify <pull-request-url>` "
+                        "to start one"
+                    ),
+                )
+            else:
+                ui.Terminal(sys.stdout).status(
+                    "No runtime verification has been started"
+                )
         return 0
     active = (
         state.get("state") in benchmark_jobs.ACTIVE_STATES
@@ -12259,9 +13506,10 @@ def _benchmark_verify(arguments: argparse.Namespace) -> int:
         )
     except benchmark_jobs.BenchmarkJobError as error:
         raise LetsInferError(str(error)) from error
-    ui.Terminal(sys.stderr).status(
-        f"Verification started · job {state['job_id'][:8]} · @{identity.login}"
-    )
+    # The attached live dashboard owns this surface and immediately renders
+    # the job identity, verifier, elapsed time, and current phase.  Avoid a
+    # transient one-line status immediately before that continuously refreshed
+    # view takes over the terminal.
     _follow_benchmark_job(state["job_id"])
     return 0
 
@@ -12494,7 +13742,9 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         command.extend(["--progress-file", str(benchmark_jobs.progress_path())])
 
     if arguments.list:
-        run_passthrough(command)
+        # ``--list`` is an explicit raw-output contract: the materializer's
+        # validated workload list belongs to the caller even on a TTY.
+        run_passthrough(command, visible=True)
     elif arguments.job_worker:
         if not isinstance(arguments.job_id, str) or not arguments.job_id:
             raise LetsInferError("benchmark worker has no job identity")
@@ -12553,10 +13803,32 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
             )
         except benchmark_jobs.BenchmarkJobError as error:
             raise LetsInferError(str(error)) from error
-        ui.Terminal(sys.stderr).status(
-            f"Benchmark started · job {state['job_id'][:8]}"
-        )
-        if not arguments.detach:
+        if arguments.detach:
+            presenter = _benchmark_presenter()
+            if presenter is not None:
+                presenter.records(
+                    (
+                        command_ui.RecordRow(
+                            "Benchmark",
+                            "Running",
+                            semantic=command_ui.Semantic.WORKING,
+                        ),
+                        command_ui.RecordRow("Runtime", arguments.runtime),
+                        command_ui.RecordRow("Job", state["job_id"][:8]),
+                    )
+                )
+                presenter.verbatim(
+                    output,
+                    label="Evidence",
+                    copyable=True,
+                )
+            else:
+                ui.Terminal(sys.stderr).status(
+                    f"Benchmark started · job {state['job_id'][:8]}"
+                )
+        else:
+            # The attached dashboard is the progress surface; it includes the
+            # job identifier from its first frame and then refreshes in place.
             _follow_benchmark_job(state["job_id"])
     return 0
 
@@ -12782,6 +14054,7 @@ def update_core(arguments: argparse.Namespace) -> int:
             "Verify update",
         ),
         section="update",
+        show_header=False,
     ) as progress:
         run(command)
         progress.advance()
@@ -12799,7 +14072,6 @@ def update_core(arguments: argparse.Namespace) -> int:
         run([str(launcher), "--help"])
         run([str(launcher), "core-prune", "--quiet"])
         progress.advance()
-    terminal.success("Core updated")
     return 0
 
 
@@ -12837,34 +14109,86 @@ def check_updates(arguments: argparse.Namespace) -> int:
             )
         )
     else:
-        terminal = ui.Terminal(sys.stdout)
-        if terminal.interactive:
-            print(f"{terminal.logo('updates')}\n")
-        if snapshot.busy:
-            terminal.status("Another update check is already running; showing verified state")
+        presenter = _human_presenter()
+        rendered = []
         for record in snapshot.records:
             label = "Core" if record.kind == "core" else record.subject
             if record.available:
-                terminal.warning(
-                    f"{label} {record.available_version} available "
-                    f"(installed {record.installed_version})"
+                state = "Available"
+                semantic = command_ui.Semantic.WARNING
+                detail = (
+                    f"{record.installed_version} → {record.available_version}"
                 )
             elif record.status == "current":
-                terminal.success(f"{label} {record.installed_version} is current")
+                state = "Current"
+                semantic = command_ui.Semantic.SUCCESS
+                detail = record.installed_version
             elif record.status == "pinned":
-                terminal.status(f"{label} {record.installed_version} is pinned")
+                state = "Pinned"
+                semantic = command_ui.Semantic.INFO
+                detail = record.installed_version
             else:
-                terminal.error(
-                    f"{label} could not be checked ({record.error_code or record.status})"
+                state = "Unavailable"
+                semantic = command_ui.Semantic.ERROR
+                detail = record.error_code or record.status
+            rendered.append(
+                {
+                    "component": label,
+                    "state": state,
+                    "detail": detail,
+                    "_semantic": semantic,
+                }
+            )
+        if presenter is not None:
+            if snapshot.busy:
+                presenter.result(
+                    "Another update check is running",
+                    semantic=command_ui.Semantic.INFO,
+                    detail="Showing the latest verified state",
                 )
-        if snapshot.available:
+            presenter.table(
+                (
+                    command_ui.TableColumn("component", "COMPONENT", min_width=8),
+                    command_ui.TableColumn("state", "STATE", min_width=7),
+                    command_ui.TableColumn("detail", "VERSION", min_width=8),
+                ),
+                rendered,
+                empty_message="No installed components were found",
+            )
             for record in snapshot.available:
-                if record.kind == "core":
-                    terminal.status(
-                        f"Apply with `letsinfer update --version {record.available_version}`"
+                command = (
+                    f"letsinfer update --version {record.available_version}"
+                    if record.kind == "core"
+                    else f"letsinfer upgrade {record.subject}"
+                )
+                presenter.verbatim(command, label="Apply", copyable=True)
+        else:
+            terminal = ui.Terminal(sys.stdout)
+            if snapshot.busy:
+                terminal.status("Another update check is already running; showing verified state")
+            for record in snapshot.records:
+                label = "Core" if record.kind == "core" else record.subject
+                if record.available:
+                    terminal.warning(
+                        f"{label} {record.available_version} available "
+                        f"(installed {record.installed_version})"
                     )
+                elif record.status == "current":
+                    terminal.success(f"{label} {record.installed_version} is current")
+                elif record.status == "pinned":
+                    terminal.status(f"{label} {record.installed_version} is pinned")
                 else:
-                    terminal.status(f"Apply with `letsinfer upgrade {record.subject}`")
+                    terminal.error(
+                        f"{label} could not be checked ({record.error_code or record.status})"
+                    )
+            if snapshot.available:
+                for record in snapshot.available:
+                    if record.kind == "core":
+                        terminal.status(
+                            f"Apply with `letsinfer update --version {record.available_version}`"
+                        )
+                    else:
+                        terminal.status(f"Apply with `letsinfer upgrade {record.subject}`")
     return int(
         (snapshot.busy and not snapshot.records)
         or any(
@@ -13104,19 +14428,42 @@ def setup_command(arguments: argparse.Namespace) -> int:
         if not arguments.no_service:
             install_core_plane_services(identity, include_gateway=False)
         value = identity_json(identity)
+        presenter = None
         if arguments.json:
             print(json.dumps(value, sort_keys=True))
         else:
-            print(
-                f"NODE {identity.display_name} id={identity.site_id} "
-                f"role={identity.role} machine={identity.member_id}"
-            )
+            presenter = _human_presenter()
+            if presenter is not None:
+                presenter.records(
+                    (
+                        command_ui.RecordRow(
+                            "Node",
+                            identity.display_name,
+                            identity.site_id,
+                            command_ui.Semantic.SUCCESS,
+                        ),
+                        command_ui.RecordRow("Role", identity.role),
+                        command_ui.RecordRow("Machine", identity.member_id),
+                    )
+                )
+            else:
+                print(
+                    f"NODE {identity.display_name} id={identity.site_id} "
+                    f"role={identity.role} machine={identity.member_id}"
+                )
         if facts_error is not None:
-            print(
-                "WARNING child facts will retry through the node service: "
-                f"{facts_error}",
-                file=sys.stderr,
-            )
+            if presenter is not None:
+                presenter.result(
+                    "Node facts will retry through the node service",
+                    semantic=command_ui.Semantic.WARNING,
+                    detail=str(facts_error),
+                )
+            else:
+                print(
+                    "WARNING child facts will retry through the node service: "
+                    f"{facts_error}",
+                    file=sys.stderr,
+                )
         return 0
     ensure_tls_material(default_tls_cert_path(), default_tls_key_path())
     if platform.system() == "Linux":
@@ -13170,12 +14517,33 @@ def setup_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(value, sort_keys=True))
     else:
-        print(
-            f"NODE {identity.display_name} id={identity.site_id} "
-            f"role={identity.role} machine={identity.member_id}"
-        )
-        print(f"API key stored privately at {local_key_path}")
-        print(f"API endpoint {value['inference_endpoint']}")
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow(
+                        "Node",
+                        identity.display_name,
+                        identity.site_id,
+                        command_ui.Semantic.SUCCESS,
+                    ),
+                    command_ui.RecordRow("Role", identity.role),
+                    command_ui.RecordRow("Machine", identity.member_id),
+                    command_ui.RecordRow("API", value["inference_endpoint"]),
+                )
+            )
+            presenter.verbatim(
+                local_key_path,
+                label="Private API key",
+                copyable=True,
+            )
+        else:
+            print(
+                f"NODE {identity.display_name} id={identity.site_id} "
+                f"role={identity.role} machine={identity.member_id}"
+            )
+            print(f"API key stored privately at {local_key_path}")
+            print(f"API endpoint {value['inference_endpoint']}")
     return 0
 
 
@@ -13201,11 +14569,29 @@ def site_status_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(value, sort_keys=True))
     else:
-        print(
-            f"{value['display_name']}\t{value['role']}\t"
-            f"node={value['node_id']}\tmachine={value['machine_id']}\t"
-            f"main={value['main_id']}@{value['main_address']}"
-        )
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow(
+                        "Node",
+                        value["display_name"],
+                        value["role"],
+                        command_ui.Semantic.SUCCESS,
+                    ),
+                    command_ui.RecordRow("Node ID", value["node_id"]),
+                    command_ui.RecordRow("Machine", value["machine_id"]),
+                    command_ui.RecordRow(
+                        "Main", value["main_id"], value["main_address"]
+                    ),
+                )
+            )
+        else:
+            print(
+                f"{value['display_name']}\t{value['role']}\t"
+                f"node={value['node_id']}\tmachine={value['machine_id']}\t"
+                f"main={value['main_id']}@{value['main_address']}"
+            )
     return 0
 
 
@@ -13219,7 +14605,14 @@ def site_move_command(arguments: argparse.Namespace) -> int:
             store.record_action(
                 "node.move", identity.site_id, "success", "plan_only"
             )
-        print(json.dumps(document, sort_keys=True, indent=None if arguments.json else 2))
+        if arguments.json:
+            print(json.dumps(document, sort_keys=True))
+        else:
+            presenter = _human_presenter()
+            if presenter is not None:
+                presenter.object(document, title="Node move plan")
+            else:
+                print(json.dumps(document, sort_keys=True, indent=2))
         return 0
     if arguments.source_site_id != identity.site_id:
         raise LetsInferError("--source-node-id must exactly confirm the current node")
@@ -13236,8 +14629,11 @@ def site_move_command(arguments: argparse.Namespace) -> int:
     code = arguments.code
     if code is None:
         try:
-            code = getpass.getpass("Destination membership code: ")
-        except (EOFError, KeyboardInterrupt) as error:
+            code = command_ui.CommandUI(sys.stderr).prompt.secret(
+                "Destination membership code",
+                require_tty=True,
+            )
+        except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
             raise LetsInferError("node move code entry was cancelled") from error
     code = re.sub(r"[- ]", "", code)
     if re.fullmatch(r"[0-9]{8}", code) is None:
@@ -13284,22 +14680,30 @@ def site_move_command(arguments: argparse.Namespace) -> int:
             for unit in (RECOVERY_TIMER_NAME, NODE_SERVICE_NAME, SERVICE_NAME):
                 if prior_units[unit][1] == "active":
                     run_passthrough(["systemctl", "--user", "stop", unit])
-        with LocalMoveTransaction(identity) as transaction:
-            enrollment = join_site(
-                str(arguments.endpoint),
-                invite_id=str(arguments.invite),
-                code=code,
-                coordinator_certificate_sha256=str(
-                    arguments.coordinator_certificate_sha256
-                ),
-                member_name=arguments.name or socket.gethostname(),
-                member_address=arguments.address or socket.getfqdn() or socket.gethostname(),
-            )
-            if not arguments.no_service:
-                ensure_core_watchdog_tls()
-                install_node_service_only()
-                install_core_watchdog_service(enrollment.identity)
-            replacement = transaction.commit()
+        moving = _command_activity(
+            arguments, "Joining the destination node", action_id="node.move"
+        )
+        with moving, ui.protect_stdout(moving):
+            with LocalMoveTransaction(identity) as transaction:
+                enrollment = join_site(
+                    str(arguments.endpoint),
+                    invite_id=str(arguments.invite),
+                    code=code,
+                    coordinator_certificate_sha256=str(
+                        arguments.coordinator_certificate_sha256
+                    ),
+                    member_name=arguments.name or socket.gethostname(),
+                    member_address=(
+                        arguments.address
+                        or socket.getfqdn()
+                        or socket.gethostname()
+                    ),
+                )
+                if not arguments.no_service:
+                    ensure_core_watchdog_tls()
+                    install_node_service_only()
+                    install_core_watchdog_service(enrollment.identity)
+                replacement = transaction.commit()
         if not arguments.no_service:
             for unit in (
                 ENGINE_SERVICE_NAME,
@@ -13342,12 +14746,34 @@ def site_move_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(result, sort_keys=True))
     else:
-        print(
-            f"MOVED source={identity.site_id} destination={replacement.site_id} "
-            f"child={replacement.member_id} state={enrollment.state}"
-        )
-        if enrollment.comparison_code is not None:
-            print(f"COMPARE {enrollment.comparison_code}")
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow(
+                        "Node move",
+                        "Complete",
+                        semantic=command_ui.Semantic.SUCCESS,
+                    ),
+                    command_ui.RecordRow("Source", identity.site_id),
+                    command_ui.RecordRow("Destination", replacement.site_id),
+                    command_ui.RecordRow("Child", replacement.member_id),
+                    command_ui.RecordRow("State", enrollment.state),
+                )
+            )
+            if enrollment.comparison_code is not None:
+                presenter.verbatim(
+                    enrollment.comparison_code,
+                    label="Comparison code",
+                    copyable=True,
+                )
+        else:
+            print(
+                f"MOVED source={identity.site_id} destination={replacement.site_id} "
+                f"child={replacement.member_id} state={enrollment.state}"
+            )
+            if enrollment.comparison_code is not None:
+                print(f"COMPARE {enrollment.comparison_code}")
     return 0
 
 
@@ -13374,11 +14800,36 @@ def member_list_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(rows, sort_keys=True))
     else:
-        for row in rows:
-            print(
-                f"{row['member_id']}\t{row['display_name']}\t{row['role']}\t"
-                f"{row['state']}\t{row['address']}"
+        presenter = _human_presenter()
+        if presenter is not None:
+            rendered = [
+                {
+                    **row,
+                    "_semantic": (
+                        command_ui.Semantic.SUCCESS
+                        if row["state"] == "active"
+                        else command_ui.Semantic.WARNING
+                    ),
+                }
+                for row in rows
+            ]
+            presenter.table(
+                (
+                    command_ui.TableColumn("display_name", "NAME", min_width=8),
+                    command_ui.TableColumn("role", "ROLE", min_width=5),
+                    command_ui.TableColumn("state", "STATE", min_width=7),
+                    command_ui.TableColumn("address", "ADDRESS", min_width=10),
+                    command_ui.TableColumn("member_id", "MEMBER", min_width=10),
+                ),
+                rendered,
+                empty_message="No nodes are connected",
             )
+        else:
+            for row in rows:
+                print(
+                    f"{row['member_id']}\t{row['display_name']}\t{row['role']}\t"
+                    f"{row['state']}\t{row['address']}"
+                )
     return 0
 
 
@@ -13387,7 +14838,14 @@ def member_prepare_command(arguments: argparse.Namespace) -> int:
         candidate = prepare_member_identity()
     except SiteError as error:
         raise LetsInferError(str(error)) from error
-    print(json.dumps(candidate, sort_keys=True, indent=None if arguments.json else 2))
+    if arguments.json:
+        print(json.dumps(candidate, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.object(candidate, title="Prepared node identity")
+        else:
+            print(json.dumps(candidate, sort_keys=True, indent=2))
     return 0
 
 
@@ -13406,27 +14864,36 @@ def member_join_command(arguments: argparse.Namespace) -> int:
     else:
         if code is None:
             try:
-                code = getpass.getpass("Membership code: ")
-            except (EOFError, KeyboardInterrupt) as error:
+                code = command_ui.CommandUI(sys.stderr).prompt.secret(
+                    "Membership code",
+                    require_tty=True,
+                )
+            except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
                 raise LetsInferError("membership code entry was cancelled") from error
         code = re.sub(r"[- ]", "", code)
         if re.fullmatch(r"[0-9]{8}", code) is None:
             raise LetsInferError("membership code must contain eight digits")
-    try:
-        enrollment = join_site(
-            arguments.endpoint,
-            invite_id=arguments.invite,
-            code=code,
-            coordinator_certificate_sha256=arguments.coordinator_certificate_sha256,
-            member_name=arguments.name or socket.gethostname(),
-            member_address=arguments.address or socket.getfqdn() or socket.gethostname(),
-        )
-    except (ControlError, SiteError) as error:
-        raise LetsInferError(str(error)) from error
-    if not arguments.no_service:
-        ensure_core_watchdog_tls()
-        install_node_service_only()
-        install_core_watchdog_service(enrollment.identity)
+    joining = _command_activity(arguments, action_id="child.join")
+    with joining, ui.protect_stdout(joining):
+        try:
+            enrollment = join_site(
+                arguments.endpoint,
+                invite_id=arguments.invite,
+                code=code,
+                coordinator_certificate_sha256=(
+                    arguments.coordinator_certificate_sha256
+                ),
+                member_name=arguments.name or socket.gethostname(),
+                member_address=(
+                    arguments.address or socket.getfqdn() or socket.gethostname()
+                ),
+            )
+        except (ControlError, SiteError) as error:
+            raise LetsInferError(str(error)) from error
+        if not arguments.no_service:
+            ensure_core_watchdog_tls()
+            install_node_service_only()
+            install_core_watchdog_service(enrollment.identity)
     identity = enrollment.identity
     value = identity_json(identity)
     value["child_state"] = enrollment.state
@@ -13436,13 +14903,43 @@ def member_join_command(arguments: argparse.Namespace) -> int:
         print(json.dumps(value, sort_keys=True))
     else:
         label = "JOINED" if enrollment.state == "active" else "PENDING"
-        print(
-            f"{label} {identity.display_name} node={identity.site_id} "
-            f"child={identity.member_id} main="
-            f"{identity.coordinator_id}@{identity.coordinator_address}"
-        )
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow(
+                        "State",
+                        label.title(),
+                        semantic=(
+                            command_ui.Semantic.SUCCESS
+                            if enrollment.state == "active"
+                            else command_ui.Semantic.WARNING
+                        ),
+                    ),
+                    command_ui.RecordRow("Node", identity.display_name, identity.site_id),
+                    command_ui.RecordRow("Member", identity.member_id),
+                    command_ui.RecordRow(
+                        "Main",
+                        identity.coordinator_id,
+                        identity.coordinator_address,
+                    ),
+                )
+            )
+        else:
+            print(
+                f"{label} {identity.display_name} node={identity.site_id} "
+                f"child={identity.member_id} main="
+                f"{identity.coordinator_id}@{identity.coordinator_address}"
+            )
         if enrollment.comparison_code is not None:
-            print(f"COMPARE {enrollment.comparison_code}")
+            if presenter is not None:
+                presenter.result(
+                    "Compare this code on both devices",
+                    semantic=command_ui.Semantic.WARNING,
+                    detail=enrollment.comparison_code,
+                )
+            else:
+                print(f"COMPARE {enrollment.comparison_code}")
     return 0
 
 
@@ -13496,12 +14993,30 @@ def member_invite_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(invite, sort_keys=True))
     else:
-        print(
-            f"INVITE {invite['invite_id']} mode={invite['mode']} "
-            f"expires={invite['expires_at_unix']}"
-        )
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow("Invite", invite["invite_id"]),
+                    command_ui.RecordRow("Mode", invite["mode"]),
+                    command_ui.RecordRow("Expires", invite["expires_at_unix"]),
+                    command_ui.RecordRow("Endpoint", invite["endpoint"]),
+                )
+            )
+        else:
+            print(
+                f"INVITE {invite['invite_id']} mode={invite['mode']} "
+                f"expires={invite['expires_at_unix']}"
+            )
         if invite["code"] is not None:
-            print(invite["code"])
+            if presenter is not None:
+                presenter.verbatim(
+                    invite["code"],
+                    label="Membership code",
+                    copyable=True,
+                )
+            else:
+                print(invite["code"])
     return 0
 
 
@@ -13515,7 +15030,15 @@ def member_approve_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(result, sort_keys=True))
     else:
-        print(f"APPROVED {result['member_id']}")
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                "Node approved",
+                semantic=command_ui.Semantic.SUCCESS,
+                detail=result["member_id"],
+            )
+        else:
+            print(f"APPROVED {result['member_id']}")
     return 0
 
 
@@ -13541,16 +15064,24 @@ def member_sync_command(arguments: argparse.Namespace) -> int:
     result = _synchronize_member_facts()
     if arguments.json:
         print(json.dumps(result, sort_keys=True))
-    else:
-        print(f"SYNCED {len(result['refreshed'])} machine(s)")
-        for failure in result["failed"]:
-            print(f"FAILED {failure}", file=sys.stderr)
     if result["failed"]:
         with _site_store() as store:
             store.record_action(
                 "child.sync", "child.sync", "failed", "child_control_unavailable"
             )
-        raise LetsInferError("one or more child nodes could not publish authenticated facts")
+        raise LetsInferError(
+            "one or more child nodes could not publish authenticated facts: "
+            + ", ".join(result["failed"])
+        )
+    if not arguments.json:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                f"Refreshed {len(result['refreshed'])} node(s)",
+                semantic=command_ui.Semantic.SUCCESS,
+            )
+        else:
+            print(f"SYNCED {len(result['refreshed'])} machine(s)")
     return 0
 
 
@@ -13591,7 +15122,18 @@ def member_remove_command(arguments: argparse.Namespace) -> int:
             result = store.remove_member(arguments.member)
         except SiteError as error:
             raise LetsInferError(str(error)) from error
-    print(json.dumps(result, sort_keys=True) if arguments.json else f"REMOVED {arguments.member}")
+    if arguments.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                "Node removed",
+                semantic=command_ui.Semantic.SUCCESS,
+                detail=arguments.member,
+            )
+        else:
+            print(f"REMOVED {arguments.member}")
     return 0
 
 
@@ -13601,7 +15143,18 @@ def member_drain_command(arguments: argparse.Namespace) -> int:
             result = store.set_member_draining(arguments.member, True)
         except SiteError as error:
             raise LetsInferError(str(error)) from error
-    print(json.dumps(result, sort_keys=True) if arguments.json else f"DRAINING {arguments.member}")
+    if arguments.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                "Node is draining",
+                semantic=command_ui.Semantic.WARNING,
+                detail=arguments.member,
+            )
+        else:
+            print(f"DRAINING {arguments.member}")
     return 0
 
 
@@ -13611,7 +15164,18 @@ def member_resume_command(arguments: argparse.Namespace) -> int:
             result = store.set_member_draining(arguments.member, False)
         except SiteError as error:
             raise LetsInferError(str(error)) from error
-    print(json.dumps(result, sort_keys=True) if arguments.json else f"ACTIVE {arguments.member}")
+    if arguments.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                "Node is active",
+                semantic=command_ui.Semantic.SUCCESS,
+                detail=arguments.member,
+            )
+        else:
+            print(f"ACTIVE {arguments.member}")
     return 0
 
 
@@ -14828,7 +16392,14 @@ def topology_command(arguments: argparse.Namespace) -> int:
     _identity, graph = _fresh_site_topology()
     document = graph.document()
     document["topology_sha256"] = graph.sha256()
-    print(json.dumps(document, sort_keys=True, indent=None if arguments.json else 2))
+    if arguments.json:
+        print(json.dumps(document, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.object(document, title="Verified topology")
+        else:
+            print(json.dumps(document, sort_keys=True, indent=2))
     return 0
 
 
@@ -14935,59 +16506,99 @@ def topology_plan_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(document, sort_keys=True))
     else:
-        print(
-            f"PLAN model={document['model']} engine={document['engine']} "
-            f"target={document['target']} strategy={document['placement']['strategy']} "
-            f"members={','.join(document['placement']['members'])} "
-            f"change_required={str(document['change_required']).lower()} "
-            f"plan={document['plan_id'] or 'none'} restart=manual"
-        )
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow("Model", document["model"]),
+                    command_ui.RecordRow("Engine", document["engine"]),
+                    command_ui.RecordRow("Target", document["target"]),
+                    command_ui.RecordRow(
+                        "Placement",
+                        document["placement"]["strategy"],
+                        ", ".join(document["placement"]["members"]),
+                    ),
+                    command_ui.RecordRow(
+                        "Change",
+                        "Required" if document["change_required"] else "None",
+                        semantic=(
+                            command_ui.Semantic.WARNING
+                            if document["change_required"]
+                            else command_ui.Semantic.SUCCESS
+                        ),
+                    ),
+                    command_ui.RecordRow("Plan", document["plan_id"] or "None"),
+                )
+            )
+        else:
+            print(
+                f"PLAN model={document['model']} engine={document['engine']} "
+                f"target={document['target']} strategy={document['placement']['strategy']} "
+                f"members={','.join(document['placement']['members'])} "
+                f"change_required={str(document['change_required']).lower()} "
+                f"plan={document['plan_id'] or 'none'} restart=manual"
+            )
     return 0
 
 
 def topology_probe_command(arguments: argparse.Namespace) -> int:
-    if arguments.left == arguments.right:
-        raise LetsInferError("topology link endpoints must be different members")
-    with _site_store() as store:
-        members = {
-            row["member_id"]: row
-            for row in store.members()
-            if row["state"] == "active"
-        }
-    try:
-        left = members[arguments.left]
-        right = members[arguments.right]
-    except KeyError as error:
-        raise LetsInferError(f"topology link member is not active: {error.args[0]}") from error
-    directions = (
-        (left, right, arguments.left_interface),
-        (right, left, arguments.right_interface),
-    )
-    links: list[dict[str, Any]] = []
-    for subject, peer, interface in directions:
+    with _command_step_progress(arguments) as progress:
+        if arguments.left == arguments.right:
+            raise LetsInferError("topology link endpoints must be different members")
+        with _site_store() as store:
+            members = {
+                row["member_id"]: row
+                for row in store.members()
+                if row["state"] == "active"
+            }
         try:
-            links.append(
-                request_member_link_probe(
-                    _site_control_endpoint(subject["address"]),
-                    expected_member_id=subject["member_id"],
-                    expected_certificate_sha256=subject["certificate_sha256"],
-                    peer_endpoint=_site_control_endpoint(peer["address"]),
-                    peer_member_id=peer["member_id"],
-                    peer_certificate_sha256=peer["certificate_sha256"],
-                    interface=interface,
-                    kind=arguments.kind,
-                )
-            )
-        except ControlError as error:
-            raise LetsInferError(str(error)) from error
-    synchronized = _synchronize_member_facts()
-    if synchronized["failed"]:
-        raise LetsInferError(
-            "link proof succeeded but authenticated fact refresh failed for: "
-            + ",".join(synchronized["failed"])
+            left = members[arguments.left]
+            right = members[arguments.right]
+        except KeyError as error:
+            raise LetsInferError(
+                f"topology link member is not active: {error.args[0]}"
+            ) from error
+        progress.advance()
+
+        directions = (
+            (left, right, arguments.left_interface),
+            (right, left, arguments.right_interface),
         )
+        links: list[dict[str, Any]] = []
+        for subject, peer, interface in directions:
+            try:
+                links.append(
+                    request_member_link_probe(
+                        _site_control_endpoint(subject["address"]),
+                        expected_member_id=subject["member_id"],
+                        expected_certificate_sha256=subject["certificate_sha256"],
+                        peer_endpoint=_site_control_endpoint(peer["address"]),
+                        peer_member_id=peer["member_id"],
+                        peer_certificate_sha256=peer["certificate_sha256"],
+                        interface=interface,
+                        kind=arguments.kind,
+                    )
+                )
+            except ControlError as error:
+                raise LetsInferError(str(error)) from error
+        progress.advance()
+
+        synchronized = _synchronize_member_facts()
+        if synchronized["failed"]:
+            raise LetsInferError(
+                "link proof succeeded but authenticated fact refresh failed for: "
+                + ",".join(synchronized["failed"])
+            )
+        progress.advance()
     result = {"links": links, "refreshed": synchronized["refreshed"]}
-    print(json.dumps(result, sort_keys=True, indent=None if arguments.json else 2))
+    if arguments.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.object(result, title="Verified links")
+        else:
+            print(json.dumps(result, sort_keys=True, indent=2))
     return 0
 
 
@@ -14997,8 +16608,22 @@ def alias_list_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(aliases, sort_keys=True))
     else:
-        for alias, model in aliases.items():
-            print(f"{alias}\t{model}")
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.table(
+                (
+                    command_ui.TableColumn("alias", "ALIAS", min_width=8),
+                    command_ui.TableColumn("model", "MODEL", min_width=12),
+                ),
+                [
+                    {"alias": alias, "model": model}
+                    for alias, model in sorted(aliases.items())
+                ],
+                empty_message="No model aliases are configured",
+            )
+        else:
+            for alias, model in aliases.items():
+                print(f"{alias}\t{model}")
     return 0
 
 
@@ -15008,7 +16633,18 @@ def alias_set_command(arguments: argparse.Namespace) -> int:
             value = store.set_alias(arguments.alias, arguments.model)
         except SiteError as error:
             raise LetsInferError(str(error)) from error
-    print(json.dumps(value, sort_keys=True) if arguments.json else f"ALIAS {value['alias']} -> {value['model']}")
+    if arguments.json:
+        print(json.dumps(value, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                f"Alias {value['alias']} saved",
+                semantic=command_ui.Semantic.SUCCESS,
+                detail=value["model"],
+            )
+        else:
+            print(f"ALIAS {value['alias']} -> {value['model']}")
     return 0
 
 
@@ -15018,7 +16654,17 @@ def alias_remove_command(arguments: argparse.Namespace) -> int:
             value = store.remove_alias(arguments.alias)
         except SiteError as error:
             raise LetsInferError(str(error)) from error
-    print(json.dumps(value, sort_keys=True) if arguments.json else f"REMOVED ALIAS {value['alias']}")
+    if arguments.json:
+        print(json.dumps(value, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                f"Alias {value['alias']} removed",
+                semantic=command_ui.Semantic.SUCCESS,
+            )
+        else:
+            print(f"REMOVED ALIAS {value['alias']}")
     return 0
 
 
@@ -15075,10 +16721,37 @@ def exposure_status_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(result, sort_keys=True))
     else:
-        print(
-            f"EXPOSURE {result['state']} provider={result['provider']} "
-            f"url={result['public_url'] or '-'}"
-        )
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow(
+                        "State",
+                        result["state"].title(),
+                        semantic=(
+                            command_ui.Semantic.SUCCESS
+                            if result["state"] == "enabled" and verified
+                            else command_ui.Semantic.WARNING
+                        ),
+                    ),
+                    command_ui.RecordRow("Provider", result["provider"]),
+                    command_ui.RecordRow("URL", result["public_url"] or "—"),
+                    command_ui.RecordRow(
+                        "Verified",
+                        "Yes" if verified else "No",
+                        semantic=(
+                            command_ui.Semantic.SUCCESS
+                            if verified
+                            else command_ui.Semantic.ERROR
+                        ),
+                    ),
+                )
+            )
+        else:
+            print(
+                f"EXPOSURE {result['state']} provider={result['provider']} "
+                f"url={result['public_url'] or '-'}"
+            )
     return 0 if verified else 1
 
 
@@ -15137,11 +16810,18 @@ def _enable_public_exposure(
 
 def expose_command(arguments: argparse.Namespace) -> int:
     value = _enable_public_exposure()
-    print(
-        json.dumps(value, sort_keys=True)
-        if arguments.json
-        else f"EXPOSED {value['public_url']} provider={value['provider']}"
-    )
+    if arguments.json:
+        print(json.dumps(value, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                "Public inference enabled",
+                semantic=command_ui.Semantic.SUCCESS,
+                detail=f"{value['public_url']} · {value['provider']}",
+            )
+        else:
+            print(f"EXPOSED {value['public_url']} provider={value['provider']}")
     return 0
 
 
@@ -15205,11 +16885,17 @@ def _disable_public_exposure(
 
 def unexpose_command(arguments: argparse.Namespace) -> int:
     value = _disable_public_exposure()
-    print(
-        json.dumps(value, sort_keys=True)
-        if arguments.json
-        else "PUBLIC INFERENCE DISABLED"
-    )
+    if arguments.json:
+        print(json.dumps(value, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                "Public inference disabled",
+                semantic=command_ui.Semantic.SUCCESS,
+            )
+        else:
+            print("PUBLIC INFERENCE DISABLED")
     return 0
 
 
@@ -15238,9 +16924,28 @@ def key_create_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(output, sort_keys=True))
     else:
-        print(f"KEY {metadata['name']} id={metadata['key_id']}")
+        presenter = _human_presenter(sys.stderr)
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow("Key", metadata["name"]),
+                    command_ui.RecordRow("Key ID", metadata["key_id"]),
+                )
+            )
+            presenter.result(
+                "This token is shown once",
+                semantic=command_ui.Semantic.WARNING,
+                detail="Store it securely now",
+            )
+        else:
+            print(
+                f"KEY {metadata['name']} id={metadata['key_id']}",
+                file=sys.stderr,
+            )
+            print("This token is shown once. Store it now.", file=sys.stderr)
+        # A one-time token is deliberately the only unstyled line.  This keeps
+        # it copyable and preserves the redirected stdout contract.
         print(token)
-        print("This token is shown once. Store it now.", file=sys.stderr)
     return 0
 
 
@@ -15250,9 +16955,37 @@ def key_list_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(rows, sort_keys=True))
     else:
-        for row in rows:
-            state = "revoked" if row["revoked_at_unix"] is not None else "active"
-            print(f"{row['key_id']}\t{row['name']}\t{state}\tmodels={','.join(row['models']) or '*'}")
+        rendered = [
+            {
+                **row,
+                "state": "revoked" if row["revoked_at_unix"] is not None else "active",
+                "model_text": ",".join(row["models"]) or "*",
+                "_semantic": (
+                    command_ui.Semantic.WARNING
+                    if row["revoked_at_unix"] is not None
+                    else command_ui.Semantic.SUCCESS
+                ),
+            }
+            for row in rows
+        ]
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.table(
+                (
+                    command_ui.TableColumn("name", "NAME", min_width=8),
+                    command_ui.TableColumn("state", "STATE", min_width=7),
+                    command_ui.TableColumn("model_text", "MODELS", min_width=8),
+                    command_ui.TableColumn("key_id", "KEY ID", min_width=10),
+                ),
+                rendered,
+                empty_message="No API keys are registered",
+            )
+        else:
+            for row in rendered:
+                print(
+                    f"{row['key_id']}\t{row['name']}\t{row['state']}\t"
+                    f"models={row['model_text']}"
+                )
     return 0
 
 
@@ -15262,7 +16995,14 @@ def key_show_command(arguments: argparse.Namespace) -> int:
             row = store.key(arguments.key)
         except SiteError as error:
             raise LetsInferError(str(error)) from error
-    print(json.dumps(row, sort_keys=True, indent=2 if not arguments.json else None))
+    if arguments.json:
+        print(json.dumps(row, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.object(row, title="API key policy")
+        else:
+            print(json.dumps(row, sort_keys=True, indent=2))
     return 0
 
 
@@ -15272,7 +17012,18 @@ def key_revoke_command(arguments: argparse.Namespace) -> int:
             row = store.revoke_key(arguments.key)
         except SiteError as error:
             raise LetsInferError(str(error)) from error
-    print(json.dumps(row, sort_keys=True) if arguments.json else f"REVOKED {row['name']} id={row['key_id']}")
+    if arguments.json:
+        print(json.dumps(row, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                f"Revoked {row['name']}",
+                semantic=command_ui.Semantic.SUCCESS,
+                detail=row["key_id"],
+            )
+        else:
+            print(f"REVOKED {row['name']} id={row['key_id']}")
     return 0
 
 
@@ -15286,9 +17037,27 @@ def key_rotate_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(output, sort_keys=True))
     else:
-        print(f"ROTATED {arguments.key} -> {row['name']} id={row['key_id']}")
+        presenter = _human_presenter(sys.stderr)
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow("Key", row["name"]),
+                    command_ui.RecordRow("Key ID", row["key_id"]),
+                    command_ui.RecordRow("Replaced", arguments.key),
+                )
+            )
+            presenter.result(
+                "This token is shown once",
+                semantic=command_ui.Semantic.WARNING,
+                detail="Store it securely now",
+            )
+        else:
+            print(
+                f"ROTATED {arguments.key} -> {row['name']} id={row['key_id']}",
+                file=sys.stderr,
+            )
+            print("This token is shown once. Store it now.", file=sys.stderr)
         print(token)
-        print("This token is shown once. Store it now.", file=sys.stderr)
     return 0
 
 
@@ -15308,7 +17077,14 @@ def key_policy_command(arguments: argparse.Namespace) -> int:
             )
         except SiteError as error:
             raise LetsInferError(str(error)) from error
-    print(json.dumps(row, sort_keys=True, indent=2 if not arguments.json else None))
+    if arguments.json:
+        print(json.dumps(row, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.object(row, title="Updated API key policy")
+        else:
+            print(json.dumps(row, sort_keys=True, indent=2))
     return 0
 
 
@@ -15321,11 +17097,40 @@ def audit_list_command(arguments: argparse.Namespace) -> int:
     if arguments.json:
         print(json.dumps(rows, sort_keys=True))
     else:
-        for row in rows:
-            timestamp = dt.datetime.fromtimestamp(
-                row["timestamp_unix_ns"] / 1_000_000_000, tz=dt.timezone.utc
-            ).isoformat()
-            print(f"{row['sequence']}\t{timestamp}\t{row['outcome']}\t{row['action']}\t{row['target']}")
+        rendered = [
+            {
+                **row,
+                "timestamp": dt.datetime.fromtimestamp(
+                    row["timestamp_unix_ns"] / 1_000_000_000,
+                    tz=dt.timezone.utc,
+                ).isoformat(),
+                "_semantic": (
+                    command_ui.Semantic.SUCCESS
+                    if row["outcome"] == "success"
+                    else command_ui.Semantic.ERROR
+                ),
+            }
+            for row in rows
+        ]
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.table(
+                (
+                    command_ui.TableColumn("sequence", "SEQ", min_width=3, align="right"),
+                    command_ui.TableColumn("outcome", "RESULT", min_width=7),
+                    command_ui.TableColumn("action", "ACTION", min_width=8),
+                    command_ui.TableColumn("target", "TARGET", min_width=8),
+                    command_ui.TableColumn("timestamp", "TIME", min_width=10),
+                ),
+                rendered,
+                empty_message="The audit chain is empty",
+            )
+        else:
+            for row in rendered:
+                print(
+                    f"{row['sequence']}\t{row['timestamp']}\t{row['outcome']}\t"
+                    f"{row['action']}\t{row['target']}"
+                )
     return 0
 
 
@@ -15334,7 +17139,14 @@ def audit_show_command(arguments: argparse.Namespace) -> int:
         rows = store.audit_rows(event_id=arguments.event)
     if not rows:
         raise LetsInferError(f"audit event is not registered: {arguments.event}")
-    print(json.dumps(rows[0], sort_keys=True, indent=2 if not arguments.json else None))
+    if arguments.json:
+        print(json.dumps(rows[0], sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.object(rows[0], title="Audit event")
+        else:
+            print(json.dumps(rows[0], sort_keys=True, indent=2))
     return 0
 
 
@@ -15344,7 +17156,29 @@ def audit_verify_command(arguments: argparse.Namespace) -> int:
             result = store.verify_audit()
         except SiteError as error:
             raise LetsInferError(str(error)) from error
-    print(json.dumps(result, sort_keys=True) if arguments.json else f"AUDIT OK events={result['events']} head=sha256:{result['head_sha256']}")
+    if arguments.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.records(
+                (
+                    command_ui.RecordRow(
+                        "Audit", "Verified", semantic=command_ui.Semantic.SUCCESS
+                    ),
+                    command_ui.RecordRow("Events", result["events"]),
+                ),
+                value_width=22,
+            )
+            presenter.verbatim(
+                f"sha256:{result['head_sha256']}",
+                label="Head",
+                copyable=True,
+            )
+        else:
+            print(
+                f"AUDIT OK events={result['events']} head=sha256:{result['head_sha256']}"
+            )
     return 0
 
 
@@ -15397,7 +17231,21 @@ def audit_export_command(arguments: argparse.Namespace) -> int:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
         if output is not None:
-            print(f"EXPORTED {count} events to {output}")
+            presenter = _human_presenter()
+            if presenter is not None:
+                presenter.records(
+                    (
+                        command_ui.RecordRow(
+                            "Audit export",
+                            "Complete",
+                            semantic=command_ui.Semantic.SUCCESS,
+                        ),
+                        command_ui.RecordRow("Events", count),
+                    )
+                )
+                presenter.verbatim(output, label="Artifact", copyable=True)
+            else:
+                print(f"EXPORTED {count} events to {output}")
     return 0
 
 
@@ -16226,6 +18074,7 @@ def parser() -> argparse.ArgumentParser:
         "gateway",
         "node-agent",
         "core-rebind",
+        "core-prune",
     }
     subcommands._choices_actions[:] = [
         choice
@@ -16245,15 +18094,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     identity = None
     audit_sequence = None
     audit_recorded = False
+    machine_output = False
+    raw_output = False
+    presentation = None
+    header_shown = False
+    update_manager = None
+    initial_updates: tuple[tuple[str, str, str | None, str | None], ...] = ()
     try:
         raw_arguments = list(argv) if argv is not None else sys.argv[1:]
-        if (
-            raw_arguments[:2] != ["update", "check"]
-            and raw_arguments[:1] != ["status"]
-            and "--json" not in raw_arguments
-            and ui.Terminal(sys.stderr).interactive
-        ):
-            ui.update_notice(_update_manager().cached().available)
         command_parser = parser()
         if not raw_arguments:
             if ui.Terminal(sys.stdout).interactive:
@@ -16262,6 +18110,64 @@ def main(argv: Sequence[str] | None = None) -> int:
                 command_parser.print_help()
             return 0
         arguments = command_parser.parse_args(raw_arguments)
+        presentation = ui_contract(arguments.action_id)
+        machine_output = bool(getattr(arguments, "json", False))
+        raw_output = _raw_ui_variant(presentation, arguments)
+        human_interactive = (
+            not machine_output
+            and not raw_output
+            and presentation.branded
+            and ui.Terminal(sys.stdout).interactive
+            and ui.Terminal(sys.stderr).interactive
+        )
+        owns_surface = presentation.output in {
+            OutputContract.FROZEN_STATUS,
+            OutputContract.LIVE_DASHBOARD,
+        }
+        public_command = presentation.surface is not SurfaceKind.INTERNAL
+        worker_context = bool(getattr(arguments, "job_worker", False))
+        source_manifest = source_root() / CORE_SOURCE_MANIFEST
+        installed_release = (
+            not source_manifest.is_symlink()
+            and source_manifest.is_file()
+        )
+        if public_command and installed_release and not worker_context:
+            update_manager = _update_manager()
+            update_snapshot = update_manager.cached()
+            initial_updates = tuple(
+                (
+                    record.kind,
+                    record.subject,
+                    record.available_version,
+                    record.available_identity,
+                )
+                for record in update_snapshot.available
+            )
+        else:
+            update_snapshot = None
+        if human_interactive and not owns_surface:
+            command_ui.CommandUI(sys.stderr).header(presentation.title)
+            header_shown = True
+        if (
+            human_interactive
+            and presentation.show_cached_updates
+            and not owns_surface
+            and update_snapshot is not None
+        ):
+            ui.update_notice(update_snapshot.available)
+        if update_manager is not None:
+            request_background_refresh(
+                update_manager,
+                snapshot=update_snapshot,
+                installed=installed_release,
+                public_command=public_command,
+                explicit_check=arguments.action_id in {
+                    "update",
+                    "update.check",
+                    "uninstall",
+                },
+                worker_context=worker_context,
+            )
         metadata, identity = _authorize_command(arguments)
         audit_sequence = _audit_marker(metadata, identity)
         port = getattr(arguments, "port", 1)
@@ -16285,16 +18191,42 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise LetsInferError("watchdog port must be between 1 and 65535")
         if getattr(arguments, "tail", 0) < 0:
             raise LetsInferError("log tail must be non-negative")
-        progress_message = ACTION_PROGRESS.get(metadata.name)
-        machine_output = bool(getattr(arguments, "json", False))
+        progress_message = ACTION_PROGRESS.get(metadata.name) or READ_PROGRESS.get(
+            metadata.name
+        )
         lightweight = bool(
             getattr(arguments, "dry_run", False)
             or getattr(arguments, "list", False)
             or getattr(arguments, "source_only", False)
         )
-        if progress_message is None:
+        has_bounded_progress = (
+            progress_message is not None
+            and presentation.progress in {ProgressKind.SPINNER, ProgressKind.STEPS}
+        )
+        generic_progress = (
+            has_bounded_progress
+            and metadata.name not in {"update", "uninstall"}
+            and metadata.name not in HANDLER_STEP_PROGRESS
+        )
+
+        def execute() -> int:
+            nonlocal audit_recorded
             result = arguments.action(arguments)
-        else:
+            succeeded = result in (None, 0)
+            _audit_command_result(
+                metadata,
+                identity,
+                outcome="success" if succeeded else "failed",
+                reason=None if succeeded else f"exit_{result}",
+                after_sequence=audit_sequence,
+            )
+            audit_recorded = True
+            after_audit = getattr(arguments, "after_audit", None)
+            if succeeded and after_audit is not None:
+                result = after_audit()
+            return result
+
+        if generic_progress:
             activity = ui.progress(
                 progress_message[0],
                 done=progress_message[1],
@@ -16302,23 +18234,58 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # for sudo. A second animated writer can leak a spinner frame into
                 # that interactive stdin stream (observed as `-: command not found`).
                 enabled=(
-                    not machine_output
+                    human_interactive
                     and not lightweight
-                    and metadata.name not in {"update", "uninstall"}
                 ),
             )
             with activity, ui.protect_stdout(activity):
-                result = arguments.action(arguments)
-        _audit_command_result(
-            metadata,
-            identity,
-            outcome="success",
-            after_sequence=audit_sequence,
-        )
-        audit_recorded = True
-        after_audit = getattr(arguments, "after_audit", None)
-        if after_audit is not None:
-            return after_audit()
+                result = execute()
+                if result not in (None, 0) or getattr(
+                    arguments, "suppress_completion", False
+                ):
+                    activity.done = None
+        else:
+            result = execute()
+            if (
+                human_interactive
+                and has_bounded_progress
+                and result in (None, 0)
+                and not getattr(arguments, "suppress_completion", False)
+            ):
+                ui.Terminal(sys.stderr).success(progress_message[1])
+        if (
+            result in (None, 0)
+            and human_interactive
+            and presentation.show_cached_updates
+            and not owns_surface
+            and update_manager is not None
+            and arguments.action_id not in {"update", "update.check", "uninstall"}
+        ):
+            refreshed_snapshot = update_manager.cached()
+            refreshed = refreshed_snapshot.available
+            refreshed_identity = tuple(
+                (
+                    record.kind,
+                    record.subject,
+                    record.available_version,
+                    record.available_identity,
+                )
+                for record in refreshed
+            )
+            if refreshed_identity != initial_updates:
+                verified_current = bool(refreshed_snapshot.records) and all(
+                    record.status in {"current", "pinned"}
+                    for record in refreshed_snapshot.records
+                )
+                ui.update_notice(
+                    refreshed,
+                    cleared=bool(initial_updates) and verified_current,
+                    attention=(
+                        bool(initial_updates)
+                        and not refreshed
+                        and not verified_current
+                    ),
+                )
         return result
     except (LetsInferError, PathContractError, RuntimePackError, SiteError) as error:
         if metadata is not None and not audit_recorded:
@@ -16329,7 +18296,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 reason=type(error).__name__,
                 after_sequence=audit_sequence,
             )
-        ui.fatal(str(error))
+        internal = bool(
+            presentation is not None
+            and presentation.surface is SurfaceKind.INTERNAL
+        )
+        if machine_output or raw_output or internal:
+            sys.stderr.write(f"FATAL: {error}\n")
+            sys.stderr.flush()
+        else:
+            section = (
+                None
+                if header_shown
+                or presentation is None
+                or presentation.output
+                in {OutputContract.FROZEN_STATUS, OutputContract.LIVE_DASHBOARD}
+                else presentation.action_id
+            )
+            ui.fatal(str(error), section=section)
         return 1
 
 

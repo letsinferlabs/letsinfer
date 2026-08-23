@@ -61,7 +61,14 @@ class BootstrapInstallTests(unittest.TestCase):
         self.assertIn('progress 5 "Resolving release"', script)
         self.assertIn('progress 80 "Initializing services"', script)
         self.assertIn('finish_progress', script)
-        self.assertIn('"$command_path" setup >"$setup_log" 2>&1', script)
+        self.assertIn(
+            '"$command_path" setup --json >"$setup_json" 2>"$setup_log"',
+            script,
+        )
+        self.assertLess(
+            script.index('json.loads(pathlib.Path(sys.argv[1])'),
+            script.index("finish_progress\n"),
+        )
 
     def test_watchdog_build_is_quiet_unless_a_command_fails(self) -> None:
         source = (REPOSITORY_ROOT / "core/cli.py").read_text(encoding="utf-8")

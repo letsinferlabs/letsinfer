@@ -9,6 +9,12 @@ from .manager import (
     UpdateSnapshot,
     compare_versions,
 )
+from .background import (
+    BACKGROUND_REFRESH_INTERVAL_SECONDS,
+    DISABLE_BACKGROUND_UPDATE_ENV,
+    request_background_refresh,
+    snapshot_is_fresh,
+)
 
 __all__ = [
     "Component",
@@ -16,5 +22,9 @@ __all__ = [
     "UpdatePoller",
     "UpdateRecord",
     "UpdateSnapshot",
+    "BACKGROUND_REFRESH_INTERVAL_SECONDS",
+    "DISABLE_BACKGROUND_UPDATE_ENV",
     "compare_versions",
+    "request_background_refresh",
+    "snapshot_is_fresh",
 ]
