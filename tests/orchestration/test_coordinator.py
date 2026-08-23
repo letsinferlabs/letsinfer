@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import pathlib
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -18,7 +19,11 @@ from core.orchestration.coordinator import (
 from core.orchestration.member import PROTOCOL
 from core.site import state
 from tests.gateway.helpers import insert_member, routing_facts, set_member_facts
-from tests.orchestration.helpers import parallel_contract, release_identity
+from tests.orchestration.helpers import (
+    parallel_connections,
+    parallel_contract,
+    release_identity,
+)
 
 
 class CoordinatorOrchestrationTests(unittest.TestCase):
@@ -49,7 +54,6 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
             self.contract,
             member_ids=self.members,
             member_addresses={item: f"{index}.local:9770" for index, item in enumerate(self.members)},
-            engine_coordinator_id=self.identity.member_id,
             topology_sha256="1" * 64,
             manifest_sha256="2" * 64,
             runtime_digest="3" * 64,
@@ -59,6 +63,7 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
             member_device_uuids={
                 item: [f"GPU-{item[:8]}"] for item in self.members
             },
+            connections=parallel_connections(self.members),
         )
         self.placement_id = "4" * 32
         self.store.set_placement({
@@ -120,7 +125,6 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         allocated = allocate_group_ports(
             self.contract,
             member_ids=self.members,
-            engine_coordinator_id=self.identity.member_id,
             occupied={
                 self.identity.member_id: ((18000, 4),),
                 "e" * 32: ((18000, 8),),
@@ -131,11 +135,14 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         self.assertEqual(allocated["e" * 32], 18008)
         self.assertEqual(allocated["f" * 32], 18000)
 
-    def test_stage_and_start_order_workers_before_engine_coordinator(self) -> None:
+    def test_stage_and_start_follow_runtime_task_phases(self) -> None:
         calls: list[tuple[str, str, str]] = []
+        first_phase = threading.Barrier(2)
 
         def submit(member, job, credential):
-            calls.append((job["action"], job["role"]["name"], member["member_id"]))
+            calls.append((job["action"], job["task"]["task_id"], member["member_id"]))
+            if job["action"] == "start" and job["task"]["task_id"] in {"task-1", "task-2"}:
+                first_phase.wait(timeout=2)
             self.assertEqual(credential is not None, job["action"] == "stage")
             return {
                 "protocol": PROTOCOL, "operation_id": job["operation_id"],
@@ -147,18 +154,16 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         orchestrator.stage()
         orchestrator.start()
         starts = [item for item in calls if item[0] == "start"]
-        self.assertEqual(
-            [item[1] for item in starts],
-            ["engine-member", "engine-member", "engine-coordinator"],
-        )
+        self.assertEqual({item[1] for item in starts[:2]}, {"task-1", "task-2"})
+        self.assertEqual(starts[2][1], "task-0")
         self.assertEqual(self.store.engine_groups()[0]["state"], "running")
 
-    def test_failed_distributed_start_stops_every_started_role(self) -> None:
+    def test_failed_distributed_start_stops_every_started_task(self) -> None:
         calls: list[tuple[str, str]] = []
 
         def submit(_member, job, _credential):
-            calls.append((job["action"], job["role"]["name"]))
-            if job["action"] == "start" and len([item for item in calls if item[0] == "start"]) == 2:
+            calls.append((job["action"], job["task"]["task_id"]))
+            if job["action"] == "start" and job["task"]["task_id"] == "task-2":
                 raise RuntimeError("synthetic failure")
             return {
                 "protocol": PROTOCOL, "operation_id": job["operation_id"],
@@ -170,14 +175,14 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         orchestrator.stage()
         with self.assertRaisesRegex(GroupOrchestrationError, "start failed"):
             orchestrator.start()
-        self.assertIn(("stop", "engine-member"), calls)
+        self.assertIn(("stop", "task-1"), calls)
         self.assertEqual(self.store.engine_groups()[0]["state"], "failed")
 
-    def test_stopped_group_removes_every_member_in_reverse_role_order(self) -> None:
+    def test_stopped_group_removes_every_task_in_reverse_startup_order(self) -> None:
         calls: list[tuple[str, str]] = []
 
         def submit(_member, job, _credential):
-            calls.append((job["action"], job["role"]["name"]))
+            calls.append((job["action"], job["task"]["task_id"]))
             return {
                 "protocol": PROTOCOL,
                 "operation_id": job["operation_id"],
@@ -192,10 +197,8 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         orchestrator.stop()
         removed = orchestrator.remove()
         removals = [item for item in calls if item[0] == "remove"]
-        self.assertEqual(
-            [item[1] for item in removals],
-            ["engine-coordinator", "engine-member", "engine-member"],
-        )
+        self.assertEqual(removals[0][1], "task-0")
+        self.assertEqual({item[1] for item in removals[1:]}, {"task-1", "task-2"})
         self.assertEqual(removed["state"], "removed")
         self.assertEqual(removed["desired_state"], "removed")
 
@@ -252,7 +255,7 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         calls: list[tuple[str, str]] = []
 
         def submit(_member, job, _credential):
-            calls.append((job["action"], job["role"]["name"]))
+            calls.append((job["action"], job["task"]["task_id"]))
             return {
                 "protocol": PROTOCOL,
                 "operation_id": job["operation_id"],
@@ -267,14 +270,12 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         calls.clear()
         result = orchestrator.recover(acknowledge_trips=True)
         self.assertEqual(result["state"], "running")
-        self.assertEqual(
-            [role for action, role in calls if action == "recover"],
-            ["engine-member", "engine-member", "engine-coordinator"],
-        )
-        self.assertEqual(
-            [role for action, role in calls if action == "stop"],
-            ["engine-coordinator", "engine-member", "engine-member"],
-        )
+        recovered = [task for event, task in calls if event == "recover"]
+        stopped = [task for event, task in calls if event == "stop"]
+        self.assertEqual(set(recovered[:2]), {"task-1", "task-2"})
+        self.assertEqual(recovered[2], "task-0")
+        self.assertEqual(stopped[0], "task-0")
+        self.assertEqual(set(stopped[1:]), {"task-1", "task-2"})
 
 if __name__ == "__main__":
     unittest.main()

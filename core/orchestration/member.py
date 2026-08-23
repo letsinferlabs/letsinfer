@@ -23,7 +23,7 @@ from .credentials import GroupCredentialError, credential_sha256
 from ..paths import data_root
 
 
-PROTOCOL = "letsinfer-engine-group-job-v1"
+PROTOCOL = "letsinfer-engine-group-job-v2"
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 OCI_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
@@ -111,7 +111,7 @@ def validate_group_job(
         "engine_credential_sha256",
         "expires_at_unix",
         "source",
-        "role",
+        "task",
         "group",
     }
     if not isinstance(value, dict) or set(value) != required or value.get("protocol") != PROTOCOL:
@@ -160,34 +160,32 @@ def validate_group_job(
         raise MemberJobError("stage job source does not match the sealed group release")
     if hashlib.sha256(canonical_bytes(group)).hexdigest() != value["plan_sha256"]:
         raise MemberJobError("engine-group job plan digest is invalid")
-    matching_members = [
+    matching_resources = [
         item
-        for item in group["members"]
-        if isinstance(item, dict) and item.get("member_id") == expected_member_id
+        for item in group["resources"]
+        if isinstance(item, dict) and item.get("node_id") == expected_member_id
     ]
-    role = value.get("role")
-    if len(matching_members) != 1 or not isinstance(role, dict):
-        raise MemberJobError("engine-group job member assignment is invalid")
-    assignment = matching_members[0]
-    required_role = {
-        "name", "rank", "role_rank", "port_base", "port_count", "launcher",
-        "command", "environment", "inference_endpoint", "readiness", "device_uuids",
+    task = value.get("task")
+    if len(matching_resources) != 1 or not isinstance(task, dict):
+        raise MemberJobError("engine-group job resource assignment is invalid")
+    assignment = matching_resources[0]
+    required_task = {
+        "task_id", "port_base", "port_count", "launcher", "command", "environment",
+        "endpoint_owner", "readiness", "device_uuids",
     }
     if (
-        set(role) != required_role
-        or role.get("name") != assignment.get("role")
-        or role.get("rank") != assignment.get("rank")
-        or role.get("role_rank") != assignment.get("role_rank")
-        or role.get("port_base") != assignment.get("port_base")
-        or role.get("port_count") != assignment.get("port_count")
-        or role.get("inference_endpoint") is not assignment.get("inference_endpoint")
-        or role.get("device_uuids") != assignment.get("device_uuids")
-        or role.get("launcher") not in {"manifest", "runtime-command"}
-        or not isinstance(role.get("command"), list)
-        or not isinstance(role.get("environment"), dict)
-        or not isinstance(role.get("readiness"), dict)
+        set(task) != required_task
+        or task.get("task_id") != assignment.get("task_id")
+        or task.get("port_base") != assignment.get("port_base")
+        or task.get("port_count") != assignment.get("port_count")
+        or task.get("endpoint_owner") is not (task.get("task_id") == group["endpoint_owner"])
+        or task.get("device_uuids") != assignment.get("device_uuids")
+        or task.get("launcher") not in {"manifest", "runtime-command"}
+        or not isinstance(task.get("command"), list)
+        or not isinstance(task.get("environment"), dict)
+        or not isinstance(task.get("readiness"), dict)
     ):
-        raise MemberJobError("engine-group job role does not match its group assignment")
+        raise MemberJobError("engine-group job task does not match its resource assignment")
     _bounded_json(value, "engine-group job", MAX_JOB_BYTES)
     return value
 
@@ -220,7 +218,7 @@ class MemberJobStore:
                 topology_sha256 TEXT NOT NULL,
                 engine_credential_sha256 TEXT NOT NULL,
                 member_id TEXT NOT NULL,
-                role_json TEXT NOT NULL,
+                task_json TEXT NOT NULL,
                 source TEXT,
                 state TEXT NOT NULL CHECK(state IN ('staged','running','stopped','failed','removed')),
                 last_operation_id TEXT NOT NULL,
@@ -239,6 +237,14 @@ class MemberJobStore:
             ) STRICT;
             """
         )
+        columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(groups)")
+        }
+        if "role_json" in columns and "task_json" not in columns:
+            self.connection.execute(
+                "ALTER TABLE groups RENAME COLUMN role_json TO task_json"
+            )
         if recover_incomplete:
             self.connection.execute(
                 "UPDATE jobs SET state='failed',"
@@ -326,7 +332,7 @@ class MemberJobStore:
             raise MemberJobError("engine-group result cannot contain credentials or secrets")
         safe_result = dict(result)
         result_json = _bounded_json(safe_result, "engine-group result", MAX_RESULT_BYTES)
-        role_json = _bounded_json(job["role"], "engine-group role", MAX_JOB_BYTES)
+        task_json = _bounded_json(job["task"], "engine-group task", MAX_JOB_BYTES)
         state = ACTION_RESULT_STATE[job["action"]]
         now = int(time.time())
         with self.transaction():
@@ -340,11 +346,11 @@ class MemberJobStore:
             self.connection.execute(
                 """INSERT INTO groups
                    (group_id,plan_sha256,runtime_digest,manifest_sha256,topology_sha256,
-                    engine_credential_sha256,member_id,role_json,source,state,
+                    engine_credential_sha256,member_id,task_json,source,state,
                     last_operation_id,updated_at_unix)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(group_id) DO UPDATE SET
-                    role_json=excluded.role_json,
+                    task_json=excluded.task_json,
                     source=COALESCE(excluded.source,groups.source),
                     state=excluded.state,
                     last_operation_id=excluded.last_operation_id,
@@ -352,7 +358,7 @@ class MemberJobStore:
                 (
                     job["group_id"], job["plan_sha256"], job["runtime_digest"],
                     job["manifest_sha256"], job["topology_sha256"],
-                    job["engine_credential_sha256"], job["member_id"], role_json,
+                    job["engine_credential_sha256"], job["member_id"], task_json,
                     job["source"], state, job["operation_id"], now,
                 ),
             )
@@ -381,7 +387,7 @@ class MemberJobStore:
         if row is None:
             return None
         result = dict(row)
-        result["role"] = json.loads(result.pop("role_json"))
+        result["task"] = json.loads(result.pop("task_json"))
         return result
 
     def groups(self) -> list[dict[str, Any]]:
@@ -390,7 +396,7 @@ class MemberJobStore:
             "SELECT * FROM groups ORDER BY updated_at_unix,group_id"
         ):
             row = dict(value)
-            row["role"] = json.loads(row.pop("role_json"))
+            row["task"] = json.loads(row.pop("task_json"))
             result.append(row)
         return result
 

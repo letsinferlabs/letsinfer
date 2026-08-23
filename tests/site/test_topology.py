@@ -56,8 +56,7 @@ def target(strategy: str, count: int) -> dict:
         },
         "memory": {"topology": "unified", "minimum_total_gib": 120},
         "placement": {
-            "strategy": strategy, "member_count": count,
-            "engine_strategy": "fixture",
+            "strategy": strategy, "node_count": count,
             "interconnect": {
                 "kind": "connectx", "rdma_required": True,
                 "minimum_speed_mbps": 100_000, "minimum_mtu": 9000,

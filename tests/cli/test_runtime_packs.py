@@ -331,8 +331,7 @@ class RuntimePackTests(unittest.TestCase):
     def _single_placement(self) -> dict[str, object]:
         return {
             "strategy": "single",
-            "member_count": 1,
-            "engine_strategy": "local",
+            "node_count": 1,
             "interconnect": {
                 "kind": "any",
                 "rdma_required": False,
@@ -444,6 +443,78 @@ class RuntimePackTests(unittest.TestCase):
         payload.parent.mkdir()
         payload.write_text("synthetic runtime payload\n", encoding="utf-8")
         return source
+
+    def _parallel_config(self, root: pathlib.Path) -> dict[str, object]:
+        source = self._source(root)
+        config = json.loads((source / "runtime.json").read_text(encoding="utf-8"))
+        config["target"]["placement"] = {
+            "strategy": "parallel",
+            "node_count": 2,
+            "interconnect": {
+                "kind": "ethernet",
+                "rdma_required": False,
+                "minimum_speed_mbps": 100000,
+                "minimum_mtu": 9000,
+            },
+        }
+        config["orchestration"] = {
+            "schema_version": 3,
+            "failure_policy": "whole-group",
+            "endpoint_owner": "task-0",
+            "startup_order": [["task-1"], ["task-0"]],
+            "tasks": [
+                {
+                    "task_id": f"task-{index}",
+                    "launcher": "runtime-command",
+                    "port_count": 2,
+                    "command": ["/opt/runtime/launch", f"task-{index}"],
+                    "environment": {},
+                    "readiness": {
+                        "kind": "exec",
+                        "command": ["/opt/runtime/ready"],
+                        "interval_seconds": 1,
+                        "timeout_seconds": 2,
+                        "retries": 60,
+                    },
+                }
+                for index in range(2)
+            ],
+        }
+        return config
+
+    def test_runtime_pack_binds_parallel_target_to_exact_generic_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = self._parallel_config(root)
+            self.assertIs(runtime_packs.validate_runtime_config(config), config)
+            missing = copy.deepcopy(config)
+            missing.pop("orchestration")
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "runtime.orchestration must contain"
+            ):
+                runtime_packs.validate_runtime_config(missing)
+            wrong_count = copy.deepcopy(config)
+            wrong_count["target"]["placement"]["node_count"] = 3
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "does not match"
+            ):
+                runtime_packs.validate_runtime_config(wrong_count)
+            semantic = copy.deepcopy(config)
+            semantic["orchestration"]["tasks"][0]["rank"] = 0
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "invalid fields"
+            ):
+                runtime_packs.validate_runtime_config(semantic)
+
+    def test_single_runtime_pack_rejects_parallel_orchestration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = self._parallel_config(root)
+            config["target"]["placement"] = self._single_placement()
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "cannot declare runtime orchestration"
+            ):
+                runtime_packs.validate_runtime_config(config)
 
     def test_archive_is_deterministic_and_verifiable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

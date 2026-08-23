@@ -90,11 +90,14 @@ rather than re-resolving the latest catalog.
 ## Parallel runtimes
 
 Replication and tensor/pipeline parallelism are different. Core owns replica
-placement and load balancing. A runtime owns TP/PP topology, ranks,
-interconnect requirements, kernels, and engine configuration. A parallel
-runtime may consume multiple machines or GPUs as one engine group; the gateway
-still treats that group as one endpoint. Core never invents parallelism from a
-single-device runtime.
+placement and load balancing. A runtime owns TP/PP topology, private ranks,
+interconnect requirements, kernels, and engine configuration. Core assigns
+only generic task IDs, exact node and GPU UUIDs, ports, addresses, credentials,
+and verified connection facts. A parallel runtime may consume multiple
+machines or GPUs as one atomic engine group; the gateway publishes its single
+endpoint only after every required task is ready. Complete parallel groups can
+also be replicated. Core never invents parallelism from a single-device
+runtime.
 
 ## Health and maintenance
 
