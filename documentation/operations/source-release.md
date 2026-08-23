@@ -82,11 +82,12 @@ fetches signed immutable GitHub Release assets:
 curl -fsSL https://letsinfer.ai/install.sh | sh
 ```
 
-An RC or historical release uses its explicit version:
+An RC or historical release uses its explicit published version (replace
+`X.Y.Z` below):
 
 ```bash
 curl -fsSL https://letsinfer.ai/install.sh \
-  | sh -s -- --version 0.11.0-rc.32
+  | sh -s -- --version X.Y.Z
 ```
 
 `install.sh` supports Linux and macOS on x86_64 and arm64. Immutable core files
