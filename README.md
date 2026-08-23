@@ -154,7 +154,10 @@ Runtime authors should start with the [runtime skill](skills/runtime/SKILL.md)
 and [benchmark skill](skills/benchmark/SKILL.md). Run the core tests with:
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m tools.core_regression
 ```
+
+The same complete suite and native Watchdog tests are required on every core
+pull request. See [Testing and pull-request gates](documentation/contributing/testing.md).
 
 Let's Infer is licensed under [AGPL-3.0-only](LICENSE).

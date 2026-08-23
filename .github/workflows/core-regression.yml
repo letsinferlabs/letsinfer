@@ -1,0 +1,41 @@
+name: Core regression
+
+on:
+  pull_request:
+    branches:
+      - main
+      - release
+  workflow_dispatch:
+
+concurrency:
+  group: core-regression-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Core regression suite
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate Python and shell sources
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          git diff --check
+          python3 -m compileall -q core benchmarks tools
+          sh -n install.sh
+      - name: Run complete regression suite
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m tools.core_regression
+      - name: Build and test Watchdog
+        run: |
+          cmake -S watchdog -B "$RUNNER_TEMP/watchdog-build" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/watchdog-build" --parallel 2
+          ctest --test-dir "$RUNNER_TEMP/watchdog-build" --output-on-failure

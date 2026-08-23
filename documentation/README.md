@@ -36,6 +36,10 @@ runtime, model artifacts, engine, lifecycle, safety, and telemetry.
 - [Core release process](operations/source-release.md)
 - [macOS app release process](operations/macos-release.md)
 
+## Contributing
+
+- [Testing and pull-request gates](contributing/testing.md)
+
 The public contract is runtime schema 4, runtime artifact schema 4, catalog
 schema 6, revocation-ledger schema 1, and Engine protocol 2. Unsupported
 schemas fail closed.
