@@ -77,7 +77,7 @@ Ordinary start or restart does not erase safety history.
 ## API keys
 
 ```bash
-letsinfer key create
+letsinfer key create my-app
 letsinfer key list
 letsinfer key rotate KEY_ID
 letsinfer key revoke KEY_ID

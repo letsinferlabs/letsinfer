@@ -67,9 +67,34 @@ After setup:
 letsinfer install qwen3.8-27b
 ```
 
-You only provide the logical model name. Let's Infer detects your hardware,
+You only provide the model name. Let's Infer detects your hardware,
 chooses the best qualified runtime from the signed catalog, downloads its exact
 model revision and Engine OCI, verifies them, and starts the service.
+
+## What happens automatically
+
+A normal model install is complete only when the local API is ready:
+
+1. the signed catalog is verified;
+2. your hardware is matched to the best qualified runtime;
+3. exact model artifacts, the runtime pack, and Engine OCI are acquired and
+   deduplicated;
+4. persistent site, gateway, Watchdog, recovery, and engine services are
+   installed;
+5. the model starts; and
+6. the command waits for the OpenAI-compatible endpoint to become ready.
+
+On Linux, the selected runtime starts again after reboot. The recovery
+controller also handles ordinary engine failures. A protection or OOM trip is
+different: it stays latched so an automatic restart cannot hide the cause. Run
+`letsinfer status` or `letsinfer doctor`, then use `letsinfer recover` when it
+is safe to continue.
+
+For a staged install that should not start inference yet:
+
+```bash
+letsinfer install qwen3.8-27b --no-start
+```
 
 To install one exact candidate:
 
@@ -83,7 +108,7 @@ letsinfer install qwen3.8-27b \
 ```bash
 letsinfer status
 letsinfer doctor
-letsinfer key create
+letsinfer key create my-app
 ```
 
 Your coordinator advertises its LAN endpoint with mDNS:
@@ -92,7 +117,7 @@ Your coordinator advertises its LAN endpoint with mDNS:
 http://<hostname>.local:8000/v1
 ```
 
-Use the API key returned by `letsinfer key create` as a bearer token. Key
+Use the API key returned by `letsinfer key create my-app` as a bearer token. Key
 material is shown once.
 
 ## Updates
