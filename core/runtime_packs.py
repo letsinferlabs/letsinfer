@@ -36,9 +36,9 @@ RUNTIME_DESCRIPTOR = "letsinfer-runtime.json"
 RUNTIME_SCHEMA_VERSION = 3
 ENGINE_PROTOCOL_VERSION = 1
 ARTIFACT_SCHEMA_VERSION = 3
-CATALOG_SCHEMA_VERSION = 4
+CATALOG_SCHEMA_VERSION = 5
 DEFAULT_CATALOG_URL = (
-    "https://raw.githubusercontent.com/letsinferlabs/catalog/main/catalog.json"
+    "https://github.com/letsinferlabs/runtimes/releases/latest/download/catalog.json"
 )
 BUILTIN_CATALOG_PUBLIC_KEY = (
     pathlib.Path(__file__).resolve().parent / "trust" / "catalog-public-key.pem"
@@ -47,6 +47,8 @@ PACK_MEDIA_TYPE = "application/vnd.letsinfer.runtime.v3+tar"
 REGISTRY_DIGEST_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
+AUTHOR_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,38})$")
+LICENSE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+-]{0,126}$")
 MAX_PACK_BYTES = 1 << 30
 MAX_PACK_FILES = 10_000
 MAX_OCI_MANIFEST_BYTES = 4 << 20
@@ -805,6 +807,7 @@ def _ignored_source_path(relative: pathlib.PurePath) -> bool:
         ".git" in relative.parts
         or "__pycache__" in relative.parts
         or relative.name == RUNTIME_DESCRIPTOR
+        or relative.as_posix() == "release.json"
         or relative.name == ".DS_Store"
         or relative.suffix in {".pyc", ".pyo", ".letsinfer"}
     )
@@ -1988,9 +1991,28 @@ def load_catalog(
         not isinstance(value, dict)
         or type(value.get("schema_version")) is not int
         or value.get("schema_version") != CATALOG_SCHEMA_VERSION
-        or set(value) != {"schema_version", "targets", "models"}
+        or set(value)
+        != {"schema_version", "recommendation_policy", "targets", "models"}
     ):
         raise RuntimePackError("unsupported runtime catalog schema_version")
+    policy = value.get("recommendation_policy")
+    if (
+        not isinstance(policy, dict)
+        or set(policy)
+        != {
+            "id",
+            "benchmark_suite",
+            "metric",
+            "cache",
+            "tie_breakers",
+        }
+        or policy.get("id") != "letsinfer-throughput-geomean-v1"
+        or policy.get("benchmark_suite") != BENCHMARK_SUITE
+        or policy.get("metric") != "aggregate_tps"
+        or policy.get("cache") != "uncached"
+        or policy.get("tie_breakers") != ["score", "version", "candidate"]
+    ):
+        raise RuntimePackError("runtime catalog recommendation policy is unsupported")
     targets = value.get("targets")
     if not isinstance(targets, dict) or not targets:
         raise RuntimePackError("runtime catalog targets must be a non-empty object")
@@ -2037,95 +2059,158 @@ def load_catalog(
             recommended = target_record.get("recommended")
             candidates = target_record.get("candidates")
             if (
-                (recommended is not None and (
-                    not isinstance(recommended, str)
-                    or not SAFE_NAME_RE.fullmatch(recommended)
-                ))
+                (
+                    recommended is not None
+                    and (
+                        not isinstance(recommended, dict)
+                        or set(recommended) != {"candidate", "version"}
+                        or not isinstance(recommended.get("candidate"), str)
+                        or not SAFE_NAME_RE.fullmatch(recommended["candidate"])
+                        or not isinstance(recommended.get("version"), str)
+                        or not VERSION_RE.fullmatch(recommended["version"])
+                    )
+                )
                 or not isinstance(candidates, dict)
                 or not candidates
             ):
                 raise RuntimePackError(
                     f"catalog target {model}/{target_id} is missing recommendation data"
                 )
-            if recommended is not None and recommended not in candidates:
+            if recommended is not None and recommended["candidate"] not in candidates:
                 raise RuntimePackError(
                     f"catalog recommendation for {model}/{target_id} is not a runtime candidate"
                 )
-            if recommended is not None and candidates[recommended].get("qualified") is not True:
-                raise RuntimePackError(
-                    f"catalog recommendation for {model}/{target_id} is not qualified"
-                )
-            for candidate, release in candidates.items():
+            for candidate, candidate_record in candidates.items():
                 if (
                     not isinstance(candidate, str)
                     or not SAFE_NAME_RE.fullmatch(candidate)
-                    or not isinstance(release, dict)
-                    or set(release) != {
-                        "version",
-                        "source",
-                        "qualified",
-                        "engine",
-                        "engine_oci",
-                        "model_uri",
-                        "benchmark",
-                    }
+                    or not isinstance(candidate_record, dict)
+                    or set(candidate_record) != {"latest", "releases"}
                 ):
                     raise RuntimePackError(
                         f"catalog candidate entry for {model}/{candidate}/{target_id} is invalid"
                     )
-                if not VERSION_RE.fullmatch(release.get("version", "")):
+                latest = candidate_record.get("latest")
+                releases = candidate_record.get("releases")
+                if (
+                    not isinstance(latest, str)
+                    or not VERSION_RE.fullmatch(latest)
+                    or not isinstance(releases, dict)
+                    or not releases
+                    or latest not in releases
+                ):
                     raise RuntimePackError(
-                        f"catalog version for {model}/{candidate}/{target_id} is invalid"
+                        f"catalog releases for {model}/{candidate}/{target_id} are invalid"
                     )
-                if not REGISTRY_DIGEST_RE.fullmatch(release.get("source", "")):
-                    raise RuntimePackError(
-                        f"catalog source for {model}/{candidate}/{target_id} must be digest-pinned OCI"
-                    )
-                if type(release.get("qualified")) is not bool:
-                    raise RuntimePackError(
-                        f"catalog qualification for {model}/{candidate}/{target_id} must be boolean"
-                    )
-                engine = release.get("engine")
-                if not isinstance(engine, str) or not SAFE_NAME_RE.fullmatch(engine):
-                    raise RuntimePackError(
-                        f"catalog engine for {model}/{candidate}/{target_id} is invalid"
-                    )
-                if not REGISTRY_DIGEST_RE.fullmatch(release.get("engine_oci", "")):
-                    raise RuntimePackError(
-                        f"catalog Engine OCI for {model}/{candidate}/{target_id} must be digest-pinned"
-                    )
-                normalize_hf_uri(
-                    release.get("model_uri"),
-                    f"catalog model URI for {model}/{candidate}/{target_id}",
-                )
-                expected_candidate = candidate_id(engine, release["model_uri"], target_id)
-                if candidate != expected_candidate:
-                    raise RuntimePackError(
-                        f"catalog candidate key {candidate} differs from its exact identities"
-                    )
-                benchmark = release.get("benchmark")
-                if benchmark is None:
-                    if release["qualified"]:
-                        raise RuntimePackError(
-                            f"qualified catalog candidate {model}/{candidate}/{target_id} "
-                            "has no benchmark"
+                for version, release in releases.items():
+                    where = f"{model}/{candidate}@{version}/{target_id}"
+                    if (
+                        not isinstance(version, str)
+                        or not VERSION_RE.fullmatch(version)
+                        or not isinstance(release, dict)
+                        or set(release)
+                        != {
+                            "authors",
+                            "license",
+                            "source",
+                            "qualified",
+                            "revoked",
+                            "engine",
+                            "engine_oci",
+                            "model_uri",
+                            "benchmark",
+                        }
+                    ):
+                        raise RuntimePackError(f"catalog release entry for {where} is invalid")
+                    authors = release.get("authors")
+                    if (
+                        not isinstance(authors, list)
+                        or not authors
+                        or len(authors) > 32
+                        or any(
+                            not isinstance(author, str)
+                            or not AUTHOR_RE.fullmatch(author)
+                            for author in authors
                         )
-                    continue
-                if not isinstance(benchmark, dict) or set(benchmark) != {
-                    "id",
-                    "suite",
-                    "score",
-                }:
-                    raise RuntimePackError(
-                        f"catalog benchmark for {model}/{candidate}/{target_id} is invalid"
+                        or len(authors) != len(set(authors))
+                    ):
+                        raise RuntimePackError(f"catalog authors for {where} are invalid")
+                    if not LICENSE_RE.fullmatch(str(release.get("license"))):
+                        raise RuntimePackError(f"catalog license for {where} is invalid")
+                    if not REGISTRY_DIGEST_RE.fullmatch(release.get("source", "")):
+                        raise RuntimePackError(
+                            f"catalog source for {where} must be digest-pinned OCI"
+                        )
+                    if type(release.get("qualified")) is not bool or type(
+                        release.get("revoked")
+                    ) is not bool:
+                        raise RuntimePackError(
+                            f"catalog publication state for {where} must be boolean"
+                        )
+                    engine = release.get("engine")
+                    if not isinstance(engine, str) or not SAFE_NAME_RE.fullmatch(engine):
+                        raise RuntimePackError(f"catalog engine for {where} is invalid")
+                    if not REGISTRY_DIGEST_RE.fullmatch(release.get("engine_oci", "")):
+                        raise RuntimePackError(
+                            f"catalog Engine OCI for {where} must be digest-pinned"
+                        )
+                    normalize_hf_uri(
+                        release.get("model_uri"), f"catalog model URI for {where}"
                     )
-                if not isinstance(benchmark.get("id"), str) or not SHA256_RE.fullmatch(benchmark["id"]):
-                    raise RuntimePackError("catalog benchmark id must be a SHA-256")
-                if not isinstance(benchmark.get("suite"), str) or not benchmark["suite"]:
-                    raise RuntimePackError("catalog benchmark suite must be non-empty")
-                score = benchmark.get("score")
-                if not isinstance(score, (int, float)) or isinstance(score, bool) or not math.isfinite(score) or score <= 0:
-                    raise RuntimePackError("catalog benchmark score must be positive and finite")
+                    expected_candidate = candidate_id(
+                        engine, release["model_uri"], target_id
+                    )
+                    if candidate != expected_candidate:
+                        raise RuntimePackError(
+                            f"catalog candidate key {candidate} differs from its exact identities"
+                        )
+                    benchmark = release.get("benchmark")
+                    if benchmark is None:
+                        if release["qualified"]:
+                            raise RuntimePackError(
+                                f"qualified catalog release {where} has no benchmark"
+                            )
+                        continue
+                    if not isinstance(benchmark, dict) or set(benchmark) != {
+                        "id",
+                        "suite",
+                        "score",
+                        "evidence",
+                    }:
+                        raise RuntimePackError(f"catalog benchmark for {where} is invalid")
+                    if not isinstance(benchmark.get("id"), str) or not SHA256_RE.fullmatch(
+                        benchmark["id"]
+                    ):
+                        raise RuntimePackError("catalog benchmark id must be a SHA-256")
+                    if benchmark.get("suite") != policy["benchmark_suite"]:
+                        raise RuntimePackError("catalog benchmark suite is unsupported")
+                    if not REGISTRY_DIGEST_RE.fullmatch(benchmark.get("evidence", "")):
+                        raise RuntimePackError(
+                            "catalog benchmark evidence must be digest-pinned OCI"
+                        )
+                    score = benchmark.get("score")
+                    if (
+                        not isinstance(score, (int, float))
+                        or isinstance(score, bool)
+                        or not math.isfinite(score)
+                        or score <= 0
+                    ):
+                        raise RuntimePackError(
+                            "catalog benchmark score must be positive and finite"
+                        )
+            if recommended is not None:
+                recommended_candidate = candidates[recommended["candidate"]]
+                recommended_release = recommended_candidate["releases"].get(
+                    recommended["version"]
+                )
+                if (
+                    not isinstance(recommended_release, dict)
+                    or recommended_release.get("qualified") is not True
+                    or recommended_release.get("revoked") is not False
+                ):
+                    raise RuntimePackError(
+                        f"catalog recommendation for {model}/{target_id} is not qualified"
+                    )
     return value
 
 
@@ -2188,23 +2273,51 @@ def catalog_release(
             )
         selected_target, target_record = matches[0]
         contract = catalog_target_contract(catalog, selected_target)
-    selected_runtime = runtime or target_record["recommended"]
-    if selected_runtime is None:
+    recommendation = target_record["recommended"]
+    if runtime is None and recommendation is None:
         raise RuntimePackError(
-            f"runtime catalog has no qualified candidate for {model}/{selected_target}; use --runtime to select an unqualified candidate explicitly"
+            f"runtime catalog has no qualified candidate for {model}/{selected_target}"
         )
-    release = target_record["candidates"].get(selected_runtime)
-    if not isinstance(release, dict):
+    selected_runtime = runtime or recommendation["candidate"]
+    candidate = target_record["candidates"].get(selected_runtime)
+    if not isinstance(candidate, dict):
         raise RuntimePackError(
             f"runtime catalog has no {selected_runtime} candidate for {model}/{selected_target}"
+        )
+    selected_version = (
+        candidate["latest"] if runtime is not None else recommendation["version"]
+    )
+    release = candidate["releases"].get(selected_version)
+    if (
+        not isinstance(release, dict)
+        or release.get("qualified") is not True
+        or release.get("revoked") is not False
+    ):
+        raise RuntimePackError(
+            f"runtime catalog release is unavailable: {selected_runtime}@{selected_version}"
         )
     return (
         selected_target,
         target_contract_sha256(contract),
         selected_runtime,
-        release["version"],
+        selected_version,
         release["source"],
     )
+
+
+def catalog_release_record(
+    catalog: dict[str, Any], model: str, target: str, candidate: str, version: str
+) -> dict[str, Any]:
+    """Return one exact validated catalog release record."""
+
+    try:
+        return catalog["models"][model]["targets"][target]["candidates"][candidate][
+            "releases"
+        ][version]
+    except (KeyError, TypeError) as error:
+        raise RuntimePackError(
+            f"runtime catalog release is unavailable: {model}/{candidate}@{version}/{target}"
+        ) from error
 
 
 def resolved_catalog_location(explicit: str | None = None) -> str | None:
