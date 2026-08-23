@@ -134,6 +134,7 @@ class CoreUpdateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source, installer, launcher = self._installed_tree(pathlib.Path(directory))
             commands: list[list[str]] = []
+            captured: list[list[str]] = []
             with (
                 mock.patch.object(
                     letsinfer,
@@ -143,6 +144,14 @@ class CoreUpdateTests(unittest.TestCase):
                 mock.patch.object(letsinfer.benchmark_jobs, "active_state", return_value=None),
                 mock.patch.object(
                     letsinfer, "run_passthrough", side_effect=lambda value: commands.append(list(value))
+                ),
+                mock.patch.object(
+                    letsinfer,
+                    "run",
+                    side_effect=lambda value: (
+                        captured.append(list(value))
+                        or subprocess.CompletedProcess(value, 0, "", "")
+                    ),
                 ),
             ):
                 result = letsinfer.update_core(argparse.Namespace(version="1.2.4-rc.1"))
@@ -161,10 +170,10 @@ class CoreUpdateTests(unittest.TestCase):
                         "1.2.4-rc.1",
                     ],
                     [str(launcher), "core-rebind"],
-                    [str(launcher), "--help"],
                     [str(launcher), "core-prune", "--quiet"],
                 ],
             )
+            self.assertEqual(captured, [[str(launcher), "--help"]])
 
     def test_update_refuses_a_checkout_and_an_active_benchmark(self) -> None:
         with mock.patch.object(
@@ -275,9 +284,10 @@ class CoreUpdateTests(unittest.TestCase):
             active_control = control / ("a" * 64)
             stale_control = control / ("b" * 64)
             for path in (active_control, stale_control):
-                releases = path / "releases"
-                releases.mkdir(parents=True)
-                (releases / "release.json").write_text("{}\n", encoding="utf-8")
+                path.mkdir(parents=True)
+                (path / "runtime-execution.json").write_text(
+                    "{}\n", encoding="utf-8"
+                )
             active_watchdog = watchdog / ("c" * 64)
             stale_watchdog = watchdog / ("d" * 64)
             active_watchdog.mkdir(parents=True)
@@ -300,7 +310,11 @@ class CoreUpdateTests(unittest.TestCase):
 
         self.assertEqual(result["control_bundles"], [stale_control])
         self.assertEqual(result["watchdog_runtimes"], [stale_watchdog])
-        validate.assert_called_once()
+        validate.assert_called_once_with(
+            stale_control,
+            stale_control / "runtime-execution.json",
+            "e" * 64,
+        )
         verify.assert_called_once_with(stale_watchdog, stale_watchdog.name)
 
     def test_core_plane_handoff_quiesces_and_restores_runtime_services(self) -> None:
