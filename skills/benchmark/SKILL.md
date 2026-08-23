@@ -103,10 +103,21 @@ Keep every raw request and telemetry stream. Hash `results.json`, the complete e
 
 Fail closed when any correctness, safety, identity, cache, stability, capacity, or performance gate fails. A performance fix requires a new runtime identity/checkpoint and fresh evidence; never edit a result into a pass.
 
-The public result is `benchmark.json` in the standalone runtime target root,
-beside `runtime.json`; never put it in Let's Infer core. `letsinfer benchmark` creates
-and validates that record automatically. Before sealing or packaging a copied
-or merged record, run:
+An ordinary or verifier run produces a validated local `benchmark.json` in its
+immutable evidence directory. Do not treat one author's checked-in result as
+qualification. For a runtime PR that has passed `benchmark-ready`, use:
+
+```bash
+letsinfer benchmark verify https://github.com/letsinferlabs/runtimes/pull/123
+```
+
+This command permits no workload/configuration overrides. It benchmarks the
+current recommendation and exact proposal with the same contract, restores the
+previous runtime on every terminal path, and posts the complete signed record
+through GitHub CLI. Ctrl-C detaches; use `letsinfer benchmark verify status` to
+reattach and `letsinfer benchmark verify stop` to cancel and restore.
+
+Before sealing or transporting a record, run:
 
 ```bash
 python3 benchmarks/benchmark_record.py /path/to/runtime/benchmark.json
@@ -132,6 +143,12 @@ Use Watchdog's independent raw one-second ring for the public timeline; do not
 increase runner-side polling or derive the timeline from a post-run snapshot.
 The validator must enforce the fixed column order, monotonic elapsed times,
 numeric bounds, and equality between each published maximum and its timeline.
+
+The bot accepts one active vote per GitHub account and pseudonymous device,
+requires three agreeing independent non-author verifiers, and writes the full
+records plus aggregate into bot-owned `benchmark.consensus.json`. Do not upload
+community evidence to an OCI, hand-edit consensus, or add qualification state
+to a runtime manifest.
 
 Keep generated prompts, plans, complete outputs, private evidence, and
 machine-specific details in ignored evidence storage; generic runners and

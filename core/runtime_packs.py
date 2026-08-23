@@ -62,7 +62,7 @@ BENCHMARK_GENERATOR = "letsinfer-code-prose"
 BENCHMARK_GENERATOR_VERSION = 2
 BENCHMARK_TOKENIZER_CAPABILITY = "engine-rendered-chat-count-v1"
 BENCHMARK_RENDER_CONTRACT = "openai-chat-user-v1"
-SELECTION_SCHEMA_VERSION = 2
+SELECTION_SCHEMA_VERSION = 3
 SELECTION_FIELDS = {
     "schema_version",
     "candidate_id",
@@ -80,6 +80,7 @@ SELECTION_FIELDS = {
     "hardware_fingerprint_sha256",
     "installation_id",
     "policy",
+    "authorization",
     "source",
     "history",
 }
@@ -128,6 +129,27 @@ def _read_object(path: pathlib.Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimePackError(f"{label} must be a JSON object: {path}")
     return value
+
+
+def _catalog_github_identity(
+    value: Any, where: str, *, allow_organization: bool
+) -> int:
+    account_types = {"User", "Organization"} if allow_organization else {"User"}
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"github_login", "github_id", "github_type"}
+        or not isinstance(value.get("github_login"), str)
+        or re.fullmatch(
+            r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", value["github_login"]
+        )
+        is None
+        or not isinstance(value.get("github_id"), int)
+        or isinstance(value.get("github_id"), bool)
+        or value["github_id"] <= 0
+        or value.get("github_type") not in account_types
+    ):
+        raise RuntimePackError(f"catalog GitHub identity for {where} is invalid")
+    return value["github_id"]
 
 
 def _relative_path(value: Any, where: str) -> pathlib.PurePosixPath:
@@ -523,7 +545,6 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
         "id",
         "version",
         "logical_model",
-        "status",
         "target",
         "engine",
         "model",
@@ -541,16 +562,13 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
         raise RuntimePackError(
             f"runtime source has unsupported fields: {', '.join(sorted(unknown))}"
         )
-    for key in ("id", "version", "logical_model", "status"):
+    for key in ("id", "version", "logical_model"):
         if not isinstance(value.get(key), str) or not value[key]:
             raise RuntimePackError(f"runtime.{key} must be a non-empty string")
     if not SAFE_NAME_RE.fullmatch(value["logical_model"]):
         raise RuntimePackError("runtime.logical_model must be a lowercase safe name")
     if not VERSION_RE.fullmatch(value["version"]):
         raise RuntimePackError("runtime.version must be semantic version syntax")
-    if value["status"] not in {"candidate", "qualified"}:
-        raise RuntimePackError("runtime.status must be candidate or qualified")
-
     target = validate_target_contract(value.get("target"), "runtime.target")
     engine = value.get("engine")
     required_engine = {
@@ -719,11 +737,11 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
         )
 
     serving = value.get("serving")
-    if not isinstance(serving, dict) or serving.get("qualified") is not (
-        value["status"] == "qualified"
-    ):
+    if not isinstance(serving, dict):
+        raise RuntimePackError("runtime.serving must be an object")
+    if {"qualified", "blocked_by"}.intersection(serving):
         raise RuntimePackError(
-            "runtime.serving.qualified must agree with runtime.status"
+            "runtime.serving cannot grant qualification or define blocked_by"
         )
 
     expected_id = candidate_id(engine_id, model["uri"], target["id"])
@@ -733,33 +751,13 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
         )
 
     benchmark = value.get("benchmark")
-    if not isinstance(benchmark, dict) or set(benchmark) != {"contract", "record"}:
-        raise RuntimePackError("runtime.benchmark must contain exactly contract and record")
+    if not isinstance(benchmark, dict) or set(benchmark) != {"contract"}:
+        raise RuntimePackError("runtime.benchmark must contain exactly contract")
     contract = benchmark.get("contract")
     if not isinstance(contract, dict):
         raise RuntimePackError("runtime.benchmark.contract must be an object")
     if contract.get("schema_version") == BENCHMARK_SCHEMA_VERSION:
         validate_benchmark_contract(contract)
-    record = benchmark.get("record")
-    if record is None:
-        if value["status"] == "qualified":
-            raise RuntimePackError(
-                "qualified runtime.benchmark.record cannot be null"
-            )
-    else:
-        if not isinstance(record, dict) or set(record) != {"path", "sha256", "id"}:
-            raise RuntimePackError(
-                "runtime.benchmark.record must be null or contain exactly "
-                "path, sha256, and id"
-            )
-        _relative_path(record.get("path"), "runtime.benchmark.record.path")
-        for key in ("sha256", "id"):
-            if not isinstance(record.get(key), str) or not SHA256_RE.fullmatch(
-                record[key]
-            ):
-                raise RuntimePackError(
-                    f"runtime.benchmark.record.{key} must be a SHA-256"
-                )
     if "orchestration" in value:
         try:
             validate_orchestration_contract(value["orchestration"])
@@ -769,7 +767,7 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_runtime_config(value: dict[str, Any]) -> dict[str, Any]:
-    """Validate one authoritative schema-v3 runtime configuration in memory."""
+    """Validate one authoritative schema-v4 execution configuration in memory."""
 
     return _runtime_metadata(value)
 
@@ -792,10 +790,10 @@ def _descriptor_metadata(value: dict[str, Any]) -> dict[str, Any]:
         raise RuntimePackError("runtime.runtime_sha256 must be a SHA-256")
     candidate = value.get("candidate")
     if not isinstance(candidate, dict) or set(candidate) != {
-        "id", "version", "logical_model", "engine", "target", "status"
+        "id", "version", "logical_model", "engine", "target"
     }:
         raise RuntimePackError("runtime candidate summary is invalid")
-    for key in ("id", "version", "logical_model", "engine", "target", "status"):
+    for key in ("id", "version", "logical_model", "engine", "target"):
         if not isinstance(candidate.get(key), str) or not candidate[key]:
             raise RuntimePackError(f"runtime candidate {key} is invalid")
     files = value.get("files")
@@ -810,6 +808,11 @@ def _ignored_source_path(relative: pathlib.PurePath) -> bool:
         or "__pycache__" in relative.parts
         or relative.name == RUNTIME_DESCRIPTOR
         or relative.as_posix() == "release.json"
+        or (
+            len(relative.parts) == 1
+            and relative.name.startswith("benchmark")
+            and relative.suffix == ".json"
+        )
         or relative.name == ".DS_Store"
         or relative.suffix in {".pyc", ".pyo", ".letsinfer"}
     )
@@ -839,14 +842,6 @@ def describe_source(root: pathlib.Path) -> RuntimePack:
     relative_names = {path.relative_to(root).as_posix() for path in files}
     if RUNTIME_CONFIG not in relative_names:
         raise RuntimePackError(f"runtime source is missing {RUNTIME_CONFIG}")
-    benchmark_record = config["benchmark"]["record"]
-    if benchmark_record is not None:
-        benchmark_path = benchmark_record["path"]
-        if benchmark_path not in relative_names:
-            raise RuntimePackError(
-                f"runtime source is missing benchmark record {benchmark_path}"
-            )
-        _verify_benchmark_record(root, config)
     if len(files) > MAX_PACK_FILES:
         raise RuntimePackError(f"runtime source exceeds {MAX_PACK_FILES} files")
     records = []
@@ -879,7 +874,6 @@ def describe_source(root: pathlib.Path) -> RuntimePack:
             "logical_model": config["logical_model"],
             "engine": config["engine"]["id"],
             "target": config["target"]["id"],
-            "status": config["status"],
         },
         "files": records,
     }
@@ -953,44 +947,17 @@ def verify_descriptor(root: pathlib.Path) -> RuntimePack:
     if sha256_file(runtime_path) != descriptor["runtime_sha256"]:
         raise RuntimePackError("runtime.json differs from the artifact descriptor")
     runtime = _runtime_metadata(_read_object(runtime_path, "runtime config"))
-    _verify_benchmark_record(root, runtime)
     expected_candidate = {
         "id": runtime["id"],
         "version": runtime["version"],
         "logical_model": runtime["logical_model"],
         "engine": runtime["engine"]["id"],
         "target": runtime["target"]["id"],
-        "status": runtime["status"],
     }
     if descriptor["candidate"] != expected_candidate:
         raise RuntimePackError("runtime candidate summary differs from runtime.json")
     digest = hashlib.sha256(canonical_bytes(descriptor)).hexdigest()
     return RuntimePack(root=root, descriptor=descriptor, runtime=runtime, digest=digest)
-
-
-def _verify_benchmark_record(root: pathlib.Path, runtime: dict[str, Any]) -> None:
-    reference = runtime["benchmark"]["record"]
-    if reference is None:
-        return
-    path = root / reference["path"]
-    if path.is_symlink() or not path.is_file():
-        raise RuntimePackError(f"runtime benchmark record is unavailable: {path}")
-    if sha256_file(path) != reference["sha256"]:
-        raise RuntimePackError("runtime benchmark record SHA-256 differs from runtime.json")
-    validator = pathlib.Path(__file__).resolve().parents[1] / "benchmarks/benchmark_record.py"
-    result = subprocess.run(
-        [sys.executable, str(validator), str(path)],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip() or "unknown validation error"
-        raise RuntimePackError(f"invalid runtime benchmark record: {detail}")
-    record = _read_object(path, "benchmark record")
-    if record.get("id") != reference["id"]:
-        raise RuntimePackError("runtime benchmark record identity differs from runtime.json")
 
 
 def build_archive(source: pathlib.Path, output: pathlib.Path) -> RuntimePack:
@@ -1590,6 +1557,16 @@ def _validate_selection(value: dict[str, Any], label: str) -> None:
     for key in ("candidate_id", "logical_model", "engine"):
         if not isinstance(value.get(key), str) or not SAFE_NAME_RE.fullmatch(value[key]):
             raise RuntimePackError(f"invalid runtime selection {key}: {label}")
+    authorization = value.get("authorization")
+    if (
+        not isinstance(authorization, dict)
+        or set(authorization) != {"qualified", "authority"}
+        or not isinstance(authorization.get("qualified"), bool)
+        or authorization.get("authority") not in {"signed-catalog", "direct"}
+        or (authorization["authority"] == "signed-catalog")
+        != authorization["qualified"]
+    ):
+        raise RuntimePackError(f"invalid runtime selection authorization: {label}")
 
 
 def selections(home: pathlib.Path | None = None) -> list[dict[str, Any]]:
@@ -1709,6 +1686,7 @@ def write_selection(
                     "hardware_fingerprint_sha256",
                     "installation_id",
                     "policy",
+                    "authorization",
                     "source",
                 )
                 if key in previous
@@ -1799,6 +1777,7 @@ def new_receipt(
     control_root: pathlib.Path,
     source: str,
     policy: str,
+    qualified: bool,
     hardware_fingerprint_sha256: str,
     target_contract_sha256: str,
     installed_at_unix_ns: int,
@@ -1828,6 +1807,10 @@ def new_receipt(
         "hardware_fingerprint_sha256": hardware_fingerprint_sha256,
         "installation_id": installation_id,
         "policy": policy,
+        "authorization": {
+            "qualified": qualified,
+            "authority": "signed-catalog" if qualified else "direct",
+        },
         "source": source,
         "history": [],
     }
@@ -2115,12 +2098,12 @@ def load_catalog(
                             "authors",
                             "license",
                             "source",
-                            "qualified",
-                            "revoked",
                             "engine",
                             "engine_oci",
                             "model_uri",
                             "benchmark",
+                            "provenance",
+                            "verification",
                         }
                     ):
                         raise RuntimePackError(f"catalog release entry for {where} is invalid")
@@ -2129,25 +2112,21 @@ def load_catalog(
                         not isinstance(authors, list)
                         or not authors
                         or len(authors) > 32
-                        or any(
-                            not isinstance(author, str)
-                            or not AUTHOR_RE.fullmatch(author)
-                            for author in authors
-                        )
-                        or len(authors) != len(set(authors))
                     ):
                         raise RuntimePackError(f"catalog authors for {where} are invalid")
+                    author_ids = [
+                        _catalog_github_identity(
+                            author, f"{where}.authors[{index}]", allow_organization=True
+                        )
+                        for index, author in enumerate(authors)
+                    ]
+                    if len(author_ids) != len(set(author_ids)):
+                        raise RuntimePackError(f"catalog authors for {where} are duplicated")
                     if not LICENSE_RE.fullmatch(str(release.get("license"))):
                         raise RuntimePackError(f"catalog license for {where} is invalid")
                     if not REGISTRY_DIGEST_RE.fullmatch(release.get("source", "")):
                         raise RuntimePackError(
                             f"catalog source for {where} must be digest-pinned OCI"
-                        )
-                    if type(release.get("qualified")) is not bool or type(
-                        release.get("revoked")
-                    ) is not bool:
-                        raise RuntimePackError(
-                            f"catalog publication state for {where} must be boolean"
                         )
                     engine = release.get("engine")
                     if not isinstance(engine, str) or not SAFE_NAME_RE.fullmatch(engine):
@@ -2168,16 +2147,13 @@ def load_catalog(
                         )
                     benchmark = release.get("benchmark")
                     if benchmark is None:
-                        if release["qualified"]:
-                            raise RuntimePackError(
-                                f"qualified catalog release {where} has no benchmark"
-                            )
-                        continue
+                        raise RuntimePackError(
+                            f"qualified catalog release {where} has no benchmark"
+                        )
                     if not isinstance(benchmark, dict) or set(benchmark) != {
                         "id",
                         "suite",
                         "score",
-                        "evidence",
                     }:
                         raise RuntimePackError(f"catalog benchmark for {where} is invalid")
                     if not isinstance(benchmark.get("id"), str) or not SHA256_RE.fullmatch(
@@ -2186,10 +2162,6 @@ def load_catalog(
                         raise RuntimePackError("catalog benchmark id must be a SHA-256")
                     if benchmark.get("suite") != policy["benchmark_suite"]:
                         raise RuntimePackError("catalog benchmark suite is unsupported")
-                    if not REGISTRY_DIGEST_RE.fullmatch(benchmark.get("evidence", "")):
-                        raise RuntimePackError(
-                            "catalog benchmark evidence must be digest-pinned OCI"
-                        )
                     score = benchmark.get("score")
                     if (
                         not isinstance(score, (int, float))
@@ -2200,16 +2172,113 @@ def load_catalog(
                         raise RuntimePackError(
                             "catalog benchmark score must be positive and finite"
                         )
+                    provenance = release.get("provenance")
+                    verification = release.get("verification")
+                    if not isinstance(provenance, dict) or not isinstance(
+                        verification, dict
+                    ):
+                        raise RuntimePackError(
+                            f"catalog qualification metadata for {where} is invalid"
+                        )
+                    method = verification.get("method")
+                    if method == "maintainer-qualified-pre-community-v1":
+                        if (
+                            set(verification) != {"method", "verifiers"}
+                            or verification.get("verifiers") != []
+                            or set(provenance)
+                            != {
+                                "method",
+                                "repository",
+                                "pull_request",
+                                "pull_request_url",
+                                "proposal_head_sha",
+                                "qualified_commit_sha",
+                            }
+                            or provenance.get("method") != method
+                        ):
+                            raise RuntimePackError(
+                                f"catalog migrated qualification for {where} is invalid"
+                            )
+                    elif method == "community-consensus-v1":
+                        if (
+                            set(verification)
+                            != {
+                                "method",
+                                "consensus_path",
+                                "consensus_sha256",
+                                "verifiers",
+                            }
+                            or set(provenance)
+                            != {
+                                "repository",
+                                "pull_request",
+                                "pull_request_url",
+                                "proposal_head_sha",
+                                "execution_sha256",
+                                "qualified_commit_sha",
+                                "consensus_sha256",
+                            }
+                            or verification.get("consensus_sha256")
+                            != provenance.get("consensus_sha256")
+                            or not SHA256_RE.fullmatch(
+                                str(verification.get("consensus_sha256"))
+                            )
+                            or verification.get("consensus_path")
+                            != f"{candidate}/benchmark.consensus.json"
+                            or not SHA256_RE.fullmatch(
+                                str(provenance.get("execution_sha256"))
+                            )
+                            or not isinstance(verification.get("verifiers"), list)
+                            or len(verification["verifiers"]) < 3
+                        ):
+                            raise RuntimePackError(
+                                f"catalog community qualification for {where} is invalid"
+                            )
+                    else:
+                        raise RuntimePackError(
+                            f"catalog qualification method for {where} is invalid"
+                        )
+                    if (
+                        provenance.get("repository") != "letsinferlabs/runtimes"
+                        or not isinstance(provenance.get("pull_request"), int)
+                        or isinstance(provenance.get("pull_request"), bool)
+                        or provenance["pull_request"] <= 0
+                        or provenance.get("pull_request_url")
+                        != "https://github.com/letsinferlabs/runtimes/pull/"
+                        + str(provenance["pull_request"])
+                        or not re.fullmatch(
+                            r"[0-9a-f]{40}", str(provenance.get("proposal_head_sha"))
+                        )
+                        or not re.fullmatch(
+                            r"[0-9a-f]{40}", str(provenance.get("qualified_commit_sha"))
+                        )
+                    ):
+                        raise RuntimePackError(
+                            f"catalog provenance for {where} is invalid"
+                        )
+                    verifiers = verification.get("verifiers")
+                    if not isinstance(verifiers, list) or len(verifiers) > 64:
+                        raise RuntimePackError(
+                            f"catalog verifiers for {where} are invalid"
+                        )
+                    verifier_ids = [
+                        _catalog_github_identity(
+                            verifier,
+                            f"{where}.verifiers[{index}]",
+                            allow_organization=False,
+                        )
+                        for index, verifier in enumerate(verifiers)
+                    ]
+                    if len(verifier_ids) != len(set(verifier_ids)):
+                        raise RuntimePackError(
+                            f"catalog verifiers for {where} are duplicated"
+                        )
             if recommended is not None:
                 recommended_candidate = candidates[recommended["candidate"]]
                 recommended_release = recommended_candidate["releases"].get(
                     recommended["version"]
                 )
-                if (
-                    not isinstance(recommended_release, dict)
-                    or recommended_release.get("qualified") is not True
-                    or recommended_release.get("revoked") is not False
-                ):
+                if not isinstance(recommended_release, dict):
                     raise RuntimePackError(
                         f"catalog recommendation for {model}/{target_id} is not qualified"
                     )
@@ -2290,11 +2359,7 @@ def catalog_release(
         candidate["latest"] if runtime is not None else recommendation["version"]
     )
     release = candidate["releases"].get(selected_version)
-    if (
-        not isinstance(release, dict)
-        or release.get("qualified") is not True
-        or release.get("revoked") is not False
-    ):
+    if not isinstance(release, dict):
         raise RuntimePackError(
             f"runtime catalog release is unavailable: {selected_runtime}@{selected_version}"
         )

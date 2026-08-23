@@ -13,7 +13,6 @@ def runtime_candidate() -> dict[str, Any]:
         "id": "example-engine--example--model--test-target",
         "version": "1.0.0",
         "logical_model": "example-model",
-        "status": "candidate",
         "target": {
             "id": "test-target",
             "platform": "linux/arm64",
@@ -78,11 +77,9 @@ def runtime_candidate() -> dict[str, Any]:
             "config": {},
         },
         "serving": {
-            "qualified": False,
             "max_connections": 16,
             "max_active_requests": 4,
             "max_context_tokens": 32768,
-            "blocked_by": "qualification-required",
         },
-        "benchmark": {"contract": {}, "record": None},
+        "benchmark": {"contract": {}},
     }

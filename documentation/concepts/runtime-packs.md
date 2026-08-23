@@ -75,10 +75,12 @@ OCI, model revision, or runtime pack.
 
 The generated root `manifest.json` is an append-only versioned release index.
 It retains every qualified candidate version, authors, license, immutable
-runtime OCI, benchmark summary, and full benchmark-evidence OCI reference.
-Release automation selects one qualified recommendation for each logical model
-and target, signs the exact projection, and publishes it directly as the latest
-release of the runtimes repository.
+runtime OCI, benchmark score, structured verifier list, and consensus digest.
+Complete accepted evidence remains in canonical bot comments and the generated
+`benchmark.consensus.json`; it is not duplicated into an evidence OCI. Release
+automation selects one qualified recommendation for each logical model and
+target, signs the exact projection and separate revocation ledger, and
+publishes them together from the runtimes repository.
 
 Discover compatible releases before installing:
 
@@ -116,6 +118,15 @@ python3 tools/generate_manifest.py --validate-only
 letsinfer pack <candidate-directory> --output /tmp/runtime.letsinfer
 ```
 
-Pack the same source twice and require byte-identical output. After engine
-protocol, safety, restart, pressure, crash, API, and benchmark gates pass,
-commit the exact `benchmark.json` and mark the candidate qualified.
+Pack the same source twice and require byte-identical output. After engine,
+safety, restart, pressure, crash, and API review, wait for the PR's
+`benchmark-ready` gate. Independent users then run:
+
+```bash
+letsinfer benchmark verify <runtime-pr-url>
+```
+
+The verification bot owns `benchmark.consensus.json`, qualification provenance,
+and the catalog projection. Runtime source cannot mark itself qualified. A
+post-release invalidation enters the separate signed revocation ledger; it
+does not rewrite the immutable release or add a status field to the manifest.

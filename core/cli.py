@@ -37,6 +37,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Iterable, Mapping, Sequence
 
+from benchmarks import benchmark_record as benchmark_record_contract
+
 # A hash-addressed control bundle must not mutate itself when Python imports
 # the adjacent engine registry. Runtime caches belong outside the bundle.
 sys.dont_write_bytecode = True
@@ -128,7 +130,7 @@ from .runtime_packs import (
 from .updates import Component, UpdateManager, UpdatePoller
 from .updates.manager import UpdateError, compare_versions
 from .catalog import CatalogError, CatalogManager
-from . import benchmark_jobs, ui
+from . import benchmark_jobs, benchmark_verification, ui
 from .state_plane import runtime_lifecycle as derive_runtime_lifecycle
 from .platform import macos as macos_services
 from .site.state import (
@@ -552,12 +554,15 @@ def read_json(path: pathlib.Path) -> dict[str, Any]:
     return value
 
 
-def runtime_execution_manifest(runtime: dict[str, Any]) -> dict[str, Any]:
+def runtime_execution_manifest(
+    runtime: dict[str, Any], *, qualified: bool, blocked_by: str = "runtime-unqualified"
+) -> dict[str, Any]:
     """Derive the private core execution view from authoritative runtime.json.
 
-    Runtime packs expose only schema-v3 runtime.json.  The control plane keeps a
+    Runtime packs expose only schema-v4 runtime.json. The control plane keeps a
     deterministic, hash-bound execution view so existing lifecycle code never
-    needs to reinterpret source metadata or trust a second author-written file.
+    needs to reinterpret source metadata. Qualification is authorization from a
+    signed catalog, never an author-controlled property of executable bytes.
     """
 
     try:
@@ -585,7 +590,7 @@ def runtime_execution_manifest(runtime: dict[str, Any]) -> dict[str, Any]:
     execution = {
         "schema_version": 1,
         "release": f"{runtime['id']}@{runtime['version']}",
-        "status": "stable" if runtime["status"] == "qualified" else "candidate",
+        "status": "stable" if qualified else "candidate",
         "target": runtime["target"],
         "engine": execution_engine,
         "model": {
@@ -609,7 +614,11 @@ def runtime_execution_manifest(runtime: dict[str, Any]) -> dict[str, Any]:
             },
         },
         "cache": runtime["cache"],
-        "serving": runtime["serving"],
+        "serving": {
+            **runtime["serving"],
+            "qualified": qualified,
+            **({} if qualified else {"blocked_by": blocked_by}),
+        },
     }
     for optional in ("orchestration",):
         if optional in runtime:
@@ -962,7 +971,11 @@ def verify_runtime_sources(manifest: dict[str, Any], root: pathlib.Path) -> None
             pack = verify_descriptor(root)
         except RuntimePackError as error:
             raise LetsInferError(str(error)) from error
-        if runtime_execution_manifest(pack.runtime) != manifest:
+        if runtime_execution_manifest(
+            pack.runtime,
+            qualified=manifest["serving"]["qualified"],
+            blocked_by=manifest["serving"].get("blocked_by", "runtime-unqualified"),
+        ) != manifest:
             raise LetsInferError(
                 "runtime descriptor and private execution manifest disagree"
             )
@@ -6746,12 +6759,12 @@ def _runtime_source_for_install(
     model: str,
     runtime: str | None,
     catalog_location: str | None,
-) -> tuple[str, str, str | None, str | None, str | None]:
+) -> tuple[str, str, str | None, str | None, str | None, bool]:
     path = pathlib.Path(model).expanduser()
     if path.exists():
-        return str(path.resolve(strict=True)), "local", None, None, None
+        return str(path.resolve(strict=True)), "local", None, None, None, False
     if REGISTRY_DIGEST_RE.fullmatch(model):
-        return model, "pinned", None, None, None
+        return model, "pinned", None, None, None, False
     location = resolved_catalog_location(catalog_location)
     if location is None:
         raise LetsInferError(
@@ -6769,13 +6782,14 @@ def _runtime_source_for_install(
     except (CatalogError, RuntimePackError) as error:
         raise LetsInferError(str(error)) from error
     policy = f"runtime:{selected_runtime}" if runtime else "recommended"
-    return source, policy, version, selected_target, selected_target_sha256
+    return source, policy, version, selected_target, selected_target_sha256, True
 
 
 def prepare_runtime_install(
     source: str,
     *,
     policy: str,
+    qualified: bool,
     requested_runtime: str | None,
     requested_target: str | None = None,
     expected_version: str | None = None,
@@ -6788,7 +6802,7 @@ def prepare_runtime_install(
     except RuntimePackError as error:
         raise LetsInferError(str(error)) from error
     manifest_path = pack.runtime_path
-    manifest = runtime_execution_manifest(pack.runtime)
+    manifest = runtime_execution_manifest(pack.runtime, qualified=qualified)
     engine = adapter_for(manifest).name
     manifest_target = target_contract(manifest)
     target_id = manifest_target["id"]
@@ -6810,7 +6824,6 @@ def prepare_runtime_install(
         pack.runtime["logical_model"] != manifest["model"]["alias"]
         or pack.runtime["engine"]["id"] != engine
         or pack.runtime["target"]["id"] != target_id
-        or (pack.runtime["status"] == "qualified") != (manifest["status"] == "stable")
     ):
         raise LetsInferError("runtime descriptor and runtime.json identity disagree")
     if requested_runtime is not None and requested_runtime != pack.runtime["id"]:
@@ -6840,6 +6853,7 @@ def prepare_runtime_install(
         control_root=control_root,
         source=source,
         policy=policy,
+        qualified=qualified,
         hardware_fingerprint_sha256=host_hardware_fingerprint_sha256(),
         target_contract_sha256=manifest_target_sha256,
         installed_at_unix_ns=time.time_ns(),
@@ -8407,6 +8421,7 @@ def install(arguments: argparse.Namespace) -> int:
             runtime_source[2],
             runtime_source[3],
             runtime_source[4],
+            runtime_source[5],
         )
     (
         source,
@@ -8414,10 +8429,12 @@ def install(arguments: argparse.Namespace) -> int:
         expected_version,
         selected_target,
         selected_target_sha256,
+        catalog_qualified,
     ) = runtime_source
     manifest_path, manifest, release_root, prepared_receipt = prepare_runtime_install(
         source,
         policy=policy,
+        qualified=catalog_qualified,
         requested_runtime=getattr(arguments, "runtime", None),
         requested_target=selected_target,
         expected_version=expected_version,
@@ -10057,7 +10074,7 @@ def _installed_runtime_image_references() -> set[str]:
             continue
         try:
             runtime = json.loads(descriptor_path.read_text(encoding="utf-8"))
-            manifest = runtime_execution_manifest(runtime)
+            manifest = runtime_execution_manifest(runtime, qualified=False)
         except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError, LetsInferError):
             # Corrupt local metadata is deleted with the runtime object, but must
             # never be trusted to select a Docker image for removal.
@@ -10381,7 +10398,6 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
                 available = [
                     (version, release)
                     for version, release in candidate_record["releases"].items()
-                    if release["qualified"] and not release["revoked"]
                 ]
                 available.sort(
                     key=functools.cmp_to_key(
@@ -10409,7 +10425,8 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
                             "model_uri": release["model_uri"],
                             "benchmark_id": benchmark["id"],
                             "benchmark_score": benchmark["score"],
-                            "benchmark_evidence": benchmark["evidence"],
+                            "verification": release["verification"],
+                            "provenance": release["provenance"],
                             "recommended": recommended,
                             "installed": (model, target, candidate, version)
                             in installed,
@@ -10448,14 +10465,21 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
         print(f"No qualified runtimes are available{suffix}.")
         return 0
 
-    headings = ("MODEL", "AUTHOR", "VERSION", "ENGINE", "TARGET", "STATUS")
+    headings = (
+        "MODEL", "AUTHOR", "VERSION", "ENGINE", "TARGET", "VERIFIED", "STATUS"
+    )
     rendered = [
         (
             row["model"],
-            ", ".join(row["authors"]),
+            ", ".join(author["github_login"] for author in row["authors"]),
             row["version"],
             row["engine"],
             row["target"],
+            (
+                str(len(row["verification"]["verifiers"]))
+                if row["verification"]["method"] == "community-consensus-v1"
+                else "legacy"
+            ),
             " · ".join(
                 label
                 for enabled, label in (
@@ -10519,6 +10543,25 @@ def inspect_runtime(arguments: argparse.Namespace) -> int:
     )
     receipt = runtime_receipt_for_manifest(manifest_path)
     launch = launch_for(manifest, manifest["serving"], arguments.port)
+    publication: dict[str, Any] | None = None
+    publication_error: str | None = None
+    if receipt is not None:
+        try:
+            catalog = CatalogManager(arguments.catalog).load(
+                refresh=False, allow_stale=True
+            ).document
+            publication = (
+                catalog.get("models", {})
+                .get(receipt["logical_model"], {})
+                .get("targets", {})
+                .get(receipt["target"], {})
+                .get("candidates", {})
+                .get(receipt["candidate_id"], {})
+                .get("releases", {})
+                .get(receipt["version"])
+            )
+        except CatalogError as error:
+            publication_error = str(error)
     if arguments.json:
         print(
             json.dumps(
@@ -10530,6 +10573,8 @@ def inspect_runtime(arguments: argparse.Namespace) -> int:
                     "status": manifest["status"],
                     "serving": manifest["serving"],
                     "command": list(launch.command),
+                    "publication": publication,
+                    "publication_error": publication_error,
                 },
                 indent=2,
                 sort_keys=True,
@@ -10546,6 +10591,26 @@ def inspect_runtime(arguments: argparse.Namespace) -> int:
             f"{runtime_name}\tengine={adapter_for(manifest).name}\t"
             f"version={version}\tstatus={manifest['status']}\tdigest={digest}"
         )
+        if publication is not None:
+            verification = publication["verification"]
+            benchmark = publication["benchmark"]
+            provenance = publication["provenance"]
+            verifiers = ", ".join(
+                f"@{item['github_login']}" for item in verification["verifiers"]
+            ) or "maintainer migration"
+            print(
+                f"verification={verification['method']}\t"
+                f"verifiers={verifiers}\t"
+                f"score={benchmark['score'] if benchmark is not None else 'unscored'}"
+            )
+            if verification["method"] == "community-consensus-v1":
+                print(
+                    f"subject={provenance['execution_sha256']}\t"
+                    f"consensus={verification['consensus_path']}\t"
+                    f"consensus_sha256={verification['consensus_sha256']}"
+                )
+        elif publication_error is not None:
+            print(f"verification=unavailable\treason={publication_error}")
     return 0
 
 
@@ -11256,12 +11321,16 @@ def _benchmark_job_snapshot(*, machine: bool = False) -> int:
         state
     )
     if state.get("state") in benchmark_jobs.ACTIVE_STATES and not active:
+        if state.get("kind") == "verification":
+            _recover_interrupted_verification(state)
+            state = benchmark_jobs.read_state() or state
         try:
-            state = benchmark_jobs.mark(
-                state["job_id"],
-                "failed",
-                error="benchmark worker exited without recording a terminal state",
-            )
+            if state.get("state") in benchmark_jobs.ACTIVE_STATES:
+                state = benchmark_jobs.mark(
+                    state["job_id"],
+                    "failed",
+                    error="benchmark worker exited without recording a terminal state",
+                )
         except benchmark_jobs.BenchmarkJobError as error:
             raise LetsInferError(str(error)) from error
     elapsed = (
@@ -11471,8 +11540,660 @@ def _mark_benchmark_job(
         raise LetsInferError(str(failure)) from failure
 
 
-def benchmark_runtime(arguments: argparse.Namespace) -> int:
-    """Run the generic sealed matrix for one installed runtime."""
+def _verification_progress(job_id: str, phase: str, message: str) -> None:
+    try:
+        benchmark_jobs.update_progress(
+            job_id,
+            {
+                "phase": phase,
+                "message": message,
+                "verification": True,
+            },
+        )
+    except benchmark_jobs.BenchmarkJobError as error:
+        raise LetsInferError(str(error)) from error
+
+
+def _gateway_is_idle() -> None:
+    """Fail before downloads or runtime replacement when clients are active."""
+
+    path = default_gateway_telemetry_path()
+    if not path.exists():
+        return
+    if path.is_symlink() or not path.is_file():
+        raise LetsInferError(f"gateway telemetry is unsafe: {path}")
+    values: dict[str, int] = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            key, separator, raw = line.partition("=")
+            if separator and key in {"active_requests", "queued_requests"}:
+                values[key] = int(raw)
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        raise LetsInferError(f"gateway telemetry is unreadable: {error}") from error
+    active = values.get("active_requests", 0)
+    queued = values.get("queued_requests", 0)
+    if active or queued:
+        raise LetsInferError(
+            f"verification requires an idle gateway; active={active} queued={queued}"
+        )
+
+
+def _interactive_github_identity() -> benchmark_verification.GitHubIdentity:
+    interactive = sys.stdin.isatty() and sys.stderr.isatty()
+    if benchmark_verification.gh_version() is None:
+        command = benchmark_verification.gh_install_command()
+        instruction = (
+            " ".join(command)
+            if command is not None
+            else "install GitHub CLI from https://cli.github.com/"
+        )
+        if not interactive or command is None:
+            raise LetsInferError(
+                f"GitHub CLI is required; run `{instruction}` and retry"
+            )
+        print(
+            f"GitHub CLI is required. Press Enter to run `{instruction}`; "
+            "Ctrl-C cancels.",
+            file=sys.stderr,
+        )
+        input()
+        try:
+            benchmark_verification.ensure_gh(interactive=True, install=True)
+        except benchmark_verification.VerificationError as error:
+            raise LetsInferError(str(error)) from error
+    try:
+        return benchmark_verification.github_identity(interactive=False)
+    except benchmark_verification.VerificationError as error:
+        if "not authenticated" not in str(error) or not interactive:
+            raise LetsInferError(str(error)) from error
+    print(
+        "Press Enter to authenticate GitHub CLI. GitHub CLI will show the browser "
+        "or device-code URL; Ctrl-C cancels.",
+        file=sys.stderr,
+    )
+    input()
+    try:
+        identity = benchmark_verification.github_identity(
+            interactive=True, authenticate=True
+        )
+    except benchmark_verification.VerificationError as error:
+        raise LetsInferError(str(error)) from error
+    print(
+        f"GitHub account: @{identity.login} ({identity.numeric_id})",
+        file=sys.stderr,
+    )
+    return identity
+
+
+def _verification_self_command(
+    arguments: argparse.Namespace, executable: pathlib.Path
+) -> list[str]:
+    command = [
+        str(executable),
+        "benchmark",
+        "verify",
+        arguments.verification_target,
+    ]
+    if arguments.candidate is not None:
+        command.extend(["--candidate", arguments.candidate])
+    return command
+
+
+def _verification_job_snapshot(*, machine: bool = False) -> int:
+    state = benchmark_jobs.read_state()
+    if state is None or state.get("kind") != "verification":
+        if machine:
+            print(compact_json({"active": False, "state": "none", "kind": "verification"}))
+        else:
+            ui.Terminal(sys.stdout).status("No runtime verification has been started")
+        return 0
+    active = (
+        state.get("state") in benchmark_jobs.ACTIVE_STATES
+        and benchmark_jobs.is_alive(state)
+    )
+    if state.get("state") in benchmark_jobs.ACTIVE_STATES and not active:
+        _recover_interrupted_verification(state)
+    if machine:
+        return _benchmark_job_snapshot(machine=True)
+    if active:
+        _follow_benchmark_job(state["job_id"])
+        return 0
+    return _benchmark_job_snapshot()
+
+
+def _verification_stop() -> int:
+    state = benchmark_jobs.active_state()
+    if state is None or state.get("kind") != "verification":
+        raise LetsInferError("no runtime verification is active")
+    return _benchmark_stop()
+
+
+def _selected_receipt(logical_model: str) -> dict[str, Any] | None:
+    try:
+        return next(
+            (
+                receipt
+                for receipt in selections()
+                if receipt["logical_model"] == logical_model
+            ),
+            None,
+        )
+    except RuntimePackError as error:
+        raise LetsInferError(str(error)) from error
+
+
+def _prepare_verification_runtime(
+    source: str,
+    *,
+    policy: str,
+    requested_runtime: str | None = None,
+    expected_version: str | None = None,
+    requested_target: str | None = None,
+    expected_target_contract_sha256: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    """Resolve and validate all candidate bytes without changing selection."""
+
+    manifest_path, manifest, release_root, prepared = prepare_runtime_install(
+        source,
+        policy=policy,
+        qualified=False,
+        requested_runtime=requested_runtime,
+        requested_target=requested_target,
+        expected_version=expected_version,
+        expected_target_contract_sha256=expected_target_contract_sha256,
+    )
+    verify_runtime_sources(manifest, release_root)
+    verify_host_target(manifest)
+    runtime_root = pathlib.Path(prepared["object_root"]).expanduser()
+    model_cache = requested_model_cache(None)
+    ensure_install_dependencies(
+        manifest,
+        model_cache=model_cache,
+        runtime_artifact_root=runtime_root,
+        download=True,
+        build_image=True,
+    )
+    verify_installed_runtime(manifest, model_cache=model_cache)
+    previous = _selected_receipt(prepared["logical_model"])
+    return manifest, prepared, previous
+
+
+def _publish_verification_runtime(
+    prepared: dict[str, Any], previous: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Atomically select a fully prepared candidate with exact rollback state."""
+
+    published = False
+    try:
+        write_selection(prepared)
+        published = True
+        current = _selected_receipt(prepared["logical_model"])
+        if current is None or current["digest"] != prepared["digest"]:
+            raise LetsInferError("verification runtime selection was not published")
+    except BaseException:
+        if published:
+            selected = _selected_receipt(prepared["logical_model"])
+            if selected is not None and selected.get("digest") == prepared["digest"]:
+                _restore_verification_selection(selected, previous)
+        raise
+    return current
+
+
+def _restore_verification_selection(
+    replacement: dict[str, Any], previous: dict[str, Any] | None
+) -> None:
+    try:
+        restore_selection(replacement, previous)
+    except RuntimePackError as error:
+        raise LetsInferError(str(error)) from error
+
+
+def _restoration_receipt_path(state: Mapping[str, Any]) -> pathlib.Path:
+    return pathlib.Path(str(state["output_directory"])) / "restoration-receipt.json"
+
+
+def _write_restoration_receipt(
+    state: Mapping[str, Any],
+    *,
+    logical_model: str,
+    original: dict[str, Any],
+    replacement: dict[str, Any] | None,
+    restored: bool,
+) -> None:
+    path = _restoration_receipt_path(state)
+    atomic_json(
+        path,
+        {
+            "schema_version": 1,
+            "job_id": state["job_id"],
+            "logical_model": logical_model,
+            "original_selection": original,
+            "replacement_digest": (
+                None if replacement is None else replacement["digest"]
+            ),
+            "restored": restored,
+            "updated_unix_ns": time.time_ns(),
+        },
+    )
+    path.chmod(0o600)
+
+
+def _recover_interrupted_verification(state: Mapping[str, Any]) -> None:
+    """Use the persisted receipt after worker death or a machine reboot."""
+
+    path = _restoration_receipt_path(state)
+    if not path.is_file() or path.is_symlink():
+        benchmark_jobs.mark(
+            str(state["job_id"]),
+            "failed",
+            error="verification worker exited before publishing a restoration receipt",
+        )
+        return
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LetsInferError(f"verification restoration receipt is invalid: {error}") from error
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("schema_version") != 1
+        or receipt.get("job_id") != state.get("job_id")
+        or not isinstance(receipt.get("logical_model"), str)
+        or not isinstance(receipt.get("original_selection"), dict)
+        or type(receipt.get("restored")) is not bool
+    ):
+        raise LetsInferError("verification restoration receipt has an invalid schema")
+    if not receipt["restored"]:
+        current = _selected_receipt(receipt["logical_model"])
+        original = receipt["original_selection"]
+        replacement_digest = receipt.get("replacement_digest")
+        if current is None:
+            raise LetsInferError("verification runtime selection disappeared before recovery")
+        if current["digest"] == original.get("digest"):
+            pass
+        elif current["digest"] == replacement_digest:
+            _restore_verification_selection(current, original)
+        else:
+            raise LetsInferError(
+                "runtime selection changed outside the interrupted verification; "
+                "automatic restoration refused"
+            )
+        if qualification_service_config_path().is_file():
+            _retire_qualification_candidate(remove_container=True)
+        _write_restoration_receipt(
+            state,
+            logical_model=receipt["logical_model"],
+            original=original,
+            replacement=None,
+            restored=True,
+        )
+    benchmark_jobs.mark(
+        str(state["job_id"]),
+        "failed",
+        error="verification worker exited; exact resident selection was restored",
+    )
+
+
+def _nested_benchmark_arguments(
+    runtime: str, output: pathlib.Path, job_id: str
+) -> argparse.Namespace:
+    arguments = parser().parse_args(
+        [
+            "benchmark",
+            runtime,
+            "--output-directory",
+            str(output),
+            "--job-worker",
+            "--job-id",
+            job_id,
+        ]
+    )
+    arguments.nested_verification = True
+    return arguments
+
+
+def _run_verification_benchmark(
+    runtime: str, output: pathlib.Path, job_id: str, label: str
+) -> dict[str, Any]:
+    _verification_progress(job_id, f"benchmark:{label}", f"Benchmarking {label}")
+    benchmark_runtime(_nested_benchmark_arguments(runtime, output, job_id))
+    path = output / "benchmark.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LetsInferError(f"{label} benchmark evidence is unavailable: {error}") from error
+    try:
+        benchmark_record_contract.validate_record(value)
+    except benchmark_record_contract.BenchmarkRecordError as error:
+        raise LetsInferError(f"{label} benchmark evidence is invalid: {error}") from error
+    return value
+
+
+def _verification_failure(error: BaseException, phase: str) -> dict[str, str]:
+    """Map an execution failure to the bounded public verification taxonomy."""
+
+    message = " ".join(str(error).split())[:500] or type(error).__name__
+    lowered = message.lower()
+    if "out of memory" in lowered or "oom" in lowered or "memory exhausted" in lowered:
+        category = "out_of_memory"
+    elif "protection" in lowered or "safety trip" in lowered:
+        category = "protection_trip"
+    elif "restor" in lowered:
+        category = "restoration"
+    elif "output" in lowered and ("invalid" in lowered or "validation" in lowered):
+        category = "output_validation"
+    elif "incomplete" in lowered or "workload" in lowered:
+        category = "incomplete_workload"
+    else:
+        category = "crash"
+    return {"category": category, "phase": phase[:128], "message": message}
+
+
+def _run_verification_worker(arguments: argparse.Namespace) -> int:
+    job_id = arguments.job_id
+    if not isinstance(job_id, str) or not job_id:
+        raise LetsInferError("verification worker has no job identity")
+    state = _mark_benchmark_job(job_id, "running")
+    metadata = state.get("metadata")
+    if not isinstance(metadata, dict):
+        raise LetsInferError("verification job metadata is unavailable")
+    output = pathlib.Path(state["output_directory"])
+    ensure_private_directory(output)
+    previous_term = signal.getsignal(signal.SIGTERM)
+    previous_int = signal.getsignal(signal.SIGINT)
+    baseline_current: dict[str, Any] | None = None
+    candidate_current: dict[str, Any] | None = None
+    candidate_previous: dict[str, Any] | None = None
+    logical_model: str | None = None
+    restoration: dict[str, Any] = {"passed": False}
+    gh: str | None = None
+    pr: benchmark_verification.PullRequest | None = None
+    identity: benchmark_verification.GitHubIdentity | None = None
+    subject: dict[str, Any] | None = None
+    baseline: dict[str, Any] | None = None
+    candidate_record: dict[str, Any] | None = None
+    candidate_execution_started = False
+    failure_phase = "preflight"
+    runtime_author_ids: set[int] = set()
+
+    def cancel(_signal: int, _frame: Any) -> None:
+        raise _BenchmarkCancelled("verification cancellation requested")
+
+    signal.signal(signal.SIGTERM, cancel)
+    signal.signal(signal.SIGINT, cancel)
+    error: BaseException | None = None
+    cancelled = False
+    try:
+        _verification_progress(job_id, "github", "Confirming pull-request identity")
+        failure_phase = "github"
+        gh = benchmark_verification.ensure_gh(interactive=False)
+        pr = benchmark_verification.pull_request(arguments.verification_target, gh=gh)
+        if pr.head_sha != metadata.get("observed_head_sha"):
+            raise LetsInferError("pull-request head changed after verification started")
+        if "benchmark-ready" not in pr.labels:
+            raise LetsInferError("runtime PR is no longer benchmark-ready")
+        identity = benchmark_verification.github_identity(interactive=False)
+        if identity.document() != metadata.get("verifier"):
+            raise LetsInferError("authenticated GitHub identity changed during verification")
+        candidate = benchmark_verification.select_candidate(pr, arguments.candidate)
+        if candidate != metadata.get("candidate"):
+            raise LetsInferError("pull-request candidate changed during verification")
+
+        _verification_progress(job_id, "source", "Downloading the exact pull-request head")
+        failure_phase = "source"
+        checkout = benchmark_verification.fetch_pull_request(
+            pr, output / "candidate-source", gh=gh
+        )
+        candidate_root = checkout / candidate
+        runtime_path = candidate_root / "runtime.json"
+        if not runtime_path.is_file() or runtime_path.is_symlink():
+            raise LetsInferError("pull-request candidate runtime.json is unavailable")
+        runtime = read_json(runtime_path)
+        release_path = candidate_root / "release.json"
+        if not release_path.is_file() or release_path.is_symlink():
+            raise LetsInferError("pull-request candidate release.json is unavailable")
+        release = read_json(release_path)
+        authors = release.get("authors")
+        if not isinstance(authors, list) or not authors:
+            raise LetsInferError("pull-request runtime authors are unavailable")
+        for author in authors:
+            author_id = author.get("github_id") if isinstance(author, dict) else None
+            if (
+                not isinstance(author_id, int)
+                or isinstance(author_id, bool)
+                or author_id <= 0
+            ):
+                raise LetsInferError("pull-request runtime author identity is invalid")
+            runtime_author_ids.add(author_id)
+        logical_model = runtime.get("logical_model")
+        if not isinstance(logical_model, str):
+            raise LetsInferError("pull-request candidate logical model is invalid")
+        if {"qualified", "blocked_by"}.intersection(runtime.get("serving", {})):
+            raise LetsInferError(
+                "a pull-request runtime cannot grant its own qualification"
+            )
+        adapter = candidate_root / "adapter" / "engine-adapter"
+        if adapter.is_symlink() or not adapter.is_file():
+            raise LetsInferError("pull-request Engine adapter is unavailable")
+        # Do not execute PR-controlled adapter code in the verifier's host
+        # credential context. The immutable runtime/Engine container performs
+        # protocol readiness later without GitHub credentials mounted.
+        pack_path = output / f"{candidate}.letsinfer"
+        try:
+            pack = build_archive(candidate_root, pack_path)
+        except RuntimePackError as pack_error:
+            raise LetsInferError(str(pack_error)) from pack_error
+        subject = benchmark_verification.execution_subject(
+            runtime,
+            pack_sha256=sha256_file(pack_path),
+            pack_bytes=pack_path.stat().st_size,
+        )
+        _verification_progress(job_id, "preflight", "Resolving baseline and dependencies")
+        failure_phase = "preflight"
+        source, policy, expected_version, selected_target, selected_target_sha, _qualified = (
+            _runtime_source_for_install(logical_model, None, None)
+        )
+        baseline_current = _selected_receipt(logical_model)
+        if (
+            baseline_current is None
+            or baseline_current.get("source") != source
+            or baseline_current.get("version") != expected_version
+            or baseline_current.get("target") != selected_target
+            or baseline_current.get("target_contract_sha256")
+            != selected_target_sha
+        ):
+            raise LetsInferError(
+                "community verification requires the current catalog recommendation "
+                f"as its exact baseline; run `letsinfer install {logical_model}` "
+                "before retrying"
+            )
+        candidate_manifest, candidate_prepared, candidate_previous = (
+            _prepare_verification_runtime(
+                str(pack_path),
+                policy="community-verification",
+                requested_runtime=candidate,
+            )
+        )
+        if candidate_manifest["model"]["alias"] != logical_model:
+            raise LetsInferError("candidate logical model changed while preparing")
+        if (
+            candidate_previous is None
+            or candidate_previous.get("digest") != baseline_current.get("digest")
+        ):
+            raise LetsInferError("candidate preparation did not bind the exact baseline")
+        _write_restoration_receipt(
+            state,
+            logical_model=logical_model,
+            original=baseline_current,
+            replacement=None,
+            restored=False,
+        )
+        failure_phase = "benchmark:baseline"
+        baseline = _run_verification_benchmark(
+            baseline_current["candidate_id"], output / "baseline", job_id, "baseline"
+        )
+
+        candidate_current = _publish_verification_runtime(
+            candidate_prepared, candidate_previous
+        )
+        candidate_execution_started = True
+        _write_restoration_receipt(
+            state,
+            logical_model=logical_model,
+            original=baseline_current,
+            replacement=candidate_current,
+            restored=False,
+        )
+        failure_phase = "benchmark:candidate"
+        candidate_record = _run_verification_benchmark(
+            candidate, output / "candidate", job_id, "candidate"
+        )
+
+        _verification_progress(job_id, "restore", "Restoring the resident runtime")
+        failure_phase = "restore"
+        _restore_verification_selection(candidate_current, candidate_previous)
+        candidate_current = None
+        resident_digest = baseline_current.get("digest")
+        restoration = {
+            "passed": True,
+            "resident_runtime_digest": resident_digest,
+            "qualification_slot_retired": not qualification_service_config_path().exists(),
+        }
+        if not restoration["qualification_slot_retired"]:
+            _retire_qualification_candidate(remove_container=True)
+            restoration["qualification_slot_retired"] = True
+        _write_restoration_receipt(
+            state,
+            logical_model=logical_model,
+            original=baseline_current,
+            replacement=None,
+            restored=True,
+        )
+
+        device = benchmark_verification.device_identity()
+        record = benchmark_verification.verification_record(
+            pr=pr,
+            verifier=identity,
+            device=device,
+            subject=subject,
+            candidate_benchmark=candidate_record,
+            baseline_benchmark=baseline,
+            restoration=restoration,
+            runtime_author_ids=runtime_author_ids,
+        )
+        evidence_path = output / "verification-benchmark.json"
+        atomic_json(evidence_path, record)
+        evidence_path.chmod(0o600)
+        body = benchmark_verification.build_comment(record, device)
+        comment_path = output / "github-comment.md"
+        _atomic_private_text(comment_path, body)
+        _verification_progress(job_id, "submit", "Posting signed verification evidence")
+        comment_url = benchmark_verification.post_comment(pr, body, gh=gh)
+        receipt = {
+            "schema_version": 1,
+            "verification_id": record["verification_id"],
+            "comment_url": comment_url,
+            "evidence_sha256": sha256_file(evidence_path),
+            "restoration": restoration,
+        }
+        atomic_json(output / "submission.json", receipt)
+        _mark_benchmark_job(job_id, "completed")
+        return 0
+    except _BenchmarkCancelled as caught:
+        error = caught
+        cancelled = True
+    except BaseException as caught:
+        error = caught
+    finally:
+        restore_errors: list[str] = []
+        if candidate_current is not None:
+            try:
+                _restore_verification_selection(candidate_current, candidate_previous)
+            except BaseException as restore_error:
+                restore_errors.append(f"candidate selection: {restore_error}")
+        if qualification_service_config_path().is_file():
+            try:
+                _retire_qualification_candidate(remove_container=True)
+            except BaseException as restore_error:
+                restore_errors.append(f"qualification slot: {restore_error}")
+        if (
+            not restore_errors
+            and logical_model is not None
+            and baseline_current is not None
+            and _restoration_receipt_path(state).is_file()
+        ):
+            try:
+                _write_restoration_receipt(
+                    state,
+                    logical_model=logical_model,
+                    original=baseline_current,
+                    replacement=None,
+                    restored=True,
+                )
+            except BaseException as restore_error:
+                restore_errors.append(f"restoration receipt: {restore_error}")
+        signal.signal(signal.SIGTERM, previous_term)
+        signal.signal(signal.SIGINT, previous_int)
+        if restore_errors:
+            error = LetsInferError(
+                "verification restoration was incomplete: " + "; ".join(restore_errors)
+            )
+            cancelled = False
+            restoration = {
+                "passed": False,
+                "errors": restore_errors,
+                "qualification_slot_retired": not qualification_service_config_path().exists(),
+            }
+        elif logical_model is not None and baseline_current is not None:
+            restoration = {
+                "passed": True,
+                "resident_runtime_digest": baseline_current.get("digest"),
+                "qualification_slot_retired": not qualification_service_config_path().exists(),
+            }
+    if cancelled:
+        _mark_benchmark_job(job_id, "cancelled")
+        return 0
+    assert error is not None
+    if (
+        candidate_execution_started
+        and pr is not None
+        and identity is not None
+        and subject is not None
+        and gh is not None
+    ):
+        try:
+            failure = _verification_failure(error, failure_phase)
+            if failure["category"] == "restoration":
+                restoration = {**restoration, "passed": False}
+            device = benchmark_verification.device_identity()
+            record = benchmark_verification.verification_record(
+                pr=pr,
+                verifier=identity,
+                device=device,
+                subject=subject,
+                candidate_benchmark=candidate_record,
+                baseline_benchmark=baseline,
+                restoration=restoration,
+                failure=failure,
+                runtime_author_ids=runtime_author_ids,
+            )
+            evidence_path = output / "verification-benchmark.json"
+            atomic_json(evidence_path, record)
+            evidence_path.chmod(0o600)
+            body = benchmark_verification.build_comment(record, device)
+            _atomic_private_text(output / "github-comment.md", body)
+            benchmark_verification.post_comment(pr, body, gh=gh)
+        except BaseException as submission_error:
+            error = LetsInferError(
+                f"{error}; blocking evidence could not be posted: {submission_error}"
+            )
+    _mark_benchmark_job(
+        job_id, "failed", error=f"{type(error).__name__}: {error}"
+    )
+    raise error
+
+
+def _benchmark_verify(arguments: argparse.Namespace) -> int:
+    target = arguments.verification_target
     selectors = any(
         getattr(arguments, name)
         for name in ("c1", "c2", "c4", "c8", "c16")
@@ -11480,6 +12201,100 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         getattr(arguments, f"context_{context}")
         for context in ("32k", "64k", "128k", "256k")
     )
+    if selectors or arguments.list or arguments.detach:
+        raise LetsInferError(
+            "runtime verification uses the complete standardized benchmark contract"
+        )
+    if arguments.yes:
+        raise LetsInferError("--yes cannot authorize GitHub authentication")
+    if target is None or target == "status":
+        return _verification_job_snapshot(machine=arguments.json)
+    if target == "stop":
+        if arguments.json:
+            raise LetsInferError("benchmark verify stop does not accept --json")
+        return _verification_stop()
+    if arguments.json:
+        raise LetsInferError("--json is available only for benchmark verify status")
+    if arguments.job_worker:
+        return _run_verification_worker(arguments)
+
+    _gateway_is_idle()
+    identity = _interactive_github_identity()
+    try:
+        gh = benchmark_verification.ensure_gh(interactive=False)
+        pr = benchmark_verification.pull_request(target, gh=gh)
+        candidate = benchmark_verification.select_candidate(pr, arguments.candidate)
+        if "benchmark-ready" not in pr.labels:
+            raise benchmark_verification.VerificationError(
+                "runtime PR is not benchmark-ready; wait for source and supply-chain review"
+            )
+    except benchmark_verification.VerificationError as error:
+        raise LetsInferError(str(error)) from error
+    active = benchmark_jobs.active_state()
+    if active is not None:
+        raise LetsInferError(
+            f"benchmark {active['job_id']} is already active; stop it first"
+        )
+    executable = _contained_regular_file(source_root(), "bin/letsinfer")
+    output = (
+        benchmarks_root()
+        / "verifications"
+        / f"pr-{pr.number}-{candidate}-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    )
+    worker = _verification_self_command(arguments, executable)
+    try:
+        state = benchmark_jobs.start(
+            worker,
+            runtime=candidate,
+            output_directory=str(output),
+            kind="verification",
+            metadata={
+                "pull_request": pr.number,
+                "pull_request_url": pr.url,
+                "observed_head_sha": pr.head_sha,
+                "candidate": candidate,
+                "verifier": identity.document(),
+                "pull_request_author": pr.author.document(),
+            },
+        )
+    except benchmark_jobs.BenchmarkJobError as error:
+        raise LetsInferError(str(error)) from error
+    ui.Terminal(sys.stderr).status(
+        f"Verification started · job {state['job_id'][:8]} · @{identity.login}"
+    )
+    _follow_benchmark_job(state["job_id"])
+    return 0
+
+
+def benchmark_runtime(arguments: argparse.Namespace) -> int:
+    """Run the generic sealed matrix for one installed runtime."""
+    try:
+        prior_job = benchmark_jobs.read_state()
+    except benchmark_jobs.BenchmarkJobError as error:
+        raise LetsInferError(str(error)) from error
+    if (
+        prior_job is not None
+        and prior_job.get("kind") == "verification"
+        and prior_job.get("state") in benchmark_jobs.ACTIVE_STATES
+        and not benchmark_jobs.is_alive(prior_job)
+    ):
+        _recover_interrupted_verification(prior_job)
+    selectors = any(
+        getattr(arguments, name)
+        for name in ("c1", "c2", "c4", "c8", "c16")
+    ) or any(
+        getattr(arguments, f"context_{context}")
+        for context in ("32k", "64k", "128k", "256k")
+    )
+    if arguments.runtime == "verify":
+        return _benchmark_verify(arguments)
+    if (
+        getattr(arguments, "verification_target", None) is not None
+        or getattr(arguments, "candidate", None) is not None
+    ):
+        raise LetsInferError(
+            "the second benchmark argument is available only after `benchmark verify`"
+        )
     if arguments.runtime is None:
         if (
             selectors
@@ -11683,15 +12498,20 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
     elif arguments.job_worker:
         if not isinstance(arguments.job_id, str) or not arguments.job_id:
             raise LetsInferError("benchmark worker has no job identity")
-        _mark_benchmark_job(arguments.job_id, "running")
+        nested_verification = bool(
+            getattr(arguments, "nested_verification", False)
+        )
+        if not nested_verification:
+            _mark_benchmark_job(arguments.job_id, "running")
         previous_term = signal.getsignal(signal.SIGTERM)
         previous_int = signal.getsignal(signal.SIGINT)
 
         def cancel_benchmark(_signal: int, _frame: Any) -> None:
             raise _BenchmarkCancelled("benchmark cancellation requested")
 
-        signal.signal(signal.SIGTERM, cancel_benchmark)
-        signal.signal(signal.SIGINT, cancel_benchmark)
+        if not nested_verification:
+            signal.signal(signal.SIGTERM, cancel_benchmark)
+            signal.signal(signal.SIGINT, cancel_benchmark)
         try:
             _run_benchmark_with_service_isolation(
                 command,
@@ -11704,20 +12524,24 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                 ],
             )
         except _BenchmarkCancelled:
-            _mark_benchmark_job(arguments.job_id, "cancelled")
+            if not nested_verification:
+                _mark_benchmark_job(arguments.job_id, "cancelled")
             return 0
         except BaseException as error:
-            _mark_benchmark_job(
-                arguments.job_id,
-                "failed",
-                error=f"{type(error).__name__}: {error}",
-            )
+            if not nested_verification:
+                _mark_benchmark_job(
+                    arguments.job_id,
+                    "failed",
+                    error=f"{type(error).__name__}: {error}",
+                )
             raise
         else:
-            _mark_benchmark_job(arguments.job_id, "completed")
+            if not nested_verification:
+                _mark_benchmark_job(arguments.job_id, "completed")
         finally:
-            signal.signal(signal.SIGTERM, previous_term)
-            signal.signal(signal.SIGINT, previous_int)
+            if not nested_verification:
+                signal.signal(signal.SIGTERM, previous_term)
+                signal.signal(signal.SIGINT, previous_int)
     else:
         assert output is not None
         worker_command = _benchmark_self_command(arguments, letsinfer_bin, output)
@@ -13014,6 +13838,7 @@ class LocalEngineGroupExecutor:
             manifest_path, manifest, control_root, receipt = prepare_runtime_install(
                 str(job["source"]),
                 policy="site-group",
+                qualified=True,
                 requested_runtime=None,
             )
             if (
@@ -14930,6 +15755,7 @@ def parser() -> argparse.ArgumentParser:
     )
     inspecting.add_argument("runtime")
     inspecting.add_argument("--target")
+    inspecting.add_argument("--catalog")
     inspecting.add_argument("--port", type=int, default=8000)
     inspecting.add_argument("--command", action="store_true")
     inspecting.add_argument("--json", action="store_true")
@@ -14980,8 +15806,18 @@ def parser() -> argparse.ArgumentParser:
         nargs="?",
         help=(
             "installed runtime, `stop` to cancel the active benchmark, or "
-            "`clean` to remove local benchmark data"
+            "`clean` to remove local benchmark data; use `verify PR_URL` for "
+            "community qualification"
         ),
+    )
+    benchmarking.add_argument(
+        "verification_target",
+        nargs="?",
+        help="pull-request URL, `status`, or `stop` after `benchmark verify`",
+    )
+    benchmarking.add_argument(
+        "--candidate",
+        help="select one exact changed candidate when a verification PR is ambiguous",
     )
     benchmarking.add_argument("--base-url")
     benchmarking.add_argument("--output-directory", type=pathlib.Path)
