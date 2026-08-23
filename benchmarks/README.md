@@ -5,6 +5,24 @@ generation, isolation, safety checks, telemetry capture, and evidence. Your
 runtime declares only its benchmark contract in `runtime.json` and retains the
 validated public `benchmark.json`.
 
+## Features
+
+- **One command** — run a complete standard matrix or select exact context and
+  concurrency cells from the CLI.
+- **Apples-to-apples prompts** — every model receives the same canonical code
+  and prose tasks, rendered and counted by its own Engine adapter.
+- **Real isolation** — every cell gets a fresh process and empty prefix state;
+  the runner rejects identity, configuration, prompt, cache, or sampling drift.
+- **Durable jobs** — Ctrl-C detaches, `letsinfer benchmark` reattaches to live
+  progress, and an explicit stop safely restores prior inference.
+- **Full-system evidence** — JSON records throughput, TTFT, prefix state,
+  clocks, utilization, temperatures, memory, NVMe, power, network, and a
+  telemetry timeline.
+- **Cryptographic identity** — results bind the installation, hardware,
+  runtime, model, Engine OCI, prompt set, and benchmark contract.
+- **Fail-closed validation** — unsafe memory headroom, unsupported workloads,
+  incomplete output, and unavailable required metrics invalidate the run.
+
 ## Run a benchmark
 
 Use the CLI:

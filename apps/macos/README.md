@@ -4,6 +4,25 @@ The native macOS menu-bar app is a provisioned controller for one or more
 logical Let's Infer sites. A site may contain one machine, replicas, or a
 distributed engine group; the app does not model a site as one DGX Spark.
 
+## Features
+
+- **AirDrop-like discovery** — nearby sites appear automatically through
+  DNS-SD, with manual configuration available when discovery is unavailable.
+- **Secure pairing without SSH** — verify a short comparison code; the app
+  creates a non-exportable controller identity and stores it in Keychain.
+- **Topology-first control** — see coordinators, members, placements, models,
+  targets, links, and site health as one logical system.
+- **Live inference visibility** — inspect active and queued requests,
+  throughput, context, cache state, utilization, temperatures, power, network,
+  and recent history from the same normalized state plane as the CLI.
+- **Role-aware actions** — start, stop, restart, recover, install, plan,
+  expose, and manage keys only when the paired controller role permits it.
+- **No telemetry database on your Mac** — the app requests only the visible
+  bounded window, keeps it in memory, and never writes telemetry history to
+  disk.
+- **One-time secrets stay one-time** — newly created API keys exist only in
+  ephemeral UI state until copied or dismissed.
+
 ## Connection model
 
 - Browse the credential-free `_letsinfer._tcp` DNS-SD service and group records
@@ -40,8 +59,8 @@ distributed engine group; the app does not model a site as one DGX Spark.
   restart, and explicitly recover placements. Administrators can additionally
   install runtimes, plan placement when multiple members are active, manage
   exposure and membership, and create, edit, rotate, or revoke inference keys.
-- Keep one-time key secrets only in ephemeral view state until the user copies
-  or dismisses them. Never persist or log them.
+- Keep one-time key secrets only in ephemeral view state until you copy or
+  dismiss them. Never persist or log them.
 
 The menu presents the logical site first, followed by active model placements,
 aggregate request state, member topology, and coordinator machine detail.
