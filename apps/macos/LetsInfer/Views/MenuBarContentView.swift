@@ -17,6 +17,7 @@ struct MenuBarContentView: View {
     @State private var errorMessage: String?
     @State private var expandedMetrics: Set<ExpandedMetric> = []
     @State private var expandedServiceIDs: Set<String> = []
+    @State private var expandedGroupIDs: Set<String> = []
     @State private var isHistoryExpanded = false
 
     var body: some View {
@@ -515,28 +516,77 @@ struct MenuBarContentView: View {
         case "failed": .red
         default: .secondary
         }
-        return HStack(spacing: 7) {
-            Circle().fill(stateColor).frame(width: 6, height: 6)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(names.joined(separator: " + "))
-                    .font(.caption.weight(.medium))
-                    .lineLimit(1)
-                Text([
-                    group.strategy.capitalized,
-                    group.release?.version,
-                    group.deviceAllocations.isEmpty
-                        ? nil
-                        : "\(group.deviceAllocations.count) GPU",
-                    group.telemetry.map { "\($0.activeRequests)/\($0.maxActiveRequests) active" }
-                ].compactMap { $0 }.joined(separator: " · "))
+        return DisclosureGroup(
+            isExpanded: Binding(
+                get: { expandedGroupIDs.contains(group.groupID) },
+                set: { expanded in
+                    if expanded {
+                        expandedGroupIDs.insert(group.groupID)
+                    } else {
+                        expandedGroupIDs.remove(group.groupID)
+                    }
+                }
+            )
+        ) {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(group.resourceAssignments, id: \.taskID) { assignment in
+                    let task = group.taskStates.first { $0.taskID == assignment.taskID }
+                    HStack(spacing: 5) {
+                        Text(assignment.taskID)
+                            .font(.caption2.weight(.semibold).monospaced())
+                        Text(
+                            machines.first { $0.memberID == assignment.nodeID }?.displayName
+                                ?? String(assignment.nodeID.prefix(8))
+                        )
+                        .font(.caption2)
+                        Text("\(assignment.deviceUUIDs.count) GPU")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text((task?.state ?? "unknown").uppercased())
+                            .font(.caption2.weight(.semibold).monospaced())
+                            .foregroundStyle(task?.state == "running" ? .green : .secondary)
+                    }
+                }
+                ForEach(Array(group.connections.enumerated()), id: \.offset) { _, link in
+                    Text(
+                        [
+                            link.kind.uppercased(),
+                            link.speedMbps > 0 ? "\(link.speedMbps / 1000) Gb/s" : nil,
+                            link.rdma ? "RDMA" : nil,
+                            "MTU \(link.mtu)",
+                        ].compactMap { $0 }.joined(separator: " · ")
+                    )
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                }
             }
-            Spacer()
-            Text(group.state.uppercased())
-                .font(.caption2.weight(.bold).monospaced())
-                .foregroundStyle(stateColor)
+            .padding(.leading, 13)
+            .padding(.top, 3)
+        } label: {
+            HStack(spacing: 7) {
+                Circle().fill(stateColor).frame(width: 6, height: 6)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(names.joined(separator: " + "))
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                    Text([
+                        group.strategy.capitalized,
+                        group.release?.version,
+                        group.deviceAllocations.isEmpty
+                            ? nil
+                            : "\(group.deviceAllocations.count) GPU",
+                        group.telemetry.map { "\($0.activeRequests)/\($0.maxActiveRequests) active" }
+                    ].compactMap { $0 }.joined(separator: " · "))
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Text(group.state.uppercased())
+                    .font(.caption2.weight(.bold).monospaced())
+                    .foregroundStyle(stateColor)
+            }
         }
         .padding(.vertical, 2)
     }

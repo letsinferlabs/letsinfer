@@ -40,7 +40,7 @@ ID_RE = re.compile(r"^[0-9a-f]{32}$")
 KEY_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 OCI_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 CHECKPOINT_INTERVAL = 100
 MAX_REASON_BYTES = 512
 MAX_TAG_BYTES = 128
@@ -634,9 +634,9 @@ class SiteStore:
                 topology_sha256 TEXT NOT NULL,
                 engine_credential_sha256 TEXT NOT NULL,
                 strategy TEXT NOT NULL CHECK(strategy IN ('single','parallel')),
-                engine_strategy TEXT NOT NULL,
+                runtime_execution_contract_sha256 TEXT NOT NULL,
                 failure_policy TEXT NOT NULL CHECK(failure_policy IN ('independent','whole-group')),
-                minimum_healthy_members INTEGER NOT NULL,
+                required_tasks INTEGER NOT NULL,
                 plan_json TEXT NOT NULL,
                 plan_sha256 TEXT NOT NULL,
                 desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped','removed')),
@@ -750,6 +750,74 @@ class SiteStore:
               BEFORE DELETE ON audit_checkpoints BEGIN SELECT RAISE(ABORT,'audit checkpoints are append-only'); END;
             """
         )
+        self._migrate_engine_group_schema()
+
+    def _migrate_engine_group_schema(self) -> None:
+        """Replace the pre-v3 engine-semantic group columns atomically."""
+        columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(engine_groups)")
+        }
+        if "engine_strategy" not in columns:
+            return
+        legacy_groups = int(
+            self.connection.execute("SELECT COUNT(*) FROM engine_groups").fetchone()[0]
+        )
+        if legacy_groups:
+            raise SiteError(
+                "legacy engine-group state cannot be relabeled as a generic execution "
+                "contract; remove the pre-release groups before upgrading"
+            )
+        try:
+            self.connection.executescript(
+                """
+                BEGIN IMMEDIATE;
+                CREATE TABLE engine_groups_v3 (
+                    group_id TEXT PRIMARY KEY,
+                    placement_id TEXT NOT NULL REFERENCES placements(placement_id),
+                    source TEXT NOT NULL,
+                    runtime_digest TEXT NOT NULL,
+                    manifest_sha256 TEXT NOT NULL,
+                    topology_sha256 TEXT NOT NULL,
+                    engine_credential_sha256 TEXT NOT NULL,
+                    strategy TEXT NOT NULL CHECK(strategy IN ('single','parallel')),
+                    runtime_execution_contract_sha256 TEXT NOT NULL,
+                    failure_policy TEXT NOT NULL CHECK(failure_policy IN ('independent','whole-group')),
+                    required_tasks INTEGER NOT NULL,
+                    plan_json TEXT NOT NULL,
+                    plan_sha256 TEXT NOT NULL,
+                    desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped','removed')),
+                    state TEXT NOT NULL CHECK(state IN
+                        ('staging','staged','starting','running','degraded','stopping','stopped',
+                         'recovering','removing','removed','failed')),
+                    members_json TEXT NOT NULL,
+                    last_error TEXT,
+                    created_at_unix INTEGER NOT NULL,
+                    updated_at_unix INTEGER NOT NULL
+                ) STRICT;
+                INSERT INTO engine_groups_v3
+                    (group_id,placement_id,source,runtime_digest,manifest_sha256,
+                     topology_sha256,engine_credential_sha256,strategy,
+                     runtime_execution_contract_sha256,failure_policy,required_tasks,
+                     plan_json,plan_sha256,desired_state,state,members_json,last_error,
+                     created_at_unix,updated_at_unix)
+                SELECT group_id,placement_id,source,runtime_digest,manifest_sha256,
+                       topology_sha256,engine_credential_sha256,strategy,
+                       engine_strategy,failure_policy,minimum_healthy_members,
+                       plan_json,plan_sha256,desired_state,state,members_json,last_error,
+                       created_at_unix,updated_at_unix
+                  FROM engine_groups;
+                DROP TABLE engine_groups;
+                ALTER TABLE engine_groups_v3 RENAME TO engine_groups;
+                UPDATE site_meta SET value='3'
+                 WHERE key='schema_version' AND value='2';
+                COMMIT;
+                """
+            )
+        except BaseException:
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
 
     def initialize_coordinator(self, identity: SiteIdentity) -> None:
         with self.transaction():
@@ -2322,7 +2390,7 @@ class SiteStore:
             or placement["strategy"] != document["strategy"]
             or placement["topology_sha256"] != document["topology_sha256"]
             or set(json.loads(placement["members_json"]))
-            != {item["member_id"] for item in document["members"]}
+            != {item["node_id"] for item in document["resources"]}
         ):
             raise SiteError("engine-group plan does not match its placement")
         if not isinstance(source, str) or not OCI_RE.fullmatch(source):
@@ -2344,18 +2412,18 @@ class SiteStore:
             "group.reconcile", "group.recover",
         }:
             raise SiteError("engine-group audit action is invalid")
-        member_fields = {"member_id", "role", "rank", "state", "operation_id", "error"}
+        member_fields = {"member_id", "task_id", "state", "operation_id", "error"}
         safe_members = [dict(item) for item in members]
         if (
-            len(safe_members) != len(document["members"])
+            len(safe_members) != len(document["resources"])
             or any(set(item) != member_fields for item in safe_members)
             or [item["member_id"] for item in safe_members]
-            != [item["member_id"] for item in document["members"]]
+            != [item["node_id"] for item in document["resources"]]
         ):
             raise SiteError("engine-group member state does not match its plan")
-        for item, planned in zip(safe_members, document["members"]):
-            if item["role"] != planned["role"] or item["rank"] != planned["rank"]:
-                raise SiteError("engine-group member role does not match its plan")
+        for item, planned in zip(safe_members, document["resources"]):
+            if item["task_id"] != planned["task_id"]:
+                raise SiteError("engine-group task does not match its resource plan")
             if item["state"] not in {
                 "pending", "staging", "staged", "starting", "running", "stopping",
                 "stopped", "removing", "removed", "failed", "unreachable",
@@ -2391,9 +2459,9 @@ class SiteStore:
             "topology_sha256": document["topology_sha256"],
             "engine_credential_sha256": engine_credential_sha256,
             "strategy": document["strategy"],
-            "engine_strategy": document["engine_strategy"],
+            "runtime_execution_contract_sha256": document["runtime_execution_contract_sha256"],
             "failure_policy": document["failure_policy"],
-            "minimum_healthy_members": document["minimum_healthy_members"],
+            "required_tasks": len(document["resources"]),
             "plan_json": plan_json,
             "plan_sha256": plan_sha256,
             "desired_state": desired_state,
@@ -2408,12 +2476,14 @@ class SiteStore:
             connection.execute(
                 """INSERT INTO engine_groups
                    (group_id,placement_id,source,runtime_digest,manifest_sha256,
-                    topology_sha256,engine_credential_sha256,strategy,engine_strategy,failure_policy,
-                    minimum_healthy_members,plan_json,plan_sha256,desired_state,state,
+                    topology_sha256,engine_credential_sha256,strategy,
+                    runtime_execution_contract_sha256,failure_policy,required_tasks,
+                    plan_json,plan_sha256,desired_state,state,
                     members_json,last_error,created_at_unix,updated_at_unix)
                    VALUES(:group_id,:placement_id,:source,:runtime_digest,:manifest_sha256,
-                    :topology_sha256,:engine_credential_sha256,:strategy,:engine_strategy,:failure_policy,
-                    :minimum_healthy_members,:plan_json,:plan_sha256,:desired_state,:state,
+                    :topology_sha256,:engine_credential_sha256,:strategy,
+                    :runtime_execution_contract_sha256,:failure_policy,:required_tasks,
+                    :plan_json,:plan_sha256,:desired_state,:state,
                     :members_json,:last_error,:created_at_unix,:updated_at_unix)
                    ON CONFLICT(group_id) DO UPDATE SET
                     placement_id=excluded.placement_id,source=excluded.source,
@@ -2421,9 +2491,10 @@ class SiteStore:
                     manifest_sha256=excluded.manifest_sha256,
                     topology_sha256=excluded.topology_sha256,
                     engine_credential_sha256=excluded.engine_credential_sha256,
-                    strategy=excluded.strategy,engine_strategy=excluded.engine_strategy,
+                    strategy=excluded.strategy,
+                    runtime_execution_contract_sha256=excluded.runtime_execution_contract_sha256,
                     failure_policy=excluded.failure_policy,
-                    minimum_healthy_members=excluded.minimum_healthy_members,
+                    required_tasks=excluded.required_tasks,
                     plan_json=excluded.plan_json,plan_sha256=excluded.plan_sha256,
                     desired_state=excluded.desired_state,state=excluded.state,
                     members_json=excluded.members_json,last_error=excluded.last_error,

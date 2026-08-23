@@ -66,6 +66,21 @@ You need a new Engine OCI when the upstream engine or its adapter changes. You
 need a core change only when the stable Let's Infer Engine protocol itself
 changes.
 
+## Parallel candidates
+
+Parallelism stays inside an exact runtime. The target declares its required
+node count, GPUs per node, memory, and verified interconnect. Its optional
+orchestration contract declares generic node tasks, startup phases, readiness,
+and one endpoint owner. Core allocates authenticated resources and manages the
+group atomically; the Engine OCI privately turns those tasks into ranks,
+pipeline stages, collectives, and engine commands.
+
+This keeps power with runtime authors: a new TP degree, PP schedule, GPU count,
+transport, kernel, or engine configuration is a new runtime candidate, not a
+core feature. Core changes only when a genuinely new generic resource or
+secure orchestration primitive is required. The gateway routes complete group
+endpoints and can replicate a complete parallel group without rewriting it.
+
 ## Qualification and recommendations
 
 A candidate becomes qualified only after the exact model revision, Engine OCI,

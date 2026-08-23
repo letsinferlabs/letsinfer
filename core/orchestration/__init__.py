@@ -5,12 +5,13 @@
 from .contracts import (
     GroupPlan,
     OrchestrationError,
-    RoleAssignment,
+    TaskAssignment,
     build_group_plan,
     build_single_group_plan,
     validate_orchestration_contract,
     validate_group_document,
     validate_target_binding,
+    orchestration_contract_sha256,
 )
 from .member import MemberAgent, MemberJobError, MemberJobStore, PROTOCOL as MEMBER_JOB_PROTOCOL
 from .credentials import (
@@ -23,7 +24,7 @@ from .credentials import (
 __all__ = [
     "GroupPlan",
     "OrchestrationError",
-    "RoleAssignment",
+    "TaskAssignment",
     "build_group_plan",
     "build_single_group_plan",
     "MemberAgent",
@@ -37,4 +38,5 @@ __all__ = [
     "validate_orchestration_contract",
     "validate_group_document",
     "validate_target_binding",
+    "orchestration_contract_sha256",
 ]

@@ -40,6 +40,6 @@ runtime, model artifacts, engine, lifecycle, safety, and telemetry.
 
 - [Testing and pull-request gates](contributing/testing.md)
 
-The public contract is runtime schema 4, runtime artifact schema 4, catalog
+The public contract is runtime schema 5, runtime artifact schema 5, catalog
 schema 6, revocation-ledger schema 1, and Engine protocol 2. Unsupported
 schemas fail closed.

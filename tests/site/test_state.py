@@ -48,6 +48,35 @@ class SiteStateTests(unittest.TestCase):
             self.assertEqual(store.members()[0]["member_id"], identity.member_id)
             self.assertTrue(store.verify_audit()["valid"])
 
+    def test_empty_engine_group_storage_migrates_to_generic_execution_columns(self) -> None:
+        identity = state.setup_site("Home", "127.0.0.1")
+        with sqlite3.connect(state.database_path()) as connection:
+            connection.execute(
+                "ALTER TABLE engine_groups RENAME COLUMN "
+                "runtime_execution_contract_sha256 TO engine_strategy"
+            )
+            connection.execute(
+                "ALTER TABLE engine_groups RENAME COLUMN "
+                "required_tasks TO minimum_healthy_members"
+            )
+            connection.execute(
+                "UPDATE site_meta SET value='2' WHERE key='schema_version'"
+            )
+        with state.SiteStore(identity=identity) as store:
+            columns = {
+                row["name"]
+                for row in store.connection.execute("PRAGMA table_info(engine_groups)")
+            }
+            self.assertIn("runtime_execution_contract_sha256", columns)
+            self.assertIn("required_tasks", columns)
+            self.assertNotIn("engine_strategy", columns)
+            self.assertEqual(
+                store.connection.execute(
+                    "SELECT value FROM site_meta WHERE key='schema_version'"
+                ).fetchone()[0],
+                "3",
+            )
+
     def test_fresh_adoption_window_expires_and_closes_after_external_pairing(self) -> None:
         identity = state.setup_site("Home", "127.0.0.1")
         certificate = (
@@ -399,7 +428,6 @@ class SiteStateTests(unittest.TestCase):
                 member_id=identity.member_id,
                 member_address="a.local:9770",
                 device_uuids=["GPU-fixture"],
-                engine_strategy="single",
                 topology_sha256="1" * 64,
                 manifest_sha256="2" * 64,
                 runtime_digest="3" * 64,
@@ -410,8 +438,7 @@ class SiteStateTests(unittest.TestCase):
             members = [
                 {
                     "member_id": item.member_id,
-                    "role": item.role,
-                    "rank": item.rank,
+                    "task_id": item.task_id,
                     "state": "staging",
                     "operation_id": None,
                     "error": None,

@@ -27,15 +27,15 @@ import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
-from core.orchestration import OrchestrationError, validate_orchestration_contract
+from core.orchestration import OrchestrationError, validate_target_binding
 from core.paths import config_root, data_root, runtime_root
 
 
 RUNTIME_CONFIG = "runtime.json"
 RUNTIME_DESCRIPTOR = "letsinfer-runtime.json"
-RUNTIME_SCHEMA_VERSION = 4
+RUNTIME_SCHEMA_VERSION = 5
 ENGINE_PROTOCOL_VERSION = 2
-ARTIFACT_SCHEMA_VERSION = 4
+ARTIFACT_SCHEMA_VERSION = 5
 CATALOG_SCHEMA_VERSION = 6
 DEFAULT_CATALOG_URL = (
     "https://github.com/letsinferlabs/runtimes/releases/latest/download/catalog.json"
@@ -43,7 +43,7 @@ DEFAULT_CATALOG_URL = (
 BUILTIN_CATALOG_PUBLIC_KEY = (
     pathlib.Path(__file__).resolve().parent / "trust" / "catalog-public-key.pem"
 )
-PACK_MEDIA_TYPE = "application/vnd.letsinfer.runtime.v4+tar"
+PACK_MEDIA_TYPE = "application/vnd.letsinfer.runtime.v5+tar"
 REGISTRY_DIGEST_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
@@ -111,6 +111,28 @@ def canonical_bytes(value: Any) -> bytes:
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         + "\n"
     ).encode("utf-8")
+
+
+def _semantic_version_key(value: str) -> tuple[Any, ...]:
+    match = re.fullmatch(
+        r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+        r"(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?",
+        value,
+    )
+    if match is None:
+        raise RuntimePackError(f"runtime version is not semantic: {value}")
+    prerelease = match[4]
+    if prerelease is None:
+        pre_key: tuple[Any, ...] = (1,)
+    else:
+        pre_key = (
+            0,
+            *(
+                (0, int(item)) if item.isdecimal() else (1, item)
+                for item in prerelease.split(".")
+            ),
+        )
+    return int(match[1]), int(match[2]), int(match[3]), pre_key
 
 
 def sha256_file(path: pathlib.Path) -> str:
@@ -239,32 +261,25 @@ def validate_target_contract(value: Any, where: str = "target") -> dict[str, Any
     placement = value.get("placement")
     if not isinstance(placement, dict) or set(placement) != {
         "strategy",
-        "member_count",
-        "engine_strategy",
+        "node_count",
         "interconnect",
     }:
         raise RuntimePackError(
-            f"{where}.placement must contain exactly strategy, member_count, "
-            "engine_strategy, and interconnect"
+            f"{where}.placement must contain exactly strategy, node_count, and interconnect"
         )
     strategy = placement.get("strategy")
     if strategy not in {"single", "parallel"}:
         raise RuntimePackError(f"{where}.placement.strategy is invalid")
-    member_count = placement.get("member_count")
+    node_count = placement.get("node_count")
     if (
-        not isinstance(member_count, int)
-        or isinstance(member_count, bool)
-        or member_count <= 0
-        or member_count > 64
+        not isinstance(node_count, int)
+        or isinstance(node_count, bool)
+        or node_count <= 0
+        or node_count > 64
     ):
-        raise RuntimePackError(f"{where}.placement.member_count must be between 1 and 64")
-    if strategy == "single" and member_count != 1:
-        raise RuntimePackError(f"{where}.placement single strategy requires one member")
-    if strategy == "parallel" and member_count < 1:
-        raise RuntimePackError(f"{where}.placement parallel strategy requires at least one member")
-    engine_strategy = placement.get("engine_strategy")
-    if not isinstance(engine_strategy, str) or not SAFE_NAME_RE.fullmatch(engine_strategy):
-        raise RuntimePackError(f"{where}.placement.engine_strategy is invalid")
+        raise RuntimePackError(f"{where}.placement.node_count must be between 1 and 64")
+    if strategy == "single" and node_count != 1:
+        raise RuntimePackError(f"{where}.placement single strategy requires one node")
     interconnect = placement.get("interconnect")
     if not isinstance(interconnect, dict) or set(interconnect) != {
         "kind",
@@ -758,16 +773,15 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
         raise RuntimePackError("runtime.benchmark.contract must be an object")
     if contract.get("schema_version") == BENCHMARK_SCHEMA_VERSION:
         validate_benchmark_contract(contract)
-    if "orchestration" in value:
-        try:
-            validate_orchestration_contract(value["orchestration"])
-        except OrchestrationError as error:
-            raise RuntimePackError(str(error)) from error
+    try:
+        validate_target_binding(value.get("orchestration"), target["placement"])
+    except OrchestrationError as error:
+        raise RuntimePackError(str(error)) from error
     return value
 
 
 def validate_runtime_config(value: dict[str, Any]) -> dict[str, Any]:
-    """Validate one authoritative schema-v4 execution configuration in memory."""
+    """Validate one authoritative schema-v5 execution configuration in memory."""
 
     return _runtime_metadata(value)
 
@@ -2233,6 +2247,60 @@ def load_catalog(
                         ):
                             raise RuntimePackError(
                                 f"catalog community qualification for {where} is invalid"
+                            )
+                    elif method == "runtime-contract-migration-v1":
+                        verification_fields = {
+                            "method",
+                            "from_version",
+                            "from_source",
+                            "benchmark_record_path",
+                            "benchmark_record_sha256",
+                            "execution_contract_sha256",
+                            "verifiers",
+                        }
+                        provenance_fields = {
+                            "method",
+                            "repository",
+                            "pull_request",
+                            "pull_request_url",
+                            "proposal_head_sha",
+                            "qualified_commit_sha",
+                            "from_version",
+                            "from_source",
+                            "benchmark_record_sha256",
+                            "execution_contract_sha256",
+                        }
+                        from_version = verification.get("from_version")
+                        if (
+                            set(verification) != verification_fields
+                            or set(provenance) != provenance_fields
+                            or provenance.get("method") != method
+                            or not isinstance(from_version, str)
+                            or not VERSION_RE.fullmatch(from_version)
+                            or _semantic_version_key(from_version)
+                            >= _semantic_version_key(version)
+                            or verification.get("from_source")
+                            != provenance.get("from_source")
+                            or not REGISTRY_DIGEST_RE.fullmatch(
+                                str(verification.get("from_source"))
+                            )
+                            or verification.get("from_source") == release["source"]
+                            or verification.get("benchmark_record_path")
+                            != f"{candidate}/benchmark.previous.json"
+                            or verification.get("benchmark_record_sha256")
+                            != provenance.get("benchmark_record_sha256")
+                            or not SHA256_RE.fullmatch(
+                                str(verification.get("benchmark_record_sha256"))
+                            )
+                            or verification.get("execution_contract_sha256")
+                            != provenance.get("execution_contract_sha256")
+                            or not SHA256_RE.fullmatch(
+                                str(verification.get("execution_contract_sha256"))
+                            )
+                            or not isinstance(verification.get("verifiers"), list)
+                        ):
+                            raise RuntimePackError(
+                                f"catalog runtime contract migration for {where} is invalid"
                             )
                     else:
                         raise RuntimePackError(

@@ -17,16 +17,14 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         root = pathlib.Path(self.temporary.name)
         self.member_id = "a" * 32
         self.group_id = "b" * 32
-        self.role = {
-            "name": "engine-member",
-            "rank": 1,
-            "role_rank": 0,
+        self.task = {
+            "task_id": "task-1",
             "port_base": 18000,
             "port_count": 2,
             "launcher": "runtime-command",
             "command": ["/opt/runtime/member"],
             "environment": {"RUNTIME_MODE": "member"},
-            "inference_endpoint": False,
+            "endpoint_owner": False,
             "readiness": {
                 "kind": "exec",
                 "command": ["/opt/runtime/ready"],
@@ -36,37 +34,43 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             },
         }
         self.group = {
-            "schema_version": 1,
+            "schema_version": 3,
             "group_id": self.group_id,
-            "strategy": "distributed",
-            "engine_strategy": "tensor-parallel",
+            "service": "fixture-model",
+            "release": {},
+            "strategy": "parallel",
             "failure_policy": "whole-group",
-            "minimum_healthy_members": 2,
             "topology_sha256": "1" * 64,
             "manifest_sha256": "2" * 64,
             "runtime_digest": "3" * 64,
-            "engine_coordinator_id": "c" * 32,
-            "startup_order": ["engine-member", "engine-coordinator"],
-            "members": [
+            "runtime_execution_contract_sha256": "7" * 64,
+            "endpoint_owner": "task-0",
+            "startup_order": [["task-1"], ["task-0"]],
+            "connections": [
                 {
-                    "member_id": "c" * 32,
+                    "nodes": sorted(("c" * 32, self.member_id)),
+                    "kind": "connectx",
+                    "speed_mbps": 200000,
+                    "mtu": 9000,
+                    "rdma": True,
+                }
+            ],
+            "resources": [
+                {
+                    "node_id": "c" * 32,
                     "address": "coordinator.local:9770",
-                    "rank": 0,
-                    "role_rank": 0,
-                    "role": "engine-coordinator",
+                    "task_id": "task-0",
                     "port_base": 18000,
                     "port_count": 2,
-                    "inference_endpoint": True,
+                    "device_uuids": ["GPU-fixture-0"],
                 },
                 {
-                    "member_id": self.member_id,
+                    "node_id": self.member_id,
                     "address": "member.local:9770",
-                    "rank": 1,
-                    "role_rank": 0,
-                    "role": "engine-member",
+                    "task_id": "task-1",
                     "port_base": 18000,
                     "port_count": 2,
-                    "inference_endpoint": False,
+                    "device_uuids": ["GPU-fixture-1"],
                 },
             ],
         }
@@ -78,7 +82,7 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             "runtime_digest": "3" * 64,
             "manifest_sha256": "2" * 64,
             "topology_sha256": "1" * 64,
-            "role": self.role,
+            "task": self.task,
             "object_root": str(root / "object"),
             "model_cache": str(root / "model"),
             "plugin_root": str(root / "plugins"),
@@ -109,7 +113,7 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             "manifest_sha256": "2" * 64,
             "topology_sha256": "1" * 64,
             "engine_credential_sha256": "6" * 64,
-            "role": self.role,
+            "task": self.task,
             "group": self.group,
         }
 
@@ -143,9 +147,9 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         self.assertEqual(result["state"], "running")
         self.assertIsNone(result["endpoint"])
         run.assert_called_once_with(["docker", "run"])
-        ready.assert_called_once_with(self.config["container_name"], self.role["readiness"])
+        ready.assert_called_once_with(self.config["container_name"], self.task["readiness"])
         self.assertEqual([call.args[2] for call in protect.call_args_list], ["pending", "starting", "armed"])
-        self.assertEqual(command.call_args.kwargs["group_context"]["role"], "engine-member")
+        self.assertEqual(command.call_args.kwargs["group_context"]["task_id"], "task-1")
 
     def test_stop_disarms_before_removing_the_exact_managed_container(self) -> None:
         executor = cli.LocalEngineGroupExecutor(self.member_id)
@@ -205,7 +209,7 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             "manifest_sha256": self.config["manifest_sha256"],
             "topology_sha256": self.config["topology_sha256"],
             "engine_credential_sha256": self.config["_credential_sha256"],
-            "role": self.role,
+            "task": self.task,
             "state": "running",
         }
         with (

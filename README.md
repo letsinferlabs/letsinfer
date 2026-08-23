@@ -29,6 +29,9 @@ No engine hunting. No model-file plumbing. No hardware-specific install path.
   Let's Infer handles concurrency, backpressure, and memory-aware queueing.
 - **Replication across your hardware** — run one model on compatible main and
   child nodes, with target-specific runtimes behind one load-balanced API.
+- **Runtime-owned parallelism** — qualify exact multi-GPU or multi-node
+  runtimes while core handles generic allocation, lifecycle, recovery, and one
+  endpoint per complete group.
 - **Live observability** — watch requests, throughput, context, cache,
   utilization, temperatures, power, network, and lifecycle in one command.
 - **Built-in protection** — Watchdog tracks the exact engine process, unified

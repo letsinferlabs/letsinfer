@@ -93,6 +93,7 @@ from .orchestration import (
     MemberJobStore,
     OrchestrationError,
     credential_sha256 as group_credential_sha256,
+    orchestration_contract_sha256,
     validate_group_document,
     validate_target_binding,
 )
@@ -233,8 +234,8 @@ MEMORY_MODEL_LABEL = "io.letsinfer.memory-model"
 GPU_COUNT_LABEL = "io.letsinfer.gpu-count"
 GPU_PARTITIONING_LABEL = "io.letsinfer.gpu-partitioning"
 GROUP_ID_LABEL = "io.letsinfer.group"
-GROUP_MEMBER_LABEL = "io.letsinfer.group-member"
-GROUP_ROLE_LABEL = "io.letsinfer.group-role"
+GROUP_NODE_LABEL = "io.letsinfer.group-node"
+GROUP_TASK_LABEL = "io.letsinfer.group-task"
 SECURITY_PROFILE = "tls-api-key-v1"
 SERVICE_CONFIG_VERSION = 4
 CORE_SOURCE_MANIFEST = "SOURCE-MANIFEST.json"
@@ -691,7 +692,7 @@ def runtime_execution_manifest(
 ) -> dict[str, Any]:
     """Derive the private core execution view from authoritative runtime.json.
 
-    Runtime packs expose only schema-v4 runtime.json. The control plane keeps a
+    Runtime packs expose only schema-v5 runtime.json. The control plane keeps a
     deterministic, hash-bound execution view so existing lifecycle code never
     needs to reinterpret source metadata. Qualification is authorization from a
     signed catalog, never an author-controlled property of executable bytes.
@@ -1290,9 +1291,9 @@ def docker_command(
     runtime_command: tuple[str, ...] | None = None
     if group_context is not None:
         required_group = {
-            "group_id", "member_id", "rank", "role_rank", "role", "launcher",
+            "group_id", "member_id", "task_id", "launcher",
             "command", "environment", "port_base", "port_count",
-            "inference_endpoint", "readiness", "device_uuids",
+            "endpoint_owner", "readiness", "device_uuids",
         }
         if set(group_context) != required_group:
             raise LetsInferError("engine-group container context is invalid")
@@ -1303,6 +1304,7 @@ def docker_command(
             or not isinstance(group_context["port_count"], int)
             or isinstance(group_context["port_count"], bool)
             or group_context["port_count"] not in range(1, 33)
+            or not isinstance(group_context["endpoint_owner"], bool)
             or not isinstance(group_context["device_uuids"], list)
             or not group_context["device_uuids"]
             or len(group_context["device_uuids"])
@@ -1371,8 +1373,8 @@ def docker_command(
         *(
             [
                 "--label", f"{GROUP_ID_LABEL}={group_context['group_id']}",
-                "--label", f"{GROUP_MEMBER_LABEL}={group_context['member_id']}",
-                "--label", f"{GROUP_ROLE_LABEL}={group_context['role']}",
+                "--label", f"{GROUP_NODE_LABEL}={group_context['member_id']}",
+                "--label", f"{GROUP_TASK_LABEL}={group_context['task_id']}",
             ]
             if group_context is not None
             else []
@@ -1450,13 +1452,11 @@ def docker_command(
             "-v", f"{group_path}:/run/letsinfer/group.json:ro",
             "-e", "LETSINFER_GROUP_CONFIG=/run/letsinfer/group.json",
             "-e", f"LETSINFER_GROUP_ID={group_context['group_id']}",
-            "-e", f"LETSINFER_MEMBER_ID={group_context['member_id']}",
-            "-e", f"LETSINFER_MEMBER_RANK={group_context['rank']}",
-            "-e", f"LETSINFER_ROLE={group_context['role']}",
-            "-e", f"LETSINFER_ROLE_RANK={group_context['role_rank']}",
+            "-e", f"LETSINFER_NODE_ID={group_context['member_id']}",
+            "-e", f"LETSINFER_TASK_ID={group_context['task_id']}",
             "-e", f"LETSINFER_PORT_BASE={group_context['port_base']}",
             "-e", f"LETSINFER_PORT_COUNT={group_context['port_count']}",
-            "-e", f"LETSINFER_ENGINE_PORT={group_context['port_base'] if group_context['inference_endpoint'] else -1}",
+            "-e", f"LETSINFER_ENGINE_PORT={group_context['port_base'] if group_context['endpoint_owner'] else -1}",
             "-e", "LETSINFER_ENGINE_CREDENTIAL_FILE=/run/secrets/letsinfer-api-key",
             "-e", "LETSINFER_TLS_CERT_FILE=/run/secrets/letsinfer-tls.crt",
             "-e", "LETSINFER_TLS_KEY_FILE=/run/secrets/letsinfer-tls.key",
@@ -7500,10 +7500,10 @@ def install_engine_group(
     for existing in existing_groups:
         if existing["state"] in {"removed", "failed"}:
             continue
-        for member in existing["plan"]["members"]:
-            if member["member_id"] in occupied:
-                occupied[member["member_id"]].append(
-                    (member["port_base"], member["port_count"])
+        for resource in existing["plan"]["resources"]:
+            if resource["node_id"] in occupied:
+                occupied[resource["node_id"]].append(
+                    (resource["port_base"], resource["port_count"])
                 )
     try:
         if contract is None:
@@ -7529,7 +7529,6 @@ def install_engine_group(
                     selected_records[member_id]["address"]
                 ),
                 device_uuids=placement.device_uuids[member_id],
-                engine_strategy=target_contract(manifest)["placement"]["engine_strategy"],
                 topology_sha256=placement.topology_sha256,
                 manifest_sha256=manifest_sha256,
                 runtime_digest=runtime.digest,
@@ -7541,7 +7540,6 @@ def install_engine_group(
             port_bases = allocate_group_ports(
                 contract,
                 member_ids=placement.member_ids,
-                engine_coordinator_id=placement.engine_coordinator_id,
                 occupied={key: tuple(value) for key, value in occupied.items()},
             )
         if placement.strategy == "parallel" and len(placement.member_ids) > 1:
@@ -7558,7 +7556,6 @@ def install_engine_group(
                 contract,
                 member_ids=placement.member_ids,
                 member_addresses=engine_addresses,
-                engine_coordinator_id=placement.engine_coordinator_id,
                 topology_sha256=placement.topology_sha256,
                 manifest_sha256=manifest_sha256,
                 runtime_digest=runtime.digest,
@@ -7566,6 +7563,7 @@ def install_engine_group(
                 release=release_identity,
                 member_port_bases=port_bases,
                 member_device_uuids=placement.device_uuids,
+                connections=graph.placement_connections(placement),
             )
     except (OrchestrationError, GroupOrchestrationError, TopologyError) as error:
         raise LetsInferError(f"cannot build engine-group plan: {error}") from error
@@ -7635,7 +7633,7 @@ def install_engine_group(
                 )
                 endpoints: list[dict[str, Any]] = []
                 for assignment in plan.assignments:
-                    if not assignment.inference_endpoint:
+                    if not assignment.endpoint_owner:
                         continue
                     result = orchestrator.results.get(assignment.member_id)
                     if (
@@ -7776,38 +7774,37 @@ def _restore_engine_group_orchestrator(
             runtime.runtime.get("orchestration"),
             target_contract(manifest)["placement"],
         )
-        members = sorted(document["members"], key=lambda item: item["rank"])
+        resources = list(document["resources"])
         if contract is None:
-            if document["strategy"] != "single" or len(members) != 1:
+            if document["strategy"] != "single" or len(resources) != 1:
                 raise LetsInferError("engine-group runtime lost its parallel contract")
-            member = members[0]
+            resource = resources[0]
             plan = build_single_group_plan(
-                member_id=member["member_id"],
-                member_address=member["address"],
-                device_uuids=member["device_uuids"],
-                engine_strategy=document["engine_strategy"],
+                member_id=resource["node_id"],
+                member_address=resource["address"],
+                device_uuids=resource["device_uuids"],
                 topology_sha256=document["topology_sha256"],
                 manifest_sha256=document["manifest_sha256"],
                 runtime_digest=document["runtime_digest"],
                 service_id=document["service_id"],
                 release=document["release"],
-                port_base=member["port_base"],
+                port_base=resource["port_base"],
             )
         else:
             plan = build_group_plan(
                 contract,
-                member_ids=tuple(item["member_id"] for item in members),
-                member_addresses={item["member_id"]: item["address"] for item in members},
-                engine_coordinator_id=document["engine_coordinator_id"],
+                member_ids=tuple(item["node_id"] for item in resources),
+                member_addresses={item["node_id"]: item["address"] for item in resources},
                 topology_sha256=document["topology_sha256"],
                 manifest_sha256=document["manifest_sha256"],
                 runtime_digest=document["runtime_digest"],
                 service_id=document["service_id"],
                 release=document["release"],
-                member_port_bases={item["member_id"]: item["port_base"] for item in members},
+                member_port_bases={item["node_id"]: item["port_base"] for item in resources},
                 member_device_uuids={
-                    item["member_id"]: item["device_uuids"] for item in members
+                    item["node_id"]: item["device_uuids"] for item in resources
                 },
+                connections=document["connections"],
             )
         if plan.document() != document:
             raise LetsInferError("runtime contract no longer reproduces the engine-group plan")
@@ -8636,9 +8633,9 @@ def _install_catalog_nodes(
         member_id: [] for member_id in selected
     }
     for group in groups:
-        for member in group["plan"]["members"]:
-            if member["member_id"] in groups_by_node:
-                groups_by_node[member["member_id"]].append(group)
+        for resource in group["plan"]["resources"]:
+            if resource["node_id"] in groups_by_node:
+                groups_by_node[resource["node_id"]].append(group)
     install_nodes: list[str] = []
     replacements: dict[str, list[str]] = {}
     planned: dict[str, tuple[tuple[str, str, str, str, str], TargetPlacement]] = {}
@@ -11723,14 +11720,14 @@ def _group_upgrade_placement(
 
 
 def _group_member_ids(group: Mapping[str, Any]) -> tuple[str, ...]:
-    members = group.get("plan", {}).get("members")
+    resources = group.get("plan", {}).get("resources")
     if (
-        not isinstance(members, list)
-        or not members
-        or any(not isinstance(item, Mapping) for item in members)
+        not isinstance(resources, list)
+        or not resources
+        or any(not isinstance(item, Mapping) for item in resources)
     ):
         raise LetsInferError("engine group has an incomplete immutable node plan")
-    values = tuple(str(item.get("member_id", "")) for item in members)
+    values = tuple(str(item.get("node_id", "")) for item in resources)
     if any(not re.fullmatch(r"[0-9a-f]{32}", value) for value in values):
         raise LetsInferError("engine group has an invalid immutable node plan")
     return values
@@ -11973,7 +11970,7 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
         old_group = item["group"]
         old_release = item["current"]
         member_ids = tuple(
-            member["member_id"] for member in old_group["plan"]["members"]
+            resource["node_id"] for resource in old_group["plan"]["resources"]
         )
         resolving = _command_activity(
             arguments,
@@ -15186,7 +15183,7 @@ def _engine_group_path(group_id: str) -> pathlib.Path:
 
 
 def _engine_group_member_host(group: Mapping[str, Any], member_id: str) -> str:
-    matches = [item for item in group["members"] if item["member_id"] == member_id]
+    matches = [item for item in group["resources"] if item["node_id"] == member_id]
     if len(matches) != 1:
         raise LetsInferError("engine-group member address is unavailable")
     address = matches[0]["address"]
@@ -15259,7 +15256,7 @@ def _read_engine_group_config(group_id: str) -> dict[str, Any]:
         "schema_version", "group_id", "member_id", "plan_sha256", "source",
         "runtime_digest", "runtime_name", "runtime_version", "object_root",
         "control_root", "manifest_path", "manifest_sha256", "topology_sha256",
-        "role", "group_file", "credential_file", "tls_certificate_file",
+        "task", "group_file", "credential_file", "tls_certificate_file",
         "tls_key_file", "model_cache", "store_root",
         "runtime_cache_root", "container_name", "protection_root",
     }
@@ -15324,7 +15321,7 @@ def _read_engine_group_config(group_id: str) -> dict[str, Any]:
 
 
 class LocalEngineGroupExecutor:
-    """Install and run one runtime role without accepting arbitrary commands."""
+    """Install and run one bounded runtime task without arbitrary commands."""
 
     def __init__(self, member_id: str) -> None:
         if not re.fullmatch(r"[0-9a-f]{32}", member_id):
@@ -15360,13 +15357,13 @@ class LocalEngineGroupExecutor:
             or job["manifest_sha256"] != config["manifest_sha256"]
             or job["topology_sha256"] != config["topology_sha256"]
             or job["engine_credential_sha256"] != config["_credential_sha256"]
-            or job["role"] != config["role"]
+            or job["task"] != config["task"]
             or job["group"] != config["_group"]
         ):
             raise LetsInferError("engine-group job differs from the staged immutable configuration")
 
     def _safe_result(self, config: Mapping[str, Any], state: str) -> dict[str, Any]:
-        role = config["role"]
+        task = config["task"]
         group = config["_group"]
         host = _engine_group_member_host(group, config["member_id"])
         certificate_path = pathlib.Path(config["tls_certificate_file"])
@@ -15384,15 +15381,15 @@ class LocalEngineGroupExecutor:
             "state": state,
             "group_id": config["group_id"],
             "member_id": config["member_id"],
-            "role": role["name"],
+            "task_id": task["task_id"],
             "runtime_digest": config["runtime_digest"],
             "manifest_sha256": config["manifest_sha256"],
             "tls_certificate_sha256": certificate_sha256(certificate_path),
             "tls_certificate_pem": certificate_pem,
         }
-        if role["inference_endpoint"]:
+        if task["endpoint_owner"]:
             endpoint_host = f"[{host}]" if ":" in host else host
-            result["endpoint"] = f"https://{endpoint_host}:{role['port_base']}"
+            result["endpoint"] = f"https://{endpoint_host}:{task['port_base']}"
         else:
             result["endpoint"] = None
         return result
@@ -15427,42 +15424,46 @@ class LocalEngineGroupExecutor:
                 runtime.runtime.get("orchestration"),
                 target_contract(manifest)["placement"],
             )
-            role = job["role"]
-            expected_role = (
+            task = job["task"]
+            expected_task = (
                 {
+                    "task_id": "task-0",
                     "port_count": 1,
                     "launcher": "manifest",
                     "environment": {},
-                    "inference_endpoint": True,
                     "readiness": {"kind": "manifest"},
                 }
-                if contract is None and role.get("name") == "engine"
+                if contract is None and task.get("task_id") == "task-0"
                 else None
                 if contract is None
-                else contract["roles"].get(role["name"])
+                else next(
+                    (item for item in contract["tasks"] if item["task_id"] == task.get("task_id")),
+                    None,
+                )
             )
-            expected_job_role = None if expected_role is None else {
-                "name": role["name"],
-                "rank": role["rank"],
-                "role_rank": role["role_rank"],
-                "port_base": role["port_base"],
-                "port_count": expected_role["port_count"],
-                "launcher": expected_role["launcher"],
-                "command": list(expected_role.get("command", [])),
-                "environment": dict(expected_role["environment"]),
-                "inference_endpoint": expected_role["inference_endpoint"],
-                "readiness": dict(expected_role["readiness"]),
-                "device_uuids": list(role["device_uuids"]),
+            expected_job_task = None if expected_task is None else {
+                "task_id": task["task_id"],
+                "port_base": task["port_base"],
+                "port_count": expected_task["port_count"],
+                "launcher": expected_task["launcher"],
+                "command": list(expected_task.get("command", [])),
+                "environment": dict(expected_task["environment"]),
+                "endpoint_owner": task["task_id"] == (
+                    "task-0" if contract is None else contract["endpoint_owner"]
+                ),
+                "readiness": dict(expected_task["readiness"]),
+                "device_uuids": list(task["device_uuids"]),
             }
-            if expected_job_role != role:
-                raise LetsInferError("engine-group job role differs from the runtime contract")
+            if expected_job_task != task:
+                raise LetsInferError("engine-group job task differs from the runtime contract")
             group = validate_group_document(dict(job["group"]))
             placement = target_contract(manifest)["placement"]
             if (
                 group["strategy"] != placement["strategy"]
-                or group["engine_strategy"] != placement["engine_strategy"]
-                or len(group["members"]) != placement["member_count"]
-                or len(role["device_uuids"])
+                or len(group["resources"]) != placement["node_count"]
+                or group["runtime_execution_contract_sha256"]
+                != orchestration_contract_sha256(contract)
+                or len(task["device_uuids"])
                 != target_contract(manifest)["accelerator"]["count"]
             ):
                 raise LetsInferError("engine-group plan differs from the release target")
@@ -15503,7 +15504,7 @@ class LocalEngineGroupExecutor:
                 "manifest_path": str(manifest_path),
                 "manifest_sha256": job["manifest_sha256"],
                 "topology_sha256": job["topology_sha256"],
-                "role": dict(job["role"]),
+                "task": dict(job["task"]),
                 "group_file": str(group_file),
                 "credential_file": str(credential_file),
                 "tls_certificate_file": str(tls_certificate),
@@ -15552,7 +15553,7 @@ class LocalEngineGroupExecutor:
     def _start_config(self, config: Mapping[str, Any]) -> Mapping[str, Any]:
         verify_active_core_watchdog()
         manifest = config["_manifest"]
-        role = config["role"]
+        task = config["task"]
         authorize_serving_launch(
             manifest["serving"], qualification_mode=False, evidence_dir=None
         )
@@ -15569,7 +15570,7 @@ class LocalEngineGroupExecutor:
             name=config["container_name"],
             manifest_sha256=config["manifest_sha256"],
             runtime_digest=config["runtime_digest"],
-            port=role["port_base"],
+            port=task["port_base"],
             model_cache=pathlib.Path(config["model_cache"]),
             store_root=pathlib.Path(config["store_root"]),
             runtime_cache_root=pathlib.Path(config["runtime_cache_root"]),
@@ -15579,8 +15580,7 @@ class LocalEngineGroupExecutor:
             group_context={
                 "group_id": config["group_id"],
                 "member_id": config["member_id"],
-                "role": role["name"],
-                **{key: value for key, value in role.items() if key != "name"},
+                **dict(task),
             },
             group_config_file=pathlib.Path(config["group_file"]),
             runtime_artifact_root=runtime_root,
@@ -15600,15 +15600,15 @@ class LocalEngineGroupExecutor:
                 require_matching_container(
                     inspection,
                     manifest,
-                    role["port_base"],
+                    task["port_base"],
                     manifest_sha256=config["manifest_sha256"],
                     runtime_digest=config["runtime_digest"],
                 )
                 labels = inspection.get("Config", {}).get("Labels") or {}
                 expected_labels = {
                     GROUP_ID_LABEL: config["group_id"],
-                    GROUP_MEMBER_LABEL: config["member_id"],
-                    GROUP_ROLE_LABEL: role["name"],
+                    GROUP_NODE_LABEL: config["member_id"],
+                    GROUP_TASK_LABEL: task["task_id"],
                 }
                 if any(labels.get(key) != value for key, value in expected_labels.items()):
                     raise LetsInferError("existing container has a different engine-group identity")
@@ -15620,28 +15620,28 @@ class LocalEngineGroupExecutor:
             publish_protection_state(
                 protection, generation, "starting", inspection=inspection
             )
-            if role["launcher"] == "manifest":
+            if task["launcher"] == "manifest":
                 wait_for_ready(
                     config["container_name"],
-                    role["port_base"],
+                    task["port_base"],
                     manifest["container"]["startup_timeout_seconds"],
                     pathlib.Path(config["tls_certificate_file"]),
                     manifest,
                 )
             else:
-                self._wait_runtime_command(config["container_name"], role["readiness"])
-            if role["inference_endpoint"] and not model_identity_ready(
+                self._wait_runtime_command(config["container_name"], task["readiness"])
+            if task["endpoint_owner"] and not model_identity_ready(
                 manifest,
-                role["port_base"],
+                task["port_base"],
                 pathlib.Path(config["tls_certificate_file"]),
                 pathlib.Path(config["credential_file"]),
             ):
                 raise LetsInferError("engine-group model identity does not match its release")
-            if role["inference_endpoint"] and role["launcher"] == "manifest":
+            if task["endpoint_owner"] and task["launcher"] == "manifest":
                 prewarm(
                     manifest,
                     config["container_name"],
-                    role["port_base"],
+                    task["port_base"],
                     pathlib.Path(config["tls_certificate_file"]),
                     pathlib.Path(config["credential_file"]),
                 )
@@ -15680,9 +15680,9 @@ class LocalEngineGroupExecutor:
                 raise LetsInferError(
                     "engine-group observation journal differs from staged state"
                 )
-        if group.get("role") != config["role"]:
+        if group.get("task") != config["task"]:
             raise LetsInferError(
-                "engine-group observation role differs from staged state"
+                "engine-group observation task differs from staged state"
             )
         stored_state = str(group.get("state", ""))
         if stored_state == "removed":
@@ -15701,16 +15701,16 @@ class LocalEngineGroupExecutor:
             return {"state": state, "protection_trip_latched": False}
         if stored_state != "running" or not protection["armed"]:
             return {"state": "failed", "protection_trip_latched": False}
-        role = config["role"]
-        if role["launcher"] == "manifest":
+        task = config["task"]
+        if task["launcher"] == "manifest":
             ready = health_ready(
-                role["port_base"], pathlib.Path(config["tls_certificate_file"])
+                task["port_base"], pathlib.Path(config["tls_certificate_file"])
             )
         else:
             ready = run(
                 [
                     "docker", "exec", config["container_name"],
-                    *role["readiness"]["command"],
+                    *task["readiness"]["command"],
                 ],
                 check=False,
             ).returncode == 0
@@ -16070,7 +16070,21 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
                     "group_id": group["group_id"],
                     "release": release,
                     "failure_policy": group["failure_policy"],
-                    "member_assignments": group["plan"]["members"],
+                    "endpoint_owner": group["plan"]["endpoint_owner"],
+                    "runtime_execution_contract_sha256": group[
+                        "runtime_execution_contract_sha256"
+                    ],
+                    "resource_assignments": group["plan"]["resources"],
+                    "connections": group["plan"]["connections"],
+                    "task_states": [
+                        {
+                            "node_id": task["member_id"],
+                            "task_id": task["task_id"],
+                            "state": task["state"],
+                            "error": task["error"],
+                        }
+                        for task in group["members"]
+                    ],
                     "device_allocations": allocations_by_group.get(
                         group["group_id"], []
                     ),
@@ -16464,7 +16478,6 @@ def _topology_plan_document(
         "placement": {
             "strategy": choice.placement.strategy,
             "members": desired_members,
-            "engine_coordinator_id": choice.placement.engine_coordinator_id,
             "reason": choice.placement.reason,
         },
         "current_placement_ids": [row["placement_id"] for row in current],

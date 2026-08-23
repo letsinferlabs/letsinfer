@@ -33,8 +33,7 @@ def catalog() -> dict:
         "memory": {"topology": "unified", "minimum_total_gib": 118},
         "placement": {
             "strategy": "single",
-            "member_count": 1,
-            "engine_strategy": "single-node",
+            "node_count": 1,
             "interconnect": {
                 "kind": "any",
                 "rdma_required": False,
@@ -103,6 +102,49 @@ def catalog() -> dict:
 
 
 class CatalogTests(unittest.TestCase):
+    def test_catalog_accepts_only_a_fully_bound_runtime_contract_migration(self) -> None:
+        document = catalog()
+        target = document["models"]["qwen3.8-27b"]["targets"]["dgx-spark"]
+        candidate = target["candidates"][CANDIDATE]
+        release = candidate["releases"].pop("0.1.0-rc.12")
+        candidate["latest"] = "0.1.0-rc.13"
+        target["recommended"]["version"] = "0.1.0-rc.13"
+        release["source"] = (
+            "ghcr.io/letsinferlabs/runtimes/qwen@sha256:" + "9" * 64
+        )
+        release["provenance"] = {
+            "method": "runtime-contract-migration-v1",
+            "repository": "letsinferlabs/runtimes",
+            "pull_request": 1,
+            "pull_request_url": "https://github.com/letsinferlabs/runtimes/pull/1",
+            "proposal_head_sha": "5" * 40,
+            "qualified_commit_sha": "6" * 40,
+            "from_version": "0.1.0-rc.12",
+            "from_source": "ghcr.io/letsinferlabs/runtimes/qwen@sha256:" + "1" * 64,
+            "benchmark_record_sha256": "7" * 64,
+            "execution_contract_sha256": "8" * 64,
+        }
+        release["verification"] = {
+            "method": "runtime-contract-migration-v1",
+            "from_version": "0.1.0-rc.12",
+            "from_source": "ghcr.io/letsinferlabs/runtimes/qwen@sha256:" + "1" * 64,
+            "benchmark_record_path": f"{CANDIDATE}/benchmark.previous.json",
+            "benchmark_record_sha256": "7" * 64,
+            "execution_contract_sha256": "8" * 64,
+            "verifiers": [],
+        }
+        candidate["releases"]["0.1.0-rc.13"] = release
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "catalog.json"
+            path.write_bytes(runtime_packs.canonical_bytes(document))
+            self.assertEqual(runtime_packs.load_catalog(str(path)), document)
+            release["verification"]["execution_contract_sha256"] = "a" * 64
+            path.write_bytes(runtime_packs.canonical_bytes(document))
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "contract migration"
+            ):
+                runtime_packs.load_catalog(str(path))
+
     def test_cache_identity_binds_catalog_and_revocation_bytes(self) -> None:
         catalog_data = b'{"schema_version":6}\n'
         self.assertNotEqual(
