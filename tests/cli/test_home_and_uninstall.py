@@ -205,6 +205,55 @@ class UninstallFlowTests(unittest.TestCase):
             )
             remove_core.assert_called_once_with()
 
+    def test_progress_begins_only_after_confirmation_and_covers_final_removal(self) -> None:
+        arguments = mock.Mock(config=None, keep_models=False)
+        events: list[str] = []
+
+        def confirmed(*_args: object, **_kwargs: object) -> bool:
+            events.append("confirmed")
+            return True
+
+        def activity(message: str, **_kwargs: object) -> contextlib.AbstractContextManager[None]:
+            events.append(f"progress:{message}")
+            return contextlib.nullcontext()
+
+        with (
+            mock.patch.object(cli, "_uninstall_service_config", return_value=(None, None)),
+            mock.patch.object(cli, "_confirmed", side_effect=confirmed),
+            mock.patch.object(cli.ui, "progress", side_effect=activity),
+            mock.patch.object(
+                cli.ui, "protect_stdout", side_effect=lambda _owner: contextlib.nullcontext()
+            ),
+            mock.patch.object(cli, "_human_presenter", return_value=None),
+            mock.patch.object(cli, "_installed_runtime_image_references", return_value=set()),
+            mock.patch.object(cli.benchmark_jobs, "active_state", return_value=None),
+            mock.patch.object(cli, "site_identity_path", return_value=pathlib.Path("/absent")),
+            mock.patch.object(cli, "_retire_qualification_candidate"),
+            mock.patch.object(cli.platform, "system", return_value="Linux"),
+            mock.patch.object(cli, "_remove_linux_services"),
+            mock.patch.object(cli, "_remove_managed_containers", return_value=(0, 0)),
+            mock.patch.object(cli, "_remove_managed_home"),
+            mock.patch.object(cli, "_remove_installed_core", return_value=True),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(cli.uninstall(arguments), 0)
+            self.assertEqual(
+                events,
+                [
+                    "confirmed",
+                    "progress:Stopping services and removing runtime data",
+                ],
+            )
+            self.assertEqual(arguments.after_audit(), 0)
+        self.assertEqual(
+            events,
+            [
+                "confirmed",
+                "progress:Stopping services and removing runtime data",
+                "progress:Removing the core and managed data",
+            ],
+        )
+
     def test_declining_confirmation_does_not_begin_cleanup(self) -> None:
         arguments = mock.Mock(config=None, keep_models=False)
         with (

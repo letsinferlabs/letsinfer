@@ -461,6 +461,28 @@ class UpdateNoticeTests(unittest.TestCase):
         ui.update_notice((mock.sentinel.record,), stream=stream)
         self.assertEqual(stream.getvalue(), "")
 
+    def test_cleared_notice_corrects_stale_interactive_advice(self):
+        stream = TTY()
+        ui.update_notice(
+            (),
+            stream=stream,
+            environ={"TERM": "xterm", "NO_COLOR": "1"},
+            cleared=True,
+        )
+        self.assertIn("installed components are current", stream.getvalue())
+
+    def test_unresolved_refresh_never_claims_components_are_current(self):
+        stream = TTY()
+        ui.update_notice(
+            (),
+            stream=stream,
+            environ={"TERM": "xterm", "NO_COLOR": "1"},
+            attention=True,
+        )
+        rendered = stream.getvalue()
+        self.assertIn("verification needs attention", rendered)
+        self.assertNotIn("components are current", rendered)
+
 
 class UpdateCommandTests(unittest.TestCase):
     def snapshot(self, *, status="available", busy=False):
