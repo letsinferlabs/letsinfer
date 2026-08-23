@@ -22,8 +22,15 @@ command's help shows its execution scope: `coordinator`, `member`, or `all`.
 ## Install a model
 
 ```bash
+letsinfer list
 letsinfer install qwen3.8-27b
 ```
+
+`letsinfer list` shows every qualified runtime compatible with your hardware,
+including all runtime authors and the recommended candidate. Use
+`letsinfer list MODEL --versions` to see retained releases, `--all-targets` to
+inspect other hardware, `--refresh` to require a fresh signed catalog, and
+`--json` for structured output.
 
 Let's Infer detects your target and installs the recommended qualified
 candidate from the signed catalog. The runtime downloads its exact model and
@@ -61,6 +68,9 @@ letsinfer logs
 Interactive `status` refreshes until you press Ctrl-C. Its API, runtime,
 admission, throughput, Watchdog, system, and temperature sections come from the
 same normalized state plane used by other consumers.
+
+`letsinfer list` is discovery from the signed public catalog. `letsinfer
+runtimes` shows only immutable packs already installed on your machine.
 
 Lifecycle commands:
 

@@ -62,7 +62,14 @@ def components(*, core_identity: str = "core-a", runtime_policy: str = "recommen
 
 def catalog(version: str = "0.1.0-rc.11", digest: str = NEXT_RUNTIME_DIGEST):
     return {
-        "schema_version": 4,
+        "schema_version": 5,
+        "recommendation_policy": {
+            "id": "letsinfer-throughput-geomean-v1",
+            "benchmark_suite": "letsinfer-code-prose-v1",
+            "metric": "aggregate_tps",
+            "cache": "uncached",
+            "tie_breakers": ["score", "version", "candidate"],
+        },
         "targets": {
             "dgx-spark": {
                 "match": {
@@ -93,21 +100,33 @@ def catalog(version: str = "0.1.0-rc.11", digest: str = NEXT_RUNTIME_DIGEST):
             "qwen3.8-27b": {
                 "targets": {
                     "dgx-spark": {
-                        "recommended": CANDIDATE,
+                        "recommended": {
+                            "candidate": CANDIDATE,
+                            "version": version,
+                        },
                         "candidates": {
                             CANDIDATE: {
-                                "version": version,
-                                "source": "ghcr.io/letsinferlabs/runtimes/qwen"
-                                f"@sha256:{digest}",
-                                "qualified": True,
-                                "engine": "sglang",
-                                "engine_oci": "ghcr.io/letsinferlabs/engines/sglang"
-                                f"@sha256:{ENGINE_DIGEST}",
-                                "model_uri": "hf://RadixArk/Qwen3.8-27B-NVFP4",
-                                "benchmark": {
-                                    "id": BENCHMARK_ID,
-                                    "suite": "letsinfer-code-prose-v1",
-                                    "score": 1.0,
+                                "latest": version,
+                                "releases": {
+                                    version: {
+                                        "authors": ["MiaAI-Lab", "Letsinfer"],
+                                        "license": "AGPL-3.0-only",
+                                        "source": "ghcr.io/letsinferlabs/runtimes/qwen"
+                                        f"@sha256:{digest}",
+                                        "qualified": True,
+                                        "revoked": False,
+                                        "engine": "sglang",
+                                        "engine_oci": "ghcr.io/letsinferlabs/engines/sglang"
+                                        f"@sha256:{ENGINE_DIGEST}",
+                                        "model_uri": "hf://RadixArk/Qwen3.8-27B-NVFP4",
+                                        "benchmark": {
+                                            "id": BENCHMARK_ID,
+                                            "suite": "letsinfer-code-prose-v1",
+                                            "score": 1.0,
+                                            "evidence": "ghcr.io/letsinferlabs/benchmarks/qwen"
+                                            "@sha256:" + "6" * 64,
+                                        },
+                                    }
                                 },
                             }
                         },

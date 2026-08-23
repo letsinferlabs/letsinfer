@@ -17,7 +17,10 @@ on a network request.
 The private update database is
 `$LETSINFER_HOME/state/updates.sqlite3`. It stores component identities,
 versions, immutable sources, results, and verification times—never
-credentials.
+credentials. Every catalog consumer shares the last verified immutable
+snapshot below `$LETSINFER_HOME/state/catalog/`; a damaged cache is replaced by
+a fresh signature-verified download and a temporary network failure may use the
+last verified snapshot without changing a running runtime.
 
 ## Update core
 
