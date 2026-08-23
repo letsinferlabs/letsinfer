@@ -63,6 +63,7 @@ ACTIONS = {
         _action("topology.show", CommandScope.COORDINATOR, MutationClass.READ, AuditPolicy.SENSITIVE_READ),
         _action("topology.probe", CommandScope.COORDINATOR, MutationClass.SITE, AuditPolicy.ALWAYS),
         _action("topology.plan", CommandScope.COORDINATOR, MutationClass.SITE, AuditPolicy.ALWAYS),
+        _action("list", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE, requires_site=False),
         _action("runtimes", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE),
         _action("pack", CommandScope.ALL, MutationClass.NODE, AuditPolicy.SUCCESS, requires_site=False),
         _action("inspect", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE, requires_site=False),

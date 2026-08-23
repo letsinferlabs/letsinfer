@@ -464,6 +464,25 @@ class RuntimePackTests(unittest.TestCase):
                     "example-engine--example--model--fixture-unified",
                 )
 
+    def test_publication_metadata_is_not_executable_runtime_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = self._source(root)
+            (source / "release.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "authors": ["example", "Letsinfer"],
+                        "license": "AGPL-3.0-only",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            artifact = root / "runtime.letsinfer"
+            runtime_packs.build_archive(source, artifact)
+            with runtime_packs.materialize(artifact) as installed:
+                self.assertFalse((installed.root / "release.json").exists())
+
     def test_unsupported_runtime_schema_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = self._source(pathlib.Path(directory))
@@ -781,6 +800,13 @@ class RuntimePackTests(unittest.TestCase):
             path = pathlib.Path(directory) / "catalog.json"
             catalog = {
                 "schema_version": runtime_packs.CATALOG_SCHEMA_VERSION,
+                "recommendation_policy": {
+                    "id": "letsinfer-throughput-geomean-v1",
+                    "benchmark_suite": "letsinfer-code-prose-v1",
+                    "metric": "aggregate_tps",
+                    "cache": "uncached",
+                    "tie_breakers": ["score", "version", "candidate"],
+                },
                 "targets": {
                     "fixture-unified": {
                         "match": {
@@ -804,19 +830,30 @@ class RuntimePackTests(unittest.TestCase):
                     "example-model": {
                         "targets": {
                             "fixture-unified": {
-                                "recommended": "example-engine--example--model--fixture-unified",
+                                "recommended": {
+                                    "candidate": "example-engine--example--model--fixture-unified",
+                                    "version": "1.2.3",
+                                },
                                 "candidates": {
                                     "example-engine--example--model--fixture-unified": {
-                                        "version": "1.2.3",
-                                        "source": "ghcr.io/example/model@sha256:" + "a" * 64,
-                                        "qualified": True,
-                                        "engine": "example-engine",
-                                        "engine_oci": "ghcr.io/example/engine@sha256:" + "b" * 64,
-                                        "model_uri": "hf://example/model",
-                                        "benchmark": {
-                                            "id": "c" * 64,
-                                            "suite": "letsinfer-code-prose-v1",
-                                            "score": 1.0,
+                                        "latest": "1.2.3",
+                                        "releases": {
+                                            "1.2.3": {
+                                                "authors": ["example"],
+                                                "license": "MIT",
+                                                "source": "ghcr.io/example/model@sha256:" + "a" * 64,
+                                                "qualified": True,
+                                                "revoked": False,
+                                                "engine": "example-engine",
+                                                "engine_oci": "ghcr.io/example/engine@sha256:" + "b" * 64,
+                                                "model_uri": "hf://example/model",
+                                                "benchmark": {
+                                                    "id": "c" * 64,
+                                                    "suite": "letsinfer-code-prose-v1",
+                                                    "score": 1.0,
+                                                    "evidence": "ghcr.io/example/benchmark@sha256:" + "d" * 64,
+                                                },
+                                            }
                                         },
                                     }
                                 },
@@ -871,7 +908,7 @@ class RuntimePackTests(unittest.TestCase):
             )
             catalog["models"]["example-model"]["targets"]["fixture-unified"]["candidates"][
                 "example-engine--example--model--fixture-unified"
-            ]["source"] = "latest"
+            ]["releases"]["1.2.3"]["source"] = "latest"
             path.write_text(json.dumps(catalog), encoding="utf-8")
             with self.assertRaisesRegex(runtime_packs.RuntimePackError, "digest-pinned"):
                 runtime_packs.load_catalog(str(path))
@@ -899,6 +936,13 @@ class RuntimePackTests(unittest.TestCase):
     def test_signed_catalog_binds_exact_bytes_and_trusted_ed25519_key(self) -> None:
         catalog = {
             "schema_version": runtime_packs.CATALOG_SCHEMA_VERSION,
+            "recommendation_policy": {
+                "id": "letsinfer-throughput-geomean-v1",
+                "benchmark_suite": "letsinfer-code-prose-v1",
+                "metric": "aggregate_tps",
+                "cache": "uncached",
+                "tie_breakers": ["score", "version", "candidate"],
+            },
             "targets": {
                 "fixture-unified": {
                     "match": {
@@ -922,19 +966,30 @@ class RuntimePackTests(unittest.TestCase):
                 "example-model": {
                     "targets": {
                         "fixture-unified": {
-                            "recommended": "example-engine--example--model--fixture-unified",
+                            "recommended": {
+                                "candidate": "example-engine--example--model--fixture-unified",
+                                "version": "1.0.0",
+                            },
                             "candidates": {
                                 "example-engine--example--model--fixture-unified": {
-                                    "version": "1.0.0",
-                                    "source": "registry.example/runtime@sha256:" + "a" * 64,
-                                    "qualified": True,
-                                    "engine": "example-engine",
-                                    "engine_oci": "registry.example/engine@sha256:" + "b" * 64,
-                                    "model_uri": "hf://example/model",
-                                    "benchmark": {
-                                        "id": "c" * 64,
-                                        "suite": "letsinfer-code-prose-v1",
-                                        "score": 1.0,
+                                    "latest": "1.0.0",
+                                    "releases": {
+                                        "1.0.0": {
+                                            "authors": ["example"],
+                                            "license": "MIT",
+                                            "source": "registry.example/runtime@sha256:" + "a" * 64,
+                                            "qualified": True,
+                                            "revoked": False,
+                                            "engine": "example-engine",
+                                            "engine_oci": "registry.example/engine@sha256:" + "b" * 64,
+                                            "model_uri": "hf://example/model",
+                                            "benchmark": {
+                                                "id": "c" * 64,
+                                                "suite": "letsinfer-code-prose-v1",
+                                                "score": 1.0,
+                                                "evidence": "registry.example/benchmark@sha256:" + "d" * 64,
+                                            },
+                                        }
                                     },
                                 }
                             },
@@ -1047,6 +1102,13 @@ class RuntimePackTests(unittest.TestCase):
         }
         catalog = {
             "schema_version": runtime_packs.CATALOG_SCHEMA_VERSION,
+            "recommendation_policy": {
+                "id": "letsinfer-throughput-geomean-v1",
+                "benchmark_suite": "letsinfer-code-prose-v1",
+                "metric": "aggregate_tps",
+                "cache": "uncached",
+                "tie_breakers": ["score", "version", "candidate"],
+            },
             "targets": {"fixture-unified": {"match": contract}},
             "models": {
                 "example-model": {
@@ -1109,6 +1171,13 @@ class RuntimePackTests(unittest.TestCase):
         }
         catalog = {
             "schema_version": runtime_packs.CATALOG_SCHEMA_VERSION,
+            "recommendation_policy": {
+                "id": "letsinfer-throughput-geomean-v1",
+                "benchmark_suite": "letsinfer-code-prose-v1",
+                "metric": "aggregate_tps",
+                "cache": "uncached",
+                "tie_breakers": ["score", "version", "candidate"],
+            },
             "targets": {
                 target: {
                     "match": {"id": target, **json.loads(json.dumps(base_contract))}
@@ -1119,11 +1188,20 @@ class RuntimePackTests(unittest.TestCase):
                 "example-model": {
                     "targets": {
                         target: {
-                            "recommended": "example-engine",
-                            "engines": {
+                            "recommended": {
+                                "candidate": "example-engine",
+                                "version": "1.0.0",
+                            },
+                            "candidates": {
                                 "example-engine": {
-                                    "version": "1.0.0",
-                                    "source": "registry/runtime@sha256:" + digest * 64,
+                                    "latest": "1.0.0",
+                                    "releases": {
+                                        "1.0.0": {
+                                            "source": "registry/runtime@sha256:" + digest * 64,
+                                            "qualified": True,
+                                            "revoked": False,
+                                        }
+                                    },
                                 }
                             },
                         }

@@ -48,7 +48,10 @@ sglang--unsloth--qwen3.8-27b-nvfp4--dgx-spark
 All three can serve the same model name. Qualification determines which one
 the catalog recommends for your target.
 
-The candidate directory may contain `engine/`, `adapter/`, `image/`,
+The candidate directory contains `runtime.json`, `release.json`, and its
+README. `release.json` records a non-empty array of runtime authors plus the
+SPDX license. Those values are versioned in the signed catalog and shown by
+`letsinfer list`. The directory may also contain `engine/`, `adapter/`, `image/`,
 `kernels/`, `patches/`, `scripts/`, and `tests/` beside `runtime.json`.
 Keep only the candidate's implementation closure there. Shared gateway,
 Watchdog, benchmark, prompt, and site code stays in core.
@@ -70,9 +73,19 @@ runtime bytes, target contract, recipe, safety envelope, and benchmark record
 pass their declared gates. Evidence does not transfer across a changed Engine
 OCI, model revision, or runtime pack.
 
-The generated root `manifest.json` projects all candidates and selects one
-qualified recommendation for each logical model and target. Release automation
-signs that projection and publishes it through the trusted catalog repository.
+The generated root `manifest.json` is an append-only versioned release index.
+It retains every qualified candidate version, authors, license, immutable
+runtime OCI, benchmark summary, and full benchmark-evidence OCI reference.
+Release automation selects one qualified recommendation for each logical model
+and target, signs the exact projection, and publishes it directly as the latest
+release of the runtimes repository.
+
+Discover compatible releases before installing:
+
+```bash
+letsinfer list
+letsinfer list qwen3.8-27b --versions
+```
 
 Catalog changes do not silently alter a running installation:
 
@@ -86,7 +99,9 @@ Installed packs are content-addressed below
 `$LETSINFER_HOME/runtimes/objects/`. Model snapshots live below
 `$LETSINFER_HOME/models/<owner>--<repository>/<revision>/`. OCI download state
 lives below `$LETSINFER_HOME/oci/`, while the container runtime retains its
-native content store.
+native content store. The last verified signed catalog lives below
+`$LETSINFER_HOME/state/catalog/` and is shared by list, install, upgrade, and
+update checks.
 
 Receipts bind the candidate ID, version, pack digest, target contract, model,
 Engine OCI, installation identity, and selection policy. A bounded history

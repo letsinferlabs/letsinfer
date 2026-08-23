@@ -13,7 +13,6 @@ starts the service, and keeps it running.
 
 ```bash
 curl -fsSL https://letsinfer.ai/install.sh | sh
-letsinfer install qwen3.8-27b
 ```
 
 No engine hunting. No model-file plumbing. No hardware-specific install path.
@@ -54,7 +53,7 @@ curl -fsSL https://letsinfer.ai/install.sh | sh
 Install a model:
 
 ```bash
-letsinfer install qwen3.8-27b
+letsinfer install MODEL
 ```
 
 Create an API key and inspect the live service:
@@ -94,6 +93,7 @@ independent runtime candidates—without adding model-specific code to core.
 | Task | Command |
 | --- | --- |
 | Inspect hardware | `letsinfer hardware` |
+| Discover compatible runtimes | `letsinfer list` |
 | Install a model | `letsinfer install MODEL` |
 | Watch live status | `letsinfer status` |
 | Create an API key | `letsinfer key create my-app` |

@@ -8,8 +8,9 @@ A runtime candidate is one flat source directory named:
 <engine>--<lowercase-hf-owner>--<lowercase-hf-model>--<target>/
 ```
 
-You author one `runtime.json` in that directory and keep any source needed to
-reproduce the candidate beside it. You do not maintain a second execution
+Create one `runtime.json` and one publication-only `release.json` in that
+directory, then keep any source needed to reproduce the candidate beside them.
+You do not maintain a second execution
 manifest. After verification and installation, core generates its private
 `runtime-execution.json` view automatically.
 
@@ -40,6 +41,21 @@ Only runtime schema 3 is accepted. The top-level fields are:
 from `engine.id`, the primary Hugging Face URI, and `target.id`. Set `status`
 to `candidate` or `qualified` and keep it consistent with
 `serving.qualified`.
+
+`release.json` is deliberately small and is not included in the executable
+runtime pack:
+
+```json
+{
+  "schema_version": 1,
+  "authors": ["github-name", "organization-name"],
+  "license": "AGPL-3.0-only"
+}
+```
+
+List every person or organization that materially authored the runtime. Use
+stable GitHub identities when one exists. The signed catalog versions this
+metadata with the runtime release, and `letsinfer list` shows the authors.
 
 ## Model artifacts
 
@@ -139,8 +155,10 @@ Symlinks, traversal, unlisted files, unsafe modes, more than 10,000 files, and
 payloads larger than 1 GiB fail closed. Repacking unchanged source must produce
 identical descriptor and archive bytes.
 
-Publish the pack as a digest-pinned OCI artifact. Do not embed model weights in
-the runtime pack.
+Publish the pack as a digest-pinned OCI artifact. The full qualified
+`benchmark.json` is a separate immutable OCI evidence artifact bound to that
+runtime OCI. Do not embed model weights or publication metadata in the runtime
+pack.
 
 ## Source layout
 

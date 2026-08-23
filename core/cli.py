@@ -8,6 +8,7 @@ import argparse
 import base64
 import contextlib
 import datetime as dt
+import functools
 import getpass
 import hashlib
 import hmac
@@ -105,11 +106,11 @@ from .runtime_packs import (
     build_archive,
     canonical_bytes,
     catalog_release,
+    catalog_release_record,
     catalog_target_contract,
     compatible_catalog_targets,
     default_runtime_home,
     describe_source,
-    load_catalog,
     materialize,
     new_receipt,
     resolved_catalog_location,
@@ -124,7 +125,8 @@ from .runtime_packs import (
     write_selection,
 )
 from .updates import Component, UpdateManager, UpdatePoller
-from .updates.manager import UpdateError
+from .updates.manager import UpdateError, compare_versions
+from .catalog import CatalogError, CatalogManager
 from . import benchmark_jobs, ui
 from .state_plane import runtime_lifecycle as derive_runtime_lifecycle
 from .platform import macos as macos_services
@@ -423,6 +425,9 @@ def _update_manager(catalog: str | None = None) -> UpdateManager:
     return UpdateManager(
         _update_components,
         catalog_location=lambda: resolved_catalog_location(catalog),
+        catalog_loader=lambda location: CatalogManager(location).load(
+            refresh=True
+        ).document,
     )
 
 
@@ -6705,7 +6710,7 @@ def _runtime_source_for_install(
             "runtime installation requires a signed catalog or an explicit local/OCI runtime source"
         )
     try:
-        catalog = load_catalog(location)
+        catalog = CatalogManager(location).load().document
         (
             selected_target,
             selected_target_sha256,
@@ -6713,7 +6718,7 @@ def _runtime_source_for_install(
             version,
             source,
         ), _choice = _catalog_site_release(catalog, model, runtime)
-    except RuntimePackError as error:
+    except (CatalogError, RuntimePackError) as error:
         raise LetsInferError(str(error)) from error
     policy = f"runtime:{selected_runtime}" if runtime else "recommended"
     return source, policy, version, selected_target, selected_target_sha256
@@ -9761,14 +9766,161 @@ def list_runtimes(_: argparse.Namespace) -> int:
     return 0
 
 
+def list_available_runtimes(arguments: argparse.Namespace) -> int:
+    """List qualified catalog releases that can run on this hardware."""
+
+    try:
+        snapshot = CatalogManager(arguments.catalog).load(
+            refresh=arguments.refresh,
+            allow_stale=not arguments.refresh,
+        )
+        receipts = selections()
+        catalog = snapshot.document
+        if arguments.all_targets:
+            target_ids = sorted(catalog["targets"])
+        else:
+            target_ids = compatible_catalog_targets(
+                catalog, host_device_fingerprint()
+            )
+    except (CatalogError, RuntimePackError) as error:
+        raise LetsInferError(str(error)) from error
+
+    installed = {
+        (
+            receipt["logical_model"],
+            receipt["target"],
+            receipt["candidate_id"],
+            receipt["version"],
+        )
+        for receipt in receipts
+    }
+    rows: list[dict[str, Any]] = []
+    model_filter = arguments.model
+    if model_filter is not None and model_filter not in catalog["models"]:
+        raise LetsInferError(f"model is not present in runtime catalog: {model_filter}")
+
+    for model, model_record in sorted(catalog["models"].items()):
+        if model_filter is not None and model != model_filter:
+            continue
+        for target, target_record in sorted(model_record["targets"].items()):
+            if target not in target_ids:
+                continue
+            recommendation = target_record["recommended"]
+            for candidate, candidate_record in sorted(
+                target_record["candidates"].items()
+            ):
+                available = [
+                    (version, release)
+                    for version, release in candidate_record["releases"].items()
+                    if release["qualified"] and not release["revoked"]
+                ]
+                available.sort(
+                    key=functools.cmp_to_key(
+                        lambda left, right: compare_versions(left[0], right[0])
+                    ),
+                    reverse=True,
+                )
+                if not arguments.versions:
+                    available = available[:1]
+                for version, release in available:
+                    benchmark = release["benchmark"]
+                    recommended = recommendation == {
+                        "candidate": candidate,
+                        "version": version,
+                    }
+                    rows.append(
+                        {
+                            "model": model,
+                            "runtime": candidate,
+                            "version": version,
+                            "authors": release["authors"],
+                            "license": release["license"],
+                            "engine": release["engine"],
+                            "target": target,
+                            "model_uri": release["model_uri"],
+                            "benchmark_id": benchmark["id"],
+                            "benchmark_score": benchmark["score"],
+                            "benchmark_evidence": benchmark["evidence"],
+                            "recommended": recommended,
+                            "installed": (model, target, candidate, version)
+                            in installed,
+                        }
+                    )
+
+    rows.sort(
+        key=lambda item: (
+            item["model"],
+            item["target"],
+            not item["recommended"],
+            item["runtime"],
+        )
+    )
+    if arguments.json:
+        print(
+            json.dumps(
+                {
+                    "catalog": {
+                        "source": snapshot.source,
+                        "sha256": snapshot.catalog_sha256,
+                        "stale": snapshot.stale,
+                        "age_seconds": snapshot.age_seconds,
+                    },
+                    "compatible_targets": target_ids,
+                    "runtimes": rows,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    if not rows:
+        suffix = "" if arguments.all_targets else " for this hardware"
+        print(f"No qualified runtimes are available{suffix}.")
+        return 0
+
+    headings = ("MODEL", "AUTHOR", "VERSION", "ENGINE", "TARGET", "STATUS")
+    rendered = [
+        (
+            row["model"],
+            ", ".join(row["authors"]),
+            row["version"],
+            row["engine"],
+            row["target"],
+            " · ".join(
+                label
+                for enabled, label in (
+                    (row["recommended"], "recommended"),
+                    (row["installed"], "installed"),
+                )
+                if enabled
+            )
+            or "qualified",
+        )
+        for row in rows
+    ]
+    widths = [
+        max(len(headings[index]), *(len(row[index]) for row in rendered))
+        for index in range(len(headings))
+    ]
+    print("  ".join(value.ljust(widths[index]) for index, value in enumerate(headings)))
+    for row in rendered:
+        print("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
+    if snapshot.stale:
+        print("\nUsing the last verified catalog; refresh is temporarily unavailable.")
+    return 0
+
+
 def hardware(arguments: argparse.Namespace) -> int:
     fingerprint = host_device_fingerprint()
     location = resolved_catalog_location(getattr(arguments, "catalog", None))
     matches: list[str] = []
     if location is not None:
         try:
-            matches = compatible_catalog_targets(load_catalog(location), fingerprint)
-        except RuntimePackError as error:
+            matches = compatible_catalog_targets(
+                CatalogManager(location).load().document, fingerprint
+            )
+        except (CatalogError, RuntimePackError) as error:
             raise LetsInferError(str(error)) from error
     selected_target = matches[0] if len(matches) == 1 else None
     payload = {
@@ -9976,7 +10128,7 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
         if location is None:
             raise LetsInferError("runtime upgrade requires --catalog or LETSINFER_CATALOG")
         try:
-            catalog = load_catalog(location)
+            catalog = CatalogManager(location).load().document
             selected_runtime = None if policy == "recommended" else receipt["candidate_id"]
             (
                 _,
@@ -9994,7 +10146,7 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
                 raise LetsInferError(
                     "catalog changed an existing target contract; publish a new target ID"
                 )
-        except RuntimePackError as error:
+        except (CatalogError, RuntimePackError) as error:
             raise LetsInferError(str(error)) from error
     try:
         with materialize(source) as candidate:
@@ -12855,15 +13007,17 @@ def _topology_plan_document(
     if location is None:
         raise LetsInferError("topology planning requires --catalog or LETSINFER_CATALOG")
     try:
-        catalog = load_catalog(location)
-    except RuntimePackError as error:
+        catalog = CatalogManager(location).load().document
+    except (CatalogError, RuntimePackError) as error:
         raise LetsInferError(str(error)) from error
     topology = _fresh_site_topology()
     release, choice = _catalog_site_release(
         catalog, model, runtime, topology=topology
     )
     target_id, target_sha256, selected_runtime, version, source = release
-    selected_engine = catalog["models"][model]["targets"][target_id]["candidates"][selected_runtime]["engine"]
+    selected_engine = catalog_release_record(
+        catalog, model, target_id, selected_runtime, version
+    )["engine"]
     identity, graph = topology
     source_digest = source.rsplit("@sha256:", 1)[1]
     desired_runtime = (
@@ -13735,6 +13889,25 @@ def parser() -> argparse.ArgumentParser:
         "runtimes", help="list installed immutable runtime packs"
     )
     runtime_listing.set_defaults(action=list_runtimes, action_id="runtimes")
+
+    available_listing = subcommands.add_parser(
+        "list", help="list qualified runtimes available for this hardware"
+    )
+    available_listing.add_argument("model", nargs="?")
+    available_listing.add_argument(
+        "--versions", action="store_true", help="include every retained release"
+    )
+    available_listing.add_argument(
+        "--all-targets",
+        action="store_true",
+        help="include runtimes for hardware targets other than this device",
+    )
+    available_listing.add_argument(
+        "--refresh", action="store_true", help="require a fresh signed catalog"
+    )
+    available_listing.add_argument("--catalog")
+    available_listing.add_argument("--json", action="store_true")
+    available_listing.set_defaults(action=list_available_runtimes, action_id="list")
 
     packing = subcommands.add_parser(
         "pack", help="build a deterministic runtime-pack artifact"

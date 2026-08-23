@@ -36,4 +36,4 @@ runtime, model artifacts, engine, lifecycle, safety, and telemetry.
 - [macOS app release process](operations/macos-release.md)
 
 The public contract is runtime schema 3, runtime artifact schema 3, catalog
-schema 4, and Engine protocol 1. Unsupported schemas fail closed.
+schema 5, and Engine protocol 1. Unsupported schemas fail closed.
