@@ -31,6 +31,10 @@ Use:
 ```
 
 The directory ID and `runtime.id` must match. Put `runtime.json` at its root.
+Add a root `release.json` with schema version 1, a non-empty `authors` array,
+and the SPDX license. Use stable GitHub identities for upstream and Let's Infer
+authors who materially contributed to the runtime; do not credit model authors
+as runtime authors unless they also worked on the serving candidate.
 You may add `adapter/`, `engine/`, `image/`, `kernels/`, `patches/`,
 `scripts/`, `tests/`, provenance, and licenses as needed.
 
@@ -123,7 +127,9 @@ gate passes on the exact model, Engine OCI, runtime bytes, target, and recipe.
 
 Engine or adapter changes first publish a new immutable Engine OCI and update
 the candidate pin, which resets qualification. After qualification, release
-automation publishes the deterministic runtime OCI, regenerates schema-4
-recommendations, signs the catalog, and verifies the public trust root.
+automation publishes the deterministic runtime OCI and runtime-bound benchmark
+evidence OCI, regenerates the append-only schema-5 release index and
+recommendations, signs the catalog, and publishes it directly from the
+runtimes repository after verifying the public trust root.
 
 Do not manually edit the root `manifest.json` or production catalog.
