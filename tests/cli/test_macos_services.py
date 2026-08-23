@@ -12,7 +12,7 @@ import unittest
 
 from core.platform.macos import (
     GATEWAY_LABEL,
-    SITE_LABEL,
+    NODE_LABEL,
     LaunchAgent,
     MacOSServiceError,
     install_launch_agent,
@@ -46,8 +46,8 @@ class MacOSServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             home = pathlib.Path(temporary)
             agent = LaunchAgent(
-                label=SITE_LABEL,
-                arguments=("/opt/letsinfer/bin/letsinfer", "site-agent", "--port", "9770"),
+                label=NODE_LABEL,
+                arguments=("/opt/letsinfer/bin/letsinfer", "node-agent", "--port", "9770"),
                 environment={"PYTHONDONTWRITEBYTECODE": "1"},
             )
             first = render_launch_agent(agent, home=home)
@@ -80,7 +80,7 @@ class MacOSServiceTests(unittest.TestCase):
     def test_shell_and_relative_executables_are_rejected(self) -> None:
         with self.assertRaises(MacOSServiceError):
             render_launch_agent(
-                LaunchAgent(label=SITE_LABEL, arguments=("sh", "-c", "echo unsafe"))
+                LaunchAgent(label=NODE_LABEL, arguments=("sh", "-c", "echo unsafe"))
             )
 
     def test_remove_boots_out_and_deletes_only_the_named_agent(self) -> None:

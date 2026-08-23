@@ -31,8 +31,10 @@ Use:
 ```
 
 The directory ID and `runtime.id` must match. Put `runtime.json` at its root.
-Add a root `release.json` with schema version 1, a non-empty `authors` array,
-and the SPDX license. Use stable GitHub identities for upstream and Let's Infer
+Add a root `release.json` with schema version 2, a non-empty structured
+`authors` array, the SPDX license, and `provenance: null`. Every author records
+the visible GitHub login, immutable numeric GitHub ID, and actor type. Use
+stable GitHub identities for upstream and Let's Infer
 authors who materially contributed to the runtime; do not credit model authors
 as runtime authors unless they also worked on the serving candidate.
 You may add `adapter/`, `engine/`, `image/`, `kernels/`, `patches/`,
@@ -60,8 +62,8 @@ size, and checksum authority in `runtime.json`; a repository link never
 replaces an immutable pin.
 
 Add a `## Reproduce this` section with the exact `letsinfer benchmark
-<logical-model>` command and selectors that reproduce the published
-`benchmark.json`. Use the friendly logical model name, explain that Let's Infer
+<logical-model>` command and selectors that produce a verifier's benchmark
+record. Use the friendly logical model name, explain that Let's Infer
 materializes the standard prompts and collects Watchdog telemetry, and never
 claim selectors or rows that are absent from the sealed record. For an
 unqualified candidate, label the command as the planned qualification run
@@ -97,7 +99,7 @@ attention backend, cache format, or recipe.
 
 ## Validate and package
 
-1. Validate runtime schema 3 and the generated root manifest.
+1. Validate runtime schema 4 and the generated root manifest.
 2. Run `engine-adapter verify --protocol 1` in the exact Engine OCI.
 3. Run every patch, kernel, model, and target-specific test.
 4. Verify every external image and model reference is immutable and the
@@ -119,17 +121,29 @@ counting, telemetry, scheduler capacity, queuing, pressure, too-large requests,
 crash/OOM protection, recovery, restart, reboot persistence, cache behavior,
 and any declared target-specific gate.
 
-Store the validated public results in `benchmark.json` and bind its path,
-SHA-256, and ID in `runtime.json`. Mark the candidate qualified only when every
-gate passes on the exact model, Engine OCI, runtime bytes, target, and recipe.
+Open the candidate PR without a generated consensus file or self-authored
+provenance. After source and supply-chain review adds the `benchmark-ready`
+gate, independent users run:
+
+```bash
+letsinfer benchmark verify <pull-request-url>
+```
+
+Three agreeing users on distinct device identities qualify the exact execution
+subject. Author and PR-author runs remain visible but do not count. The trusted
+bot owns `benchmark.consensus.json`, `release.json.provenance`, canonical
+evidence comments, and the generated catalog projection. Never hand-author or
+copy those fields, and never add a qualification/status flag to `runtime.json`.
 
 ## Publish
 
 Engine or adapter changes first publish a new immutable Engine OCI and update
 the candidate pin, which resets qualification. After qualification, release
-automation publishes the deterministic runtime OCI and runtime-bound benchmark
-evidence OCI, regenerates the append-only schema-5 release index and
-recommendations, signs the catalog, and publishes it directly from the
-runtimes repository after verifying the public trust root.
+automation publishes the deterministic runtime OCI, regenerates the append-only
+schema-6 release index and recommendations, signs the catalog and separate
+revocation ledger, and publishes them directly from the runtimes repository
+after verifying the public trust root. Community verification evidence is not
+copied to OCI; full accepted records remain in canonical bot comments and
+`benchmark.consensus.json`.
 
 Do not manually edit the root `manifest.json` or production catalog.

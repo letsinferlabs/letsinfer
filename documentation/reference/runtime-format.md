@@ -16,15 +16,14 @@ manifest. After verification and installation, core generates its private
 
 ## Required schema
 
-Only runtime schema 3 is accepted. The top-level fields are:
+Only runtime schema 4 is accepted. The top-level fields are:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "id": "sglang--owner--model--dgx-spark",
   "version": "1.0.0",
   "logical_model": "model",
-  "status": "candidate",
   "target": {},
   "engine": {},
   "model": {},
@@ -38,24 +37,29 @@ Only runtime schema 3 is accepted. The top-level fields are:
 ```
 
 `orchestration` is optional. Unknown fields fail closed. Derive `id` exactly
-from `engine.id`, the primary Hugging Face URI, and `target.id`. Set `status`
-to `candidate` or `qualified` and keep it consistent with
-`serving.qualified`.
+from `engine.id`, the primary Hugging Face URI, and `target.id`. Executable
+runtime source contains no qualification or publication status. A release is
+qualified only by inclusion in the signed catalog.
 
 `release.json` is deliberately small and is not included in the executable
 runtime pack:
 
 ```json
 {
-  "schema_version": 1,
-  "authors": ["github-name", "organization-name"],
-  "license": "AGPL-3.0-only"
+  "schema_version": 2,
+  "authors": [
+    {"github_login": "github-name", "github_id": 123, "github_type": "User"}
+  ],
+  "license": "AGPL-3.0-only",
+  "provenance": null
 }
 ```
 
-List every person or organization that materially authored the runtime. Use
-stable GitHub identities when one exists. The signed catalog versions this
-metadata with the runtime release, and `letsinfer list` shows the authors.
+List every person or organization that materially authored the runtime. The
+numeric GitHub ID is authoritative across account renames. Authors leave
+`provenance` null; trusted qualification automation owns that field. The signed
+catalog versions this metadata with the runtime release, and `letsinfer list`
+shows the authors.
 
 ## Model artifacts
 
@@ -104,7 +108,7 @@ Pin one Engine OCI and provide its opaque upstream settings:
 {
   "engine": {
     "id": "sglang",
-    "protocol": {"version": 1},
+    "protocol": {"version": 2},
     "oci": {
       "reference": "ghcr.io/org/image@sha256:<manifest-digest>",
       "immutable_id": "sha256:<image-config-digest>",
@@ -131,23 +135,31 @@ Describe your target by capabilities: platform, accelerator vendor and
 architecture, device count and partitioning, memory topology and minimum, and
 placement/interconnect requirements. Do not use a hostname as a target.
 
+Set `target.placement.strategy` to `single` for an independent group. Core may
+replicate that group across compatible nodes and load-balance the resulting
+endpoints. Set it to `parallel` only when this runtime qualifies an exact TP/PP
+topology. In that case the runtime owns rank layout, engine configuration,
+interconnect requirements, kernels, and adapter inputs; core allocates the
+declared devices and treats the complete group as one endpoint.
+
 Use `container` for measured resource and startup bounds. Use `serving` for
-the measured maximum connections, active requests, context, qualification
-gate, and optional orchestration. Use `cache` for the selected provider and
+the measured maximum connections, active requests, context, and optional
+orchestration. Use `cache` for the selected provider and
 replay contract; its implementation stays inside the Engine OCI.
 
 ## Benchmark record
 
 `benchmark.contract` selects the standard core-owned workload and request
-matrix. A qualified runtime binds a validated `benchmark.json` by path,
-SHA-256, and benchmark ID. Prompts and runners stay in core, so every model
-receives the same benchmark bytes and measurement rules.
+matrix. Prompts and runners stay in core, so every model receives the same
+benchmark bytes and measurement rules. Individual verifiers produce complete
+schema-4 benchmark records. The trusted bot aggregates accepted records into
+`benchmark.consensus.json`, which is excluded from executable pack bytes.
 
 ## Deterministic runtime artifact
 
 `letsinfer pack CANDIDATE --output FILE` creates a deterministic artifact using
-runtime artifact schema 3 and media type
-`application/vnd.letsinfer.runtime.v3+tar`. The generated
+runtime artifact schema 4 and media type
+`application/vnd.letsinfer.runtime.v4+tar`. The generated
 `letsinfer-runtime.json` descriptor records every path, byte length, normalized
 mode, and SHA-256. Paths are sorted; ownership and timestamps are normalized.
 
@@ -155,16 +167,16 @@ Symlinks, traversal, unlisted files, unsafe modes, more than 10,000 files, and
 payloads larger than 1 GiB fail closed. Repacking unchanged source must produce
 identical descriptor and archive bytes.
 
-Publish the pack as a digest-pinned OCI artifact. The full qualified
-`benchmark.json` is a separate immutable OCI evidence artifact bound to that
-runtime OCI. Do not embed model weights or publication metadata in the runtime
-pack.
+Publish the pack as a digest-pinned OCI artifact. Complete community evidence
+stays in canonical bot comments and `benchmark.consensus.json`; do not publish
+it as a second OCI or embed it, model weights, or publication metadata in the
+runtime pack.
 
 ## Source layout
 
 Keep candidate-specific kernels, patches, engine source, image recipes,
 adapters, tests, and qualification helpers beside `runtime.json`. Generic CLI,
-gateway, Watchdog, benchmark runners, prompts, and site orchestration belong to
+gateway, Watchdog, benchmark runners, prompts, and node orchestration belong to
 core and must not be copied into your candidate.
 
 The root runtimes `manifest.json` is generated from candidates. Do not edit it

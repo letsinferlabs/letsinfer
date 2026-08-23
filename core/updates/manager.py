@@ -227,7 +227,7 @@ class UpdateManager:
     """Refresh and expose one transactional update snapshot.
 
     Normal commands call :meth:`cached`, which performs no network I/O and does
-    not create a database. The site agent and `update check` call
+    not create a database. The node agent and `update check` call
     :meth:`refresh`. A SQLite lease prevents concurrent network refreshes across
     the persistent agent and transient CLI processes.
     """
@@ -623,7 +623,7 @@ class UpdateManager:
 
 
 class UpdatePoller:
-    """Bounded background refresh owned by the existing site-agent process."""
+    """Bounded background refresh owned by the existing node-agent process."""
 
     def __init__(
         self,

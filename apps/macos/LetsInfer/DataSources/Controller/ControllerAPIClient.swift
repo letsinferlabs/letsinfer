@@ -19,13 +19,13 @@ struct LogicalSiteIdentity: Decodable, Equatable, Sendable {
     let memberPublicKeySHA256: String
 
     enum CodingKeys: String, CodingKey {
-        case siteID = "site_id"
-        case memberID = "member_id"
+        case siteID = "node_id"
+        case memberID = "machine_id"
         case displayName = "display_name"
         case role
-        case coordinatorID = "coordinator_id"
-        case coordinatorAddress = "coordinator_address"
-        case memberPublicKeySHA256 = "member_public_key_sha256"
+        case coordinatorID = "main_id"
+        case coordinatorAddress = "main_address"
+        case memberPublicKeySHA256 = "machine_public_key_sha256"
     }
 }
 
@@ -196,6 +196,7 @@ struct SiteMemberRecord: Decodable, Equatable, Identifiable, Sendable {
 
 struct SitePlacementRecord: Decodable, Equatable, Identifiable, Sendable {
     var id: String { placementID }
+    let groupID: String
     let placementID: String
     let model: String
     let runtime: String
@@ -205,17 +206,26 @@ struct SitePlacementRecord: Decodable, Equatable, Identifiable, Sendable {
     let members: [String]
     let endpoints: [SitePlacementEndpoint]
     let capacity: SitePlacementCapacity?
+    let release: SiteRuntimeRelease?
+    let deviceAllocations: [SiteDeviceAllocation]
+    let telemetry: SiteGroupTelemetry?
     let updatedAtUnix: Int
 
     enum CodingKeys: String, CodingKey {
+        case groupID = "group_id"
         case placementID = "placement_id"
         case model, runtime, target, strategy, state, members, endpoints, capacity
+        case release
+        case deviceAllocations = "device_allocations"
+        case telemetry
         case updatedAtUnix = "updated_at_unix"
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         placementID = try container.decode(String.self, forKey: .placementID)
+        groupID = try container.decodeIfPresent(String.self, forKey: .groupID)
+            ?? placementID
         model = try container.decode(String.self, forKey: .model)
         runtime = try container.decode(String.self, forKey: .runtime)
         target = try container.decode(String.self, forKey: .target)
@@ -228,9 +238,52 @@ struct SitePlacementRecord: Decodable, Equatable, Identifiable, Sendable {
         capacity = try container.decodeIfPresent(
             SitePlacementCapacity.self, forKey: .capacity
         )
+        release = try container.decodeIfPresent(
+            SiteRuntimeRelease.self, forKey: .release
+        )
+        deviceAllocations = try container.decodeIfPresent(
+            [SiteDeviceAllocation].self, forKey: .deviceAllocations
+        ) ?? []
+        telemetry = try container.decodeIfPresent(
+            SiteGroupTelemetry.self, forKey: .telemetry
+        )
         updatedAtUnix = try container.decodeIfPresent(
             Int.self, forKey: .updatedAtUnix
         ) ?? 0
+    }
+}
+
+struct SiteRuntimeRelease: Decodable, Equatable, Sendable {
+    let candidateID: String
+    let version: String
+    let qualification: String
+    let authors: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case candidateID = "candidate_id"
+        case version, qualification, authors
+    }
+}
+
+struct SiteDeviceAllocation: Decodable, Equatable, Sendable {
+    let machineID: String
+    let deviceUUID: String
+    let state: String
+
+    enum CodingKeys: String, CodingKey {
+        case machineID = "machine_id"
+        case deviceUUID = "device_uuid"
+        case state
+    }
+}
+
+struct SiteGroupTelemetry: Decodable, Equatable, Sendable {
+    let activeRequests: Int
+    let maxActiveRequests: Int
+
+    enum CodingKeys: String, CodingKey {
+        case activeRequests = "active_requests"
+        case maxActiveRequests = "max_active_requests"
     }
 }
 
@@ -308,18 +361,23 @@ struct ControllerSiteDocument: Decodable, Equatable, Sendable {
     let identity: LogicalSiteIdentity
     let members: [SiteMemberRecord]
     let topology: SiteTopologyRecord
-    let placements: [SitePlacementRecord]
+    let services: [ControllerModelService]
     let pendingTopologyPlans: [SiteTopologyPlanRecord]
     let exposure: SiteExposureRecord
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
-        case identity, members, topology, placements, exposure
+        case identity, topology, services, exposure
+        case members = "machines"
         case pendingTopologyPlans = "pending_topology_plans"
     }
 
     var activeMemberCount: Int {
         members.count { $0.state == "active" }
+    }
+
+    var placements: [SitePlacementRecord] {
+        services.flatMap(\.groups)
     }
 
     var currentPlacements: [SitePlacementRecord] {
@@ -364,6 +422,33 @@ struct ControllerSiteDocument: Decodable, Equatable, Sendable {
     }
 }
 
+struct ControllerModelService: Decodable, Equatable, Identifiable, Sendable {
+    var id: String { serviceID }
+    let serviceID: String
+    let model: String
+    let desiredState: String
+    let groups: [SitePlacementRecord]
+    let telemetry: SiteServiceTelemetry
+
+    enum CodingKeys: String, CodingKey {
+        case serviceID = "service_id"
+        case model, groups, telemetry
+        case desiredState = "desired_state"
+    }
+}
+
+struct SiteServiceTelemetry: Decodable, Equatable, Sendable {
+    let activeRequests: Int
+    let queuedRequests: Int
+    let available: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case activeRequests = "active_requests"
+        case queuedRequests = "queued_requests"
+        case available
+    }
+}
+
 struct ControllerSiteEnvelope: Decodable, Equatable, Sendable {
     let protocolName: String
     let controller: ControllerPrincipal
@@ -371,7 +456,8 @@ struct ControllerSiteEnvelope: Decodable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case protocolName = "protocol"
-        case controller, site
+        case controller
+        case site = "node"
     }
 }
 
@@ -748,7 +834,7 @@ struct MemberInvite: Decodable, Equatable, Sendable {
         case inviteID = "invite_id"
         case mode, code, endpoint
         case expiresAtUnix = "expires_at_unix"
-        case coordinatorCertificateSHA256 = "coordinator_certificate_sha256"
+        case coordinatorCertificateSHA256 = "main_certificate_sha256"
     }
 }
 
@@ -1229,7 +1315,7 @@ actor ControllerAPIClient: ControllerSiteAPI {
     }
 
     func site(for savedSite: SavedSite) async throws -> ControllerSiteEnvelope {
-        try await request(savedSite, path: "/control/v1/site")
+        try await request(savedSite, path: "/control/v1/node")
     }
 
     func telemetry(for savedSite: SavedSite) async throws -> ControllerTelemetryEnvelope {
@@ -1343,7 +1429,7 @@ actor ControllerAPIClient: ControllerSiteAPI {
         )
         return try await administrationRequest(
             savedSite,
-            path: "/control/v1/members/remove",
+            path: "/control/v1/children/remove",
             method: "POST",
             body: body
         )
@@ -1355,7 +1441,7 @@ actor ControllerAPIClient: ControllerSiteAPI {
     ) async throws -> ControllerAdministrationEnvelope<MemberApprovalResult> {
         try await memberRoutingRequest(
             memberID: memberID,
-            path: "/control/v1/members/drain",
+            path: "/control/v1/children/drain",
             for: savedSite
         )
     }
@@ -1366,7 +1452,7 @@ actor ControllerAPIClient: ControllerSiteAPI {
     ) async throws -> ControllerAdministrationEnvelope<MemberApprovalResult> {
         try await memberRoutingRequest(
             memberID: memberID,
-            path: "/control/v1/members/resume",
+            path: "/control/v1/children/resume",
             for: savedSite
         )
     }
@@ -1401,7 +1487,7 @@ actor ControllerAPIClient: ControllerSiteAPI {
     func siteMovePlan(for savedSite: SavedSite) async throws
         -> ControllerAdministrationEnvelope<SiteMovePlanResult> {
         try await administrationRequest(
-            savedSite, path: "/control/v1/site-move/plan"
+            savedSite, path: "/control/v1/node-move/plan"
         )
     }
 
@@ -1421,7 +1507,7 @@ actor ControllerAPIClient: ControllerSiteAPI {
         ])
         return try await administrationRequest(
             savedSite,
-            path: "/control/v1/members/invite",
+            path: "/control/v1/children/invite",
             method: "POST",
             body: body
         )
@@ -1444,7 +1530,7 @@ actor ControllerAPIClient: ControllerSiteAPI {
         ])
         return try await administrationRequest(
             savedSite,
-            path: "/control/v1/members/adopt",
+            path: "/control/v1/children/adopt",
             method: "POST",
             body: body
         )
@@ -1461,7 +1547,7 @@ actor ControllerAPIClient: ControllerSiteAPI {
         ])
         return try await administrationRequest(
             savedSite,
-            path: "/control/v1/members/approve",
+            path: "/control/v1/children/approve",
             method: "POST",
             body: body
         )
@@ -1479,13 +1565,13 @@ actor ControllerAPIClient: ControllerSiteAPI {
             "endpoint": invite.endpoint,
             "invite_id": invite.inviteID,
             "code": invite.code.map { $0 as Any } ?? NSNull(),
-            "coordinator_certificate_sha256": invite.coordinatorCertificateSHA256,
+            "main_certificate_sha256": invite.coordinatorCertificateSHA256,
             "member_name": memberName,
             "member_address": memberAddress,
         ])
         return try await administrationRequest(
             savedSite,
-            path: "/control/v1/site-move/prepare",
+            path: "/control/v1/node-move/prepare",
             method: "POST",
             body: body
         )
@@ -1498,7 +1584,7 @@ actor ControllerAPIClient: ControllerSiteAPI {
         let body = try JSONSerialization.data(withJSONObject: ["move_id": moveID])
         return try await administrationRequest(
             savedSite,
-            path: "/control/v1/site-move/commit",
+            path: "/control/v1/node-move/commit",
             method: "POST",
             body: body
         )
@@ -1511,7 +1597,7 @@ actor ControllerAPIClient: ControllerSiteAPI {
         let body = try JSONSerialization.data(withJSONObject: ["move_id": moveID])
         return try await administrationRequest(
             savedSite,
-            path: "/control/v1/site-move/cancel",
+            path: "/control/v1/node-move/cancel",
             method: "POST",
             body: body
         )
@@ -1524,7 +1610,7 @@ actor ControllerAPIClient: ControllerSiteAPI {
         let body = try JSONSerialization.data(withJSONObject: ["member_id": memberID])
         return try await administrationRequest(
             savedSite,
-            path: "/control/v1/members/cancel",
+            path: "/control/v1/children/cancel",
             method: "POST",
             body: body
         )
@@ -1601,7 +1687,7 @@ actor ControllerAPIClient: ControllerSiteAPI {
         }
         let value = try JSONDecoder().decode(Response.self, from: data)
         if let site = value as? ControllerSiteEnvelope,
-           site.protocolName != controllerProtocol || site.site.schemaVersion != 1 {
+           site.protocolName != controllerProtocol || site.site.schemaVersion != 2 {
             throw ControllerAPIError.invalidResponse
         }
         if let telemetry = value as? ControllerTelemetryEnvelope,

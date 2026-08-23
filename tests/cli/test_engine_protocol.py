@@ -20,7 +20,7 @@ from tests.runtime_fixture import runtime_candidate
 
 class EngineProtocolTests(unittest.TestCase):
     def manifest(self) -> dict:
-        return cli.runtime_execution_manifest(runtime_candidate())
+        return cli.runtime_execution_manifest(runtime_candidate(), qualified=False)
 
     def test_arbitrary_engine_uses_one_fixed_protocol_entrypoint(self) -> None:
         manifest = self.manifest()
@@ -45,7 +45,7 @@ class EngineProtocolTests(unittest.TestCase):
         runtime = runtime_candidate()
         runtime["engine"]["environment"]["LETSINFER_LISTEN_PORT"] = "1"
         with self.assertRaisesRegex(Exception, "without LETSINFER_"):
-            cli.runtime_execution_manifest(runtime)
+            cli.runtime_execution_manifest(runtime, qualified=False)
 
     def test_unknown_engine_arguments_are_adapter_owned_and_opaque(self) -> None:
         runtime = runtime_candidate()
@@ -54,7 +54,7 @@ class EngineProtocolTests(unittest.TestCase):
             "opaque-value",
             "${artifact:model}",
         ]
-        manifest = cli.runtime_execution_manifest(runtime)
+        manifest = cli.runtime_execution_manifest(runtime, qualified=False)
         self.assertEqual(
             manifest["engine"]["arguments"], runtime["engine"]["arguments"]
         )

@@ -274,7 +274,7 @@ final class SiteMonitoringController: ObservableObject {
                 return
             case "failed":
                 throw ControllerAPIError.rejected(
-                    "Site action failed (\(envelope.action.error ?? "unknown"))."
+                    "Node action failed (\(envelope.action.error ?? "unknown"))."
                 )
             case "accepted":
                 continue
@@ -282,7 +282,7 @@ final class SiteMonitoringController: ObservableObject {
                 throw ControllerAPIError.invalidResponse
             }
         }
-        throw ControllerAPIError.rejected("Site action timed out.")
+        throw ControllerAPIError.rejected("Node action timed out.")
     }
 
     func runtimeActionPending(siteID: SavedSite.ID, placementID: String) -> Bool {

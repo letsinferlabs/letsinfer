@@ -62,7 +62,7 @@ def _endpoint(address: str) -> str:
 
 
 class SiteAdministration:
-    """Bounded in-memory coordinator transaction state for Mac administration."""
+    """Bounded in-memory main-node transaction state for Mac administration."""
 
     def __init__(
         self,
@@ -71,8 +71,8 @@ class SiteAdministration:
         move_apply: MoveApply = apply_prepared_move,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        if identity.role != "coordinator":
-            raise AdministrationError("site administration is coordinator-only")
+        if identity.role != "main":
+            raise AdministrationError("node administration is main-only")
         self.identity = identity
         self.move_apply = move_apply
         self.clock = clock
@@ -96,13 +96,13 @@ class SiteAdministration:
             raise AdministrationError("controller identity is invalid")
         if not isinstance(payload, Mapping):
             raise AdministrationError("administrator request must be an object")
-        if action == "site.move.plan":
+        if action == "node.move.plan":
             if payload:
-                raise AdministrationError("site move plan does not accept arguments")
+                raise AdministrationError("node move plan does not accept arguments")
             with SiteStore(identity=self.identity) as store:
                 plan = plan_local_move(store).document()
                 store.record_action(
-                    "site.move.plan",
+                    "node.move.plan",
                     self.identity.site_id,
                     "success",
                     actor_type="controller",
@@ -110,19 +110,19 @@ class SiteAdministration:
                     origin_interface="controller-api",
                 )
                 return {"plan": plan}
-        if action == "member.invite":
+        if action == "child.invite":
             return self._invite(controller_id, payload)
-        if action == "member.adopt":
+        if action == "child.adopt":
             return self._adopt(controller_id, payload)
-        if action == "member.approve":
+        if action == "child.approve":
             return self._approve(controller_id, payload)
-        if action == "member.cancel":
+        if action == "child.cancel":
             return self._cancel_member(controller_id, payload)
-        if action == "member.drain":
+        if action == "child.drain":
             return self._set_member_draining(controller_id, payload, True)
-        if action == "member.resume":
+        if action == "child.resume":
             return self._set_member_draining(controller_id, payload, False)
-        if action == "member.remove":
+        if action == "child.remove":
             return self._remove_member(controller_id, payload)
         if action == "key.list":
             return self._list_keys(controller_id, payload)
@@ -136,11 +136,11 @@ class SiteAdministration:
             return self._revoke_key(controller_id, payload)
         if action == "key.policy":
             return self._update_key_policy(controller_id, payload)
-        if action == "site.move.prepare":
+        if action == "node.move.prepare":
             return self._prepare_move(controller_id, payload)
-        if action == "site.move.commit":
+        if action == "node.move.commit":
             return self._commit_move(controller_id, payload)
-        if action == "site.move.cancel":
+        if action == "node.move.cancel":
             return self._cancel_move(controller_id, payload)
         raise AdministrationError("administrator action is not supported")
 
@@ -425,7 +425,7 @@ class SiteAdministration:
             if direct_link is not None
             else self.identity.coordinator_address
         )
-        invite["coordinator_certificate_sha256"] = _certificate_sha256()
+        invite["main_certificate_sha256"] = _certificate_sha256()
         if direct_link is not None:
             invite["direct_link"] = direct_link
         return {"invite": invite}
@@ -488,7 +488,7 @@ class SiteAdministration:
             )
             with SiteStore(identity=self.identity) as store:
                 store.record_action(
-                    "member.adopt",
+                    "child.adopt",
                     payload["source_member_id"],
                     "success",
                     actor_type="controller",
@@ -500,7 +500,7 @@ class SiteAdministration:
             try:
                 with SiteStore(identity=self.identity) as store:
                     store.record_action(
-                        "member.adopt",
+                        "child.adopt",
                         str(payload.get("source_member_id", "unknown")),
                         "failed",
                         type(error).__name__,
@@ -550,33 +550,33 @@ class SiteAdministration:
             "endpoint",
             "invite_id",
             "code",
-            "coordinator_certificate_sha256",
+            "main_certificate_sha256",
             "member_name",
             "member_address",
         }
         if set(payload) != expected:
-            raise AdministrationError("site move preparation schema is invalid")
+            raise AdministrationError("node move preparation schema is invalid")
         if payload.get("source_site_id") != self.identity.site_id:
-            raise AdministrationError("site move source identity changed")
+            raise AdministrationError("node move source identity changed")
         text_fields = (
             "endpoint",
             "invite_id",
-            "coordinator_certificate_sha256",
+            "main_certificate_sha256",
             "member_name",
             "member_address",
         )
         if any(not isinstance(payload.get(field), str) for field in text_fields):
-            raise AdministrationError("site move preparation value is invalid")
+            raise AdministrationError("node move preparation value is invalid")
         code = payload.get("code")
         if code is not None and not isinstance(code, str):
-            raise AdministrationError("site move membership code is invalid")
+            raise AdministrationError("node move child code is invalid")
         try:
             prepared = prepare_local_move(
                 endpoint=str(payload["endpoint"]),
                 invite_id=str(payload["invite_id"]),
                 code=code,
                 coordinator_certificate_sha256=str(
-                    payload["coordinator_certificate_sha256"]
+                    payload["main_certificate_sha256"]
                 ),
                 member_name=str(payload["member_name"]),
                 member_address=str(payload["member_address"]),
@@ -586,11 +586,11 @@ class SiteAdministration:
         with self._lock:
             self._prune()
             if len(self._moves) >= MAX_PREPARED_MOVES:
-                raise AdministrationError("prepared site move limit reached")
+                raise AdministrationError("prepared node move limit reached")
             self._moves[prepared.move_id] = (controller_id, prepared)
         with SiteStore(identity=self.identity) as store:
             store.record_action(
-                "site.move.prepare",
+                "node.move.prepare",
                 prepared.package.document["site_id"],
                 "success",
                 actor_type="controller",
@@ -630,24 +630,24 @@ class SiteAdministration:
         self, controller_id: str, payload: Mapping[str, Any]
     ) -> dict[str, Any]:
         if set(payload) != {"move_id"}:
-            raise AdministrationError("site move cancellation schema is invalid")
+            raise AdministrationError("node move cancellation schema is invalid")
         move_id = payload.get("move_id")
         if not isinstance(move_id, str) or not ID_RE.fullmatch(move_id):
-            raise AdministrationError("prepared site move identity is invalid")
+            raise AdministrationError("prepared node move identity is invalid")
         with self._lock:
             self._prune()
             record = self._moves.get(move_id)
             if record is None:
-                raise AdministrationError("prepared site move is unknown or expired")
+                raise AdministrationError("prepared node move is unknown or expired")
             owner, prepared = record
             if owner != controller_id:
                 raise AdministrationError(
-                    "prepared site move belongs to another controller"
+                    "prepared node move belongs to another controller"
                 )
             self._moves.pop(move_id, None)
         with SiteStore(identity=self.identity) as store:
             store.record_action(
-                "site.move.cancel",
+                "node.move.cancel",
                 prepared.package.document["site_id"],
                 "success",
                 actor_type="controller",
@@ -661,18 +661,18 @@ class SiteAdministration:
         self, controller_id: str, payload: Mapping[str, Any]
     ) -> dict[str, Any]:
         if set(payload) != {"move_id"}:
-            raise AdministrationError("site move commit schema is invalid")
+            raise AdministrationError("node move commit schema is invalid")
         move_id = payload.get("move_id")
         if not isinstance(move_id, str) or not ID_RE.fullmatch(move_id):
-            raise AdministrationError("prepared site move identity is invalid")
+            raise AdministrationError("prepared node move identity is invalid")
         with self._lock:
             self._prune()
             record = self._moves.get(move_id)
         if record is None:
-            raise AdministrationError("prepared site move is unknown or expired")
+            raise AdministrationError("prepared node move is unknown or expired")
         owner, prepared = record
         if owner != controller_id:
-            raise AdministrationError("prepared site move belongs to another controller")
+            raise AdministrationError("prepared node move belongs to another controller")
         try:
             replacement = self.move_apply(prepared)
         except SiteError as error:

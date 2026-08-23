@@ -22,7 +22,7 @@ def identity() -> SiteIdentity:
         member_id=MEMBER,
         installation_id="4" * 64,
         display_name="Fixture",
-        role="member",
+        role="child",
         coordinator_id="5" * 32,
         coordinator_address="coordinator.local",
         site_public_key_sha256="6" * 64,
@@ -84,7 +84,7 @@ class LinkStoreTests(unittest.TestCase):
 
     def test_proof_uses_local_freshness_and_binds_peer_challenge(self) -> None:
         challenge = {
-            "protocol": "letsinfer-site-link-v1",
+            "protocol": "letsinfer-node-link-v1",
             "member_id": PEER,
             "requester_member_id": MEMBER,
             "nonce": "a" * 64,

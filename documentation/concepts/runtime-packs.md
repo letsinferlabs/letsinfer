@@ -24,7 +24,7 @@ Let's Infer:
 5. downloads every model artifact declared by that runtime;
 6. pulls the digest-pinned Engine OCI;
 7. verifies all identities and compatibility; and
-8. starts the runtime behind your site's OpenAI-compatible gateway.
+8. starts the runtime behind your node's OpenAI-compatible gateway.
 
 You may select an exact candidate with `--runtime`. You never need to supply an
 engine name or a `targets/...` path.
@@ -54,13 +54,13 @@ SPDX license. Those values are versioned in the signed catalog and shown by
 `letsinfer list`. The directory may also contain `engine/`, `adapter/`, `image/`,
 `kernels/`, `patches/`, `scripts/`, and `tests/` beside `runtime.json`.
 Keep only the candidate's implementation closure there. Shared gateway,
-Watchdog, benchmark, prompt, and site code stays in core.
+Watchdog, benchmark, prompt, and node-orchestration code stays in core.
 
 ## Engine independence
 
 The Engine OCI combines an upstream engine version and the adapter for that
 version. The runtime pins the OCI by digest and supplies opaque native
-arguments. Core speaks only Engine protocol v1.
+arguments. Core speaks only Engine protocol v2.
 
 You need a new Engine OCI when the upstream engine or its adapter changes. You
 need a core change only when the stable Let's Infer Engine protocol itself
@@ -75,10 +75,12 @@ OCI, model revision, or runtime pack.
 
 The generated root `manifest.json` is an append-only versioned release index.
 It retains every qualified candidate version, authors, license, immutable
-runtime OCI, benchmark summary, and full benchmark-evidence OCI reference.
-Release automation selects one qualified recommendation for each logical model
-and target, signs the exact projection, and publishes it directly as the latest
-release of the runtimes repository.
+runtime OCI, benchmark score, structured verifier list, and consensus digest.
+Complete accepted evidence remains in canonical bot comments and the generated
+`benchmark.consensus.json`; it is not duplicated into an evidence OCI. Release
+automation selects one qualified recommendation for each logical model and
+target, signs the exact projection and separate revocation ledger, and
+publishes them together from the runtimes repository.
 
 Discover compatible releases before installing:
 
@@ -116,6 +118,15 @@ python3 tools/generate_manifest.py --validate-only
 letsinfer pack <candidate-directory> --output /tmp/runtime.letsinfer
 ```
 
-Pack the same source twice and require byte-identical output. After engine
-protocol, safety, restart, pressure, crash, API, and benchmark gates pass,
-commit the exact `benchmark.json` and mark the candidate qualified.
+Pack the same source twice and require byte-identical output. After engine,
+safety, restart, pressure, crash, and API review, wait for the PR's
+`benchmark-ready` gate. Independent users then run:
+
+```bash
+letsinfer benchmark verify <runtime-pr-url>
+```
+
+The verification bot owns `benchmark.consensus.json`, qualification provenance,
+and the catalog projection. Runtime source cannot mark itself qualified. A
+post-release invalidation enters the separate signed revocation ledger; it
+does not rewrite the immutable release or add a status field to the manifest.

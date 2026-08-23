@@ -17,6 +17,8 @@ from core.orchestration.coordinator import (
 )
 from core.orchestration.member import PROTOCOL
 from core.site import state
+from tests.gateway.helpers import insert_member, routing_facts, set_member_facts
+from tests.orchestration.helpers import parallel_contract, release_identity
 
 
 class CoordinatorOrchestrationTests(unittest.TestCase):
@@ -29,41 +31,20 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         self.environment.start()
         self.identity = state.setup_site()
         self.members = (self.identity.member_id, "e" * 32, "f" * 32)
-        self.contract = {
-            "schema_version": 1,
-            "strategy": "distributed",
-            "member_count": 3,
-            "engine_strategy": "tensor-parallel",
-            "failure_policy": "whole-group",
-            "minimum_healthy_members": 3,
-            "startup_order": ["engine-member", "engine-coordinator"],
-            "roles": {
-                "engine-member": {
-                    "assignment": "members",
-                    "launcher": "runtime-command",
-                    "port_count": 4,
-                    "command": ["/opt/runtime/launch", "member"],
-                    "environment": {},
-                    "inference_endpoint": False,
-                    "readiness": {
-                        "kind": "exec", "command": ["/opt/runtime/ready"],
-                        "interval_seconds": 1, "timeout_seconds": 1, "retries": 5,
-                    },
-                },
-                "engine-coordinator": {
-                    "assignment": "engine-coordinator",
-                    "launcher": "runtime-command",
-                    "port_count": 4,
-                    "command": ["/opt/runtime/launch", "coordinator"],
-                    "environment": {},
-                    "inference_endpoint": True,
-                    "readiness": {
-                        "kind": "exec", "command": ["/opt/runtime/ready"],
-                        "interval_seconds": 1, "timeout_seconds": 1, "retries": 5,
-                    },
-                },
-            },
-        }
+        self.contract = parallel_contract()
+        self.release = release_identity(
+            manifest_sha256="2" * 64,
+            runtime_digest="3" * 64,
+        )
+        self.store = state.SiteStore(identity=self.identity)
+        set_member_facts(
+            self.store,
+            self.identity.member_id,
+            routing_facts(self.identity.member_id),
+        )
+        insert_member(self.store, "e" * 32)
+        insert_member(self.store, "f" * 32)
+        self.service_id = self.store.ensure_model_service("model")["service_id"]
         self.plan = build_group_plan(
             self.contract,
             member_ids=self.members,
@@ -72,17 +53,32 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
             topology_sha256="1" * 64,
             manifest_sha256="2" * 64,
             runtime_digest="3" * 64,
+            service_id=self.service_id,
+            release=self.release,
             member_port_bases={item: 18000 for item in self.members},
+            member_device_uuids={
+                item: [f"GPU-{item[:8]}"] for item in self.members
+            },
         )
         self.placement_id = "4" * 32
-        self.store = state.SiteStore(identity=self.identity)
         self.store.set_placement({
             "placement_id": self.placement_id,
+            "service_id": self.service_id,
             "model": "model", "runtime": "runtime", "target": "target",
-            "strategy": "distributed", "state": "starting",
+            "strategy": "parallel", "state": "starting",
             "topology_sha256": "1" * 64,
             "members": list(self.members), "endpoints": [], "capacity": {},
         })
+        self.store.reserve_group_devices(
+            self.plan.group_id,
+            [
+                {
+                    "member_id": assignment.member_id,
+                    "device_uuids": list(assignment.device_uuids),
+                }
+                for assignment in self.plan.assignments
+            ],
+        )
         self.records = {
             item: {
                 "member_id": item,
@@ -102,7 +98,7 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
             store=self.store,
             plan=self.plan,
             placement_id=self.placement_id,
-            source="registry.example/runtime@sha256:" + "9" * 64,
+            source=str(self.release["source"]),
             members=self.records,
             submit=submit,
             status=statuses or (lambda _member, group_id: {
@@ -279,93 +275,6 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
             [role for action, role in calls if action == "stop"],
             ["engine-coordinator", "engine-member", "engine-member"],
         )
-
-    def test_replica_recovery_does_not_restart_healthy_peer(self) -> None:
-        contract = {
-            "schema_version": 1,
-            "strategy": "replicated",
-            "member_count": 2,
-            "engine_strategy": "replica-pool",
-            "failure_policy": "replica-independent",
-            "minimum_healthy_members": 1,
-            "startup_order": ["replica"],
-            "roles": {
-                "replica": {
-                    "assignment": "all",
-                    "launcher": "manifest",
-                    "port_count": 1,
-                    "environment": {},
-                    "inference_endpoint": True,
-                    "readiness": {"kind": "manifest"},
-                }
-            },
-        }
-        members = self.members[:2]
-        plan = build_group_plan(
-            contract,
-            member_ids=members,
-            member_addresses={item: f"{index}.local" for index, item in enumerate(members)},
-            engine_coordinator_id=members[0],
-            topology_sha256="a" * 64,
-            manifest_sha256="b" * 64,
-            runtime_digest="c" * 64,
-            member_port_bases={item: 19000 for item in members},
-        )
-        placement_id = "d" * 32
-        self.store.set_placement({
-            "placement_id": placement_id,
-            "model": "model-b", "runtime": "runtime-b", "target": "target-b",
-            "strategy": "replicated", "state": "starting",
-            "topology_sha256": "a" * 64,
-            "members": list(members), "endpoints": [], "capacity": {},
-        })
-        states = {item: "running" for item in members}
-        calls: list[tuple[str, str]] = []
-
-        def submit(member, job, _credential):
-            calls.append((job["action"], member["member_id"]))
-            if job["action"] == "start":
-                states[member["member_id"]] = "running"
-            elif job["action"] == "stop":
-                states[member["member_id"]] = "stopped"
-            return {
-                "protocol": PROTOCOL,
-                "operation_id": job["operation_id"],
-                "state": "succeeded",
-                "result": {"state": job["action"]},
-            }
-
-        orchestrator = EngineGroupOrchestrator(
-            store=self.store,
-            plan=plan,
-            placement_id=placement_id,
-            source="registry.example/runtime@sha256:" + "9" * 64,
-            members={item: self.records[item] for item in members},
-            submit=submit,
-            status=lambda member, group_id: {
-                "protocol": PROTOCOL,
-                "group": {"group_id": group_id, "state": states[member["member_id"]]},
-                "protection_trip_latched": False,
-            },
-            job_status=lambda _member, operation_id: {
-                "protocol": PROTOCOL,
-                "job": {
-                    "operation_id": operation_id,
-                    "state": "succeeded",
-                    "result": {"state": "complete"},
-                },
-            },
-        )
-        orchestrator.stage()
-        orchestrator.start()
-        calls.clear()
-        states[members[1]] = "failed"
-        degraded = orchestrator.reconcile()
-        self.assertEqual(degraded["state"], "degraded")
-        result = orchestrator.recover_replicas()
-        self.assertEqual(result["state"], "running")
-        self.assertEqual(calls, [("stop", members[1]), ("start", members[1])])
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from core.orchestration import build_group_plan
+from core.orchestration import build_single_group_plan
+from tests.gateway.helpers import insert_member, routing_facts, set_member_facts
+from tests.orchestration.helpers import release_identity
 from core.site import state
 
 
@@ -31,7 +33,7 @@ class SiteStateTests(unittest.TestCase):
 
     def test_setup_separates_site_and_member_keys(self) -> None:
         identity = state.setup_site("Home", "127.0.0.1")
-        self.assertEqual(identity.role, "coordinator")
+        self.assertEqual(identity.role, "main")
         self.assertNotEqual(
             state.site_key_path().read_bytes(), state.member_key_path().read_bytes()
         )
@@ -209,6 +211,9 @@ class SiteStateTests(unittest.TestCase):
             },
         }
         with state.SiteStore(identity=identity) as store:
+            placement["service_id"] = store.ensure_model_service(
+                "fixture-model"
+            )["service_id"]
             store.set_placement(placement)
             invalid: list[tuple[str, dict]] = []
             for label, path, value in (
@@ -239,7 +244,7 @@ class SiteStateTests(unittest.TestCase):
                     with self.assertRaises(state.SiteError):
                         store.set_placement(candidate)
 
-    def test_new_running_placement_atomically_supersedes_old_model_placement(self) -> None:
+    def test_replica_placements_for_one_model_service_can_run_together(self) -> None:
         identity = state.setup_site()
         endpoint = {
             "member_id": identity.member_id,
@@ -280,11 +285,14 @@ class SiteStateTests(unittest.TestCase):
             }
         )
         with state.SiteStore(identity=identity) as store:
+            service_id = store.ensure_model_service("fixture-model")["service_id"]
+            first["service_id"] = service_id
+            second["service_id"] = service_id
             store.set_placement(first)
             before = store.verify_audit()["events"]
             store.set_placement(second)
             placements = {row["placement_id"]: row for row in store.placements()}
-            self.assertEqual(placements[first["placement_id"]]["state"], "stopped")
+            self.assertEqual(placements[first["placement_id"]]["state"], "running")
             self.assertEqual(placements[second["placement_id"]]["state"], "running")
             self.assertEqual(store.verify_audit()["events"], before + 1)
 
@@ -305,7 +313,7 @@ class SiteStateTests(unittest.TestCase):
             events = store.audit_rows(limit=2)
             self.assertEqual(
                 [event["action"] for event in events],
-                ["member.resume", "member.drain"],
+                ["child.resume", "child.drain"],
             )
             self.assertTrue(all(event["outcome"] == "success" for event in events))
             self.assertEqual(store.verify_audit()["events"], before + 2)
@@ -380,55 +388,43 @@ class SiteStateTests(unittest.TestCase):
 
     def test_engine_group_transition_is_placement_bound_and_audited(self) -> None:
         identity = state.setup_site()
-        other = "f" * 32
-        contract = {
-            "schema_version": 1,
-            "strategy": "replicated",
-            "member_count": 2,
-            "engine_strategy": "replica-pool",
-            "failure_policy": "replica-independent",
-            "minimum_healthy_members": 1,
-            "startup_order": ["replica"],
-            "roles": {
-                "replica": {
-                    "assignment": "all",
-                    "launcher": "manifest",
-                    "port_count": 1,
-                    "environment": {},
-                    "inference_endpoint": True,
-                    "readiness": {"kind": "manifest"},
-                }
-            },
-        }
-        plan = build_group_plan(
-            contract,
-            member_ids=(identity.member_id, other),
-            member_addresses={identity.member_id: "a.local:9770", other: "b.local:9770"},
-            engine_coordinator_id=identity.member_id,
-            topology_sha256="1" * 64,
+        sealed_release = release_identity(
             manifest_sha256="2" * 64,
             runtime_digest="3" * 64,
-            member_port_bases={identity.member_id: 18000, other: 18000},
         )
         placement_id = "4" * 32
-        members = [
-            {
-                "member_id": item.member_id,
-                "role": item.role,
-                "rank": item.rank,
-                "state": "staging",
-                "operation_id": None,
-                "error": None,
-            }
-            for item in plan.assignments
-        ]
         with state.SiteStore(identity=identity) as store:
+            service_id = store.ensure_model_service("example-model")["service_id"]
+            plan = build_single_group_plan(
+                member_id=identity.member_id,
+                member_address="a.local:9770",
+                device_uuids=["GPU-fixture"],
+                engine_strategy="single",
+                topology_sha256="1" * 64,
+                manifest_sha256="2" * 64,
+                runtime_digest="3" * 64,
+                service_id=service_id,
+                release=sealed_release,
+                port_base=18000,
+            )
+            members = [
+                {
+                    "member_id": item.member_id,
+                    "role": item.role,
+                    "rank": item.rank,
+                    "state": "staging",
+                    "operation_id": None,
+                    "error": None,
+                }
+                for item in plan.assignments
+            ]
             store.set_placement({
                 "placement_id": placement_id,
+                "service_id": service_id,
                 "model": "example-model",
                 "runtime": "example-runtime",
                 "target": "example-target",
-                "strategy": "replicated",
+                "strategy": "single",
                 "state": "starting",
                 "topology_sha256": "1" * 64,
                 "members": [item.member_id for item in plan.assignments],
@@ -439,7 +435,7 @@ class SiteStateTests(unittest.TestCase):
             stored = store.set_engine_group(
                 plan.document(),
                 placement_id=placement_id,
-                source="registry.example/runtime@sha256:" + "5" * 64,
+                source=sealed_release["source"],
                 engine_credential_sha256="6" * 64,
                 desired_state="running",
                 state="staging",
@@ -452,8 +448,32 @@ class SiteStateTests(unittest.TestCase):
             self.assertEqual(rows[0]["plan"], plan.document())
             self.assertEqual(store.verify_audit()["events"], before + 1)
 
+    def test_device_reservation_ignores_unrelated_invalid_node_inventory(self) -> None:
+        identity = state.setup_site()
+        unrelated = "e" * 32
+        with state.SiteStore(identity=identity) as store:
+            set_member_facts(
+                store,
+                identity.member_id,
+                routing_facts(identity.member_id),
+            )
+            insert_member(store, unrelated)
+            store.connection.execute(
+                "UPDATE members SET facts_json='{}' WHERE member_id=?",
+                (unrelated,),
+            )
+            allocations = store.reserve_group_devices(
+                "a" * 32,
+                [{
+                    "member_id": identity.member_id,
+                    "device_uuids": [f"GPU-{identity.member_id[:8]}"],
+                }],
+            )
+        self.assertEqual(len(allocations), 1)
+        self.assertEqual(allocations[0]["member_id"], identity.member_id)
+
     def test_membership_invite_is_one_use_and_site_key_never_moves(self) -> None:
-        coordinator_home = pathlib.Path(self.temporary.name) / "coordinator"
+        coordinator_home = pathlib.Path(self.temporary.name) / "main"
         candidate_home = pathlib.Path(self.temporary.name) / "candidate"
         with mock.patch.dict(
             os.environ,
@@ -468,7 +488,7 @@ class SiteStateTests(unittest.TestCase):
         ):
             candidate = state.prepare_member_identity()
             transcript = {
-                "contract": "letsinfer-member-enrollment-v1",
+                "contract": "letsinfer-child-enrollment-v1",
                 "site_id": coordinator.site_id,
                 "invite_id": invite["invite_id"],
                 "nonce": invite["nonce"],
@@ -526,7 +546,7 @@ class SiteStateTests(unittest.TestCase):
                 enrolled["site_ca_certificate"],
                 enrolled["member_certificate"],
             )
-            self.assertEqual(joined.role, "member")
+            self.assertEqual(joined.role, "child")
             self.assertFalse(state.site_key_path().exists())
             self.assertTrue(state.member_certificate_path().exists())
 
@@ -560,7 +580,7 @@ class SiteStateTests(unittest.TestCase):
                     direct_interface="enp1s0",
                 )
         transcript = {
-            "contract": "letsinfer-member-enrollment-v1",
+            "contract": "letsinfer-child-enrollment-v1",
             "site_id": coordinator.site_id,
             "invite_id": invite["invite_id"],
             "nonce": invite["nonce"],

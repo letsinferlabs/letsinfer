@@ -40,7 +40,7 @@ ID_RE = re.compile(r"^[0-9a-f]{32}$")
 KEY_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 OCI_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CHECKPOINT_INTERVAL = 100
 MAX_REASON_BYTES = 512
 MAX_TAG_BYTES = 128
@@ -298,8 +298,8 @@ def _issue_member_certificate(
 
 
 def _ensure_coordinator_control_credentials(identity: SiteIdentity) -> str:
-    if identity.role != "coordinator":
-        raise SiteError("only the coordinator can create site control credentials")
+    if identity.role != "main":
+        raise SiteError("only the main node can create node control credentials")
     site_ca = site_ca_certificate_path()
     member_certificate = member_certificate_path()
     existing = [site_ca.exists(), member_certificate.exists()]
@@ -386,8 +386,8 @@ def _identity_from(value: Mapping[str, Any]) -> SiteIdentity:
     for field in ("installation_id", "site_public_key_sha256", "member_public_key_sha256"):
         if not isinstance(value.get(field), str) or not SHA256_RE.fullmatch(str(value[field])):
             raise SiteError(f"site identity {field} is invalid")
-    if value.get("role") not in {"coordinator", "member"}:
-        raise SiteError("site identity role is invalid")
+    if value.get("role") not in {"main", "child"}:
+        raise SiteError("node identity role is invalid")
     if not isinstance(value.get("coordinator_address"), str) or not value["coordinator_address"].strip():
         raise SiteError("site coordinator address is invalid")
     if not isinstance(value.get("created_at_unix"), int) or isinstance(value["created_at_unix"], bool) or value["created_at_unix"] <= 0:
@@ -413,7 +413,7 @@ def read_identity(path: pathlib.Path | None = None) -> SiteIdentity:
     if not isinstance(value, dict):
         raise SiteError("site identity must be a JSON object")
     identity = _identity_from(value)
-    if identity.role == "coordinator":
+    if identity.role == "main":
         site_fingerprint = _generate_identity_key(site_key_path(), site_public_key_path())
     else:
         if site_key_path().exists():
@@ -425,7 +425,7 @@ def read_identity(path: pathlib.Path | None = None) -> SiteIdentity:
     _validate_site_ca(
         site_ca_certificate_path(),
         site_public_key_path(),
-        private_key=site_key_path() if identity.role == "coordinator" else None,
+        private_key=site_key_path() if identity.role == "main" else None,
     )
     _validate_member_certificate(
         member_certificate_path(),
@@ -453,7 +453,7 @@ def setup_site(display_name: str = "Home", coordinator_address: str | None = Non
         "member_id": member_id,
         "installation_id": installation["installation_id"],
         "display_name": _display_name(display_name),
-        "role": "coordinator",
+        "role": "main",
         "coordinator_id": member_id,
         "coordinator_address": (coordinator_address or socket.getfqdn() or socket.gethostname()).strip(),
         "site_public_key_sha256": site_fingerprint,
@@ -496,9 +496,9 @@ class SiteStore:
         initialize: bool = False,
     ) -> None:
         self.identity = identity or read_identity()
-        if self.identity.role != "coordinator":
+        if self.identity.role != "main":
             raise SiteError(
-                "the authoritative site database is coordinator-only; "
+                "the authoritative node database is main-node-only; "
                 f"coordinator={self.identity.coordinator_id}@{self.identity.coordinator_address}"
             )
         self.path = path or database_path()
@@ -546,7 +546,7 @@ class SiteStore:
             CREATE TABLE IF NOT EXISTS members (
                 member_id TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
-                role TEXT NOT NULL CHECK(role IN ('coordinator','member')),
+                role TEXT NOT NULL CHECK(role IN ('main','child')),
                 address TEXT NOT NULL,
                 public_key_sha256 TEXT NOT NULL UNIQUE,
                 public_key_pem TEXT NOT NULL,
@@ -604,12 +604,20 @@ class SiteStore:
                 consumed_at_unix INTEGER,
                 created_at_unix INTEGER NOT NULL
             ) STRICT;
+            CREATE TABLE IF NOT EXISTS model_services (
+                service_id TEXT PRIMARY KEY,
+                model TEXT NOT NULL UNIQUE,
+                desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped','removed')),
+                created_at_unix INTEGER NOT NULL,
+                updated_at_unix INTEGER NOT NULL
+            ) STRICT;
             CREATE TABLE IF NOT EXISTS placements (
                 placement_id TEXT PRIMARY KEY,
+                service_id TEXT NOT NULL REFERENCES model_services(service_id),
                 model TEXT NOT NULL,
                 runtime TEXT NOT NULL,
                 target TEXT NOT NULL,
-                strategy TEXT NOT NULL CHECK(strategy IN ('single','replicated','distributed')),
+                strategy TEXT NOT NULL CHECK(strategy IN ('single','parallel')),
                 state TEXT NOT NULL,
                 topology_sha256 TEXT NOT NULL,
                 members_json TEXT NOT NULL,
@@ -625,9 +633,9 @@ class SiteStore:
                 manifest_sha256 TEXT NOT NULL,
                 topology_sha256 TEXT NOT NULL,
                 engine_credential_sha256 TEXT NOT NULL,
-                strategy TEXT NOT NULL CHECK(strategy IN ('replicated','distributed')),
+                strategy TEXT NOT NULL CHECK(strategy IN ('single','parallel')),
                 engine_strategy TEXT NOT NULL,
-                failure_policy TEXT NOT NULL CHECK(failure_policy IN ('replica-independent','whole-group')),
+                failure_policy TEXT NOT NULL CHECK(failure_policy IN ('independent','whole-group')),
                 minimum_healthy_members INTEGER NOT NULL,
                 plan_json TEXT NOT NULL,
                 plan_sha256 TEXT NOT NULL,
@@ -640,6 +648,19 @@ class SiteStore:
                 created_at_unix INTEGER NOT NULL,
                 updated_at_unix INTEGER NOT NULL
             ) STRICT;
+            CREATE TABLE IF NOT EXISTS device_allocations (
+                allocation_id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                member_id TEXT NOT NULL REFERENCES members(member_id),
+                device_uuid TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('reserved','active','draining','released')),
+                created_at_unix INTEGER NOT NULL,
+                updated_at_unix INTEGER NOT NULL,
+                UNIQUE(group_id,member_id,device_uuid)
+            ) STRICT;
+            CREATE UNIQUE INDEX IF NOT EXISTS device_allocations_exclusive
+              ON device_allocations(member_id,device_uuid)
+              WHERE state IN ('reserved','active','draining');
             CREATE TABLE IF NOT EXISTS topology_plans (
                 plan_id TEXT PRIMARY KEY,
                 model TEXT NOT NULL,
@@ -756,7 +777,7 @@ class SiteStore:
                     approval_expires_at_unix,facts_json,
                     facts_signature_base64,facts_sha256,joined_at_unix,updated_at_unix)
                    VALUES(?,?,?,?,?,?,?,?,'active',NULL,NULL,'{}',NULL,NULL,?,?)""",
-                (identity.member_id, socket.gethostname(), "coordinator", identity.coordinator_address,
+                (identity.member_id, socket.gethostname(), "main", identity.coordinator_address,
                  identity.member_public_key_sha256,
                  _private_file(member_public_key_path(), minimum_bytes=128).decode("ascii"),
                  _certificate_fingerprint(member_certificate_path()),
@@ -765,7 +786,7 @@ class SiteStore:
             )
             if not self.connection.execute("SELECT 1 FROM audit_events LIMIT 1").fetchone():
                 self._append_audit(
-                    action="site.setup", target=identity.site_id, outcome="success",
+                    action="node.setup", target=identity.site_id, outcome="success",
                     before_sha256=None, after_sha256=_state_hash(dataclasses.asdict(identity)),
                     reason=None, actor_type="local-user", actor_id=getpass.getuser(),
                     origin_interface="cli", correlation_id=uuid.uuid4().hex,
@@ -795,7 +816,7 @@ class SiteStore:
         if (
             len(members) != 1
             or members[0]["member_id"] != self.identity.member_id
-            or members[0]["role"] != "coordinator"
+            or members[0]["role"] != "main"
             or members[0]["state"] != "active"
         ):
             reasons.append("site_is_not_single_member")
@@ -1189,7 +1210,7 @@ class SiteStore:
             }
 
         return self.mutate(
-            action="member.invite", target=invite_id, before={}, callback=insert,
+            action="child.invite", target=invite_id, before={}, callback=insert,
             after=lambda _connection, result: {key: value for key, value in result.items() if key != "code"},
             actor_type=actor_type,
             actor_id=actor_id,
@@ -1208,7 +1229,7 @@ class SiteStore:
         invite = dict(row)
         if invite["consumed_at_unix"] is not None:
             self.record_denied(
-                "member.invite.use",
+                "child.invite.use",
                 invite_id,
                 "invite_already_consumed",
                 actor_type="member-candidate",
@@ -1218,7 +1239,7 @@ class SiteStore:
             raise SiteError("membership invite was already consumed")
         if invite["expires_at_unix"] < int(time.time()):
             self.record_denied(
-                "member.invite.use",
+                "child.invite.use",
                 invite_id,
                 "invite_expired",
                 actor_type="member-candidate",
@@ -1228,7 +1249,7 @@ class SiteStore:
             raise SiteError("membership invite expired")
         if invite["attempts"] >= 5:
             self.record_denied(
-                "member.invite.use",
+                "child.invite.use",
                 invite_id,
                 "invite_attempt_limit",
                 actor_type="member-candidate",
@@ -1287,7 +1308,7 @@ class SiteStore:
             raise SiteError("membership invite attempt limit reached")
         fingerprint = member_public_key_fingerprint(member_public_key)
         transcript = {
-            "contract": "letsinfer-member-enrollment-v1",
+            "contract": "letsinfer-child-enrollment-v1",
             "site_id": self.identity.site_id,
             "invite_id": invite_id,
             "nonce": invite["nonce"],
@@ -1307,7 +1328,7 @@ class SiteStore:
                     (invite_id,),
                 )
                 self._append_audit(
-                    action="member.enroll", target=member_id, outcome="denied",
+                    action="child.enroll", target=member_id, outcome="denied",
                     before_sha256=None, after_sha256=None, reason="invalid_member_proof",
                     actor_type="member-candidate", actor_id=member_id,
                     origin_interface="pairing", correlation_id=uuid.uuid4().hex,
@@ -1323,7 +1344,7 @@ class SiteStore:
                         (invite_id,),
                     )
                     self._append_audit(
-                        action="member.enroll",
+                        action="child.enroll",
                         target=member_id,
                         outcome="denied",
                         before_sha256=None,
@@ -1351,13 +1372,13 @@ class SiteStore:
                         (invite_id,),
                     )
                     self._append_audit(
-                        action="member.enroll", target=member_id, outcome="denied",
+                        action="child.enroll", target=member_id, outcome="denied",
                         before_sha256=None, after_sha256=None, reason="invalid_setup_code",
                         actor_type="member-candidate", actor_id=member_id,
                         origin_interface="pairing", correlation_id=uuid.uuid4().hex,
                     )
                 raise SiteError("membership setup code is incorrect")
-        with tempfile.TemporaryDirectory(prefix="letsinfer-member-certificate-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="letsinfer-child-certificate-") as temporary:
             root = pathlib.Path(temporary)
             public_key_path = root / "member.pub"
             certificate_path = root / "member.crt"
@@ -1401,7 +1422,7 @@ class SiteStore:
                     certificate_sha256,certificate_pem,state,approval_code_hash,
                     approval_expires_at_unix,facts_json,
                     facts_signature_base64,facts_sha256,joined_at_unix,updated_at_unix)
-                   VALUES(?,?,'member',?,?,?,?,?,?,?,?, '{}',NULL,NULL,?,?)""",
+                   VALUES(?,?,'child',?,?,?,?,?,?,?,?, '{}',NULL,NULL,?,?)""",
                 (
                     member_id, name, member_address, fingerprint, member_public_key,
                     certificate_sha256, certificate_pem, membership["state"],
@@ -1418,7 +1439,7 @@ class SiteStore:
 
         signature = sign_site_document(membership)
         document = self.mutate(
-            action="member.enroll", target=member_id, before={}, callback=enroll,
+            action="child.enroll", target=member_id, before={}, callback=enroll,
             after=lambda _connection, result: result,
             actor_type="member-candidate", actor_id=member_id, origin_interface="pairing",
         )
@@ -1457,7 +1478,7 @@ class SiteStore:
             raise SiteError("member approval expired")
         if not self.verify_secret(comparison_code, str(current["approval_code_hash"])):
             self.record_denied(
-                "member.approve",
+                "child.approve",
                 member_id,
                 "comparison_code_mismatch",
                 actor_type=actor_type,
@@ -1480,7 +1501,7 @@ class SiteStore:
             return {"member_id": member_id, "state": "active"}
 
         return self.mutate(
-            action="member.approve", target=member_id, before=before,
+            action="child.approve", target=member_id, before=before,
             callback=approve, after=lambda _connection, result: result,
             actor_type=actor_type,
             actor_id=actor_id,
@@ -1608,7 +1629,7 @@ class SiteStore:
             return {"member_id": member_id, "state": desired_state}
 
         return self.mutate(
-            action="member.drain" if draining else "member.resume",
+            action="child.drain" if draining else "child.resume",
             target=member_id,
             before=before,
             callback=update,
@@ -1656,7 +1677,7 @@ class SiteStore:
             return {"member_id": member_id, "state": "removed"}
 
         return self.mutate(
-            action="member.remove", target=member_id, before=before,
+            action="child.remove", target=member_id, before=before,
             callback=remove, after=lambda _connection, result: result,
             actor_type=actor_type,
             actor_id=actor_id,
@@ -1707,15 +1728,326 @@ class SiteStore:
             callback=remove, after=lambda _connection, result: {},
         )
 
+    def ensure_model_service(
+        self,
+        model: str,
+        *,
+        desired_state: str = "running",
+        actor_type: str = "system",
+        actor_id: str = "main",
+        origin_interface: str = "orchestrator",
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or return the one durable public service for a logical model."""
+        if not isinstance(model, str) or not SAFE_NAME_RE.fullmatch(model):
+            raise SiteError("logical model service name is invalid")
+        if desired_state not in {"running", "stopped", "removed"}:
+            raise SiteError("logical model service desired state is invalid")
+        identity = hashlib.sha256(
+            _canonical_bytes(
+                {
+                    "contract": "letsinfer-model-service-v1",
+                    "node_id": self.identity.site_id,
+                    "model": model,
+                }
+            )
+        ).hexdigest()[:32]
+        current = self.connection.execute(
+            "SELECT * FROM model_services WHERE service_id=?", (identity,)
+        ).fetchone()
+        before = {} if current is None else dict(current)
+        now = int(time.time())
+        created = now if current is None else int(current["created_at_unix"])
+        row = {
+            "service_id": identity,
+            "model": model,
+            "desired_state": desired_state,
+            "created_at_unix": created,
+            "updated_at_unix": now,
+        }
+
+        def update(connection: sqlite3.Connection) -> dict[str, Any]:
+            connection.execute(
+                """INSERT INTO model_services
+                   (service_id,model,desired_state,created_at_unix,updated_at_unix)
+                   VALUES(:service_id,:model,:desired_state,:created_at_unix,:updated_at_unix)
+                   ON CONFLICT(service_id) DO UPDATE SET
+                    desired_state=excluded.desired_state,
+                    updated_at_unix=excluded.updated_at_unix""",
+                row,
+            )
+            return dict(row)
+
+        return self.mutate(
+            action="service.ensure",
+            target=identity,
+            before=before,
+            callback=update,
+            after=lambda _connection, result: result,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            origin_interface=origin_interface,
+            correlation_id=correlation_id,
+        )
+
+    def model_services(self) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM model_services ORDER BY model"
+            )
+        ]
+
+    def reserve_group_devices(
+        self,
+        group_id: str,
+        assignments: Sequence[Mapping[str, Any]],
+        *,
+        actor_type: str = "system",
+        actor_id: str = "main",
+        origin_interface: str = "orchestrator",
+        correlation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Atomically reserve exact accelerator UUIDs for one engine group."""
+        if not isinstance(group_id, str) or not ID_RE.fullmatch(group_id):
+            raise SiteError("device allocation group identity is invalid")
+        requested: list[tuple[str, str]] = []
+        for assignment in assignments:
+            if not isinstance(assignment, Mapping) or set(assignment) != {
+                "member_id", "device_uuids"
+            }:
+                raise SiteError("device allocation assignment is invalid")
+            member_id = assignment.get("member_id")
+            device_uuids = assignment.get("device_uuids")
+            if (
+                not isinstance(member_id, str)
+                or not ID_RE.fullmatch(member_id)
+                or not isinstance(device_uuids, list)
+                or not device_uuids
+                or len(device_uuids) != len(set(device_uuids))
+                or any(
+                    not isinstance(device_uuid, str)
+                    or not device_uuid
+                    or len(device_uuid.encode("utf-8")) > 255
+                    or any(
+                        unicodedata.category(character).startswith("C")
+                        for character in device_uuid
+                    )
+                    for device_uuid in device_uuids
+                )
+            ):
+                raise SiteError("device allocation member or UUID is invalid")
+            requested.extend((member_id, device_uuid) for device_uuid in device_uuids)
+        if not requested or len(requested) != len(set(requested)):
+            raise SiteError("device allocation contains duplicate or empty claims")
+        requested_members = sorted({member_id for member_id, _uuid in requested})
+        placeholders = ",".join("?" for _member_id in requested_members)
+        active_rows = self.connection.execute(
+            "SELECT member_id,facts_json FROM members "
+            f"WHERE state='active' AND member_id IN ({placeholders})",
+            requested_members,
+        ).fetchall()
+        active_members = {str(row["member_id"]) for row in active_rows}
+        if any(member_id not in active_members for member_id, _uuid in requested):
+            raise SiteError("device allocation requires active child or main nodes")
+        inventory_by_member: dict[str, set[str]] = {}
+        for row in active_rows:
+            try:
+                facts = json.loads(str(row["facts_json"]))
+                devices = facts["accelerator"]["devices"]
+            except (KeyError, TypeError, json.JSONDecodeError) as error:
+                raise SiteError(
+                    f"node {row['member_id']} has no valid accelerator inventory"
+                ) from error
+            if (
+                not isinstance(devices, list)
+                or not devices
+                or len(devices) != len(set(devices))
+                or any(not isinstance(device, str) or not device for device in devices)
+            ):
+                raise SiteError(
+                    f"node {row['member_id']} has no valid accelerator inventory"
+                )
+            inventory_by_member[str(row["member_id"])] = set(devices)
+        unknown = [
+            (member_id, device_uuid)
+            for member_id, device_uuid in requested
+            if device_uuid not in inventory_by_member.get(member_id, set())
+        ]
+        if unknown:
+            member_id, device_uuid = unknown[0]
+            raise SiteError(
+                f"device {device_uuid} is not present in node {member_id}'s signed inventory"
+            )
+        now = int(time.time())
+        rows = [
+            {
+                "allocation_id": hashlib.sha256(
+                    _canonical_bytes(
+                        {
+                            "contract": "letsinfer-device-allocation-v1",
+                            "group_id": group_id,
+                            "member_id": member_id,
+                            "device_uuid": device_uuid,
+                        }
+                    )
+                ).hexdigest()[:32],
+                "group_id": group_id,
+                "member_id": member_id,
+                "device_uuid": device_uuid,
+                "state": "reserved",
+                "created_at_unix": now,
+                "updated_at_unix": now,
+            }
+            for member_id, device_uuid in sorted(requested)
+        ]
+        current = [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM device_allocations WHERE group_id=? ORDER BY member_id,device_uuid",
+                (group_id,),
+            )
+        ]
+
+        def update(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+            conflicts = connection.execute(
+                """SELECT member_id,device_uuid,group_id FROM device_allocations
+                   WHERE state IN ('reserved','active','draining')
+                     AND group_id!=?""",
+                (group_id,),
+            ).fetchall()
+            conflict_map = {
+                (str(row["member_id"]), str(row["device_uuid"])): str(row["group_id"])
+                for row in conflicts
+            }
+            overlap = [
+                (member_id, device_uuid, conflict_map[(member_id, device_uuid)])
+                for member_id, device_uuid in requested
+                if (member_id, device_uuid) in conflict_map
+            ]
+            if overlap:
+                member_id, device_uuid, owner = overlap[0]
+                raise SiteError(
+                    f"device {device_uuid} on node {member_id} is allocated to group {owner}"
+                )
+            connection.execute(
+                "UPDATE device_allocations SET state='released',updated_at_unix=? "
+                "WHERE group_id=? AND state!='released'",
+                (now, group_id),
+            )
+            for row in rows:
+                connection.execute(
+                    """INSERT INTO device_allocations
+                       (allocation_id,group_id,member_id,device_uuid,state,created_at_unix,updated_at_unix)
+                       VALUES(:allocation_id,:group_id,:member_id,:device_uuid,:state,:created_at_unix,:updated_at_unix)
+                       ON CONFLICT(allocation_id) DO UPDATE SET
+                        state='reserved',updated_at_unix=excluded.updated_at_unix""",
+                    row,
+                )
+            return [dict(row) for row in rows]
+
+        return self.mutate(
+            action="allocation.reserve",
+            target=group_id,
+            before=current,
+            callback=update,
+            after=lambda _connection, result: result,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            origin_interface=origin_interface,
+            correlation_id=correlation_id,
+        )
+
+    def set_group_allocation_state(
+        self,
+        group_id: str,
+        state: str,
+        *,
+        actor_type: str = "system",
+        actor_id: str = "main",
+        origin_interface: str = "orchestrator",
+        correlation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not ID_RE.fullmatch(group_id) or state not in {
+            "reserved", "active", "draining", "released"
+        }:
+            raise SiteError("device allocation transition is invalid")
+        current = [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM device_allocations WHERE group_id=? ORDER BY member_id,device_uuid",
+                (group_id,),
+            )
+        ]
+        if not current:
+            raise SiteError("engine group has no device allocation")
+        allowed = {
+            "reserved": {"reserved", "active", "released"},
+            "active": {"active", "draining"},
+            "draining": {"draining", "reserved", "released"},
+            "released": {"released"},
+        }
+        invalid = sorted(
+            {
+                str(row["state"])
+                for row in current
+                if state not in allowed[str(row["state"])]
+            }
+        )
+        if invalid:
+            raise SiteError(
+                "device allocation transition is invalid: "
+                + ",".join(invalid)
+                + f" -> {state}"
+            )
+        now = int(time.time())
+
+        def update(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+            connection.execute(
+                "UPDATE device_allocations SET state=?,updated_at_unix=? WHERE group_id=?",
+                (state, now, group_id),
+            )
+            return [
+                {**row, "state": state, "updated_at_unix": now}
+                for row in current
+            ]
+
+        return self.mutate(
+            action=f"allocation.{state}",
+            target=group_id,
+            before=current,
+            callback=update,
+            after=lambda _connection, result: result,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            origin_interface=origin_interface,
+            correlation_id=correlation_id,
+        )
+
+    def device_allocations(self, *, active_only: bool = False) -> list[dict[str, Any]]:
+        where = (
+            " WHERE state IN ('reserved','active','draining')" if active_only else ""
+        )
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM device_allocations"
+                + where
+                + " ORDER BY member_id,device_uuid,group_id"
+            )
+        ]
+
     def set_placement(self, placement: Mapping[str, Any]) -> dict[str, Any]:
         required = {
-            "placement_id", "model", "runtime", "target", "strategy", "state",
+            "placement_id", "service_id", "model", "runtime", "target", "strategy", "state",
             "topology_sha256", "members", "endpoints", "capacity",
         }
         if set(placement) != required:
             raise SiteError("placement document has invalid fields")
         if not isinstance(placement["placement_id"], str) or not ID_RE.fullmatch(placement["placement_id"]):
             raise SiteError("placement identity is invalid")
+        if not isinstance(placement["service_id"], str) or not ID_RE.fullmatch(placement["service_id"]):
+            raise SiteError("placement service identity is invalid")
         for key in ("model", "runtime", "target"):
             value = placement[key]
             if (
@@ -1725,7 +2057,7 @@ class SiteStore:
                 or any(unicodedata.category(character).startswith("C") for character in value)
             ):
                 raise SiteError(f"placement {key} is invalid")
-        if placement["strategy"] not in {"single", "replicated", "distributed"}:
+        if placement["strategy"] not in {"single", "parallel"}:
             raise SiteError("placement strategy is invalid")
         if placement["state"] not in {"starting", "running", "draining", "stopped", "failed"}:
             raise SiteError("placement state is invalid")
@@ -1741,8 +2073,8 @@ class SiteStore:
             raise SiteError("placement members are invalid")
         if placement["strategy"] == "single" and len(members) != 1:
             raise SiteError("single placement requires exactly one member")
-        if placement["strategy"] in {"replicated", "distributed"} and len(members) < 2:
-            raise SiteError("multi-member placement requires at least two members")
+        if placement["strategy"] == "parallel" and not members:
+            raise SiteError("parallel placement requires at least one member")
 
         endpoints = placement["endpoints"]
         capacity = placement["capacity"]
@@ -1777,13 +2109,13 @@ class SiteStore:
                     or value < 0
                 ):
                     raise SiteError(f"placement interconnect {key} must be non-negative")
-            if placement["strategy"] != "distributed" and (
+            if placement["strategy"] != "parallel" and (
                 interconnect["kind"] != "any"
                 or interconnect["rdma_required"]
                 or interconnect["minimum_speed_mbps"]
                 or interconnect["minimum_mtu"]
             ):
-                raise SiteError("placement interconnect requires a distributed strategy")
+                raise SiteError("placement interconnect requires a parallel strategy")
 
         endpoint_required = {
             "member_id", "url", "credential_file", "ca_file", "max_active_requests",
@@ -1893,8 +2225,8 @@ class SiteStore:
                 raise SiteError("placement contains duplicate member endpoints")
             endpoint_keys.add(endpoint_key)
             endpoint_members.append(member_id)
-        if placement["strategy"] in {"single", "distributed"} and len(endpoints) > 1:
-            raise SiteError("placement strategy permits only one inference endpoint")
+        if len(endpoints) > 1:
+            raise SiteError("an engine group permits only one inference endpoint")
         if placement["state"] == "running" and (
             not endpoints
             or not {"max_active_requests", "max_context_tokens"}.issubset(capacity)
@@ -1903,23 +2235,16 @@ class SiteStore:
         current = self.connection.execute(
             "SELECT * FROM placements WHERE placement_id=?", (placement["placement_id"],)
         ).fetchone()
-        superseded = []
-        if placement["state"] == "running":
-            superseded = [
-                str(item[0])
-                for item in self.connection.execute(
-                    "SELECT placement_id FROM placements "
-                    "WHERE model=? AND state='running' AND placement_id!=? "
-                    "ORDER BY placement_id",
-                    (placement["model"], placement["placement_id"]),
-                )
-            ]
-        before = {
-            "placement": {} if current is None else dict(current),
-            "superseded_running": superseded,
-        }
+        service = self.connection.execute(
+            "SELECT model FROM model_services WHERE service_id=?",
+            (placement["service_id"],),
+        ).fetchone()
+        if service is None or service["model"] != placement["model"]:
+            raise SiteError("placement does not belong to its logical model service")
+        before = {"placement": {} if current is None else dict(current)}
         row = {
-            "placement_id": placement["placement_id"], "model": placement["model"],
+            "placement_id": placement["placement_id"], "service_id": placement["service_id"],
+            "model": placement["model"],
             "runtime": placement["runtime"], "target": placement["target"],
             "strategy": placement["strategy"], "state": placement["state"],
             "topology_sha256": placement["topology_sha256"],
@@ -1930,20 +2255,15 @@ class SiteStore:
         }
 
         def update(connection: sqlite3.Connection) -> dict[str, Any]:
-            if row["state"] == "running":
-                connection.execute(
-                    "UPDATE placements SET state='stopped', updated_at_unix=? "
-                    "WHERE model=? AND state='running' AND placement_id!=?",
-                    (row["updated_at_unix"], row["model"], row["placement_id"]),
-                )
             connection.execute(
                 """INSERT INTO placements
-                   (placement_id,model,runtime,target,strategy,state,topology_sha256,
+                   (placement_id,service_id,model,runtime,target,strategy,state,topology_sha256,
                     members_json,endpoints_json,capacity_json,updated_at_unix)
-                   VALUES(:placement_id,:model,:runtime,:target,:strategy,:state,:topology_sha256,
+                   VALUES(:placement_id,:service_id,:model,:runtime,:target,:strategy,:state,:topology_sha256,
                           :members_json,:endpoints_json,:capacity_json,:updated_at_unix)
                    ON CONFLICT(placement_id) DO UPDATE SET
-                    model=excluded.model,runtime=excluded.runtime,target=excluded.target,
+                    service_id=excluded.service_id,model=excluded.model,
+                    runtime=excluded.runtime,target=excluded.target,
                     strategy=excluded.strategy,state=excluded.state,
                     topology_sha256=excluded.topology_sha256,members_json=excluded.members_json,
                     endpoints_json=excluded.endpoints_json,capacity_json=excluded.capacity_json,
@@ -1955,7 +2275,7 @@ class SiteStore:
         return self.mutate(
             action="placement.set", target=placement["placement_id"], before=before,
             callback=update, after=lambda _connection, result: result,
-            actor_type="system", actor_id="coordinator", origin_interface="orchestrator",
+            actor_type="system", actor_id="main", origin_interface="orchestrator",
         )
 
     def placements(self) -> list[dict[str, Any]]:
@@ -1981,7 +2301,7 @@ class SiteStore:
         action: str,
         error: str | None = None,
         actor_type: str = "system",
-        actor_id: str = "coordinator",
+        actor_id: str = "main",
         origin_interface: str = "orchestrator",
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
@@ -1998,7 +2318,8 @@ class SiteStore:
         if placement is None:
             raise SiteError("engine-group placement is not registered")
         if (
-            placement["strategy"] != document["strategy"]
+            placement["service_id"] != document["service_id"]
+            or placement["strategy"] != document["strategy"]
             or placement["topology_sha256"] != document["topology_sha256"]
             or set(json.loads(placement["members_json"]))
             != {item["member_id"] for item in document["members"]}
@@ -2006,6 +2327,8 @@ class SiteStore:
             raise SiteError("engine-group plan does not match its placement")
         if not isinstance(source, str) or not OCI_RE.fullmatch(source):
             raise SiteError("engine-group source must be digest-pinned OCI")
+        if source != document["release"]["source"]:
+            raise SiteError("engine-group source differs from its signed release")
         if not isinstance(engine_credential_sha256, str) or not SHA256_RE.fullmatch(engine_credential_sha256):
             raise SiteError("engine-group credential digest is invalid")
         if desired_state not in {"running", "stopped", "removed"}:
@@ -2269,9 +2592,9 @@ class SiteStore:
         first request after the SQLite transaction commits without rebuilding
         topology for every request.
         """
-        if identity.role != "coordinator":
+        if identity.role != "main":
             raise SiteError(
-                "the authoritative site database is coordinator-only; "
+                "the authoritative node database is main-node-only; "
                 f"coordinator={identity.coordinator_id}@{identity.coordinator_address}"
             )
         match = re.fullmatch(r"li_([0-9a-f]{16})_([A-Za-z0-9_-]{32,})", token)
@@ -2697,13 +3020,25 @@ class SiteStore:
 
 
 def identity_json(identity: SiteIdentity) -> dict[str, Any]:
-    return dataclasses.asdict(identity)
+    """Return the public node vocabulary without leaking legacy field names."""
+    return {
+        "node_id": identity.site_id,
+        "machine_id": identity.member_id,
+        "installation_id": identity.installation_id,
+        "display_name": identity.display_name,
+        "role": identity.role,
+        "main_id": identity.coordinator_id,
+        "main_address": identity.coordinator_address,
+        "node_public_key_sha256": identity.site_public_key_sha256,
+        "machine_public_key_sha256": identity.member_public_key_sha256,
+        "created_at_unix": identity.created_at_unix,
+    }
 
 
 def sign_site_document(document: Mapping[str, Any]) -> str:
     identity = read_identity()
-    if identity.role != "coordinator":
-        raise SiteError("only the coordinator can sign site documents")
+    if identity.role != "main":
+        raise SiteError("only the main node can sign node documents")
     signature = _run(
         ["openssl", "dgst", "-sha256", "-sign", str(site_key_path())],
         input_bytes=_canonical_bytes(document),
@@ -2754,7 +3089,7 @@ def prepare_member_identity() -> dict[str, Any]:
 
 
 def existing_member_identity(identity: SiteIdentity | None = None) -> dict[str, Any]:
-    """Return the configured physical-member identity for an explicit site move.
+    """Return the configured physical-machine identity for an explicit node move.
 
     This exposes only the public enrollment material.  It deliberately does not
     make a configured coordinator look like an unconfigured join candidate to
@@ -2800,7 +3135,7 @@ def verify_member_proof(
         signature = base64.b64decode(signature_base64, validate=True)
     except ValueError as error:
         raise SiteError("member proof is invalid") from error
-    with tempfile.TemporaryDirectory(prefix="letsinfer-member-proof-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="letsinfer-child-proof-") as temporary:
         public = pathlib.Path(temporary) / "member.pub"
         signature_path = pathlib.Path(temporary) / "proof.sig"
         public.write_text(public_key_pem, encoding="ascii")
@@ -2816,7 +3151,7 @@ def verify_member_proof(
 def member_public_key_fingerprint(public_key_pem: str) -> str:
     if not isinstance(public_key_pem, str) or len(public_key_pem.encode("ascii", errors="ignore")) > 4096:
         raise SiteError("member public key is invalid")
-    with tempfile.TemporaryDirectory(prefix="letsinfer-member-key-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="letsinfer-child-key-") as temporary:
         public = pathlib.Path(temporary) / "member.pub"
         public.write_text(public_key_pem, encoding="ascii")
         der = _run(["openssl", "pkey", "-pubin", "-in", str(public), "-outform", "DER"])
@@ -2870,7 +3205,7 @@ def install_member_identity(
         member_certificate_bytes = member_certificate_pem.encode("ascii")
     except (AttributeError, UnicodeEncodeError) as error:
         raise SiteError("membership credentials are invalid") from error
-    with tempfile.TemporaryDirectory(prefix="letsinfer-membership-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="letsinfer-child-") as temporary:
         root = pathlib.Path(temporary)
         site_public = root / "site.pub"
         site_ca = root / "site-ca.crt"
@@ -2895,12 +3230,12 @@ def install_member_identity(
         if certificate_fingerprint != membership["member_certificate_sha256"]:
             raise SiteError("membership certificate fingerprint mismatch")
     value = {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "site_id": membership["site_id"],
         "member_id": membership["member_id"],
         "installation_id": membership["installation_id"],
         "display_name": membership["display_name"],
-        "role": "member",
+        "role": "child",
         "coordinator_id": membership["coordinator_id"],
         "coordinator_address": membership["coordinator_address"],
         "site_public_key_sha256": membership["site_public_key_sha256"],

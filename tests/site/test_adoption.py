@@ -137,11 +137,11 @@ class FreshSiteAdoptionTests(unittest.TestCase):
             client = mock.Mock()
             client.request.side_effect = [
                 {
-                    "protocol": "letsinfer-site-control-v1",
+                    "protocol": "letsinfer-node-control-v1",
                     "display_name": "Fresh",
                     "site_id": source.site_id,
                     "member_id": source.member_id,
-                    "role": "coordinator",
+                    "role": "main",
                     "claimed_state": "adoptable",
                     "public_key_sha256": source.member_public_key_sha256,
                     "certificate_sha256": "d" * 64,

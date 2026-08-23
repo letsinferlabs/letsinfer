@@ -21,8 +21,8 @@ MAX_TXT_VALUE_BYTES = 200
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DISCOVERY_TXT_FIELDS = {
     "protocol",
-    "site",
-    "member",
+    "node",
+    "machine",
     "role",
     "state",
     "key",
@@ -71,8 +71,8 @@ def advertisement(
         "port": port,
         "txt": {
             "protocol": "1",
-            "site": identity.site_id,
-            "member": identity.member_id,
+            "node": identity.site_id,
+            "machine": identity.member_id,
             "role": identity.role,
             "state": "adoptable" if adoptable else "configured",
             "key": identity.member_public_key_sha256,

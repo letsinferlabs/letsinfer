@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Bounded, signed member telemetry and logical-site aggregation."""
+"""Bounded, signed machine telemetry and logical-node aggregation."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from .state import (
 )
 
 
-PROTOCOL = "letsinfer-site-telemetry-v1"
+PROTOCOL = "letsinfer-node-telemetry-v1"
 TELEMETRY_SCHEMA_VERSION = 2
 RECORD_MAGIC = 0x3152494C
 RECORD_VERSION = 1
@@ -820,7 +820,7 @@ def post_member_sample(
             raise TelemetryError("telemetry TLS peer is not the site coordinator")
         connection.request(
             "POST",
-            "/site/v1/telemetry",
+            "/node/v1/telemetry",
             body=payload,
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
@@ -868,7 +868,7 @@ class TelemetryPublisher:
         self.last_sequence: int | None = None
         self.last_error: str | None = None
         self.thread = threading.Thread(
-            target=self._run, name="letsinfer-site-telemetry", daemon=True
+            target=self._run, name="letsinfer-node-telemetry", daemon=True
         )
 
     def start(self) -> None:

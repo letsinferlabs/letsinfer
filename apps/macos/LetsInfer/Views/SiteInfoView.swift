@@ -25,14 +25,14 @@ struct SiteInfoView: View {
     var body: some View {
         List {
             if let siteView {
-                Section("Site") {
+                Section("Node") {
                     row("Name", siteView.site.identity.displayName)
-                    row("Site ID", siteView.site.identity.siteID)
-                    row("Coordinator", siteView.site.identity.coordinatorAddress)
+                    row("Node ID", siteView.site.identity.siteID)
+                    row("Main", siteView.site.identity.coordinatorAddress)
                     row("Topology", siteView.site.topology.valid ? "Verified" : "Unavailable")
-                    row("Controller role", siteView.controller.role.capitalized)
+                    row("Access role", siteView.controller.role.capitalized)
                 }
-                Section("Members") {
+                Section("Main and children") {
                     ForEach(siteView.site.members) { member in
                         let telemetry = memberTelemetry(member.memberID)
                         VStack(alignment: .leading, spacing: 4) {
@@ -90,7 +90,7 @@ struct SiteInfoView: View {
                 row("System serial", serialValue(system?.serialNumber ?? site.hardwareIdentity?.serialNumber))
                 row("Serial source", system?.serialSource)
                 row("System UUID", serialValue(system?.systemUUID ?? site.hardwareIdentity?.systemUUID))
-                row("Stable machine fingerprint", system?.machineIDHash ?? site.hardwareIdentity?.machineIDHash)
+                row("Stable node fingerprint", system?.machineIDHash ?? site.hardwareIdentity?.machineIDHash)
                 row("Hostname", system?.hostname ?? site.host)
                 row("Addresses", networkAddresses(system?.networkAddresses))
                 row("Default interface", system?.defaultNetworkInterface)
@@ -243,7 +243,7 @@ struct SiteInfoView: View {
             }
         }
         .confirmationDialog(
-            "Remove member?",
+            "Remove child?",
             isPresented: Binding(
                 get: { memberToRemove != nil },
                 set: { if !$0 { memberToRemove = nil } }
@@ -258,7 +258,7 @@ struct SiteInfoView: View {
             }
             Button("Cancel", role: .cancel) { memberToRemove = nil }
         } message: { member in
-            Text("The member must not be part of a running placement. Its model and cache data remain on that machine.")
+            Text("The child must not be part of a running group. Its model and cache data remain on that node.")
         }
         .sheet(item: $editingKey) { key in
             APIKeyPolicyEditor(key: key) { policy in
@@ -311,34 +311,56 @@ struct SiteInfoView: View {
                 }
             }
             if envelope.site.activeMemberCount > 1 {
-                ForEach(envelope.site.currentPlacements) { placement in
-                    HStack {
-                        Text(placement.model)
-                        Spacer()
-                        Button("Plan placement") {
-                            Task {
-                                await monitoring.planPlacement(
-                                    model: placement.model,
-                                    engine: nil,
-                                    site: site
+                ForEach(envelope.site.services) { service in
+                    DisclosureGroup {
+                        ForEach(service.groups.sorted { $0.groupID < $1.groupID }) { group in
+                            LabeledContent(
+                                group.members.compactMap { machineID in
+                                    envelope.site.members.first {
+                                        $0.memberID == machineID
+                                    }?.displayName
+                                }.joined(separator: " + ")
+                            ) {
+                                Text(
+                                    "\(group.strategy.capitalized) · \(group.state.capitalized)"
                                 )
+                                .font(.caption.monospaced())
                             }
                         }
-                        .disabled(
-                            monitoring.siteActionPending(
-                                siteID: site.id,
-                                resource: "topology:\(placement.model)"
+                    } label: {
+                        HStack {
+                            Text(service.model)
+                            Spacer()
+                            Text(
+                                service.groups.count == 1
+                                    ? "1 group" : "\(service.groups.count) replicas"
                             )
-                        )
+                            .foregroundStyle(.secondary)
+                            Button("Plan placement") {
+                                Task {
+                                    await monitoring.planPlacement(
+                                        model: service.model,
+                                        engine: nil,
+                                        site: site
+                                    )
+                                }
+                            }
+                            .disabled(
+                                monitoring.siteActionPending(
+                                    siteID: site.id,
+                                    resource: "topology:\(service.model)"
+                                )
+                            )
+                        }
                     }
                     if let result = monitoring.siteActionResult(
                         siteID: site.id,
-                        resource: "topology:\(placement.model)"
+                        resource: "topology:\(service.model)"
                     ) {
                         Text(
                             result.state == "pending"
                                 ? "A verified placement plan is pending; no runtime was restarted."
-                                : "The current placement already fits the active members."
+                                : "The current placement already fits the active nodes."
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -384,7 +406,7 @@ struct SiteInfoView: View {
                     ProgressView().controlSize(.small)
                 }
             }
-            Text("Only the OpenAI-compatible inference endpoint is published. Site control and telemetry stay private.")
+            Text("Only the OpenAI-compatible inference endpoint is published. Node control and telemetry stay private.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -456,7 +478,7 @@ struct SiteInfoView: View {
 
     private var dataSourceName: String? {
         switch snapshot?.source {
-        case .controller: "Authenticated site facts"
+        case .controller: "Authenticated node facts"
         case .watchdog: "Let's Infer Watchdog"
         case .ssh: "Direct SSH"
         case nil: nil
@@ -756,7 +778,7 @@ private struct OneTimeAPIKeyView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Save this API key now").font(.headline)
-            Text("The coordinator will not show this token again.")
+            Text("The main node will not show this token again.")
                 .foregroundStyle(.secondary)
             Text(secret.token)
                 .font(.system(.body, design: .monospaced))

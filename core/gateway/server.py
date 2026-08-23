@@ -284,6 +284,11 @@ class PolicySnapshot:
         self.aliases: dict[str, str] = {}
         self.backends: list[Backend] = []
         self.active: collections.Counter[tuple[str, str, str]] = collections.Counter()
+        self.queued_by_model: collections.Counter[str] = collections.Counter()
+        self.group_counters: dict[str, collections.Counter[str]] = {}
+        self.group_windows: collections.deque[
+            tuple[float, str, dict[str, int]]
+        ] = collections.deque(maxlen=16_384)
         self.failure_counts: collections.Counter[tuple[str, str, str]] = collections.Counter()
         self.unavailable_until: dict[tuple[str, str, str], float] = {}
         self.prefix_affinity: collections.OrderedDict[
@@ -354,7 +359,7 @@ class PolicySnapshot:
                     member_certificates=member_certificates,
                 )
             except TopologyError as error:
-                raise GatewayError("current site topology is invalid") from error
+                raise GatewayError("current node topology is invalid") from error
         backends: list[Backend] = []
         for placement_value in placements:
             placement = dict(placement_value)
@@ -381,23 +386,21 @@ class PolicySnapshot:
                     f"placement {placement['placement_id']} runtime identity is invalid"
                 )
             engine = runtime_parts[1]
-            if placement["strategy"] == "distributed" and len(endpoints) != 1:
+            if len(endpoints) != 1:
                 raise GatewayError(
-                    f"distributed placement {placement['placement_id']} must expose "
-                    "exactly one engine coordinator endpoint"
+                    f"engine group {placement['placement_id']} must expose exactly one endpoint"
                 )
-            # A distributed engine is one qualified unit: losing or draining
-            # any required member makes the entire placement unavailable. A
-            # replica pool can continue admitting on its active members.
-            if placement["strategy"] == "distributed" and any(
+            # Every placement is one atomic engine group. Losing any required
+            # member removes that group endpoint; sibling replica groups remain.
+            if any(
                 member_states.get(member) != "active" for member in members
             ):
                 continue
-            if placement["strategy"] == "distributed":
+            if placement["strategy"] == "parallel":
                 try:
                     if routing_graph is None or not routing_graph.placement_available(
                         members,
-                        strategy="distributed",
+                        strategy="parallel",
                         interconnect=capacity.get("interconnect"),
                     ):
                         continue
@@ -674,6 +677,78 @@ class PolicySnapshot:
                 self.active.pop(backend.key, None)
             self.condition.notify_all()
 
+    def begin_wait(self, model: str) -> None:
+        with self.condition:
+            self.queued_by_model[model] += 1
+
+    def end_wait(self, model: str) -> None:
+        with self.condition:
+            if self.queued_by_model[model] > 1:
+                self.queued_by_model[model] -= 1
+            else:
+                self.queued_by_model.pop(model, None)
+
+    def record_group_metrics(self, placement_id: str | None, **changes: int) -> None:
+        if placement_id is None or not changes:
+            return
+        bounded = {
+            key: max(0, int(value))
+            for key, value in changes.items()
+            if int(value) != 0
+        }
+        if not bounded:
+            return
+        with self.condition:
+            counters = self.group_counters.setdefault(
+                placement_id, collections.Counter()
+            )
+            counters.update(bounded)
+            self.group_windows.append((time.monotonic(), placement_id, bounded))
+
+    def activity_snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        cutoff = now - 5.0
+        with self.condition:
+            while self.group_windows and self.group_windows[0][0] < cutoff:
+                self.group_windows.popleft()
+            recent: dict[str, collections.Counter[str]] = {}
+            first: dict[str, float] = {}
+            for observed, placement_id, changes in self.group_windows:
+                recent.setdefault(placement_id, collections.Counter()).update(changes)
+                first.setdefault(placement_id, observed)
+            groups: dict[str, dict[str, Any]] = {}
+            for backend in self.backends:
+                row = groups.setdefault(
+                    backend.placement_id,
+                    {
+                        "model": backend.model,
+                        "active_requests": 0,
+                        "max_active_requests": 0,
+                        "counters": dict(self.group_counters.get(backend.placement_id, {})),
+                        "rates": {},
+                    },
+                )
+                row["active_requests"] += self.active[backend.key]
+                row["max_active_requests"] += backend.max_active_requests
+            for placement_id, counters in recent.items():
+                if placement_id not in groups:
+                    continue
+                elapsed = max(1.0, now - first[placement_id])
+                groups[placement_id]["rates"] = {
+                    "input_tokens_per_second": counters["input_tokens"] / elapsed,
+                    "output_tokens_per_second": counters["output_tokens"] / elapsed,
+                    "cached_tokens_per_second": counters["cached_tokens"] / elapsed,
+                }
+            return {
+                "schema_version": 1,
+                "unix_ms": int(time.time() * 1000),
+                "models": {
+                    model: {"queued_requests": amount}
+                    for model, amount in sorted(self.queued_by_model.items())
+                },
+                "groups": groups,
+            }
+
 
 class QuotaState:
     def __init__(self, identity: SiteIdentity) -> None:
@@ -762,8 +837,15 @@ class MetricsPublisher:
     FIELDS = tuple(field.name for field in dataclasses.fields(GatewayMetrics))
     MAX_STALE_SECONDS = 3.5
 
-    def __init__(self, path: pathlib.Path) -> None:
+    def __init__(
+        self,
+        path: pathlib.Path,
+        *,
+        details_provider: Callable[[], Mapping[str, Any]] | None = None,
+    ) -> None:
         self.path = path
+        self.details_path = path.with_name(path.name + ".groups.json")
+        self.details_provider = details_provider
         self.lock = threading.Lock()
         self.metrics = GatewayMetrics()
         self.last_success_monotonic = 0.0
@@ -801,6 +883,28 @@ class MetricsPublisher:
                 handle.flush()
                 os.fsync(handle.fileno())
             temporary.replace(self.path)
+            if self.details_provider is not None:
+                details = self.details_provider()
+                details_body = (
+                    json.dumps(details, sort_keys=True, separators=(",", ":")) + "\n"
+                ).encode("utf-8")
+                if len(details_body) > 1024 * 1024:
+                    raise GatewayError("gateway group telemetry exceeds its size limit")
+                details_temporary = self.details_path.with_name(
+                    f".{self.details_path.name}.{os.getpid()}.{secrets.token_hex(4)}"
+                )
+                details_descriptor = os.open(
+                    details_temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
+                try:
+                    with os.fdopen(details_descriptor, "wb") as details_handle:
+                        details_handle.write(details_body)
+                        details_handle.flush()
+                        os.fsync(details_handle.fileno())
+                    details_temporary.replace(self.details_path)
+                finally:
+                    if details_temporary.exists():
+                        details_temporary.unlink()
             with self.lock:
                 self.last_success_monotonic = time.monotonic()
                 self.last_error = None
@@ -949,7 +1053,10 @@ class GatewayServer(http.server.ThreadingHTTPServer):
         self.policy = PolicySnapshot(identity)
         self.policy.reload(force=True)
         self.quotas = QuotaState(identity)
-        self.metrics = MetricsPublisher(telemetry_file)
+        self.metrics = MetricsPublisher(
+            telemetry_file,
+            details_provider=self.policy.activity_snapshot,
+        )
         self.usage = UsageWriter(identity, self.metrics)
         self.queue_timeout_seconds = queue_timeout_seconds
         self.connection_slots = threading.BoundedSemaphore(max_connections)
@@ -1422,13 +1529,17 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
         try:
             attempted: set[tuple[str, str, str]] = set()
             while True:
-                backend, waited = self.gateway.policy.acquire_backend(
-                    model,
-                    prefix_key=prefix_key,
-                    timeout=self.gateway.queue_timeout_seconds,
-                    excluded=attempted,
-                    cancelled=self._client_disconnected,
-                )
+                self.gateway.policy.begin_wait(model)
+                try:
+                    backend, waited = self.gateway.policy.acquire_backend(
+                        model,
+                        prefix_key=prefix_key,
+                        timeout=self.gateway.queue_timeout_seconds,
+                        excluded=attempted,
+                        cancelled=self._client_disconnected,
+                    )
+                finally:
+                    self.gateway.policy.end_wait(model)
                 queue_seconds += waited
                 if queued_metric:
                     self.gateway.metrics.update(queued_requests=-1)
@@ -1474,6 +1585,9 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                     headers["Content-Length"] = str(len(body))
                     if not request_admitted:
                         self.gateway.metrics.update(requests_admitted=1)
+                        self.gateway.policy.record_group_metrics(
+                            selected_placement_id, requests_admitted=1
+                        )
                         request_admitted = True
                     dispatch_at = time.monotonic()
                     engine_dispatched = True
@@ -1510,6 +1624,9 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                         live_changes = streaming_usage.feed(chunk)
                         if any(live_changes.values()):
                             self.gateway.metrics.update(**live_changes)
+                            self.gateway.policy.record_group_metrics(
+                                selected_placement_id, **live_changes
+                            )
                         self.wfile.write(chunk)
                         self.wfile.flush()
                         tail.extend(chunk)
@@ -1660,6 +1777,13 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                 else 0,
                 prefix_cache_hits=1 if (usage.cached_tokens or 0) > 0 else 0,
             )
+            self.gateway.policy.record_group_metrics(
+                selected_placement_id,
+                **usage_changes,
+                requests_completed=1 if status == "completed" else 0,
+                requests_failed=1 if status == "failed" else 0,
+                requests_cancelled=1 if status == "cancelled" else 0,
+            )
             self.gateway.usage.submit({
                 "request_id": request_id,
                 "key_id": key_id,
@@ -1738,9 +1862,9 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
 
 def run_gateway(arguments: argparse.Namespace) -> int:
     identity = read_identity()
-    if identity.role != "coordinator":
+    if identity.role != "main":
         raise GatewayError(
-            f"the inference gateway is coordinator-only; coordinator="
+            f"the inference gateway runs on the main node; main="
             f"{identity.coordinator_id}@{identity.coordinator_address}"
         )
     if arguments.port < 1 or arguments.port > 65535:

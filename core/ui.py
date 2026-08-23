@@ -168,10 +168,10 @@ def home(
     terminal = Terminal(target, environ=environ)
     target.write(
         f"{terminal.logo()}\n\n"
-        f"{terminal.paint('Your inference site is ready', BOLD)}\n"
+        f"{terminal.paint('Your inference node is ready', BOLD)}\n"
         f"{terminal.paint('Install a model to start serving on one local endpoint.', DIM)}\n\n"
         f"{terminal.command('letsinfer install <model>', 'Install a model')}\n"
-        f"{terminal.command('letsinfer status', 'View site health')}\n"
+        f"{terminal.command('letsinfer status', 'View node health')}\n"
         f"{terminal.command('letsinfer --help', 'Explore commands')}\n\n"
     )
     target.flush()
@@ -220,27 +220,27 @@ def _mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def site_status(
+def node_status(
     payload: Mapping[str, Any],
     *,
     stream: TextIO | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> None:
-    """Render a fresh site's control-plane health before a runtime is installed."""
+    """Render a fresh node's control-plane health before a runtime is installed."""
     target = sys.stdout if stream is None else stream
     terminal = Terminal(target, environ=environ)
     identity = _mapping(payload.get("identity"))
     services = _mapping(payload.get("services"))
-    role = str(identity.get("role") or "site")
-    site_ready = services.get("site_active") == "active"
-    gateway_expected = role == "coordinator"
+    role = str(identity.get("role") or "node")
+    node_ready = services.get("node_active") == "active"
+    gateway_expected = role == "main"
     gateway_ready = (
         services.get("gateway_active") == "active"
         and services.get("gateway_health") is True
         and services.get("gateway_auth_required") is True
         and services.get("gateway_authenticated") is True
     )
-    ready = site_ready and (gateway_ready if gateway_expected else True)
+    ready = node_ready and (gateway_ready if gateway_expected else True)
 
     target.write(f"{terminal.logo()}\n\n")
     updates = payload.get("updates")
@@ -255,7 +255,7 @@ def site_status(
     state_mark = "●" if terminal.unicode else "*"
     state = "ONLINE" if ready else "ATTENTION"
     display_name = terminal.clip(
-        str(identity.get("display_name") or "Let's Infer site"),
+        str(identity.get("display_name") or "Let's Infer node"),
         max(1, terminal.width - len(state) - 5),
     )
     target.write(
@@ -264,7 +264,7 @@ def site_status(
         f"{terminal.paint(display_name, BOLD)}\n"
     )
     detail = terminal.clip(
-        f"{role} · {identity.get('member_id') or 'local member'}",
+        f"{role} · {identity.get('machine_id') or 'local machine'}",
         max(1, terminal.width - 2),
     )
     target.write(f"  {terminal.paint(detail, DIM)}\n\n")
@@ -280,7 +280,7 @@ def site_status(
             f"{terminal.paint(detail_value, DIM)}\n"
         )
 
-    row("Site", site_ready, "Active" if site_ready else "Unavailable", role)
+    row("Node", node_ready, "Active" if node_ready else "Unavailable", role)
     if gateway_expected:
         row(
             "API",
@@ -659,7 +659,7 @@ def live_runtime_status(snapshot: Callable[[], Mapping[str, Any]]) -> int:
             payload = dict(snapshot())
             if "service" not in payload:
                 sys.stdout.write("\033[H\033[J" if not first else "\033[2J\033[H")
-                site_status(payload)
+                node_status(payload)
                 return int(payload.get("exit_code") or 0)
             now = time.monotonic()
             current_telemetry = payload.get("telemetry")
