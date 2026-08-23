@@ -1,163 +1,151 @@
 # Let's Infer
 
-Let's Infer installs and serves the best qualified local inference runtime for
-your model and hardware. You choose the model you want to run:
+> Local AI, installed like software.
+
+[![Release](https://img.shields.io/github/v/release/letsinferlabs/letsinfer?include_prereleases&label=release)](https://github.com/letsinferlabs/letsinfer/releases)
+[![Core release](https://github.com/letsinferlabs/letsinfer/actions/workflows/release-core.yml/badge.svg?branch=release)](https://github.com/letsinferlabs/letsinfer/actions/workflows/release-core.yml)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+
+Let's Infer turns local AI hardware into one reliable, OpenAI-compatible
+inference service. Tell it which model you want. It detects your hardware,
+selects the fastest qualified runtime, downloads the exact model and engine,
+starts the service, and keeps it running.
 
 ```bash
 curl -fsSL https://letsinfer.ai/install.sh | sh
 letsinfer install qwen3.8-27b
 ```
 
-Let's Infer detects the target, verifies the signed catalog, selects the
-recommended qualified runtime, downloads its exact model revision and Engine
-OCI, installs the runtime pack, and exposes one OpenAI-compatible API. You do
-not need to select an engine, find model files, or write a hardware-specific path.
+No engine hunting. No model-file plumbing. No hardware-specific install path.
 
-## Architecture
+## Features
 
-Let's Infer has four independently versioned parts:
+- **One-command installs** — resolve the exact model, runtime, engine, adapter,
+  and dependencies from a model name.
+- **Hardware-aware speed** — signed benchmarks select the fastest qualified
+  runtime for your target; `--runtime` pins an exact candidate.
+- **Automatic lifecycle** — start immediately, wait for API readiness, restore
+  after reboot, and recover ordinary engine failures.
+- **One API, every engine** — keep the same OpenAI-compatible endpoint while
+  Let's Infer handles concurrency, backpressure, and memory-aware queueing.
+- **Live observability** — watch requests, throughput, context, cache,
+  utilization, temperatures, power, network, and lifecycle in one command.
+- **Built-in protection** — Watchdog tracks the exact engine process, unified
+  memory, PSI, swap, cgroup events, and crashes without hiding safety trips.
+- **Verifiable supply chain** — signed catalogs, exact Hugging Face revisions,
+  digest-pinned OCI images, deterministic packs, and bound benchmark evidence.
+- **Independent updates** — update core, upgrade a runtime, or roll back one
+  without silently changing the others.
+- **Reproducible benchmarks** — durable, isolated code-and-prose runs capture
+  TTFT, throughput, cache state, hardware telemetry, and validated JSON.
+- **Secure by default** — scoped API keys, audit records, mDNS discovery,
+  private controller mTLS, and optional inference-only public exposure.
 
-- **Core** provides the CLI, site state, target detection, admission, gateway,
-  Watchdog, benchmark orchestration, OCI verification, and update state. It
-  contains no model or upstream-engine implementation.
-- An **Engine OCI** contains one upstream engine version and its matching
-  adapter. The adapter implements Let's Infer Engine protocol v1 for launch,
-  health, exact token counting, normalized telemetry, and inference.
-- A **runtime pack** binds one logical model to exact Hugging Face revisions,
-  one digest-pinned Engine OCI, one hardware target, engine arguments, kernels,
-  patches, capacity limits, safety policy, and benchmark evidence.
-- The signed **catalog** maps a logical model and detected target to the best
-  qualified runtime candidate.
+[Explore every feature →](documentation/features.md)
 
-Engine and adapter ship together because their internal APIs change together.
-Core knows only the stable Engine protocol. A new engine version therefore does
-not require a core release unless the protocol itself changes.
+## Quick start
 
-## Runtime identity
-
-Runtime sources are flat directories in the public runtimes repository:
-
-```text
-<engine>--<hf-owner>--<hf-model>--<target>/
-├── runtime.json
-├── adapter/
-├── engine/
-├── image/
-├── kernels/
-├── patches/
-├── scripts/
-├── tests/
-└── benchmark.json
-```
-
-Only `runtime.json` is mandatory. A candidate may include any model- or
-target-specific implementation needed to reproduce it. The runtime declares
-the model URI and immutable revision, so installation downloads the model
-automatically. Multiple quantizations or independently optimized checkpoints
-are separate candidates, for example:
-
-```text
-sglang--qwen--qwen3.8-27b--dgx-spark/
-sglang--radixark--qwen3.8-27b-nvfp4--dgx-spark/
-sglang--unsloth--qwen3.8-27b-nvfp4--dgx-spark/
-```
-
-The generated runtimes `manifest.json` contains all candidates and the
-qualified recommendation for each model/target. Production clients consume
-the separately published, signed catalog rather than trusting the source repo.
-
-## Commands
+Install Let's Infer and initialize your local site:
 
 ```bash
-letsinfer setup
-letsinfer hardware
+curl -fsSL https://letsinfer.ai/install.sh | sh
+```
+
+Install a model:
+
+```bash
 letsinfer install qwen3.8-27b
-letsinfer install qwen3.8-27b --runtime <exact-candidate-id>
+```
+
+Create an API key and inspect the live service:
+
+```bash
+letsinfer key create my-app
 letsinfer status
-letsinfer benchmark qwen3.8-27b --c1
-letsinfer update check
-letsinfer update
-letsinfer upgrade qwen3.8-27b
-letsinfer verify qwen3.8-27b
-letsinfer doctor
 ```
 
-`--runtime` is an exact advanced pin. There is no user-facing engine selector.
-Changing an engine, model source, quantization, kernel, patch, or recipe creates
-a new immutable runtime candidate and requires fresh qualification.
-
-`letsinfer update` changes core only. `letsinfer upgrade` changes the selected
-runtime only. Neither operation silently changes the other component.
-
-## Local data
-
-All durable and rebuildable data lives below one user-owned directory:
+Your stable local endpoint is:
 
 ```text
-$LETSINFER_HOME/
-├── core/
-│   ├── current
-│   └── versions/
-├── config/
-├── secrets/
-├── models/
-│   └── <hf-owner>--<hf-model>/<revision>/
-├── runtimes/
-├── oci/
-├── state/
-├── benchmarks/
-├── logs/
-└── cache/
+http://<hostname>.local:8000/v1
 ```
 
-The default is `~/.local/share/letsinfer`. `LETSINFER_HOME` must be an absolute
-path you own and cannot be `/` or your home directory itself. Equal
-Hugging Face revisions and OCI content deduplicate across runtimes.
+Use it like any OpenAI-compatible API:
 
-`letsinfer uninstall` asks for confirmation and removes the managed home.
-`letsinfer uninstall --keep-models` preserves only the model store.
+```bash
+curl http://<hostname>.local:8000/v1/chat/completions \
+  -H "Authorization: Bearer $LETSINFER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.8-27b",
+    "messages": [{"role": "user", "content": "Why is the sky blue?"}]
+  }'
+```
 
-## Site and API
+## Supported today
 
-`letsinfer setup` creates a logical site. The first machine is its coordinator
-and owns the API-key registry, audit chain, scheduling, and stable gateway.
-Members can provide independent runtimes, replicas, or roles in a
-runtime-qualified distributed placement. Clients still use one local endpoint:
+NVIDIA DGX Spark is the first qualified target. The signed production catalog
+currently includes qualified Qwen3.8 27B NVFP4 and DeepSeek V4 Flash runtimes.
+New models, quantizations, engines, kernels, and hardware targets ship as
+independent runtime candidates—without adding model-specific code to core.
+
+## Common commands
+
+| Task | Command |
+| --- | --- |
+| Inspect hardware | `letsinfer hardware` |
+| Install a model | `letsinfer install MODEL` |
+| Watch live status | `letsinfer status` |
+| Create an API key | `letsinfer key create my-app` |
+| Check for updates | `letsinfer update check` |
+| Update core | `letsinfer update` |
+| Upgrade a runtime | `letsinfer upgrade MODEL` |
+| Roll back a runtime | `letsinfer rollback MODEL` |
+| Run the C1 benchmark | `letsinfer benchmark MODEL --c1` |
+| Verify an installation | `letsinfer doctor` |
+| Remove everything | `letsinfer uninstall` |
+
+Core and runtime updates are deliberately independent. A catalog change never
+silently moves a running model.
+
+## How it works
 
 ```text
-http://<coordinator>.local:8000/v1
+model name + detected hardware
+              │
+              ▼
+       signed runtime catalog
+              │
+              ▼
+ exact model + runtime pack + Engine OCI
+              │
+              ▼
+ OpenAI-compatible gateway + Watchdog
 ```
 
-The gateway requires a scoped API key, queues admission when a runtime is under
-pressure, and returns a structured request error when a request can never fit.
-Watchdog remains independent of the engine and supplies normalized safety and
-telemetry state to the CLI and other consumers.
+Each immutable runtime binds an exact model, Engine OCI, hardware target,
+serving recipe, optional optimizations, and benchmark evidence. Core stays
+model- and engine-agnostic.
 
-## Security and reproducibility
+## Documentation
 
-- Remote catalogs require an exact-byte Ed25519 signature before parsing.
-- Engine and runtime OCI references are immutable registry digests.
-- Model artifacts use exact 40-hex Hugging Face revisions; GGUF files also pin
-  their file SHA-256.
-- Runtime packs are deterministic archives whose descriptor hashes every file,
-  byte length, mode, and path.
-- Runtime containers use read-only model mounts and are isolated from core
-  secrets.
-- Qualification is bound to the exact model, Engine OCI, runtime pack, target,
-  recipe, benchmark contract, and result record.
-- Core never silently falls back to another engine, checkpoint, quantization,
-  kernel, cache format, or recipe.
+- [Features](documentation/features.md)
+- [Installation](documentation/getting-started/installation.md)
+- [CLI reference](documentation/reference/cli.md)
+- [Sites and security](documentation/concepts/sites.md)
+- [Runtime development](documentation/reference/runtime-format.md)
+- [Updates and rollback](documentation/operations/upgrades-and-rollback.md)
+- [Watchdog](documentation/operations/watchdog.md)
+- [Benchmark framework](benchmarks/README.md)
+- [macOS controller](apps/macos/README.md)
 
-## Development
+## Contributing
 
-Public architecture and command references live in [documentation](documentation/README.md).
-If you are building a runtime, read [the runtime skill](skills/runtime/SKILL.md)
-and [benchmark skill](skills/benchmark/SKILL.md).
-
-Run the core suite with:
+Runtime authors should start with the [runtime skill](skills/runtime/SKILL.md)
+and [benchmark skill](skills/benchmark/SKILL.md). Run the core tests with:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Let's Infer is licensed under AGPL-3.0-only.
+Let's Infer is licensed under [AGPL-3.0-only](LICENSE).

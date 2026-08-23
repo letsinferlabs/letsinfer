@@ -1,12 +1,27 @@
 # Let's Infer documentation
 
-Tell Let's Infer which model you want to run. It detects your hardware,
-resolves the best qualified runtime, and serves it through one
-OpenAI-compatible site gateway.
+Let's Infer turns local AI hardware into one reliable, OpenAI-compatible
+inference service. Start with a model name; Let's Infer handles the target,
+runtime, model artifacts, engine, lifecycle, safety, and telemetry.
+
+## Features at a glance
+
+- one-command, hardware-aware model installation;
+- automatic start, reboot persistence, and ordinary crash recovery;
+- one stable OpenAI-compatible API across engines;
+- dynamic request admission and memory-aware queueing;
+- live throughput, request, cache, temperature, power, and system telemetry;
+- independent Watchdog protection with explicit safety recovery;
+- signed, digest-pinned, reproducible runtimes and benchmarks;
+- independent core/runtime updates with runtime rollback; and
+- secure mDNS discovery, scoped API keys, controller pairing, and audit.
+
+[Explore every feature](features.md)
 
 ## Start here
 
 - [Installation](getting-started/installation.md)
+- [Features](features.md)
 - [CLI reference](reference/cli.md)
 - [Runtime format](reference/runtime-format.md)
 - [Runtime candidates](concepts/runtime-packs.md)
