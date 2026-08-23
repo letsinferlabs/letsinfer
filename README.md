@@ -27,6 +27,8 @@ No engine hunting. No model-file plumbing. No hardware-specific install path.
   after reboot, and recover ordinary engine failures.
 - **One API, every engine** — keep the same OpenAI-compatible endpoint while
   Let's Infer handles concurrency, backpressure, and memory-aware queueing.
+- **Replication across your hardware** — run one model on compatible main and
+  child nodes, with target-specific runtimes behind one load-balanced API.
 - **Live observability** — watch requests, throughput, context, cache,
   utilization, temperatures, power, network, and lifecycle in one command.
 - **Built-in protection** — Watchdog tracks the exact engine process, unified
@@ -44,7 +46,7 @@ No engine hunting. No model-file plumbing. No hardware-specific install path.
 
 ## Quick start
 
-Install Let's Infer and initialize your local site:
+Install Let's Infer and initialize your local node:
 
 ```bash
 curl -fsSL https://letsinfer.ai/install.sh | sh
@@ -95,6 +97,9 @@ independent runtime candidates—without adding model-specific code to core.
 | Inspect hardware | `letsinfer hardware` |
 | Discover compatible runtimes | `letsinfer list` |
 | Install a model | `letsinfer install MODEL` |
+| Replicate on every compatible node | `letsinfer install MODEL --all-nodes` |
+| Set the replica count | `letsinfer scale MODEL --replicas N` |
+| Inspect the node topology | `letsinfer topology show` |
 | Watch live status | `letsinfer status` |
 | Create an API key | `letsinfer key create my-app` |
 | Check for updates | `letsinfer update check` |
@@ -111,7 +116,7 @@ silently moves a running model.
 ## How it works
 
 ```text
-model name + detected hardware
+model name + verified node topology
               │
               ▼
        signed runtime catalog
@@ -132,7 +137,7 @@ model- and engine-agnostic.
 - [Features](documentation/features.md)
 - [Installation](documentation/getting-started/installation.md)
 - [CLI reference](documentation/reference/cli.md)
-- [Sites and security](documentation/concepts/sites.md)
+- [Nodes, replication, and trust](documentation/concepts/sites.md)
 - [Runtime development](documentation/reference/runtime-format.md)
 - [Updates and rollback](documentation/operations/upgrades-and-rollback.md)
 - [Watchdog](documentation/operations/watchdog.md)

@@ -14,7 +14,7 @@ final class SiteStore: ObservableObject {
         var errorDescription: String? {
             switch self {
             case .invalidName:
-                "Enter a name for this site."
+                "Enter a name for this node."
             case .invalidHost:
                 "Enter a valid hostname or IP address."
             case .invalidPort:
@@ -24,7 +24,7 @@ final class SiteStore: ObservableObject {
             case .privateKeyRequired:
                 "Choose a private key, or use your SSH agent or config."
             case .duplicate:
-                "This site has already been added."
+                "This node has already been added."
             case .saveFailed:
                 "Let's Infer could not save its data."
             }
@@ -104,7 +104,7 @@ final class SiteStore: ObservableObject {
             sites = try JSONDecoder.letsInfer.decode([SavedSite].self, from: data)
         } catch {
             sites = []
-            loadError = "Saved site data could not be read."
+            loadError = "Saved node data could not be read."
         }
     }
 

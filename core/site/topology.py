@@ -271,6 +271,7 @@ class Placement:
     strategy: str
     member_ids: tuple[str, ...]
     engine_coordinator_id: str
+    device_uuids: Mapping[str, tuple[str, ...]]
     topology_sha256: str
     reason: str
 
@@ -290,6 +291,7 @@ class TopologyGraph:
         *,
         now_unix: int | None = None,
         member_certificates: Mapping[str, str] | None = None,
+        allocated_devices: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
         now = now_unix or int(time.time())
         self.members: dict[str, dict[str, Any]] = {}
@@ -305,6 +307,20 @@ class TopologyGraph:
             self.members[member_id] = validated
         if not self.members:
             raise TopologyError("topology requires at least one member")
+        self.allocated_devices: dict[str, frozenset[str]] = {}
+        for member_id in self.members:
+            allocated = () if allocated_devices is None else allocated_devices.get(member_id, ())
+            if (
+                not isinstance(allocated, Sequence)
+                or isinstance(allocated, (str, bytes))
+                or any(not isinstance(item, str) or not item for item in allocated)
+                or len(allocated) != len(set(allocated))
+            ):
+                raise TopologyError(f"allocated device inventory is invalid for member {member_id}")
+            known = set(self.members[member_id]["accelerator"]["devices"])
+            if set(allocated) - known:
+                raise TopologyError(f"allocated device inventory contains an unknown device on {member_id}")
+            self.allocated_devices[member_id] = frozenset(allocated)
         if member_certificates is not None:
             if set(member_certificates) != set(self.members) or any(
                 not isinstance(digest, str) or not SHA256_RE.fullmatch(digest)
@@ -379,11 +395,25 @@ class TopologyGraph:
         expected_memory = target["memory"]
         return (
             member["platform"] == target["platform"]
-            and all(accelerator[key] == expected_accelerator[key] for key in ("vendor", "architecture", "count", "partitioning"))
+            and all(accelerator[key] == expected_accelerator[key] for key in ("vendor", "architecture", "partitioning"))
+            and len(self.available_devices(member["member_id"])) >= expected_accelerator["count"]
             and accelerator["minimum_memory_gib"] >= expected_accelerator.get("minimum_memory_gib", 0)
             and memory["topology"] == expected_memory["topology"]
             and memory["total_gib"] >= expected_memory["minimum_total_gib"]
             and member_available(member["health"])
+        )
+
+    def available_devices(self, member_id: str) -> tuple[str, ...]:
+        """Return stable, currently unallocated accelerator identities."""
+        if member_id not in self.members:
+            raise TopologyError(f"unknown topology member {member_id}")
+        allocated = self.allocated_devices.get(member_id, frozenset())
+        return tuple(
+            sorted(
+                device
+                for device in self.members[member_id]["accelerator"]["devices"]
+                if device not in allocated
+            )
         )
 
     def _link_satisfies(self, left: str, right: str, contract: Mapping[str, Any]) -> bool:
@@ -421,7 +451,7 @@ class TopologyGraph:
     ) -> bool:
         """Return whether an existing placement is safe on the current graph."""
         if (
-            strategy not in {"single", "replicated", "distributed"}
+            strategy not in {"single", "parallel"}
             or not members
             or len(members) != len(set(members))
             or any(member_id not in self.members for member_id in members)
@@ -431,11 +461,11 @@ class TopologyGraph:
             )
         ):
             return False
-        if strategy != "distributed":
+        if strategy != "parallel" or len(members) == 1:
             return True
         if not isinstance(interconnect, Mapping):
             raise TopologyError(
-                "distributed placement has no interconnect contract"
+                "parallel placement has no interconnect contract"
             )
         return self._connected(tuple(members), interconnect)
 
@@ -457,7 +487,7 @@ class TopologyGraph:
 
         candidates: list[tuple[str, ...]] = []
         for selected in combinations(compatible, count):
-            if strategy != "distributed" or self._connected(selected, placement["interconnect"]):
+            if strategy != "parallel" or len(selected) == 1 or self._connected(selected, placement["interconnect"]):
                 candidates.append(selected)
         if not candidates:
             raise TopologyError(f"target {target['id']} has no topology-compatible placement")
@@ -465,10 +495,16 @@ class TopologyGraph:
         candidates.sort(key=lambda selected: (coordinator_id not in selected, selected))
         selected = candidates[0]
         engine_coordinator = coordinator_id if coordinator_id in selected else selected[0]
+        devices_per_member = target["accelerator"]["count"]
+        device_uuids = {
+            member_id: self.available_devices(member_id)[:devices_per_member]
+            for member_id in selected
+        }
         return Placement(
             strategy=strategy,
             member_ids=selected,
             engine_coordinator_id=engine_coordinator,
+            device_uuids=device_uuids,
             topology_sha256=self.sha256(),
             reason=f"qualified {strategy} target {target['id']}",
         )
@@ -480,11 +516,11 @@ class TopologyGraph:
     ) -> dict[str, str]:
         """Select one verified engine-traffic address on each distributed member."""
         if (
-            placement.strategy != "distributed"
+            placement.strategy != "parallel"
             or placement.topology_sha256 != self.sha256()
             or set(placement.member_ids) - set(self.members)
         ):
-            raise TopologyError("engine addresses require this exact distributed placement")
+            raise TopologyError("engine addresses require this exact parallel placement")
         selected = set(placement.member_ids)
         result: dict[str, str] = {}
         for member_id in placement.member_ids:
@@ -500,7 +536,7 @@ class TopologyGraph:
             interfaces = {link["interface"] for link in links}
             if not links or len(interfaces) != 1:
                 raise TopologyError(
-                    f"distributed member {member_id} has no single verified engine interface"
+                    f"parallel member {member_id} has no single verified engine interface"
                 )
             interface_name = next(iter(interfaces))
             interface = next(
@@ -524,7 +560,7 @@ class TopologyGraph:
             addresses.sort(key=lambda item: (item.version != 4, int(item)))
             if not addresses:
                 raise TopologyError(
-                    f"distributed member {member_id} has no usable engine address"
+                    f"parallel member {member_id} has no usable engine address"
                 )
             chosen = str(addresses[0])
             result[member_id] = f"[{chosen}]" if addresses[0].version == 6 else chosen
@@ -538,14 +574,14 @@ class TopologyGraph:
     ) -> TargetPlacement:
         """Select one catalog target using the product placement policy.
 
-        Distributed, replicated, and single-member targets are considered in
-        that order. More than one compatible target at the best available
+        Parallel and single-member targets are considered in that order. More
+        than one compatible target at the best available
         strategy is a catalog defect; target choice is never delegated to the
         user or resolved by incidental dictionary order.
         """
         if not targets:
             raise TopologyError("catalog model has no target variants")
-        priority = {"distributed": 0, "replicated": 1, "single": 2}
+        priority = {"parallel": 0, "single": 1}
         candidates: list[TargetPlacement] = []
         failures: list[str] = []
         for target_id in sorted(targets):

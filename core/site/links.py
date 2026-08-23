@@ -85,7 +85,7 @@ def link_from_proof(
 ) -> dict[str, Any]:
     peer_observed = challenge.get("observed_at_unix")
     if (
-        challenge.get("protocol") != "letsinfer-site-link-v1"
+        challenge.get("protocol") != "letsinfer-node-link-v1"
         or challenge.get("member_id") != peer_member_id
         or challenge.get("requester_member_id") != member_id
         or not isinstance(challenge.get("nonce"), str)

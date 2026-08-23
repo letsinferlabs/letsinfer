@@ -9,7 +9,7 @@ struct ControllerAPIClientTests {
         {
           "member_id":"33333333333333333333333333333333",
           "display_name":"Desk",
-          "role":"coordinator",
+          "role":"main",
           "address":"home.local",
           "state":"active",
           "certificate_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -31,21 +31,21 @@ struct ControllerAPIClientTests {
         {
           "protocol":"letsinfer-controller-control-v1",
           "controller":{"id":"11111111111111111111111111111111","role":"viewer"},
-          "site":{
-            "schema_version":1,
+          "node":{
+            "schema_version":2,
             "identity":{
-              "site_id":"22222222222222222222222222222222",
-              "member_id":"33333333333333333333333333333333",
+              "node_id":"22222222222222222222222222222222",
+              "machine_id":"33333333333333333333333333333333",
               "display_name":"Home",
-              "role":"coordinator",
-              "coordinator_id":"33333333333333333333333333333333",
-              "coordinator_address":"home.local",
-              "member_public_key_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+              "role":"main",
+              "main_id":"33333333333333333333333333333333",
+              "main_address":"home.local",
+              "machine_public_key_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             },
-            "members":[{
+            "machines":[{
               "member_id":"33333333333333333333333333333333",
               "display_name":"Desk",
-              "role":"coordinator",
+              "role":"main",
               "address":"home.local",
               "state":"active",
               "certificate_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -113,7 +113,11 @@ struct ControllerAPIClientTests {
               "updated_at_unix":1700000001
             }],
             "topology":{"valid":true,"topology_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
-            "placements":[{
+            "services":[{
+              "service_id":"66666666666666666666666666666666",
+              "model":"qwen3.8-27b",
+              "desired_state":"running",
+              "groups":[{
               "placement_id":"44444444444444444444444444444444",
               "model":"qwen3.8-27b",
               "runtime":"qwen3.8-27b/sglang/dgx-spark@0.1.0-rc.2@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -141,6 +145,8 @@ struct ControllerAPIClientTests {
               "state":"stopped",
               "members":["33333333333333333333333333333333"],
               "updated_at_unix":1700000002
+              }],
+              "telemetry":{"active_requests":2,"queued_requests":1,"available":true}
             }],
             "pending_topology_plans":[],
             "exposure":{
@@ -156,7 +162,7 @@ struct ControllerAPIClientTests {
         """.utf8)
         let site = try JSONDecoder().decode(ControllerSiteEnvelope.self, from: siteData)
         #expect(site.site.identity.displayName == "Home")
-        #expect(site.site.members.first?.role == "coordinator")
+        #expect(site.site.members.first?.role == "main")
         #expect(site.site.placements.first?.strategy == "single")
         #expect(site.site.currentPlacements.count == 1)
         #expect(site.site.currentPlacements.first?.state == "running")
@@ -505,7 +511,7 @@ struct ControllerAPIClientTests {
           "protocol":"letsinfer-controller-control-v1",
           "controller":{"id":"11111111111111111111111111111111","role":"administrator"},
           "result":{"adoption":{
-            "protocol":"letsinfer-site-adoption-v1",
+            "protocol":"letsinfer-node-adoption-v1",
             "state":"committed",
             "source_site_id":"22222222222222222222222222222222",
             "destination_site_id":"33333333333333333333333333333333",

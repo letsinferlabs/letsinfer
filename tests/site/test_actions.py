@@ -24,7 +24,7 @@ def member_identity() -> SiteIdentity:
         member_id="2" * 32,
         installation_id="3" * 64,
         display_name="Home",
-        role="member",
+        role="child",
         coordinator_id="4" * 32,
         coordinator_address="coordinator.local",
         site_public_key_sha256="5" * 64,
@@ -42,8 +42,8 @@ class ActionRegistryTests(unittest.TestCase):
         validate_registry(leaves)
         for action in ACTIONS.values():
             self.assertIsInstance(action.scope, CommandScope)
-            if action.mutation is MutationClass.SITE and action.name != "setup":
-                self.assertIs(action.scope, CommandScope.COORDINATOR)
+            if action.mutation is MutationClass.NODE and action.name != "setup":
+                self.assertIs(action.scope, CommandScope.MAIN)
                 self.assertIs(action.audit, AuditPolicy.ALWAYS)
 
         def assert_help_and_no_aliases(parser: argparse.ArgumentParser) -> None:
@@ -85,7 +85,7 @@ class ActionRegistryTests(unittest.TestCase):
             identity_path.return_value.exists.return_value = True
             self.assertEqual(cli.main(["key", "create", "fixture"]), 1)
         invoked.assert_not_called()
-        self.assertIn("command scope is coordinator", stderr.getvalue())
+        self.assertIn("command scope is main", stderr.getvalue())
         self.assertIn("coordinator.local", stderr.getvalue())
 
     def test_connectx_invite_fails_before_site_mutation_without_verified_link(self) -> None:
@@ -120,9 +120,9 @@ class ActionRegistryTests(unittest.TestCase):
                     raise cli.LetsInferError("prevalidation rejected")
 
                 arguments = argparse.Namespace(
-                    action_id="member.invite",
+                    action_id="child.invite",
                     action=reject,
-                    command="member",
+                    command="child",
                     port=1,
                 )
                 parsed = mock.MagicMock()
@@ -132,12 +132,12 @@ class ActionRegistryTests(unittest.TestCase):
                     mock.patch.object(cli, "parser", return_value=parsed),
                     contextlib.redirect_stderr(stderr),
                 ):
-                    self.assertEqual(cli.main(["member", "invite"]), 1)
+                    self.assertEqual(cli.main(["child", "invite"]), 1)
                 with state.SiteStore(identity=identity) as store:
                     events = [
                         row
                         for row in store.audit_rows(limit=10)
-                        if row["action"] == "member.invite"
+                        if row["action"] == "child.invite"
                     ]
                 self.assertEqual(len(events), 1)
                 self.assertEqual(events[0]["outcome"], "failed")
@@ -152,14 +152,14 @@ class ActionRegistryTests(unittest.TestCase):
                 def reject(_arguments: argparse.Namespace) -> int:
                     with state.SiteStore(identity=identity) as store:
                         store.record_action(
-                            "member.invite", "fixture", "failed", "fixture"
+                            "child.invite", "fixture", "failed", "fixture"
                         )
                     raise cli.LetsInferError("mutation rejected")
 
                 arguments = argparse.Namespace(
-                    action_id="member.invite",
+                    action_id="child.invite",
                     action=reject,
-                    command="member",
+                    command="child",
                     port=1,
                 )
                 parsed = mock.MagicMock()
@@ -168,12 +168,12 @@ class ActionRegistryTests(unittest.TestCase):
                     mock.patch.object(cli, "parser", return_value=parsed),
                     contextlib.redirect_stderr(io.StringIO()),
                 ):
-                    self.assertEqual(cli.main(["member", "invite"]), 1)
+                    self.assertEqual(cli.main(["child", "invite"]), 1)
                 with state.SiteStore(identity=identity) as store:
                     events = [
                         row
                         for row in store.audit_rows(limit=10)
-                        if row["action"] == "member.invite"
+                        if row["action"] == "child.invite"
                     ]
                 self.assertEqual(len(events), 1)
                 self.assertEqual(events[0]["outcome"], "failed")

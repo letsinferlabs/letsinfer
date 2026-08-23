@@ -34,12 +34,12 @@ class SiteAdministrationTests(unittest.TestCase):
     def test_plan_and_invite_are_narrow_and_controller_audited(self) -> None:
         admin = administration.SiteAdministration(self.identity)
         plan = admin.perform(
-            controller_id=CONTROLLER, action="site.move.plan", payload={}
+            controller_id=CONTROLLER, action="node.move.plan", payload={}
         )
         self.assertEqual(plan["plan"]["source_site_id"], self.identity.site_id)
         invite = admin.perform(
             controller_id=CONTROLLER,
-            action="member.invite",
+            action="child.invite",
             payload={
                 "mode": "lan",
                 "expires_in": 180,
@@ -52,13 +52,13 @@ class SiteAdministrationTests(unittest.TestCase):
         self.assertEqual(invite["endpoint"], "https://home.local:9770")
         with state.SiteStore(identity=self.identity) as store:
             event = store.audit_rows(limit=1)[0]
-        self.assertEqual(event["action"], "member.invite")
+        self.assertEqual(event["action"], "child.invite")
         self.assertEqual(event["actor_type"], "controller")
         self.assertEqual(event["actor_id"], CONTROLLER)
         with self.assertRaisesRegex(administration.AdministrationError, "schema"):
             admin.perform(
                 controller_id=CONTROLLER,
-                action="member.invite",
+                action="child.invite",
                 payload={"mode": "lan"},
             )
 
@@ -66,13 +66,13 @@ class SiteAdministrationTests(unittest.TestCase):
         admin = administration.SiteAdministration(self.identity)
         drained = admin.perform(
             controller_id=CONTROLLER,
-            action="member.drain",
+            action="child.drain",
             payload={"member_id": self.identity.member_id},
         )
         self.assertEqual(drained["membership"]["state"], "draining")
         resumed = admin.perform(
             controller_id=CONTROLLER,
-            action="member.resume",
+            action="child.resume",
             payload={"member_id": self.identity.member_id},
         )
         self.assertEqual(resumed["membership"]["state"], "active")
@@ -80,14 +80,14 @@ class SiteAdministrationTests(unittest.TestCase):
             events = store.audit_rows(limit=2)
         self.assertEqual(
             [event["action"] for event in events],
-            ["member.resume", "member.drain"],
+            ["child.resume", "child.drain"],
         )
         self.assertTrue(all(event["actor_type"] == "controller" for event in events))
         self.assertTrue(all(event["actor_id"] == CONTROLLER for event in events))
         with self.assertRaisesRegex(administration.AdministrationError, "schema"):
             admin.perform(
                 controller_id=CONTROLLER,
-                action="member.drain",
+                action="child.drain",
                 payload={"member_id": self.identity.member_id, "force": True},
             )
 
@@ -101,11 +101,11 @@ class SiteAdministrationTests(unittest.TestCase):
                     certificate_sha256,certificate_pem,state,approval_code_hash,
                     approval_expires_at_unix,facts_json,facts_signature_base64,
                     facts_sha256,joined_at_unix,updated_at_unix)
-                   VALUES(?,?,'member',?,?,?,?,?,'active',NULL,NULL,'{}',NULL,NULL,?,?)""",
+                   VALUES(?,?,'child',?,?,?,?,?,'active',NULL,NULL,'{}',NULL,NULL,?,?)""",
                 (
                     member_id,
                     "Prepared member",
-                    "member.local",
+                    "child.local",
                     hashlib.sha256(b"prepared-key").hexdigest(),
                     "synthetic-public-key",
                     hashlib.sha256(b"prepared-certificate").hexdigest(),
@@ -117,20 +117,20 @@ class SiteAdministrationTests(unittest.TestCase):
         admin = administration.SiteAdministration(self.identity)
         result = admin.perform(
             controller_id=CONTROLLER,
-            action="member.cancel",
+            action="child.cancel",
             payload={"member_id": member_id},
         )
         self.assertEqual(result["membership"]["state"], "removed")
         with state.SiteStore(identity=self.identity) as store:
             self.assertNotIn(member_id, {row["member_id"] for row in store.members()})
             event = store.audit_rows(limit=1)[0]
-        self.assertEqual(event["action"], "member.remove")
+        self.assertEqual(event["action"], "child.remove")
         self.assertEqual(event["actor_id"], CONTROLLER)
 
     def test_fresh_member_adoption_is_direct_signed_and_controller_audited(self) -> None:
         admin = administration.SiteAdministration(self.identity)
         response = {
-            "protocol": "letsinfer-site-adoption-v1",
+            "protocol": "letsinfer-node-adoption-v1",
             "state": "committed",
             "source_site_id": "b" * 32,
             "destination_site_id": self.identity.site_id,
@@ -163,7 +163,7 @@ class SiteAdministrationTests(unittest.TestCase):
         ):
             result = admin.perform(
                 controller_id=CONTROLLER,
-                action="member.adopt",
+                action="child.adopt",
                 payload={
                     "source_endpoint": "https://192.0.2.20:9770",
                     "source_site_id": "b" * 32,
@@ -179,7 +179,7 @@ class SiteAdministrationTests(unittest.TestCase):
             "https://192.0.2.10:9770",
         )
         with state.SiteStore(identity=self.identity) as store:
-            self.assertEqual(store.audit_rows(limit=1)[0]["action"], "member.adopt")
+            self.assertEqual(store.audit_rows(limit=1)[0]["action"], "child.adopt")
 
     def test_prepared_move_is_bound_to_its_controller(self) -> None:
         destination_site = "b" * 32
@@ -221,7 +221,7 @@ class SiteAdministrationTests(unittest.TestCase):
         replacement = dataclasses.replace(
             self.identity,
             site_id=destination_site,
-            role="member",
+            role="child",
             coordinator_id="e" * 32,
             coordinator_address="destination.local",
         )
@@ -233,7 +233,7 @@ class SiteAdministrationTests(unittest.TestCase):
             "endpoint": "https://destination.local:9770",
             "invite_id": "f" * 32,
             "code": None,
-            "coordinator_certificate_sha256": "d" * 64,
+            "main_certificate_sha256": "d" * 64,
             "member_name": "Source",
             "member_address": "source.local",
         }
@@ -242,19 +242,19 @@ class SiteAdministrationTests(unittest.TestCase):
         ):
             result = admin.perform(
                 controller_id=CONTROLLER,
-                action="site.move.prepare",
+                action="node.move.prepare",
                 payload=payload,
             )
         self.assertEqual(result["move"]["move_id"], prepared.move_id)
         with self.assertRaisesRegex(administration.AdministrationError, "another"):
             admin.perform(
                 controller_id="1" * 32,
-                action="site.move.commit",
+                action="node.move.commit",
                 payload={"move_id": prepared.move_id},
             )
         committed = admin.perform(
             controller_id=CONTROLLER,
-            action="site.move.commit",
+            action="node.move.commit",
             payload={"move_id": prepared.move_id},
         )
         self.assertEqual(committed["move"]["state"], "committed")
@@ -265,19 +265,19 @@ class SiteAdministrationTests(unittest.TestCase):
         ):
             admin.perform(
                 controller_id=CONTROLLER,
-                action="site.move.prepare",
+                action="node.move.prepare",
                 payload=payload,
             )
         cancelled = admin.perform(
             controller_id=CONTROLLER,
-            action="site.move.cancel",
+            action="node.move.cancel",
             payload={"move_id": second.move_id},
         )
         self.assertEqual(cancelled["move"]["state"], "cancelled")
         with self.assertRaisesRegex(administration.AdministrationError, "unknown"):
             admin.perform(
                 controller_id=CONTROLLER,
-                action="site.move.commit",
+                action="node.move.commit",
                 payload={"move_id": second.move_id},
             )
 

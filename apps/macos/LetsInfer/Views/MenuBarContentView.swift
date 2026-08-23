@@ -16,6 +16,7 @@ struct MenuBarContentView: View {
     @State private var selectedSiteID: SavedSite.ID?
     @State private var errorMessage: String?
     @State private var expandedMetrics: Set<ExpandedMetric> = []
+    @State private var expandedServiceIDs: Set<String> = []
     @State private var isHistoryExpanded = false
 
     var body: some View {
@@ -72,7 +73,7 @@ struct MenuBarContentView: View {
                 Button {
                     addSiteWindow.show(store: siteStore)
                 } label: {
-                    Label("Add Site", systemImage: "plus")
+                    Label("Add Node", systemImage: "plus")
                 }
                 .keyboardShortcut(.defaultAction)
             }
@@ -107,7 +108,7 @@ struct MenuBarContentView: View {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.borderless)
-                .help("Add Site")
+                .help("Add Node")
             }
             .padding(14)
 
@@ -125,7 +126,7 @@ struct MenuBarContentView: View {
 
             Divider()
             HStack {
-                Text("\(siteStore.sites.count) \(siteStore.sites.count == 1 ? "site" : "sites")")
+                Text("\(siteStore.sites.count) \(siteStore.sites.count == 1 ? "node" : "nodes")")
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }
@@ -190,7 +191,7 @@ struct MenuBarContentView: View {
                         }
                     }
                     Spacer()
-                    Text("\((document?.members.count ?? 1)) members")
+                    Text("\((document?.members.count ?? 1)) nodes")
                         .foregroundStyle(.secondary)
                 }
                 .font(.caption)
@@ -223,6 +224,8 @@ struct MenuBarContentView: View {
                         siteView?.site.currentPlacements ?? [],
                         model: status.model
                     ),
+                    service: siteView?.site.services.first { $0.model == status.model },
+                    machines: siteView?.site.members ?? [],
                     controllerRole: siteView?.controller.role,
                     activeMemberCount: siteView?.site.activeMemberCount ?? 0,
                     savedSite: site
@@ -356,6 +359,8 @@ struct MenuBarContentView: View {
         metrics: MemberMetrics?,
         history: [MetricHistoryPoint],
         placement: SitePlacementRecord?,
+        service: ControllerModelService?,
+        machines: [SiteMemberRecord],
         controllerRole: String?,
         activeMemberCount: Int,
         savedSite: SavedSite
@@ -448,6 +453,42 @@ struct MenuBarContentView: View {
                     )
                 }
             }
+
+            if let service, !service.groups.isEmpty {
+                Divider()
+                DisclosureGroup(
+                    isExpanded: Binding(
+                        get: { expandedServiceIDs.contains(service.serviceID) },
+                        set: { expanded in
+                            if expanded {
+                                expandedServiceIDs.insert(service.serviceID)
+                            } else {
+                                expandedServiceIDs.remove(service.serviceID)
+                            }
+                        }
+                    )
+                ) {
+                    VStack(spacing: 5) {
+                        ForEach(service.groups.sorted { $0.groupID < $1.groupID }) { group in
+                            engineGroupRow(group, machines: machines)
+                        }
+                    }
+                    .padding(.top, 5)
+                } label: {
+                    HStack {
+                        Text(service.groups.count == 1 ? "1 engine group" : "\(service.groups.count) replica groups")
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        Text(
+                            service.telemetry.available
+                                ? "\(service.telemetry.activeRequests) active · \(service.telemetry.queuedRequests) queued"
+                                : service.desiredState.capitalized
+                        )
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -458,6 +499,46 @@ struct MenuBarContentView: View {
                 Divider()
             }
         }
+    }
+
+    private func engineGroupRow(
+        _ group: SitePlacementRecord,
+        machines: [SiteMemberRecord]
+    ) -> some View {
+        let names = group.members.map { machineID in
+            machines.first { $0.memberID == machineID }?.displayName
+                ?? String(machineID.prefix(8))
+        }
+        let stateColor: Color = switch group.state.lowercased() {
+        case "running": .green
+        case "starting", "draining", "stopped": .orange
+        case "failed": .red
+        default: .secondary
+        }
+        return HStack(spacing: 7) {
+            Circle().fill(stateColor).frame(width: 6, height: 6)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(names.joined(separator: " + "))
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                Text([
+                    group.strategy.capitalized,
+                    group.release?.version,
+                    group.deviceAllocations.isEmpty
+                        ? nil
+                        : "\(group.deviceAllocations.count) GPU",
+                    group.telemetry.map { "\($0.activeRequests)/\($0.maxActiveRequests) active" }
+                ].compactMap { $0 }.joined(separator: " · "))
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Text(group.state.uppercased())
+                .font(.caption2.weight(.bold).monospaced())
+                .foregroundStyle(stateColor)
+        }
+        .padding(.vertical, 2)
     }
 
     private func preferredPlacement(
@@ -1026,7 +1107,7 @@ struct MenuBarContentView: View {
 
     private func sourceName(_ source: SiteDataSourceKind) -> String {
         switch source {
-        case .controller: return "Site facts"
+        case .controller: return "Node facts"
         case .watchdog: return "Watchdog"
         case .ssh: return "SSH fallback"
         }
@@ -1106,7 +1187,7 @@ private struct SiteTopologyGraph: View {
 
                 topologyNode(
                     name: coordinatorName,
-                    role: "Coordinator",
+                    role: "Main",
                     state: coordinatorState,
                     systemImage: "server.rack"
                 )
@@ -1118,7 +1199,7 @@ private struct SiteTopologyGraph: View {
                         * (CGFloat(index) + 0.5) / CGFloat(max(1, count))
                     topologyNode(
                         name: member.displayName,
-                        role: "Member",
+                        role: "Child",
                         state: member.state,
                         systemImage: "cube.box.fill"
                     )
@@ -1137,7 +1218,7 @@ private struct SiteTopologyGraph: View {
         .frame(height: members.isEmpty ? 72 : (members.count > 4 ? 188 : 170))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-            "Coordinator \(coordinatorName), \(members.count) connected members"
+            "Main \(coordinatorName), \(members.count) connected children"
         )
     }
 

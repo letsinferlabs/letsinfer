@@ -61,9 +61,9 @@ struct AddSiteView: View {
                     .padding(9)
                     .background(.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 13))
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Add a Site")
+                    Text("Add a Node")
                         .font(.title2.weight(.semibold))
-                    Text("Nearby Let's Infer sites appear automatically.")
+                    Text("Nearby Let's Infer nodes appear automatically.")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -78,7 +78,7 @@ struct AddSiteView: View {
 
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Text("Nearby Sites").font(.headline)
+                    Text("Nearby Nodes").font(.headline)
                     Spacer()
                     Button {
                         discovery.refresh()
@@ -151,12 +151,12 @@ struct AddSiteView: View {
                 Image(systemName: discovery.isSearching ? "dot.radiowaves.left.and.right" : "network.slash")
                     .font(.system(size: 34, weight: .light))
                     .foregroundStyle(.secondary)
-                Text(discovery.isSearching ? "Looking for sites…" : "No nearby sites found")
+                Text(discovery.isSearching ? "Looking for nodes…" : "No nearby nodes found")
                     .font(.headline)
                 Text(
                     discovery.isSearching
-                        ? "Sites on this local network will appear here."
-                        : "Check that the site service is running, or use Custom Configuration."
+                        ? "Nodes on this local network will appear here."
+                        : "Check that the node service is running, or use Custom Configuration."
                 )
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -244,7 +244,7 @@ struct AddSiteView: View {
                 Text(
                     moveReview != nil
                         ? "Move into Home"
-                        : (isFreshAdoption ? "Add to Home" : "Pair with \(name.isEmpty ? "Site" : name)")
+                        : (isFreshAdoption ? "Add to Home" : "Pair with \(name.isEmpty ? "Node" : name)")
                 )
                 .font(.title2.weight(.semibold))
                 Text(subtitle).foregroundStyle(.secondary)
@@ -304,12 +304,12 @@ struct AddSiteView: View {
             return "Review everything affected before moving \(review.source.name) into \(review.destination.name)."
         }
         if isFreshAdoption {
-            return "Add this fresh machine to Home over its verified direct ConnectX link."
+            return "Add this fresh node to Home over its verified direct ConnectX link."
         }
         if isCustomConfiguration {
-            return "Enter the site address and the one-time code from `letsinfer pair`."
+            return "Enter the node address and the one-time code from `letsinfer pair`."
         }
-        return "Enter the one-time code shown by `letsinfer pair` on this site."
+        return "Enter the one-time code shown by `letsinfer pair` on this node."
     }
 
     private var selectedDiscovery: DiscoveredSite? {
@@ -330,7 +330,7 @@ struct AddSiteView: View {
         if let destination = freshAdoptionDestination {
             Section("Add to Home") {
                 LabeledContent("Home", value: destination.name)
-                LabeledContent("Machine", value: name)
+                LabeledContent("Node", value: name)
                 LabeledContent("Authorization", value: "Verified direct ConnectX")
                 if destination.controllerRole != "administrator" {
                     Label(
@@ -344,10 +344,10 @@ struct AddSiteView: View {
                     .foregroundStyle(.secondary)
             }
         } else {
-            Section("Site") {
+            Section("Node") {
                 if isCustomConfiguration {
                     TextField("Name", text: $name, prompt: Text("My Spark"))
-                    TextField("Hostname or IP", text: $host, prompt: Text("site-abcd.local"))
+                    TextField("Hostname or IP", text: $host, prompt: Text("node-abcd.local"))
                         .textContentType(.URL)
                 } else {
                     LabeledContent("Name", value: name)
@@ -361,11 +361,11 @@ struct AddSiteView: View {
             if let home = siteStore.sites.first {
                 Section("After pairing") {
                     Picker("Action", selection: $choice) {
-                        Text("Connect as separate site").tag(AddSiteChoice.connect)
+                        Text("Connect as separate node").tag(AddSiteChoice.connect)
                         Text("Move into \(home.name)").tag(AddSiteChoice.move)
                     }
                     .pickerStyle(.radioGroup)
-                    Text("Moving is never automatic. You will review active runtimes and credentials before the source site changes.")
+                    Text("Moving is never automatic. You will review active runtimes and credentials before the source node changes.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -411,18 +411,18 @@ struct AddSiteView: View {
                     .foregroundStyle(.orange)
             }
         }
-        Section("Preserved on the machine") {
+        Section("Preserved on the node") {
             ForEach(review.plan.preservedData, id: \.self) { Text($0) }
         }
         Section("Reset at commit") {
             ForEach(review.plan.resetState, id: \.self) { Text($0) }
         }
         if let preparedMove, let code = preparedMove.comparisonCode {
-            Section("Confirm membership") {
+            Section("Confirm child") {
                 LabeledContent("Comparison code") {
                     Text(code).font(.title2.monospacedDigit().weight(.semibold))
                 }
-                Text("Confirm this code before Home approves membership. The source remains unchanged until approval succeeds.")
+                Text("Confirm this code before Home approves the child. The source remains unchanged until approval succeeds.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -510,7 +510,7 @@ struct AddSiteView: View {
               let sourceMemberID = service.coordinatorID,
               let sourcePublicKeySHA256 = service.publicKeySHA256,
               let sourceCertificateSHA256 = service.certificateSHA256 else {
-            errorMessage = "The fresh machine's complete direct-link identity is unavailable."
+            errorMessage = "The fresh node's complete direct-link identity is unavailable."
             return
         }
         do {
@@ -576,7 +576,7 @@ struct AddSiteView: View {
                 return
             }
             guard logical.controller.role == "administrator" else {
-                throw ControllerAPIError.rejected("Moving a site requires an administrator controller.")
+                throw ControllerAPIError.rejected("Moving a node requires an administrator controller.")
             }
             guard destination.controllerRole == "administrator" else {
                 throw ControllerAPIError.rejected("Home must be paired with an administrator controller.")

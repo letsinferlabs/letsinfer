@@ -392,7 +392,7 @@ class RuntimePackTests(unittest.TestCase):
             },
             "engine": {
                 "id": "example-engine",
-                "protocol": {"version": 1},
+                "protocol": {"version": 2},
                 "oci": {
                     "reference": "ghcr.io/example/engine@sha256:" + "a" * 64,
                     "immutable_id": "sha256:" + "b" * 64,

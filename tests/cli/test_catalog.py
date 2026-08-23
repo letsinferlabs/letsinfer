@@ -60,7 +60,7 @@ def catalog() -> dict:
         },
     }
     return {
-        "schema_version": 5,
+        "schema_version": runtime_packs.CATALOG_SCHEMA_VERSION,
         "recommendation_policy": {
             "id": "letsinfer-throughput-geomean-v1",
             "benchmark_suite": "letsinfer-code-prose-v1",

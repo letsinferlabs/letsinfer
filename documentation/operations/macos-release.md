@@ -17,7 +17,7 @@ latest release; the latest route remains reserved for the core installer.
 
 ## Validation and publication
 
-Pull requests to `main` run macOS validation when the app, private site API,
+Pull requests to `main` run macOS validation when the app, private node API,
 or Watchdog wire contract changes. Pull requests to the protected
 `macos-release` branch run the same app-owned contract tests and native Xcode
 tests. Merging into `macos-release` repeats validation and then:

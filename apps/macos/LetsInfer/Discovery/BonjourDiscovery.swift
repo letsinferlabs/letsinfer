@@ -26,7 +26,7 @@ struct DiscoveredSite: Identifiable, Equatable, Sendable {
 
 @MainActor
 final class BonjourDiscovery: NSObject, ObservableObject {
-    private static let siteControlProtocol = "letsinfer-site-control-v1"
+    private static let siteControlProtocol = "letsinfer-node-control-v1"
     @Published private(set) var services: [DiscoveredSite] = []
     @Published private(set) var isSearching = false
     @Published private(set) var errorMessage: String?
@@ -92,11 +92,11 @@ final class BonjourDiscovery: NSObject, ObservableObject {
     ) -> DiscoveredSite? {
         guard text["protocol"] == "1",
               text["control"] == Self.siteControlProtocol,
-              text["role"] == "coordinator",
+              text["role"] == "main",
               text["inference"] == "http",
               text["inference_port"] == "8000" else { return nil }
-        guard let siteID = lowercaseHex(text["site"], count: 32),
-              let memberID = lowercaseHex(text["member"], count: 32),
+        guard let siteID = lowercaseHex(text["node"], count: 32),
+              let memberID = lowercaseHex(text["machine"], count: 32),
               let certificate = lowercaseHex(text["tls"], count: 64),
               let publicKey = lowercaseHex(text["key"], count: 64),
               ["configured", "adoptable"].contains(text["state"] ?? "") else {
@@ -175,7 +175,7 @@ extension BonjourDiscovery: @preconcurrency NetServiceBrowserDelegate {
         didNotSearch errorDict: [String: NSNumber]
     ) {
         isSearching = false
-        errorMessage = "Nearby Let's Infer sites could not be discovered."
+        errorMessage = "Nearby Let's Infer nodes could not be discovered."
     }
 }
 

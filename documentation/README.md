@@ -9,6 +9,7 @@ runtime, model artifacts, engine, lifecycle, safety, and telemetry.
 - one-command, hardware-aware model installation;
 - automatic start, reboot persistence, and ordinary crash recovery;
 - one stable OpenAI-compatible API across engines;
+- target-aware replication across compatible main and child nodes;
 - dynamic request admission and memory-aware queueing;
 - live throughput, request, cache, temperature, power, and system telemetry;
 - independent Watchdog protection with explicit safety recovery;
@@ -26,7 +27,7 @@ runtime, model artifacts, engine, lifecycle, safety, and telemetry.
 - [Runtime format](reference/runtime-format.md)
 - [Runtime candidates](concepts/runtime-packs.md)
 - [Engine protocol and Engine OCI](concepts/engine-adapters.md)
-- [Sites, members, and trust](concepts/sites.md)
+- [Nodes, replication, and trust](concepts/sites.md)
 
 ## Operations
 
@@ -35,5 +36,5 @@ runtime, model artifacts, engine, lifecycle, safety, and telemetry.
 - [Core release process](operations/source-release.md)
 - [macOS app release process](operations/macos-release.md)
 
-The public contract is runtime schema 3, runtime artifact schema 3, catalog
-schema 5, and Engine protocol 1. Unsupported schemas fail closed.
+The public contract is runtime schema 4, runtime artifact schema 4, catalog
+schema 6, and Engine protocol 2. Unsupported schemas fail closed.

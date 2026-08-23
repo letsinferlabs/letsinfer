@@ -24,7 +24,7 @@ Let's Infer:
 5. downloads every model artifact declared by that runtime;
 6. pulls the digest-pinned Engine OCI;
 7. verifies all identities and compatibility; and
-8. starts the runtime behind your site's OpenAI-compatible gateway.
+8. starts the runtime behind your node's OpenAI-compatible gateway.
 
 You may select an exact candidate with `--runtime`. You never need to supply an
 engine name or a `targets/...` path.
@@ -54,13 +54,13 @@ SPDX license. Those values are versioned in the signed catalog and shown by
 `letsinfer list`. The directory may also contain `engine/`, `adapter/`, `image/`,
 `kernels/`, `patches/`, `scripts/`, and `tests/` beside `runtime.json`.
 Keep only the candidate's implementation closure there. Shared gateway,
-Watchdog, benchmark, prompt, and site code stays in core.
+Watchdog, benchmark, prompt, and node-orchestration code stays in core.
 
 ## Engine independence
 
 The Engine OCI combines an upstream engine version and the adapter for that
 version. The runtime pins the OCI by digest and supplies opaque native
-arguments. Core speaks only Engine protocol v1.
+arguments. Core speaks only Engine protocol v2.
 
 You need a new Engine OCI when the upstream engine or its adapter changes. You
 need a core change only when the stable Let's Infer Engine protocol itself

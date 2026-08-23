@@ -27,7 +27,7 @@ from .state import (
 )
 
 
-PROTOCOL = "letsinfer-site-adoption-v1"
+PROTOCOL = "letsinfer-node-adoption-v1"
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_ADOPTION_SECONDS = 180
@@ -96,7 +96,7 @@ def request_adoption(
     except ValueError as error:
         raise AdoptionError("adoption candidate direct address is invalid") from error
     client = PinnedHTTPS(source_member_address, port, source_certificate_sha256)
-    discovery = client.request("GET", "/site/v1/discovery")
+    discovery = client.request("GET", "/node/v1/discovery")
     expected_discovery = {
         "protocol",
         "display_name",
@@ -112,10 +112,10 @@ def request_adoption(
     }
     if (
         set(discovery) != expected_discovery
-        or discovery.get("protocol") != "letsinfer-site-control-v1"
+        or discovery.get("protocol") != "letsinfer-node-control-v1"
         or discovery.get("site_id") != source_site_id
         or discovery.get("member_id") != source_member_id
-        or discovery.get("role") != "coordinator"
+        or discovery.get("role") != "main"
         or discovery.get("claimed_state") != "adoptable"
         or discovery.get("public_key_sha256") != source_public_key_sha256
         or discovery.get("certificate_sha256") != source_certificate_sha256
@@ -180,7 +180,7 @@ def request_adoption(
         raise AdoptionError("destination site signing identity is unavailable") from error
     response = client.request(
         "POST",
-        "/site/v1/adopt",
+        "/node/v1/adopt",
         {
             "protocol": PROTOCOL,
             "document": document,

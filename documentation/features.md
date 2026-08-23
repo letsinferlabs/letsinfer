@@ -29,7 +29,7 @@ engine, lifecycle, API, safety, telemetry, and updates.
   `http://<hostname>.local:8000/v1` on your LAN.
 - **Engine-independent clients.** Changing from SGLang to DwarfStar—or to a
   future engine—does not change the client endpoint.
-- **Local discovery.** The coordinator advertises itself with mDNS, so clients
+- **Local discovery.** The main node advertises itself with mDNS, so clients
   and the macOS controller can find it without a hand-maintained IP address.
 - **Scoped API keys.** Create, rotate, revoke, expire, and restrict keys by
   model, tenant, application, request rate, token rate, concurrency, and
@@ -42,7 +42,7 @@ engine, lifecycle, API, safety, telemetry, and updates.
 
 ## Starts automatically. Recovers deliberately.
 
-- **Reboot persistence.** Linux user services restore the site, gateway,
+- **Reboot persistence.** Linux user services restore the node, gateway,
   Watchdog, recovery controller, and selected runtime after reboot.
 - **Ordinary crash recovery.** The recovery controller can restart a failed
   engine and rebind the stable gateway without relying on an unbounded Docker
@@ -58,12 +58,12 @@ engine, lifecycle, API, safety, telemetry, and updates.
 ## Live, normalized observability
 
 `letsinfer status` is a continuously refreshed view of the whole request path,
-not a container snapshot. It combines the coordinator, gateway, Engine
+not a container snapshot. It combines the main node, gateway, Engine
 adapter, and Watchdog into one state plane.
 
 Depending on what the Engine adapter and hardware expose, it shows:
 
-- site, lifecycle, runtime, engine, target, API, and guard state;
+- node, lifecycle, runtime, engine, target, API, and guard state;
 - active and queued requests, admission capacity, and live context use;
 - aggregate, decode, and prefill throughput, TTFT, and prefix-cache state;
 - GPU, unified memory, CPU, NVMe, power, and network activity;
@@ -134,22 +134,28 @@ every runtime:
 Benchmark records are bound to the runtime, model, Engine OCI, target,
 installation, prompt set, and contract. They are evidence, not a prose claim.
 
-## Sites, controllers, and exposure
+## Nodes, replication, controllers, and exposure
 
-- **One coordinator per site.** The coordinator owns the public gateway,
-  runtime placement, keys, audit log, and controller policy.
+- **One main node.** The main node owns the public gateway, replica placement,
+  keys, audit log, and controller policy.
+- **Mixed-hardware replication.** Install the same logical model on every
+  compatible node. Each node resolves its own qualified runtime while clients
+  continue using one endpoint.
+- **Capacity-aware routing.** The gateway selects healthy groups, queues when
+  every replica is full, and retries another group only before streaming.
+- **Rolling runtime changes.** Upgrade and rollback proceed group by group and
+  restore the exact prior signed release if a replacement fails.
 - **Secure controller pairing.** Private controller operations use a
-  comparison-code flow, pinned site CA, mTLS identity, and role enforcement.
-- **Site-level audit.** Mutating CLI and controller actions carry an explicit
-  coordinator, worker, or all-member scope and enter the tamper-evident audit
+  comparison-code flow, pinned node CA, mTLS identity, and role enforcement.
+- **Node-level audit.** Mutating CLI and controller actions carry an explicit
+  main, child, or all scope and enter the tamper-evident audit
   log.
 - **Optional public inference.** Tailscale Funnel can expose only the inference
   gateway while private control and Watchdog surfaces remain private.
 
-The catalog currently qualifies single-node DGX Spark candidates. Replication
-and distributed execution are selected only when a runtime explicitly
-qualifies that topology; Let's Infer does not silently reinterpret a
-single-device benchmark as a multi-device result.
+Replication reuses independently qualified target runtimes. Distributed TP/PP
+execution requires a runtime that explicitly qualifies the complete topology;
+Let's Infer never reinterprets a single-device benchmark as a parallel result.
 
 ## A runtime platform, not an engine fork
 
@@ -165,7 +171,7 @@ move independently whenever the Engine protocol remains compatible.
 
 ## Native macOS control
 
-The macOS menu-bar controller discovers nearby sites, securely pairs without
+The macOS menu-bar controller discovers nearby nodes, securely pairs without
 SSH, shows topology and live telemetry, controls lifecycle actions according
 to its role, and manages API keys. It is a true telemetry consumer: it keeps
 only the bounded window visible in the UI and never persists telemetry history

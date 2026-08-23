@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import copy
 import unittest
 
 from core.orchestration import (
@@ -12,128 +11,61 @@ from core.orchestration import (
     validate_orchestration_contract,
     validate_target_binding,
 )
+from tests.orchestration.helpers import parallel_contract, release_identity
 
 
 class OrchestrationContractTests(unittest.TestCase):
-    def replicated(self) -> dict[str, object]:
-        return {
-            "schema_version": 1,
-            "strategy": "replicated",
-            "member_count": 2,
-            "engine_strategy": "replica-pool",
-            "failure_policy": "replica-independent",
-            "minimum_healthy_members": 1,
-            "startup_order": ["replica"],
-            "roles": {
-                "replica": {
-                    "assignment": "all",
-                    "launcher": "manifest",
-                    "port_count": 1,
-                    "environment": {},
-                    "inference_endpoint": True,
-                    "readiness": {"kind": "manifest"},
-                }
-            },
-        }
+    def parallel(self) -> dict[str, object]:
+        return parallel_contract()
 
-    def distributed(self) -> dict[str, object]:
-        readiness = {
-            "kind": "exec",
-            "command": ["/opt/runtime/ready"],
-            "interval_seconds": 2,
-            "timeout_seconds": 3,
-            "retries": 90,
-        }
-        return {
-            "schema_version": 1,
-            "strategy": "distributed",
-            "member_count": 3,
-            "engine_strategy": "tensor-parallel",
-            "failure_policy": "whole-group",
-            "minimum_healthy_members": 3,
-            "startup_order": ["engine-member", "engine-coordinator"],
-            "roles": {
-                "engine-member": {
-                    "assignment": "members",
-                    "launcher": "runtime-command",
-                    "port_count": 4,
-                    "command": ["/opt/runtime/launch", "member"],
-                    "environment": {"ENGINE_LOG_LEVEL": "info"},
-                    "inference_endpoint": False,
-                    "readiness": copy.deepcopy(readiness),
-                },
-                "engine-coordinator": {
-                    "assignment": "engine-coordinator",
-                    "launcher": "runtime-command",
-                    "port_count": 4,
-                    "command": ["/opt/runtime/launch", "coordinator"],
-                    "environment": {},
-                    "inference_endpoint": True,
-                    "readiness": copy.deepcopy(readiness),
-                },
-            },
-        }
-
-    def test_replica_contract_reuses_sealed_manifest_launcher(self) -> None:
-        value = self.replicated()
-        self.assertIs(validate_orchestration_contract(value), value)
-        self.assertIs(
-            validate_target_binding(
-                value,
-                {
-                    "strategy": "replicated",
-                    "member_count": 2,
-                    "engine_strategy": "replica-pool",
-                },
-            ),
-            value,
-        )
+    def test_replication_is_core_owned_and_single_targets_have_no_contract(self) -> None:
+        self.assertIsNone(validate_target_binding(None, {"strategy": "single"}))
+        with self.assertRaisesRegex(OrchestrationError, "cannot declare"):
+            validate_target_binding(self.parallel(), {"strategy": "single"})
 
     def test_boolean_schema_and_numeric_role_fields_are_rejected(self) -> None:
-        invalid = self.replicated()
+        invalid = self.parallel()
         invalid["schema_version"] = True
         with self.assertRaisesRegex(OrchestrationError, "schema_version"):
             validate_orchestration_contract(invalid)
 
-        invalid = self.replicated()
-        invalid["roles"]["replica"]["port_count"] = True
+        invalid = self.parallel()
+        invalid["roles"]["engine-member"]["port_count"] = True
         with self.assertRaisesRegex(OrchestrationError, "port_count"):
             validate_orchestration_contract(invalid)
 
-    def test_distributed_contract_is_runtime_owned_and_whole_group(self) -> None:
-        value = self.distributed()
+    def test_parallel_contract_is_runtime_owned_and_whole_group(self) -> None:
+        value = self.parallel()
         self.assertIs(validate_orchestration_contract(value), value)
         self.assertEqual(value["startup_order"], ["engine-member", "engine-coordinator"])
 
     def test_target_binding_rejects_missing_mismatched_and_single_contracts(self) -> None:
         placement = {
-            "strategy": "distributed",
+            "strategy": "parallel",
             "member_count": 3,
             "engine_strategy": "tensor-parallel",
         }
         with self.assertRaisesRegex(OrchestrationError, "must contain exactly"):
             validate_target_binding(None, placement)
-        changed = self.distributed()
+        changed = self.parallel()
         changed["member_count"] = 2
         changed["minimum_healthy_members"] = 2
         with self.assertRaisesRegex(OrchestrationError, "does not match"):
             validate_target_binding(changed, placement)
-        with self.assertRaisesRegex(OrchestrationError, "cannot declare"):
-            validate_target_binding(self.replicated(), {"strategy": "single"})
 
     def test_contract_rejects_shells_and_protected_environment(self) -> None:
-        shell = self.distributed()
+        shell = self.parallel()
         shell["roles"]["engine-member"]["command"] = ["/bin/sh", "-c", "engine"]
         with self.assertRaisesRegex(OrchestrationError, "cannot invoke"):
             validate_orchestration_contract(shell)
-        protected = self.distributed()
+        protected = self.parallel()
         protected["roles"]["engine-member"]["environment"] = {
             "LETSINFER_GROUP_ID": "forged"
         }
         with self.assertRaisesRegex(OrchestrationError, "reserved for core"):
             validate_orchestration_contract(protected)
 
-    def test_distributed_group_plan_is_deterministic_and_ranked(self) -> None:
+    def test_parallel_group_plan_is_deterministic_and_ranked(self) -> None:
         members = ("1" * 32, "2" * 32, "3" * 32)
         arguments = {
             "member_ids": members,
@@ -146,14 +78,19 @@ class OrchestrationContractTests(unittest.TestCase):
             "topology_sha256": "4" * 64,
             "manifest_sha256": "5" * 64,
             "runtime_digest": "6" * 64,
+            "service_id": "7" * 32,
+            "release": release_identity(),
             "member_port_bases": {
                 "1" * 32: 18000,
                 "2" * 32: 18000,
                 "3" * 32: 18000,
             },
+            "member_device_uuids": {
+                member: [f"GPU-{member[:8]}"] for member in members
+            },
         }
-        first = build_group_plan(self.distributed(), **arguments)
-        second = build_group_plan(self.distributed(), **arguments)
+        first = build_group_plan(self.parallel(), **arguments)
+        second = build_group_plan(self.parallel(), **arguments)
         self.assertEqual(first, second)
         self.assertEqual(first.assignments[0].member_id, "2" * 32)
         self.assertEqual(first.assignments[0].role, "engine-coordinator")
@@ -168,14 +105,25 @@ class OrchestrationContractTests(unittest.TestCase):
     def test_group_plan_rejects_incomplete_member_addresses(self) -> None:
         with self.assertRaisesRegex(OrchestrationError, "addresses"):
             build_group_plan(
-                self.replicated(),
-                member_ids=("1" * 32, "2" * 32),
+                self.parallel(),
+                member_ids=("1" * 32, "2" * 32, "3" * 32),
                 member_addresses={"1" * 32: "a.local:9770"},
                 engine_coordinator_id="1" * 32,
                 topology_sha256="3" * 64,
-                manifest_sha256="4" * 64,
-                runtime_digest="5" * 64,
-                member_port_bases={"1" * 32: 18000, "2" * 32: 18000},
+                manifest_sha256="5" * 64,
+                runtime_digest="6" * 64,
+                service_id="7" * 32,
+                release=release_identity(),
+                member_port_bases={
+                    "1" * 32: 18000,
+                    "2" * 32: 18000,
+                    "3" * 32: 18000,
+                },
+                member_device_uuids={
+                    "1" * 32: ["GPU-1"],
+                    "2" * 32: ["GPU-2"],
+                    "3" * 32: ["GPU-3"],
+                },
             )
 
 

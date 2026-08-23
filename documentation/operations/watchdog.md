@@ -83,21 +83,21 @@ Every one-second sample also carries the complete engine-neutral inference
 counter contract: active/queued requests; received, admitted, completed,
 failed, cancelled, and retried requests; input/output/cached tokens; queue,
 TTFT, and decode time; exact-token coverage; prefix hits; and dropped/failed
-usage writes. The coordinator accepts only signed telemetry schema 2 and
+usage writes. The main node accepts only signed telemetry schema 2 and
 derives aggregate wall throughput plus exact service-time prefill/decode rates
 from successive counter windows. During a request, native cumulative usage can
 also produce live wall-clock prefill/decode rates before the final timing
-record arrives. `aggregate_tokens_per_second` is the normalized site-wide
+record arrives. `aggregate_tokens_per_second` is the normalized node-wide
 output rate; `decode_tokens_per_second` retains exact service-time decode when
 available. It returns `null` when no exact engine token observation
-exists. The Mac decodes all native fields and the full coordinator aggregate;
-the controller's current placement overrides any stale core/site baseline
+exists. The Mac decodes all native fields and the full main-node aggregate;
+the controller's current group overrides any stale core/node baseline
 identity, and historical placements stay collapsed to the newest record per
 model. It never estimates token counts from response text.
 
-The site agent feeds the coordinator from one authenticated native Watchdog
+The node agent feeds the main node from one authenticated native Watchdog
 live subscription, so the ten-second durable-ring flush remains a crash/history
-boundary rather than a live-visibility gate. The local CLI reads the site
+boundary rather than a live-visibility gate. The local CLI reads the node
 agent's current private aggregate instead of consuming another Watchdog stream
 or transferring unused history on every refresh. That controller listener has
 eight bounded concurrent request workers, and a slow TLS peer cannot block

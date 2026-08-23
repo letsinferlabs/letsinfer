@@ -11,12 +11,20 @@ import unittest
 from unittest import mock
 
 from core import cli
+from tests.orchestration.helpers import release_identity
 
 
 class _Store:
-    def __init__(self, members: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        members: list[dict] | None = None,
+        *,
+        service_id: str = "0" * 32,
+    ) -> None:
         self._members = members or []
+        self.service_id = service_id
         self.placements: list[dict] = []
+        self.allocation_states: list[tuple[str, str]] = []
 
     def __enter__(self):
         return self
@@ -34,56 +42,32 @@ class _Store:
         self.placements.append(dict(placement))
         return dict(placement)
 
+    def ensure_model_service(self, _model):
+        return {"service_id": self.service_id}
+
+    def reserve_group_devices(self, _group_id, _assignments):
+        return None
+
+    def set_group_allocation_state(self, group_id, state):
+        self.allocation_states.append((group_id, state))
+
 
 class EngineGroupInstallTests(unittest.TestCase):
-    def test_normal_install_dispatches_a_multi_member_target(self) -> None:
-        source = "registry.example/runtime@sha256:" + "1" * 64
-        manifest_path = pathlib.Path("/control/releases/release.json")
-        control_root = pathlib.Path("/control")
-        manifest = {
-            "serving": {"qualified": True},
-            "target": {"placement": {"strategy": "distributed"}},
-        }
-        receipt = {"source": source}
+    def test_normal_install_delegates_to_signed_catalog_node_planner(self) -> None:
         arguments = argparse.Namespace(
             model="example-model",
             engine=None,
             catalog=None,
             no_service=False,
         )
-        with (
-            mock.patch.object(
-                cli,
-                "_runtime_source_for_install",
-                return_value=(source, "recommended", "1.0.0", "target", "2" * 64),
-            ),
-            mock.patch.object(
-                cli,
-                "prepare_runtime_install",
-                return_value=(manifest_path, manifest, control_root, receipt),
-            ),
-            mock.patch.object(cli, "verify_runtime_sources"),
-            mock.patch.object(cli, "user_lingering_enabled", return_value=True),
-            mock.patch.object(
-                cli,
-                "target_contract",
-                return_value={"placement": {"strategy": "distributed"}},
-            ),
-            mock.patch.object(cli, "install_engine_group", return_value=17) as install_group,
-        ):
+        with mock.patch.object(
+            cli, "_install_catalog_nodes", return_value=17
+        ) as install_nodes:
             self.assertEqual(cli.install(arguments), 17)
-
-        install_group.assert_called_once_with(
-            arguments,
-            source=source,
-            manifest_path=manifest_path,
-            manifest=manifest,
-            control_root=control_root,
-            receipt=receipt,
-        )
+        install_nodes.assert_called_once_with(arguments)
 
     def test_post_start_finalization_failure_stops_group_and_marks_failed(self) -> None:
-        member_ids = ("a" * 32, "b" * 32)
+        member_ids = ("a" * 32,)
         records = [
             {
                 "member_id": member_id,
@@ -93,61 +77,25 @@ class EngineGroupInstallTests(unittest.TestCase):
             }
             for index, member_id in enumerate(member_ids)
         ]
-        store = _Store(records)
+        node_id = "f" * 32
+        service_id = cli.logical_service_id(node_id, "example-model")
+        store = _Store(records, service_id=service_id)
         placement = types.SimpleNamespace(
-            strategy="distributed",
+            strategy="single",
             member_ids=member_ids,
             engine_coordinator_id=member_ids[0],
             topology_sha256="4" * 64,
+            device_uuids={member_ids[0]: ("GPU-fixture",)},
         )
         graph = mock.Mock()
-        graph.engine_addresses.return_value = {
-            member_ids[0]: "192.0.2.10",
-            member_ids[1]: "192.0.2.11",
-        }
-        contract = {
-            "schema_version": 1,
-            "strategy": "distributed",
-            "member_count": 2,
-            "engine_strategy": "tensor-parallel",
-            "failure_policy": "whole-group",
-            "minimum_healthy_members": 2,
-            "startup_order": ["engine-member", "engine-coordinator"],
-            "roles": {
-                "engine-member": {
-                    "assignment": "members",
-                    "launcher": "runtime-command",
-                    "port_count": 2,
-                    "command": ["/opt/runtime/member"],
-                    "environment": {},
-                    "inference_endpoint": False,
-                    "readiness": {
-                        "kind": "exec",
-                        "command": ["/opt/runtime/ready"],
-                        "interval_seconds": 1,
-                        "timeout_seconds": 1,
-                        "retries": 2,
-                    },
-                },
-                "engine-coordinator": {
-                    "assignment": "engine-coordinator",
-                    "launcher": "runtime-command",
-                    "port_count": 2,
-                    "command": ["/opt/runtime/coordinator"],
-                    "environment": {},
-                    "inference_endpoint": True,
-                    "readiness": {
-                        "kind": "exec",
-                        "command": ["/opt/runtime/ready"],
-                        "interval_seconds": 1,
-                        "timeout_seconds": 1,
-                        "retries": 2,
-                    },
-                },
-            },
-        }
         manifest = {
             "model": {"alias": "example-model"},
+            "engine": {
+                "name": "example-engine",
+                "model_format": "huggingface-snapshot",
+                "cache_provider": "none",
+            },
+            "cache": {"persistent": False},
             "serving": {
                 "max_connections": 16,
                 "max_active_requests": 8,
@@ -155,11 +103,11 @@ class EngineGroupInstallTests(unittest.TestCase):
             },
         }
         runtime = types.SimpleNamespace(
-            digest="5" * 64,
+            digest="6" * 64,
             runtime={
-                "id": "engine--owner--model--two-node",
+                "id": "engine--owner--model--one-node",
                 "version": "1.0.0",
-                "orchestration": contract,
+                "orchestration": None,
             },
         )
         instances = []
@@ -198,17 +146,28 @@ class EngineGroupInstallTests(unittest.TestCase):
             no_build_image=False,
         )
         target = {
-            "id": "two-node",
+            "id": "one-node",
             "placement": {
-                "strategy": "distributed",
-                "interconnect": {"kind": "connectx"},
+                "strategy": "single",
+                "engine_strategy": "single",
+                "interconnect": {"kind": "none"},
             },
         }
+        sealed_release = release_identity(manifest_sha256="7" * 64)
+        sealed_release.update({
+            "logical_model": "example-model",
+            "source": "registry.example/runtime@sha256:" + "9" * 64,
+            "target_id": "one-node",
+        })
         with tempfile.TemporaryDirectory() as directory:
             with (
-                mock.patch.object(cli, "resolve_manifest_placement", return_value=(mock.sentinel.identity, graph, placement)),
+                mock.patch.object(
+                    cli,
+                    "resolve_manifest_placement",
+                    return_value=(types.SimpleNamespace(site_id=node_id), graph, placement),
+                ),
                 mock.patch.object(cli, "verify_descriptor", return_value=runtime),
-                mock.patch.object(cli, "validate_target_binding", return_value=contract),
+                mock.patch.object(cli, "validate_target_binding", return_value=None),
                 mock.patch.object(cli, "target_contract", return_value=target),
                 mock.patch.object(cli, "sha256_file", return_value="7" * 64),
                 mock.patch.object(
@@ -239,11 +198,13 @@ class EngineGroupInstallTests(unittest.TestCase):
                     manifest=manifest,
                     control_root=pathlib.Path("/control"),
                     receipt={"object_root": "/objects/runtime"},
+                    release_identity=sealed_release,
                 )
 
         self.assertEqual(instances[0].stop_calls, 1)
         self.assertEqual(store.placements[-1]["state"], "failed")
         self.assertEqual(store.placements[-1]["endpoints"], [])
+        self.assertEqual(store.allocation_states[-1][1], "released")
 
 
 if __name__ == "__main__":

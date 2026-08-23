@@ -39,7 +39,7 @@ struct DataSourceTests {
         )
         do {
             _ = try await router.fetchSnapshot(for: site)
-            Issue.record("A paired site must not use the SSH fallback")
+            Issue.record("A paired node must not use the SSH fallback")
         } catch let error as WatchdogClientError {
             guard case .connectionClosed = error else {
                 Issue.record("Expected the Watchdog failure to be preserved")
@@ -339,18 +339,18 @@ struct DataSourceTests {
 
     @Test
     @MainActor
-    func bonjourDiscoveryAcceptsOnlyCompleteCoordinatorIdentity() {
+    func bonjourDiscoveryAcceptsOnlyCompleteMainIdentity() {
         let siteID = String(repeating: "a", count: 32)
         let memberID = String(repeating: "b", count: 32)
         let certificate = String(repeating: "c", count: 64)
         let publicKey = String(repeating: "d", count: 64)
         let fields = [
             "protocol": "1",
-            "control": "letsinfer-site-control-v1",
-            "role": "coordinator",
+            "control": "letsinfer-node-control-v1",
+            "role": "main",
             "state": "adoptable",
-            "site": siteID,
-            "member": memberID,
+            "node": siteID,
+            "machine": memberID,
             "tls": certificate,
             "key": publicKey,
             "inference": "http",
@@ -375,11 +375,11 @@ struct DataSourceTests {
         #expect(site?.adoptable == true)
 
         var member = fields
-        member["role"] = "member"
+        member["role"] = "child"
         #expect(BonjourDiscovery.validatedSite(
             fallbackID: "fallback",
-            name: "Member",
-            host: "member.local",
+            name: "Child",
+            host: "child.local",
             port: 9_770,
             text: member
         ) == nil)

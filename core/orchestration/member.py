@@ -156,6 +156,8 @@ def validate_group_job(
         or group.get("runtime_digest") != value["runtime_digest"]
     ):
         raise MemberJobError("engine-group job group document is invalid")
+    if action == "stage" and source != group["release"]["source"]:
+        raise MemberJobError("stage job source does not match the sealed group release")
     if hashlib.sha256(canonical_bytes(group)).hexdigest() != value["plan_sha256"]:
         raise MemberJobError("engine-group job plan digest is invalid")
     matching_members = [
@@ -169,7 +171,7 @@ def validate_group_job(
     assignment = matching_members[0]
     required_role = {
         "name", "rank", "role_rank", "port_base", "port_count", "launcher",
-        "command", "environment", "inference_endpoint", "readiness",
+        "command", "environment", "inference_endpoint", "readiness", "device_uuids",
     }
     if (
         set(role) != required_role
@@ -179,6 +181,7 @@ def validate_group_job(
         or role.get("port_base") != assignment.get("port_base")
         or role.get("port_count") != assignment.get("port_count")
         or role.get("inference_endpoint") is not assignment.get("inference_endpoint")
+        or role.get("device_uuids") != assignment.get("device_uuids")
         or role.get("launcher") not in {"manifest", "runtime-command"}
         or not isinstance(role.get("command"), list)
         or not isinstance(role.get("environment"), dict)
@@ -434,7 +437,7 @@ class MemberAgent:
         )
         self._worker = threading.Thread(
             target=self._work,
-            name="letsinfer-member-lifecycle",
+            name="letsinfer-child-lifecycle",
             daemon=True,
         )
         self._worker.start()

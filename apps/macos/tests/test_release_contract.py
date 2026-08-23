@@ -100,7 +100,7 @@ class MacOSReleaseContractTests(unittest.TestCase):
         self.assertIn("kSecAttrIsExtractable as String: false", pairing)
         self.assertIn("kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly", pairing)
         self.assertIn(
-            'private static let siteControlProtocol = "letsinfer-site-control-v1"',
+            'private static let siteControlProtocol = "letsinfer-node-control-v1"',
             discovery,
         )
         self.assertIn('text["control"] == Self.siteControlProtocol', discovery)
