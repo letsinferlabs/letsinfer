@@ -31,6 +31,62 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
+    def test_monitor_safety_stop_replaces_secondary_stream_failure(self) -> None:
+        secondary = runtime_matrix.RuntimeMatrixError(
+            "fixture completion token count 75 is below 128"
+        )
+
+        failure = runtime_matrix.prefer_monitor_failure(
+            secondary,
+            ["runtime unified-memory reserve fell below 4 GiB"],
+        )
+
+        self.assertIsInstance(failure, runtime_matrix.RuntimeMatrixError)
+        self.assertEqual(
+            str(failure),
+            "runtime unified-memory reserve fell below 4 GiB",
+        )
+        self.assertIs(
+            runtime_matrix.prefer_monitor_failure(secondary, []),
+            secondary,
+        )
+
+    def test_ttft_cache_result_records_exact_cold_warm_pair(self) -> None:
+        cells = {
+            f"{phase}-code-c1": {
+                "prompt_suite": "letsinfer-code-prose-v1",
+                "fixtures": [{"sha256": "a" * 64}],
+            }
+            for phase in runtime_matrix.TTFT_CONTEXTS
+        }
+        rows = [
+            {
+                "cell": f"{phase}-code-c1",
+                "summary": {
+                    "prompt_tokens": [63_900],
+                    "ttft_ms": {"mean": ttft_ms},
+                    "cached_prompt_tokens": {"max": cached},
+                },
+            }
+            for phase, ttft_ms, cached in (
+                ("ttftcold", 60_000.0, 0.0),
+                ("ttftwarm", 2_000.0, 63_744.0),
+            )
+        ]
+
+        result = runtime_matrix.ttft_cache_benchmark_result(rows, cells)
+
+        self.assertEqual(result["cold_ttft_seconds"], 60.0)
+        self.assertEqual(result["warm_ttft_seconds"], 2.0)
+        self.assertEqual(result["warm_cached_prompt_tokens"], 63_744)
+        self.assertEqual(result["ttft_speedup_ratio"], 30.0)
+
+        rows[1]["summary"]["cached_prompt_tokens"]["max"] = 0.0
+        with self.assertRaisesRegex(
+            runtime_matrix.RuntimeMatrixError, "larger exact cache hit"
+        ):
+            runtime_matrix.ttft_cache_benchmark_result(rows, cells)
+
     def test_runtime_config_uses_the_nested_benchmark_contract(self) -> None:
         contract = {
             "tokenizer": {
