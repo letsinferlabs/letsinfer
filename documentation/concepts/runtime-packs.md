@@ -69,8 +69,12 @@ changes.
 A radical runtime does not wait on a preliminary Engine publication PR. It
 keeps the complete changed or new Engine implementation in the runtime
 candidate, builds locally without registry writes, and submits the whole
-reviewable source closure in one PR. Automated PR artifacts give verifiers the
-exact Engine and runtime bytes. A runtime that does not change Engine inputs
+reviewable source closure in one PR. A no-code PR sentinel triggers a
+secretless default-branch builder, and a separate trusted default-branch
+finalizer gives verifiers the exact Engine and runtime bytes without executing
+proposal code.
+`letsinfer benchmark verify` downloads that head-bound artifact, not the PR
+source tree. A runtime that does not change Engine inputs
 simply reuses the existing immutable Engine pin and publishes no duplicate
 Engine object.
 
@@ -155,7 +159,10 @@ reviewer always occupies one slot, and a blocking failure is terminal for that
 subject; performance variance does not change quorum. The verification bot
 owns `benchmark.consensus.json`, qualification provenance, and the catalog
 projection. An authorized maintainer then uses `/shipit` to promote the exact
-reviewed Engine and runtime objects. Runtime source cannot mark itself
+reviewed Engine and runtime objects, anonymously reverify both, and merge the
+checked head. A configured maintainer may waive only the second verifier after
+one independent pass and no blocking failure; live maintainer permission and a
+trusted numeric-ID allowlist are both required. Runtime source cannot mark itself
 qualified. A post-release invalidation enters the separate signed revocation
 ledger; it does not rewrite the immutable release or add a status field to the
 manifest.

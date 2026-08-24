@@ -61,18 +61,35 @@ run `engine-adapter verify --protocol 2`, exercise target-specific tests, and
 launch only in explicit development or qualification mode. Repack unchanged
 source twice and require identical bytes.
 
+Calculate and place the deterministic future production Engine manifest and
+configuration digests in `runtime.json` before requesting human verification.
+This calculation needs no registry access. Trusted CI independently rebuilds
+the recipe; if the pins differ it uploads an `engine-pin-pr-*` patch and does
+not create a benchmarkable artifact for that head.
+
 Do not invent a `letsinfer runtime ...` command family. `letsinfer pack`, local
 qualification, and the repository tools are the supported building blocks.
 
 ## Submit and qualify
 
-Submit the Engine and runtime together in one candidate PR. Untrusted PR jobs
-may build downloadable verifier artifacts but have no production package-write
-credential. The final verifier bundle binds the PR head, complete source,
+Submit the Engine and runtime together in one candidate PR. A no-code PR
+sentinel triggers a read-only, secretless default-branch builder for the exact
+head; contributor changes cannot replace that build workflow. A second
+default-branch `workflow_run` finalizer re-audits and repacks the raw outputs
+without executing proposal code. The final
+verifier bundle binds the PR head, complete source,
 Engine manifest and configuration digests, runtime pack and planned OCI digest,
 model revisions, target, benchmark contract, SBOM, and build provenance.
 
-Reviewers run the exact bundle through `letsinfer benchmark verify`. After two
-eligible independent passes, an authorized maintainer uses `/shipit` to promote
+Reviewers run the exact bundle through `letsinfer benchmark verify`; the command
+does not download or pack PR source. After two eligible independent passes, an
+authorized maintainer uses `/shipit` to promote
 the exact verified Engine and runtime objects. Any changed byte creates a new
 subject and requires fresh verification.
+
+Use the pre-provisioned public
+`ghcr.io/letsinferlabs/engine-images` repository for every new Engine build.
+Multiple manifests share that package safely because `runtime.json`, the
+verifier subject, and publication all bind the exact manifest and configuration
+digests. Never create or change a GHCR package's visibility from contributor
+automation.

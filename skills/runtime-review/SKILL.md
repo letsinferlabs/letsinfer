@@ -30,20 +30,21 @@ one slot, regardless of reruns. Authors are informational. Performance
 differences are reported but do not create disagreement mechanics or increase
 quorum. Any accepted blocking failure is terminal for the subject.
 
-The configured Taimur bypass is intentionally narrow:
+The configured maintainer bypass is intentionally narrow:
 
 ```text
 /shipit --bypass-verifiers
 Reason: <required non-empty explanation>
 ```
 
-Trusted code must match the immutable configured numeric GitHub user ID and
-current maintainer permission. It still requires one complete successful run
-for the current subject. It waives only the second verifier and a non-blocking
-performance warning; it never waives source review, required checks, protocol,
-determinism, licensing, SBOM, public pull verification, or blocking evidence.
-Record the actor ID, command, reason, subject, time, and waived requirement in
-bot-owned provenance.
+Trusted code must find the actor's immutable numeric GitHub ID in
+`LETSINFER_VERIFIER_BYPASS_GITHUB_IDS` and independently confirm live
+`maintain` or `admin` permission. It still requires one complete successful
+independent run for the current subject and no accepted blocking failure. It
+waives only the second verifier; it never waives source review, required
+checks, protocol, determinism, licensing, SBOM, public pull verification, or
+blocking evidence. Record the actor ID, command, reason, subject, time, and
+waived requirement in bot-owned consensus and the publication receipt.
 
 ## Process `/shipit`
 
@@ -60,8 +61,17 @@ Promote, do not unconstrainedly rebuild:
 3. Push the exact deterministic runtime pack and verify byte identity through
    an anonymous pull.
 4. Materialize only bot-owned consensus, provenance, and catalog projection.
-5. Mark the exact head shippable and merge through protected-branch controls.
-6. Continue through the protected catalog-signing and release lane.
+5. Post the exact publication receipt and merge through protected-branch
+   controls with the checked head SHA.
+6. Let the protected release lane anonymously reverify objects before catalog
+   signing; it must not republish Engine or runtime objects.
+
+Before enabling `/shipit`, maintainers pre-provision public
+`ghcr.io/letsinferlabs/runtime-artifacts` and
+`ghcr.io/letsinferlabs/engine-images` packages linked to the public runtimes
+repository. Existing candidates retain their current public package. Treat an
+anonymous-pull failure after promotion as terminal: never merge and never
+weaken visibility verification.
 
 If retained artifacts expired, a rebuild is only a reproducibility check and
 may proceed solely when every digest matches the verified subject. A mismatch

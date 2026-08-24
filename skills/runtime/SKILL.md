@@ -127,9 +127,11 @@ Classify the Engine path before editing:
   runtime merely because that runtime uses the Engine.
 - **Changed or new Engine:** keep its source, adapter, image recipe, patches,
   tests, and license material in the candidate. Develop and validate locally,
-  then submit them in the same runtime PR. Pull-request automation creates the
-  verifier Engine artifact and final pin; do not publish an unofficial Engine
-  OCI or split the work into a preliminary Engine PR.
+  calculate its deterministic future production digest without publishing,
+  and submit everything in the same runtime PR. Pull-request automation
+  independently rebuilds the verifier Engine artifact; a differing pin yields
+  a mechanical patch and blocks verification for that head. Do not publish an
+  unofficial Engine OCI or split the work into a preliminary Engine PR.
 
 ## Define one measured recipe
 
@@ -201,17 +203,27 @@ copy those fields, and never add a qualification/status flag to `runtime.json`.
 
 ## Publish
 
-Opening or updating a finalized PR automatically creates the exact verifier
-artifacts. Reviewers run those artifacts through `letsinfer benchmark verify`.
+Opening or updating a finalized PR runs a no-code sentinel, a secretless
+default-branch builder for the exact head, and a separate trusted
+default-branch finalizer. Contributor changes cannot replace either trusted
+workflow.
+Reviewers run those artifacts through `letsinfer benchmark verify`, which never
+downloads or repacks the proposal source.
 After qualification, an authorized maintainer comments `/shipit`. Trusted
 automation promotes the exact verified Engine OCI when the Engine changed,
 reuses an existing Engine OCI when it did not, and always publishes the exact
-verified runtime OCI. It then regenerates the append-only
-schema-6 release index and recommendations, signs the catalog and separate
-revocation ledger, and publishes them directly from the runtimes repository
-after verifying the public trust root. Community verification evidence is not
+verified runtime OCI. It anonymously verifies both public objects and merges
+only the reviewed head. The later protected release lane verifies—not
+republishes—those objects, then signs the append-only schema-6 catalog and
+separate revocation ledger. Community verification evidence is not
 copied to OCI; full accepted records remain in canonical bot comments and
 `benchmark.consensus.json`.
+
+For a brand-new candidate, plan its runtime OCI in the pre-provisioned public
+`ghcr.io/letsinferlabs/runtime-artifacts` package. Existing candidates retain
+their current public package. New Engine builds use
+`ghcr.io/letsinferlabs/engine-images`. All references remain digest-pinned;
+authors never create packages, set visibility, or receive registry credentials.
 
 Do not manually edit the root `manifest.json` or production catalog, publish
 official OCI objects, or merge the PR yourself unless you are following the

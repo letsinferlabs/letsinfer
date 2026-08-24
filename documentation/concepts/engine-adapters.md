@@ -84,8 +84,12 @@ compatibility branches to core.
 
 Runtime authors do not need registry publication access. Keep the complete
 Engine source, adapter, deterministic image recipe, patches, tests, licenses,
-and SBOM inputs in the same runtime candidate PR. Pull-request automation
-builds the exact verifier artifact. After two independent verifications, a
+and SBOM inputs in the same runtime candidate PR. A no-code PR sentinel starts
+a secretless default-branch builder that builds twice; a separate trusted
+default-branch finalizer validates the exact verifier artifact without
+executing proposal code. Pin the
+deterministic future production digest before human verification; a mismatch
+produces a patch and no benchmarkable artifact. After qualification, a
 maintainer's `/shipit` promotes those exact bytes to the official Engine
 repository and publishes the runtime that already pins them.
 

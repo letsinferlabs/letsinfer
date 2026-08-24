@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import io
 import json
+import os
 import pathlib
 import tarfile
 import tempfile
@@ -14,6 +17,8 @@ from unittest import mock
 
 from benchmarks import benchmark_record
 from core import benchmark_verification as verification
+from core import cli, runtime_packs
+from tests.runtime_fixture import runtime_candidate
 
 
 class BenchmarkVerificationTests(unittest.TestCase):
@@ -23,6 +28,7 @@ class BenchmarkVerificationTests(unittest.TestCase):
             "https://github.com/letsinferlabs/runtimes/pull/123",
             "OPEN",
             "main",
+            "b" * 40,
             "a" * 40,
             verification.GitHubIdentity("Author", 41, "User"),
             ("sglang--owner--model--dgx-spark/runtime.json",),
@@ -251,6 +257,322 @@ class BenchmarkVerificationTests(unittest.TestCase):
             with self.assertRaisesRegex(verification.VerificationError, "run `brew install gh`"):
                 verification.ensure_gh(interactive=False, install=True)
         run.assert_not_called()
+
+    def test_gh_preflight_rejects_cli_before_attestation_security_fix(self) -> None:
+        with mock.patch.object(
+            verification, "gh_version", return_value=(2, 96, 0)
+        ), self.assertRaisesRegex(
+            verification.VerificationError, "2.97.0 or newer"
+        ):
+            verification.ensure_gh(interactive=False)
+
+    def test_every_verifier_payload_requires_trusted_finalizer_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            for name in ("bundle.json", "runtime.letsinfer"):
+                (root / name).write_bytes(name.encode())
+            with mock.patch.dict(
+                os.environ, {"LETSINFER_ATTESTATION_TOKEN": "attestation-token"}
+            ), mock.patch.object(verification, "_run") as run:
+                verification.verify_bundle_attestations(root, gh="/usr/bin/gh")
+        self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            command = call.args[0]
+            self.assertEqual(command[:3], ["/usr/bin/gh", "attestation", "verify"])
+            self.assertIn("--repo", command)
+            self.assertIn(verification.REPOSITORY, command)
+            self.assertIn("--cert-identity", command)
+            self.assertIn(verification.FINALIZER_CERT_IDENTITY, command)
+            self.assertEqual(
+                call.kwargs["environment"]["GH_TOKEN"], "attestation-token"
+            )
+
+    def _reuse_bundle(self, root: pathlib.Path) -> tuple[pathlib.Path, verification.PullRequest]:
+        source = root / "source"
+        source.mkdir()
+        runtime = runtime_candidate()
+        (source / "runtime.json").write_text(json.dumps(runtime), encoding="utf-8")
+        pack = root / "runtime.letsinfer"
+        runtime_packs.build_archive(source, pack)
+        pack_sha = verification.sha256_file(pack)
+        subject = verification.execution_subject(
+            runtime, pack_sha256=pack_sha, pack_bytes=pack.stat().st_size
+        )
+        subject.pop("execution_sha256")
+        subject.update(
+            {
+                "artifact_schema_version": 1,
+                "repository": verification.REPOSITORY,
+                "pull_request": 123,
+                "proposal_head_sha": "a" * 40,
+                "proposal_base_sha": "b" * 40,
+                "proposal_tree_sha256": "b" * 64,
+                "engine_mode": "reuse-engine",
+                "build_workflow_run_id": 11,
+            }
+        )
+        subject["execution_sha256"] = verification.sha256_bytes(
+            verification.canonical_bytes(subject)
+        )
+        config = json.dumps(
+            {
+                "candidate": runtime["id"],
+                "media_type": runtime_packs.PACK_MEDIA_TYPE,
+                "schema_version": 1,
+                "version": runtime["version"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        manifest_digest = subject["runtime_oci_manifest_digest"]
+        plan = {
+            "candidate": runtime["id"],
+            "version": runtime["version"],
+            "tag": f"ghcr.io/letsinferlabs/runtimes/{runtime['id']}:{runtime['id']}-{runtime['version']}",
+            "source": f"ghcr.io/letsinferlabs/runtimes/{runtime['id']}@{manifest_digest}",
+            "manifest_digest": manifest_digest,
+            "manifest_bytes": 0,
+            "config_digest": "sha256:" + hashlib.sha256(config).hexdigest(),
+            "layer_digest": "sha256:" + pack_sha,
+            "layer_bytes": pack.stat().st_size,
+        }
+        bundle_root = root / "bundle"
+        bundle_root.mkdir()
+        pack.replace(bundle_root / "runtime.letsinfer")
+        engine = {
+            "mode": "reuse-engine",
+            "reference": runtime["engine"]["oci"]["reference"],
+            "config_digest": runtime["engine"]["oci"]["immutable_id"],
+        }
+        payloads = {
+            "runtime-plan.json": verification.canonical_bytes(plan),
+            "candidate-audit.json": b"{}\n",
+            "runtime.spdx.json": b"{}\n",
+            "provenance.json": verification.canonical_bytes(
+                {"subject": subject, "engine": engine}
+            ),
+        }
+        for name, data in payloads.items():
+            (bundle_root / name).write_bytes(data)
+        names = {
+            "runtime.letsinfer",
+            "runtime-plan.json",
+            "candidate-audit.json",
+            "runtime.spdx.json",
+            "provenance.json",
+        }
+        checksums = {
+            name: {
+                "sha256": verification.sha256_file(bundle_root / name),
+                "bytes": (bundle_root / name).stat().st_size,
+            }
+            for name in sorted(names)
+        }
+        (bundle_root / "checksums.json").write_bytes(
+            verification.canonical_bytes(checksums)
+        )
+        document = {
+            "schema_version": 1,
+            "repository": verification.REPOSITORY,
+            "pull_request": 123,
+            "proposal_head_sha": "a" * 40,
+            "proposal_base_sha": "b" * 40,
+            "proposal_tree_sha256": "b" * 64,
+            "candidate": runtime["id"],
+            "runtime_authors": [
+                {"github_login": "Author", "github_id": 41, "github_type": "User"}
+            ],
+            "mode": "reuse-engine",
+            "artifact_name": f"verification-bundle-pr-123-{'a' * 40}",
+            "build_workflow": {"path": ".github/workflows/build-verifier.yml", "run_id": 11, "workflow_sha": "b" * 40},
+            "finalizer_workflow": {"path": ".github/workflows/finalize-verifier.yml", "run_id": 12, "workflow_sha": "c" * 40},
+            "subject": subject,
+            "engine": engine,
+            "runtime": plan,
+            "checksums_sha256": verification.sha256_file(bundle_root / "checksums.json"),
+        }
+        (bundle_root / "bundle.json").write_bytes(
+            verification.canonical_bytes(document)
+        )
+        pr = verification.PullRequest(
+            123,
+            "https://github.com/letsinferlabs/runtimes/pull/123",
+            "OPEN",
+            "main",
+            "b" * 40,
+            "a" * 40,
+            verification.GitHubIdentity("Author", 41, "User"),
+            (f"{runtime['id']}/runtime.json",),
+        )
+        return bundle_root, pr
+
+    def test_verifier_bundle_is_exact_and_tamper_evident(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, pr = self._reuse_bundle(pathlib.Path(temporary))
+            bundle = verification.validate_verifier_bundle(
+                root, pr=pr, candidate="example-engine--example--model--test-target"
+            )
+            self.assertIsNone(bundle.engine_archive)
+            (root / "candidate-audit.json").write_bytes(b'{"tampered":true}\n')
+            with self.assertRaisesRegex(verification.VerificationError, "payload differs"):
+                verification.validate_verifier_bundle(
+                    root, pr=pr, candidate="example-engine--example--model--test-target"
+                )
+
+    def test_verification_image_override_is_private_and_exact(self) -> None:
+        config = "sha256:" + "9" * 64
+        manifest = cli.runtime_execution_manifest(
+            runtime_candidate(),
+            qualified=False,
+            image_override={
+                "distribution": "local-image-id",
+                "reference": config,
+                "immutable_id": config,
+            },
+        )
+        self.assertEqual(
+            manifest["image"],
+            {
+                "distribution": "local-image-id",
+                "reference": config,
+                "immutable_id": config,
+            },
+        )
+
+    def test_oci_layout_converts_to_exact_docker_rootfs(self) -> None:
+        compact = lambda value: json.dumps(
+            value, sort_keys=True, separators=(",", ":")
+        ).encode()
+        layer_buffer = io.BytesIO()
+        with tarfile.open(fileobj=layer_buffer, mode="w") as layer_archive:
+            payload = b"verified engine"
+            item = tarfile.TarInfo("opt/letsinfer/engine")
+            item.size = len(payload)
+            layer_archive.addfile(item, io.BytesIO(payload))
+        layer_tar = layer_buffer.getvalue()
+        layer_blob = gzip.compress(layer_tar, mtime=0)
+        diff_id = "sha256:" + hashlib.sha256(layer_tar).hexdigest()
+        config = compact(
+            {
+                "architecture": "arm64",
+                "os": "linux",
+                "rootfs": {"type": "layers", "diff_ids": [diff_id]},
+            }
+        )
+        config_digest = "sha256:" + hashlib.sha256(config).hexdigest()
+        layer_digest = "sha256:" + hashlib.sha256(layer_blob).hexdigest()
+        manifest = compact(
+            {
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {
+                    "mediaType": "application/vnd.oci.image.config.v1+json",
+                    "digest": config_digest,
+                    "size": len(config),
+                },
+                "layers": [
+                    {
+                        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                        "digest": layer_digest,
+                        "size": len(layer_blob),
+                    }
+                ],
+            }
+        )
+        manifest_digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
+        index = compact(
+            {
+                "schemaVersion": 2,
+                "manifests": [
+                    {
+                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "digest": manifest_digest,
+                        "size": len(manifest),
+                        "platform": {"os": "linux", "architecture": "arm64"},
+                    }
+                ],
+            }
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            oci = root / "engine.oci.tar"
+            with tarfile.open(oci, "w") as archive:
+                for name, data in (
+                    ("oci-layout", compact({"imageLayoutVersion": "1.0.0"})),
+                    ("index.json", index),
+                    (f"blobs/sha256/{config_digest[7:]}", config),
+                    (f"blobs/sha256/{layer_digest[7:]}", layer_blob),
+                    (f"blobs/sha256/{manifest_digest[7:]}", manifest),
+                ):
+                    item = tarfile.TarInfo(name)
+                    item.size = len(data)
+                    archive.addfile(item, io.BytesIO(data))
+            identity = verification._oci_archive_identity(
+                oci,
+                expected_manifest=manifest_digest,
+                expected_config=config_digest,
+                expected_platform="linux/arm64",
+            )
+            docker = root / "engine.docker.tar"
+            verification._docker_archive_from_oci(
+                oci,
+                docker,
+                expected_manifest=manifest_digest,
+                expected_config=config_digest,
+                expected_platform="linux/arm64",
+                tag="letsinfer-verifier/test:head",
+            )
+            with tarfile.open(docker, "r") as archive:
+                docker_manifest = json.loads(archive.extractfile("manifest.json").read())
+                converted_layer = archive.extractfile(
+                    docker_manifest[0]["Layers"][0]
+                ).read()
+        self.assertEqual(identity["manifest_digest"], manifest_digest)
+        self.assertEqual(converted_layer, layer_tar)
+
+    def test_local_engine_cleanup_preserves_preexisting_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            verification._write_local_engine_receipt(
+                verification.local_engine_receipt_path(root),
+                {
+                    "schema_version": 1,
+                    "config_digest": "sha256:" + "9" * 64,
+                    "tag": "test/image:head",
+                    "preexisting": True,
+                    "loaded": True,
+                    "cleaned": False,
+                },
+            )
+            with mock.patch.object(verification, "_run") as run:
+                verification.cleanup_local_engine(root)
+            run.assert_not_called()
+            receipt = json.loads(
+                verification.local_engine_receipt_path(root).read_text()
+            )
+            self.assertTrue(receipt["cleaned"])
+
+    def test_local_engine_reuses_preexisting_config_without_ephemeral_tag(self) -> None:
+        config = "sha256:" + "9" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            archive = root / "engine.oci.tar"
+            archive.touch()
+            bundle = verification.VerifierBundle(
+                root=root,
+                document={"engine": {}},
+                runtime_pack=root / "runtime.letsinfer",
+                engine_archive=archive,
+                engine_config_digest=config,
+                engine_tag="letsinfer-verifier/test:head",
+            )
+            with mock.patch.object(
+                verification, "_docker_image_id", return_value=config
+            ), mock.patch.object(verification, "_docker_archive_from_oci") as convert:
+                receipt = verification.load_local_engine(bundle, root)
+        convert.assert_not_called()
+        self.assertIsNotNone(receipt)
+        self.assertTrue(receipt["preexisting"])
 
 
 if __name__ == "__main__":
