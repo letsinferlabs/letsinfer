@@ -79,6 +79,9 @@ Run the narrowest parity screen first, then the complete contract only if it pas
 
 1. Historical solo and long-context parity, using the final production recipe. Every comparable row must meet or beat both prior decode/aggregate throughput and TTFT by default.
 2. Isolated context ladder. For each context, start with a dedicated clean cache namespace and guarded lifecycle; retain the cold miss, immediate hot hit, graceful restart, two restored hits, and replay seal.
+   For a runtime declaring persistent cache, verify that the restored hit comes
+   from its Core-mounted NVMe store rather than an engine-process RAM cache,
+   and include an incompatible or corrupt record check that must become a miss.
 3. Output correctness. Preserve full requests, SSE events, token IDs where available, finish reasons, usage/cache counters, and outputs. Enforce the runtime's declared equality oracle; never hide allowed numerical divergence.
 4. Admission through the runtime's declared connection ceiling and its
    measured scheduling or queueing behavior.
