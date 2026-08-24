@@ -16,6 +16,7 @@ from unittest import mock
 
 from core import catalog as catalog_module, cli, command_ui, runtime_packs
 from core.catalog import CatalogManager, CatalogSnapshot, _snapshot_identity
+from core.orchestration.contracts import validate_release_identity
 from core.revocations import canonical_bytes as revocation_bytes, empty_ledger
 
 
@@ -111,6 +112,61 @@ def catalog() -> dict:
 
 
 class CatalogTests(unittest.TestCase):
+    def test_group_release_accepts_catalog_consensus_without_embedded_record(self) -> None:
+        release = catalog()["models"]["qwen3.8-27b"]["targets"]["dgx-spark"][
+            "candidates"
+        ][CANDIDATE]["releases"]["0.1.0-rc.12"]
+        runtime = {
+            "logical_model": "qwen3.8-27b",
+            "engine": {
+                "id": release["engine"],
+                "oci": {"reference": release["engine_oci"]},
+            },
+            "model": {"uri": release["model_uri"]},
+            "artifacts": [
+                {
+                    "name": "model",
+                    "uri": release["model_uri"],
+                    "revision": "4" * 40,
+                }
+            ],
+            "benchmark": {"contract": {"schema_version": 7}},
+        }
+        pack = runtime_packs.RuntimePack(
+            pathlib.Path("/runtime"), {}, runtime, "5" * 64
+        )
+        identity = cli._group_release_identity(
+            catalog_release_value=release,
+            candidate_id=CANDIDATE,
+            version="0.1.0-rc.12",
+            source=release["source"],
+            target_id="dgx-spark",
+            target_sha256="6" * 64,
+            runtime=pack,
+            manifest_sha256="7" * 64,
+        )
+        self.assertEqual(
+            identity["benchmark"], {"id": "3" * 64, "evidence": None}
+        )
+        self.assertEqual(identity["authors"], ["MiaAI-Lab", "letsinferlabs"])
+        self.assertIs(validate_release_identity(identity), identity)
+
+        runtime["benchmark"]["record"] = {"id": "8" * 64}
+        with self.assertRaisesRegex(
+            cli.LetsInferError,
+            "signed catalog release does not match the installed runtime bytes",
+        ):
+            cli._group_release_identity(
+                catalog_release_value=release,
+                candidate_id=CANDIDATE,
+                version="0.1.0-rc.12",
+                source=release["source"],
+                target_id="dgx-spark",
+                target_sha256="6" * 64,
+                runtime=pack,
+                manifest_sha256="7" * 64,
+            )
+
     def test_catalog_accepts_only_a_fully_bound_runtime_contract_migration(self) -> None:
         document = catalog()
         target = document["models"]["qwen3.8-27b"]["targets"]["dgx-spark"]
