@@ -119,10 +119,16 @@ letsinfer benchmark verify https://github.com/letsinferlabs/runtimes/pull/123
 ```
 
 This command permits no workload/configuration overrides. It benchmarks the
-current recommendation and exact proposal with the same contract, restores the
-previous runtime on every terminal path, and posts the complete signed record
-through GitHub CLI. Ctrl-C detaches; use `letsinfer benchmark verify status` to
-reattach and `letsinfer benchmark verify stop` to cancel and restore.
+current recommendation and exact trusted-finalizer bundle with the same
+contract. It never downloads or packages PR source. For a changed Engine it
+validates the bundle's OCI descriptors and rootfs diff IDs, converts the layout
+to a temporary Docker-load archive, and removes that archive plus only the
+image it introduced. It requires GitHub CLI 2.97.0 or newer and verifies build
+provenance for every bundle file against the trusted main-branch finalizer.
+It restores the previous runtime and local Engine state on every terminal path
+and posts the complete signed record through GitHub CLI. Ctrl-C detaches; use
+`letsinfer benchmark verify status` to reattach and
+`letsinfer benchmark verify stop` to cancel and restore.
 
 Before sealing or transporting a record, run:
 
@@ -155,11 +161,15 @@ increase runner-side polling or derive the timeline from a post-run snapshot.
 The validator must enforce the fixed column order, monotonic elapsed times,
 numeric bounds, and equality between each published maximum and its timeline.
 
-The bot accepts one active vote per GitHub account and pseudonymous device,
-requires three agreeing independent non-author verifiers, and writes the full
-records plus aggregate into bot-owned `benchmark.consensus.json`. Do not upload
-community evidence to an OCI, hand-edit consensus, or add qualification state
-to a runtime manifest.
+The bot accepts one slot per GitHub account and pseudonymous device and
+requires two successful independent non-author verifiers. Rerunning does not
+create a second slot. Any accepted correctness, safety, crash, OOM,
+incomplete-workload, or restoration failure blocks that exact execution
+subject and cannot be rerun away. Performance differences remain visible but
+do not create a disagreement state or expand the verifier count. The bot
+writes the full records plus aggregate into bot-owned
+`benchmark.consensus.json`. Do not upload community evidence to an OCI,
+hand-edit consensus, or add qualification state to a runtime manifest.
 
 Keep generated prompts, plans, complete outputs, private evidence, and
 machine-specific details in ignored evidence storage; generic runners and
