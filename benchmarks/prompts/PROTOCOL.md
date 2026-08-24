@@ -36,7 +36,10 @@ Materialization rules:
    every domain/cell with a fresh process and empty prefix store. Generator
    v3/schema 3 runs every selected cell exactly once in deterministic ascending
    concurrency/context order on one fresh matrix process/store and retains
-   prefix state between cells.
+   prefix state between cells. Generator v4/schema 4 keeps the same one-process
+   policy, places the complete immutable ledger before a short stream-specific
+   suffix, and runs C1/C2/C4 adjacent within each context so distinct streams
+   reuse the declared shared prefix.
 
 Generated prompt files are ignored evidence. They are never committed to core
 or packaged in a runtime.

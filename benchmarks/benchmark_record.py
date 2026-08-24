@@ -18,6 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from core.runtime_packs import (  # noqa: E402
+    PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
     RuntimePackError,
     SHARED_BENCHMARK_SCHEMA_VERSION,
     validate_benchmark_contract,
@@ -460,9 +461,12 @@ def validate_record(value: Any) -> dict[str, Any]:
             raise BenchmarkRecordError(
                 f"benchmark_contract is invalid: {error}"
             ) from error
-        if contract.get("schema_version") != SHARED_BENCHMARK_SCHEMA_VERSION:
+        if contract.get("schema_version") not in {
+            SHARED_BENCHMARK_SCHEMA_VERSION,
+            PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
+        }:
             raise BenchmarkRecordError(
-                "benchmark_contract must use shared-matrix schema 3"
+                "benchmark_contract must use shared-matrix schema 3 or 4"
             )
         contract_sha = hashlib.sha256(canonical_bytes(contract)).hexdigest()
         if value.get("benchmark_contract_sha256") != contract_sha:

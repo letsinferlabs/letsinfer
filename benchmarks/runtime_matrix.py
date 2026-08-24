@@ -130,6 +130,7 @@ def expected_duration_range(
     *,
     includes_materializer: bool,
     shared_prefix_state: bool = False,
+    shared_stream_prefix: bool = False,
 ) -> tuple[int, int]:
     """Return a deliberately broad first-run estimate in whole minutes."""
     if shared_prefix_state:
@@ -154,7 +155,9 @@ def expected_duration_range(
             ]
             if positive:
                 groups[key] = (
-                    max(groups.get(key, (0, 0))[0], len(positive)),
+                    1
+                    if shared_stream_prefix
+                    else max(groups.get(key, (0, 0))[0], len(positive)),
                     max(groups.get(key, (0, 0))[1], max(positive)),
                 )
         prompt_tokens = sum(count * tokens for count, tokens in groups.values())
@@ -829,21 +832,33 @@ def select_cells(
     concurrencies: list[int],
     contexts: list[str],
     prompt_domain: str | None = None,
+    *,
+    context_first: bool = False,
 ) -> list[dict[str, Any]]:
-    # C1 is intentionally completed before higher concurrency so sealed parity
-    # is known before the expensive load cells begin.
+    # Legacy matrices complete C1 before higher concurrency. Prefix-shared
+    # matrices keep every concurrency for one context adjacent so cache state
+    # cannot be evicted by a larger context before reuse is measured.
     declared_domains = [
         domain
         for domain in prompt_generator.DOMAINS
         if any(cell.get("prompt_domain") == domain for cell in cells.values())
     ]
-    names = [
-        f"{context}-{domain}-c{concurrency}"
-        for concurrency in concurrencies
-        for context in contexts
-        for domain in declared_domains
-        if prompt_domain is None or domain == prompt_domain
-    ]
+    if context_first:
+        names = [
+            f"{context}-{domain}-c{concurrency}"
+            for context in contexts
+            for concurrency in concurrencies
+            for domain in declared_domains
+            if prompt_domain is None or domain == prompt_domain
+        ]
+    else:
+        names = [
+            f"{context}-{domain}-c{concurrency}"
+            for concurrency in concurrencies
+            for context in contexts
+            for domain in declared_domains
+            if prompt_domain is None or domain == prompt_domain
+        ]
     missing = [name for name in names if name not in cells]
     if missing:
         raise RuntimeMatrixError(
@@ -1406,10 +1421,14 @@ def run_isolated_matrix(
         and execution.get("prefix_state") == "shared"
         and execution.get("samples_per_cell") == 1
     )
+    shared_stream_prefix = bool(
+        shared_matrix and execution.get("stream_prefix") == "shared-body"
+    )
     expected_low, expected_high = expected_duration_range(
         selected,
         includes_materializer=benchmark_contract is not None,
         shared_prefix_state=shared_matrix,
+        shared_stream_prefix=shared_stream_prefix,
     )
     global _COMPLETED_CELLS, _CURRENT_CELL, _EXPECTED_MINUTES, _SELECTED_CELLS
     _EXPECTED_MINUTES = (expected_low, expected_high)
@@ -1796,6 +1815,7 @@ def run_isolated_matrix(
         "fresh_process_per_matrix": shared_matrix,
         "fresh_store_per_matrix": shared_matrix,
         "prefix_state": "shared" if shared_matrix else "per-cell",
+        "stream_prefix": "shared-body" if shared_stream_prefix else "distinct",
         "samples_per_cell": 1,
         "cells": rows,
         "qualification_passed": True,
@@ -1857,8 +1877,20 @@ def main() -> int:
             },
         )
     concurrencies, contexts = selected_axes(arguments, cells)
+    execution = (
+        benchmark_contract.get("execution")
+        if isinstance(benchmark_contract, dict)
+        else None
+    )
     selected = select_cells(
-        cells, concurrencies, contexts, arguments.prompt_domain
+        cells,
+        concurrencies,
+        contexts,
+        arguments.prompt_domain,
+        context_first=(
+            isinstance(execution, dict)
+            and execution.get("stream_prefix") == "shared-body"
+        ),
     )
     capacity = validate_capacity(manifest, selected)
     if arguments.list:
