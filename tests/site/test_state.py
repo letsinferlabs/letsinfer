@@ -48,6 +48,73 @@ class SiteStateTests(unittest.TestCase):
             self.assertEqual(store.members()[0]["member_id"], identity.member_id)
             self.assertTrue(store.verify_audit()["valid"])
 
+    def test_cleanup_exposure_reader_survives_invalid_site_identity(self) -> None:
+        identity = state.setup_site("Home", "127.0.0.1")
+        with state.SiteStore(identity=identity) as store:
+            expected = store.set_exposure(
+                provider="tailscale-funnel",
+                public_url="https://home.example.ts.net",
+                state="enabled",
+                inference_target="http://127.0.0.1:8000",
+                configuration_sha256="a" * 64,
+            )
+            state.identity_path().write_text(
+                '{"schema_version":1}\n', encoding="utf-8"
+            )
+            # Keep the writer open so the row remains in WAL during cleanup.
+            self.assertEqual(state.read_exposure_for_cleanup(), expected)
+
+    def test_cleanup_exposure_reader_accepts_an_empty_owned_table(self) -> None:
+        state.setup_site("Home", "127.0.0.1")
+        self.assertIsNone(state.read_exposure_for_cleanup())
+
+    def test_cleanup_readers_reject_a_dangling_database_symlink(self) -> None:
+        database = state.database_path()
+        database.parent.mkdir(parents=True, mode=0o700)
+        database.symlink_to(database.parent / "missing.sqlite3")
+        with self.assertRaisesRegex(state.SiteError, "cannot be a symlink"):
+            state.read_exposure_for_cleanup()
+        with self.assertRaisesRegex(state.SiteError, "cannot be a symlink"):
+            state.has_active_engine_groups_for_cleanup()
+
+    def test_cleanup_detects_active_engine_groups_without_identity(self) -> None:
+        identity = state.setup_site("Home", "127.0.0.1")
+        with state.SiteStore(identity=identity) as store:
+            store.connection.execute(
+                "INSERT INTO model_services(service_id,model,desired_state,"
+                "created_at_unix,updated_at_unix) "
+                "VALUES('service','fixture-model','running',1,1)"
+            )
+            store.connection.execute(
+                "INSERT INTO placements(placement_id,service_id,model,runtime,target,"
+                "strategy,state,topology_sha256,members_json,endpoints_json,capacity_json,"
+                "updated_at_unix) VALUES('placement','service','fixture-model','runtime',"
+                "'target','single','active',?, '[]','[]','{}',1)",
+                ("b" * 64,),
+            )
+            store.connection.execute(
+                "INSERT INTO engine_groups(group_id,placement_id,source,runtime_digest,"
+                "manifest_sha256,topology_sha256,engine_credential_sha256,strategy,"
+                "runtime_execution_contract_sha256,failure_policy,required_tasks,plan_json,"
+                "plan_sha256,desired_state,state,members_json,created_at_unix,updated_at_unix) "
+                "VALUES('group','placement',?,?,?,?,?,'single',?,'independent',1,'{}',?,"
+                "'running','running','[]',1,1)",
+                tuple("c" * 64 for _item in range(7)),
+            )
+            state.identity_path().unlink()
+            self.assertTrue(state.has_active_engine_groups_for_cleanup())
+            for incomplete_state in ("failed", "removing"):
+                store.connection.execute(
+                    "UPDATE engine_groups SET desired_state='removed', state=? "
+                    "WHERE group_id='group'",
+                    (incomplete_state,),
+                )
+                self.assertTrue(state.has_active_engine_groups_for_cleanup())
+            store.connection.execute(
+                "UPDATE engine_groups SET state='removed' WHERE group_id='group'"
+            )
+            self.assertFalse(state.has_active_engine_groups_for_cleanup())
+
     def test_empty_engine_group_storage_migrates_to_generic_execution_columns(self) -> None:
         identity = state.setup_site("Home", "127.0.0.1")
         with sqlite3.connect(state.database_path()) as connection:

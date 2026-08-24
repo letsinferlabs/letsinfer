@@ -803,13 +803,28 @@ def live_runtime_status(snapshot: Callable[[], Mapping[str, Any]]) -> int:
     last_telemetry_at: float | None = None
     last_history_sequence: int | None = None
     next_refresh = time.monotonic()
+
+    def wait_for_refresh() -> None:
+        nonlocal next_refresh
+        next_refresh += LIVE_STATUS_REFRESH_SECONDS
+        now = time.monotonic()
+        if next_refresh <= now:
+            next_refresh = now + LIVE_STATUS_REFRESH_SECONDS
+        time.sleep(next_refresh - now)
+
     try:
         while True:
             payload = dict(snapshot())
             if "service" not in payload:
-                sys.stdout.write("\033[H\033[J" if not first else "\033[2J\033[H")
+                prefix = "\033[?1049h\033[?25l\033[H" if first else "\033[H"
+                alternate_screen = True
+                sys.stdout.write(prefix)
                 node_status(payload)
-                return int(payload.get("exit_code") or 0)
+                sys.stdout.write("\033[J")
+                sys.stdout.flush()
+                first = False
+                wait_for_refresh()
+                continue
             now = time.monotonic()
             current_telemetry = payload.get("telemetry")
             telemetry = (
@@ -890,11 +905,7 @@ def live_runtime_status(snapshot: Callable[[], Mapping[str, Any]]) -> int:
             sys.stdout.write(prefix + "\n".join(lines) + "\n\033[J")
             sys.stdout.flush()
             first = False
-            next_refresh += LIVE_STATUS_REFRESH_SECONDS
-            now = time.monotonic()
-            if next_refresh <= now:
-                next_refresh = now + LIVE_STATUS_REFRESH_SECONDS
-            time.sleep(next_refresh - now)
+            wait_for_refresh()
     except KeyboardInterrupt:
         return 0
     finally:
