@@ -10,12 +10,24 @@ import json
 import math
 import pathlib
 import re
+import sys
 from typing import Any
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from core.runtime_packs import (  # noqa: E402
+    RuntimePackError,
+    SHARED_BENCHMARK_SCHEMA_VERSION,
+    validate_benchmark_contract,
+)
 
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 WORKLOAD_RE = re.compile(r"pp[1-9][0-9]*,tg[1-9][0-9]*,c[1-9][0-9]*")
 SCHEMA_VERSION = 4
+SHARED_SCHEMA_VERSION = 5
 SUBJECT_FIELDS = {
     "candidate_id",
     "runtime_version",
@@ -62,6 +74,7 @@ RECORD_FIELDS = {
     "results_sha256",
     "results",
 }
+SHARED_RECORD_FIELDS = RECORD_FIELDS | {"benchmark_contract"}
 TELEMETRY_COLUMNS = [
     "elapsed_seconds",
     "gpu_usage_percent",
@@ -418,17 +431,44 @@ def _validate_telemetry(result: dict[str, Any], where: str) -> None:
 
 
 def validate_record(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != RECORD_FIELDS:
+    schema_version = value.get("schema_version") if isinstance(value, dict) else None
+    expected_fields = (
+        SHARED_RECORD_FIELDS
+        if schema_version == SHARED_SCHEMA_VERSION
+        else RECORD_FIELDS
+    )
+    if not isinstance(value, dict) or set(value) != expected_fields:
         raise BenchmarkRecordError(
-            "benchmark record must contain exactly " + ", ".join(sorted(RECORD_FIELDS))
+            "benchmark record must contain exactly "
+            + ", ".join(sorted(expected_fields))
         )
     if (
         type(value.get("schema_version")) is not int
-        or value.get("schema_version") != SCHEMA_VERSION
+        or value.get("schema_version") not in {SCHEMA_VERSION, SHARED_SCHEMA_VERSION}
     ):
         raise BenchmarkRecordError(
-            f"benchmark record schema_version must be {SCHEMA_VERSION}"
+            f"benchmark record schema_version must be {SCHEMA_VERSION} or "
+            f"{SHARED_SCHEMA_VERSION}"
         )
+    if schema_version == SHARED_SCHEMA_VERSION:
+        contract = value.get("benchmark_contract")
+        if not isinstance(contract, dict):
+            raise BenchmarkRecordError("benchmark_contract must be an object")
+        try:
+            validate_benchmark_contract(contract)
+        except RuntimePackError as error:
+            raise BenchmarkRecordError(
+                f"benchmark_contract is invalid: {error}"
+            ) from error
+        if contract.get("schema_version") != SHARED_BENCHMARK_SCHEMA_VERSION:
+            raise BenchmarkRecordError(
+                "benchmark_contract must use shared-matrix schema 3"
+            )
+        contract_sha = hashlib.sha256(canonical_bytes(contract)).hexdigest()
+        if value.get("benchmark_contract_sha256") != contract_sha:
+            raise BenchmarkRecordError(
+                "benchmark_contract_sha256 does not match benchmark_contract"
+            )
     timestamp_ns = value.get("timestamp_unix_ns")
     timestamp = value.get("timestamp")
     if (

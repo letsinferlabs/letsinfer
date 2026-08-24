@@ -23,7 +23,6 @@ if str(ROOT) not in sys.path:
 
 from core.runtime_packs import (  # noqa: E402
     BENCHMARK_GENERATOR,
-    BENCHMARK_GENERATOR_VERSION,
     BENCHMARK_RENDER_CONTRACT,
     BENCHMARK_SUITE,
     BENCHMARK_TOKENIZER_CAPABILITY,
@@ -122,10 +121,11 @@ def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Return both standard prompt domains for every declared matrix cell."""
     validate_benchmark_contract(contract)
     request = contract["request"]
+    domains = contract.get("domains", list(DOMAINS))
     cells: dict[str, dict[str, Any]] = {}
     for case in contract["cases"]:
         for concurrency in case["concurrencies"]:
-            for domain in DOMAINS:
+            for domain in domains:
                 name = f"{case['id']}-{domain}-c{concurrency}"
                 cells[name] = {
                     "name": name,
@@ -168,6 +168,7 @@ def materialize(
     fixture_rows: dict[tuple[str, str, int], dict[str, Any]] = {}
     contexts: list[dict[str, Any]] = []
     request = contract["request"]
+    domains = contract.get("domains", list(DOMAINS))
 
     for case in contract["cases"]:
         cell_map: dict[str, list[str]] = {}
@@ -178,7 +179,7 @@ def materialize(
         ]
         if not selected_for_case:
             continue
-        for domain in DOMAINS:
+        for domain in domains:
             domain_cells = [
                 row for row in selected_for_case if row["prompt_domain"] == domain
             ]
@@ -247,13 +248,13 @@ def materialize(
         for row in fixtures
     ]
     prompt_set = prompt_set_sha256(public_rows)
-    template_hashes = {domain: sha256_file(TEMPLATES[domain]) for domain in DOMAINS}
+    template_hashes = {domain: sha256_file(TEMPLATES[domain]) for domain in domains}
     identity = {
         "schema_version": 2,
-        "suite": BENCHMARK_SUITE,
+        "suite": contract["suite"],
         "generator": {
             "id": BENCHMARK_GENERATOR,
-            "version": BENCHMARK_GENERATOR_VERSION,
+            "version": contract["generator"]["version"],
             "sha256": sha256_file(pathlib.Path(__file__).resolve()),
         },
         "templates": template_hashes,
@@ -264,7 +265,7 @@ def materialize(
     }
     plan = {
         "schema_version": 2,
-        "prompt_suite": BENCHMARK_SUITE,
+        "prompt_suite": contract["suite"],
         "model_id": model_id,
         "model_revision": model_revision,
         "tokenizer_identity": contract["tokenizer"],

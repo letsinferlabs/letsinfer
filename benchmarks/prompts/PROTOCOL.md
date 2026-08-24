@@ -1,9 +1,10 @@
 # Let's Infer canonical code/prose prompt protocol
 
-`letsinfer-code-prose-v1` defines two engine-neutral domains for every standard
-context and concurrency cell. Core owns the templates, generator, fixed seeds,
-and stream ordering. A runtime declares only supported context tiers,
-concurrencies, request settings, and its exact tokenizer/render identity.
+`letsinfer-code-prose-v1` defines two engine-neutral domains that a runtime may
+select for standard context and concurrency cells. Core owns the templates,
+generator, fixed seeds, and stream ordering. A runtime declares only supported
+domains, context tiers, concurrencies, execution policy, request settings, and
+its exact tokenizer/render identity.
 `runtime.json.benchmark` selects the suite and requires an exact tokenizer-count capability;
 it does not own or alter the canonical prompt bytes.
 
@@ -31,7 +32,11 @@ Materialization rules:
    identities in evidence.
 6. Reject a cell whose actual prompt plus requested output exceeds the
    runtime's qualified context instead of shortening the prompt.
-7. Run every domain/cell with a fresh process and empty prefix store.
+7. Obey the benchmark contract's execution policy. Generator v2/schema 2 runs
+   every domain/cell with a fresh process and empty prefix store. Generator
+   v3/schema 3 runs every selected cell exactly once in deterministic ascending
+   concurrency/context order on one fresh matrix process/store and retains
+   prefix state between cells.
 
 Generated prompt files are ignored evidence. They are never committed to core
 or packaged in a runtime.

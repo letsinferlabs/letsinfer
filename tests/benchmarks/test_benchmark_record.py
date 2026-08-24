@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import tempfile
@@ -104,14 +105,87 @@ class BenchmarkRecordTests(unittest.TestCase):
         value = self.record()
         value["schema_version"] = 1
         with self.assertRaisesRegex(
-            benchmark_record.BenchmarkRecordError, "schema_version must be 4"
+            benchmark_record.BenchmarkRecordError, "schema_version must be 4 or 5"
         ):
             benchmark_record.validate_record(value)
 
         value = self.record()
         value["schema_version"] = True
         with self.assertRaisesRegex(
-            benchmark_record.BenchmarkRecordError, "schema_version must be 4"
+            benchmark_record.BenchmarkRecordError, "schema_version must be 4 or 5"
+        ):
+            benchmark_record.validate_record(value)
+
+    def test_shared_record_embeds_and_hashes_the_benchmark_contract(self) -> None:
+        value = self.record()
+        contract = {
+            "schema_version": 3,
+            "suite": "letsinfer-code-prose-v1",
+            "generator": {"id": "letsinfer-code-prose", "version": 3},
+            "domains": ["code"],
+            "execution": {
+                "isolation": "fresh-matrix",
+                "prefix_state": "shared",
+                "samples_per_cell": 1,
+            },
+            "tokenizer": {
+                "capability": "engine-rendered-chat-count-v1",
+                "model_sha256": "7" * 64,
+                "engine_image_sha256": "8" * 64,
+                "render_contract": "openai-chat-user-v1",
+            },
+            "request": {
+                "output_tokens": 128,
+                "min_completion_tokens": 128,
+                "require_natural_stop": False,
+                "temperature": 0,
+                "seed": 42042,
+            },
+            "sample_interval_seconds": 5,
+            "cases": [
+                {
+                    "id": "32k",
+                    "prompt_tokens": 32768,
+                    "concurrencies": [1, 2, 4],
+                }
+            ],
+        }
+        value["schema_version"] = benchmark_record.SHARED_SCHEMA_VERSION
+        value["benchmark_contract"] = contract
+        value["benchmark_contract_sha256"] = hashlib.sha256(
+            benchmark_record.canonical_bytes(contract)
+        ).hexdigest()
+        value["id"] = benchmark_record.benchmark_id(
+            value["installation_id"],
+            value["timestamp_unix_ns"],
+            value["subject"],
+            value["benchmark_contract_sha256"],
+            value["results_sha256"],
+        )
+        self.assertIs(benchmark_record.validate_record(value), value)
+
+        value["benchmark_contract"]["domains"] = ["prose"]
+        with self.assertRaisesRegex(
+            benchmark_record.BenchmarkRecordError,
+            "benchmark_contract_sha256 does not match",
+        ):
+            benchmark_record.validate_record(value)
+
+        value["benchmark_contract"]["domains"] = ["prose"]
+        value["benchmark_contract"]["execution"]["samples_per_cell"] = 2
+        value["benchmark_contract_sha256"] = hashlib.sha256(
+            benchmark_record.canonical_bytes(value["benchmark_contract"])
+        ).hexdigest()
+        value["id"] = benchmark_record.benchmark_id(
+            value["installation_id"],
+            value["timestamp_unix_ns"],
+            value["subject"],
+            value["benchmark_contract_sha256"],
+            value["results_sha256"],
+        )
+        with self.assertRaisesRegex(
+            benchmark_record.BenchmarkRecordError,
+            "samples_per_cell must be 1",
         ):
             benchmark_record.validate_record(value)
 
