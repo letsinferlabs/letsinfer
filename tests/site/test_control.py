@@ -258,6 +258,35 @@ class SiteControlTests(unittest.TestCase):
                     document, requester_member_id="f" * 32
                 )
 
+    def test_coordinator_accepts_own_in_process_telemetry_without_signature(self) -> None:
+        with mock.patch.dict(os.environ, self.coordinator_environment):
+            coordinator = state.setup_site("Home", "coordinator.local")
+            aggregate = telemetry.TelemetryAggregator()
+            coordinator_control = control.SiteControlState(
+                coordinator,
+                facts_provider=lambda: facts(coordinator.member_id),
+                telemetry=aggregate,
+            )
+            sample = telemetry_sample(coordinator.member_id)
+            self.assertEqual(
+                coordinator_control.accept_local_telemetry(
+                    sample, requester_member_id=coordinator.member_id
+                ),
+                {"protocol": telemetry.PROTOCOL, "accepted": True},
+            )
+            self.assertEqual(
+                aggregate.snapshot()["aggregate"]["requests_received"], 1
+            )
+            with self.assertRaisesRegex(control.ControlError, "requester identity"):
+                coordinator_control.accept_local_telemetry(
+                    sample, requester_member_id="f" * 32
+                )
+            with self.assertRaisesRegex(control.ControlError, "sample identity"):
+                coordinator_control.accept_local_telemetry(
+                    {**sample, "member_id": "e" * 32},
+                    requester_member_id=coordinator.member_id,
+                )
+
     def test_connectx_enrollment_is_active_only_after_direct_route_proof(self) -> None:
         with mock.patch.dict(os.environ, self.member_environment):
             candidate = state.prepare_member_identity()

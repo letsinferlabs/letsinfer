@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import io
+import inspect
 import types
 import unittest
 from unittest import mock
@@ -17,6 +19,24 @@ from tests.regression.cli_cases import CLI_CASES
 
 
 class CliSurfaceTests(unittest.TestCase):
+    def test_every_runtime_prepare_call_declares_qualification(self) -> None:
+        tree = ast.parse(inspect.getsource(cli))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "prepare_runtime_install"
+        ]
+        self.assertGreater(len(calls), 0)
+        for call in calls:
+            with self.subTest(line=call.lineno):
+                self.assertIn(
+                    "qualified",
+                    {keyword.arg for keyword in call.keywords},
+                    "runtime qualification must be explicit at every install boundary",
+                )
+
     def test_every_registered_action_has_one_parseable_command(self) -> None:
         command_parser = cli.parser()
         self.assertEqual(set(CLI_CASES), set(ACTIONS))

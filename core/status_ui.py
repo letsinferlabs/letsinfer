@@ -196,12 +196,18 @@ def dashboard_lines(
     history = session_history or {}
     width = max(42, min(terminal.width, 76) - 6)
 
+    runtime_installed = service.get("runtime_installed") is not False
+    gateway_expected = service.get("gateway_expected") is not False
+    watchdog_expected = service.get("watchdog_expected") is not False
     lifecycle_state = str(lifecycle.get("state") or "degraded")
-    serving = lifecycle_state == "ready"
+    control_ready = lifecycle_state == "ready"
+    serving = control_ready and runtime_installed
     runtime_ready = lifecycle.get("runtime_ready") is True
     state = (
         "SERVING"
         if serving
+        else "READY"
+        if control_ready
         else "STARTING"
         if lifecycle_state == "starting"
         else "STOPPED"
@@ -212,18 +218,21 @@ def dashboard_lines(
     )
     state_color = (
         ui.GREEN
-        if serving
+        if control_ready
         else ui.CYAN
         if lifecycle_state == "starting"
         else ui.RED
         if lifecycle_state in {"failed", "blocked"}
         else ui.YELLOW
     )
-    site_color = ui.GREEN if serving else ui.YELLOW
+    site_color = ui.GREEN if control_ready else ui.YELLOW
     endpoint = str(service.get("gateway_endpoint") or "LAN HTTP · API key").removeprefix(
         "http://"
     )
-    model = str(container.get("model") or "No model")
+    model = str(
+        container.get("model")
+        or ("No model" if runtime_installed else "Not installed")
+    )
     engine = str(container.get("engine") or "unknown")
     target = str(container.get("target") or "unknown target")
     version = str(container.get("runtime_version") or "unknown version")
@@ -239,13 +248,17 @@ def dashboard_lines(
         and service.get("gateway_auth_required") is True
         and service.get("gateway_authenticated") is True
     )
-    route_ready = service.get("gateway_model_identity") is True
+    route_ready = (
+        service.get("gateway_model_identity") is True
+        if runtime_installed
+        else api_process_ready
+    )
 
     display_name = str(site.get("display_name") or "Home")
     uptime = _format_uptime(site.get("uptime_seconds"))
     site_mark = (
-        "✓" if terminal.unicode and serving
-        else "!" if not serving
+        "✓" if terminal.unicode and control_ready
+        else "!" if not control_ready
         else "OK"
     )
     brand = terminal.logo()
@@ -282,12 +295,12 @@ def dashboard_lines(
             )
     lines.append("")
     state_symbol = (
-        "✓" if terminal.unicode and serving
+        "✓" if terminal.unicode and control_ready
         else "•" if terminal.unicode and lifecycle_state == "starting"
         else "○" if terminal.unicode and lifecycle_state == "stopped"
         else "✗" if terminal.unicode and lifecycle_state in {"failed", "blocked"}
         else "!" if terminal.unicode
-        else "OK" if serving
+        else "OK" if control_ready
         else "!"
     )
     lines.append(
@@ -300,19 +313,30 @@ def dashboard_lines(
             width=width,
         )
     )
-    lines.append(_row(terminal, "Model", model, _context(capacity.get("max_context_tokens")), width=width))
-    lines.append(_row(terminal, "Engine", engine, width=width))
-    runtime_metadata_ready = service.get("runtime_metadata_ready") is not False
-    lines.append(
-        _row(
-            terminal,
-            "Version",
-            version,
-            "" if runtime_metadata_ready else "runtime metadata incompatible",
-            color=None if runtime_metadata_ready else ui.RED,
-            width=width,
+    if runtime_installed:
+        lines.append(_row(terminal, "Model", model, _context(capacity.get("max_context_tokens")), width=width))
+        lines.append(_row(terminal, "Engine", engine, width=width))
+        runtime_metadata_ready = service.get("runtime_metadata_ready") is not False
+        lines.append(
+            _row(
+                terminal,
+                "Version",
+                version,
+                "" if runtime_metadata_ready else "runtime metadata incompatible",
+                color=None if runtime_metadata_ready else ui.RED,
+                width=width,
+            )
         )
-    )
+    else:
+        lines.append(
+            _row(
+                terminal,
+                "Runtime",
+                "Not installed",
+                "letsinfer install <model>",
+                width=width,
+            )
+        )
     api_state = "Ready" if api_process_ready and route_ready else "Starting" if lifecycle_state == "starting" else "Unavailable"
     api_color = ui.GREEN if api_state == "Ready" else ui.CYAN if api_state == "Starting" else ui.RED
     api_detail = endpoint
@@ -329,18 +353,23 @@ def dashboard_lines(
         if api_state == "Ready"
         else f"{api_state} · {api_detail}"
     )
-    lines.append(
-        _health_row(
-            terminal,
-            "API",
-            api_symbol,
-            api_text,
-            color=api_color,
-            width=width,
+    if gateway_expected:
+        lines.append(
+            _health_row(
+                terminal,
+                "API",
+                api_symbol,
+                api_text,
+                color=api_color,
+                width=width,
+            )
         )
-    )
     safety = (
-        "Armed"
+        "Monitoring"
+        if not runtime_installed and service.get("active") == "active"
+        else "Unavailable"
+        if not runtime_installed
+        else "Armed"
         if protection.get("armed") is True
         else "Arming"
         if lifecycle_state == "starting"
@@ -350,7 +379,7 @@ def dashboard_lines(
     )
     safety_color = (
         ui.GREEN
-        if safety == "Armed"
+        if safety in {"Armed", "Monitoring"}
         else ui.CYAN
         if safety == "Arming"
         else ui.YELLOW
@@ -363,114 +392,124 @@ def dashboard_lines(
         else ""
     )
     guard_symbol = (
-        "✓" if terminal.unicode and safety == "Armed"
+        "✓" if terminal.unicode and safety in {"Armed", "Monitoring"}
         else "•" if terminal.unicode and safety == "Arming"
         else "○" if terminal.unicode and safety == "Disarmed"
         else "✗" if terminal.unicode and safety == "Blocked"
         else "!" if terminal.unicode
-        else "OK" if safety == "Armed"
+        else "OK" if safety in {"Armed", "Monitoring"}
         else "!"
     )
     guard_text = (
         ""
-        if safety == "Armed"
+        if safety in {"Armed", "Monitoring"}
         else safety
         if not safety_detail
         else f"{safety} · {safety_detail}"
     )
-    lines.append(
-        _health_row(
-            terminal,
-            "Guard",
-            guard_symbol,
-            guard_text,
-            color=safety_color,
-            width=width,
+    if runtime_installed or watchdog_expected:
+        lines.append(
+            _health_row(
+                terminal,
+                "Guard",
+                guard_symbol,
+                guard_text,
+                color=safety_color,
+                width=width,
+            )
         )
-    )
 
     def route(name: str, status: str, detail: str, color: str) -> str:
+        status_width = 15 if not runtime_installed else 11
         return (
             f"{terminal.paint('●', ui.BOLD, color)}  {terminal.paint(name.ljust(10), ui.BOLD)}"
-            f"{terminal.paint(status.ljust(11), ui.BOLD, color)}{terminal.paint(detail, ui.DIM)}"
+            f"{terminal.paint(status.ljust(status_width), ui.BOLD, color)}{terminal.paint(detail, ui.DIM)}"
         ).rstrip()
 
-    lines.extend(("", "Request path", terminal.paint("○  CLIENT", ui.DIM), terminal.paint("│", ui.DIM)))
-    gateway_state = (
-        "API Ready"
-        if api_process_ready and route_ready
-        else "STARTING"
-        if lifecycle_state == "starting"
-        else "UNAVAILABLE"
-    )
-    gateway_color = (
-        ui.GREEN
-        if gateway_state == "API Ready"
-        else ui.CYAN
-        if gateway_state == "STARTING"
-        else ui.RED
-    )
-    lines.append(route("GATEWAY", gateway_state, endpoint, gateway_color))
-    lines.extend(
-        (
-            terminal.paint("│", ui.DIM),
-            route(
-                "RUNTIME",
-                "SERVING"
-                if runtime_ready
-                else "STARTING"
-                if lifecycle_state == "starting"
-                else "STOPPED",
-                f"{model} · {engine}",
-                ui.GREEN
-                if runtime_ready
-                else ui.CYAN
-                if lifecycle_state == "starting"
-                else ui.RED,
-            ),
-            terminal.paint("│", ui.DIM),
-            route(
-                "TARGET",
-                "READY" if runtime_ready else "WAITING",
-                target,
-                ui.GREEN if runtime_ready else ui.YELLOW,
-            ),
+    if gateway_expected:
+        lines.extend(("", "Request path", terminal.paint("○  CLIENT", ui.DIM), terminal.paint("│", ui.DIM)))
+        gateway_state = (
+            "API Ready"
+            if api_process_ready and route_ready
+            else "STARTING"
+            if lifecycle_state == "starting"
+            else "UNAVAILABLE"
         )
-    )
+        gateway_color = (
+            ui.GREEN
+            if gateway_state == "API Ready"
+            else ui.CYAN
+            if gateway_state == "STARTING"
+            else ui.RED
+        )
+        lines.append(route("GATEWAY", gateway_state, endpoint, gateway_color))
+        lines.extend(
+            (
+                terminal.paint("│", ui.DIM),
+                route(
+                    "RUNTIME",
+                    "SERVING"
+                    if runtime_ready
+                    else "STARTING"
+                    if lifecycle_state == "starting"
+                    else "NOT INSTALLED"
+                    if not runtime_installed
+                    else "STOPPED",
+                    "letsinfer install <model>"
+                    if not runtime_installed
+                    else f"{model} · {engine}",
+                    ui.GREEN
+                    if runtime_ready
+                    else ui.CYAN
+                    if lifecycle_state == "starting"
+                    else ui.YELLOW
+                    if not runtime_installed
+                    else ui.RED,
+                ),
+                terminal.paint("│", ui.DIM),
+                route(
+                    "DEVICE" if not runtime_installed else "TARGET",
+                    "READY" if control_ready else "WAITING",
+                    hardware if not runtime_installed else target,
+                    ui.GREEN if control_ready else ui.YELLOW,
+                ),
+            )
+        )
 
-    scheduler_capacity = str(maximum) if maximum is not None else "—"
-    lines.extend(
-        (
-            "",
-            f"Scheduler  {terminal.paint(f'{scheduler_capacity} max · dynamic admission', ui.DIM)}",
-        )
-    )
     active_value = active if active is not None else None
     queued_value = queued if queued is not None else None
-    lines.append(
-        _row(
-            terminal,
-            "Active",
-            "—" if active_value is None else f"{active_value} requests",
-            width=width,
+    scheduler_capacity = str(maximum) if maximum is not None else "—"
+    if runtime_installed:
+        lines.extend(
+            (
+                "",
+                f"Scheduler  {terminal.paint(f'{scheduler_capacity} max · dynamic admission', ui.DIM)}",
+            )
         )
-    )
-    lines.append(
-        _row(
-            terminal,
-            "Queue",
-            "—" if queued_value is None else f"{queued_value} waiting",
-            width=width,
+        lines.append(
+            _row(
+                terminal,
+                "Active",
+                "—" if active_value is None else f"{active_value} requests",
+                width=width,
+            )
         )
-    )
-    lines.append(
-        _row(
-            terminal,
-            "Allocated",
-            f"{allocated or 0} / {maximum or '—'}",
-            width=width,
+        lines.append(
+            _row(
+                terminal,
+                "Queue",
+                "—" if queued_value is None else f"{queued_value} waiting",
+                width=width,
+            )
         )
-    )
+        lines.append(
+            _row(
+                terminal,
+                "Allocated",
+                f"{allocated or 0} / {maximum or '—'}",
+                width=width,
+            )
+        )
 
     aggregate_rate = (
         rates.get("aggregate_tokens_per_second")
@@ -497,32 +536,34 @@ def dashboard_lines(
         if telemetry_display_state == "unavailable"
         else ""
     )
-    lines.extend(("", "Performance"))
-    lines.append(_row(terminal, "Tokens", f"{_rate(aggregate_rate)} tok/s", f"{_rate(decode_rate)} decode · {_rate(prefill_rate)} prefill", width=width))
-    lines.append(_row(terminal, "Latency", "—" if ttft < 0 else f"{ttft / 1000:.2f}s TTFT", "— prefix hit" if prefix < 0 else f"{prefix * 100:.0f}% prefix hit", width=width))
-    lines.append(_row(terminal, "Context", f"— / {_context(capacity.get('max_context_tokens')).removesuffix(' context')}", "live usage unavailable", width=width))
-    lines.append(
-        _row(
-            terminal,
-            "Requests",
-            (
-                "—"
-                if active_value is None or queued_value is None
-                else f"{active_value} active · {queued_value} queued"
-            ),
-            width=width,
+    lines.extend(("", "Performance" if runtime_installed else "Monitoring"))
+    if runtime_installed:
+        lines.append(_row(terminal, "Tokens", f"{_rate(aggregate_rate)} tok/s", f"{_rate(decode_rate)} decode · {_rate(prefill_rate)} prefill", width=width))
+        lines.append(_row(terminal, "Latency", "—" if ttft < 0 else f"{ttft / 1000:.2f}s TTFT", "— prefix hit" if prefix < 0 else f"{prefix * 100:.0f}% prefix hit", width=width))
+        lines.append(_row(terminal, "Context", f"— / {_context(capacity.get('max_context_tokens')).removesuffix(' context')}", "live usage unavailable", width=width))
+        lines.append(
+            _row(
+                terminal,
+                "Requests",
+                (
+                    "—"
+                    if active_value is None or queued_value is None
+                    else f"{active_value} active · {queued_value} queued"
+                ),
+                width=width,
+            )
         )
-    )
-    lines.append(
-        _row(
-            terminal,
-            "Watchdog",
-            watchdog_usage,
-            telemetry_detail,
-            color=(ui.YELLOW if telemetry_display_state == "reconnecting" else None),
-            width=width,
+    if runtime_installed or watchdog_expected:
+        lines.append(
+            _row(
+                terminal,
+                "Watchdog",
+                watchdog_usage,
+                telemetry_detail,
+                color=(ui.YELLOW if telemetry_display_state == "reconnecting" else None),
+                width=width,
+            )
         )
-    )
 
     memory_used = _number(system.get("memory_used_mib"))
     memory_total = _number(system.get("memory_total_mib"))

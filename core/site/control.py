@@ -1281,6 +1281,27 @@ class SiteControlState:
             raise ControlError(str(error)) from error
         return {"protocol": TELEMETRY_PROTOCOL, "accepted": True}
 
+    def accept_local_telemetry(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        requester_member_id: str,
+    ) -> dict[str, Any]:
+        """Accept this main node's in-process Watchdog sample without signing."""
+
+        if self.identity.role != "main" or self.telemetry_aggregator is None:
+            raise ControlError("node telemetry aggregation is main-only")
+        if requester_member_id != self.identity.member_id:
+            raise ControlError("local telemetry requester identity is invalid")
+        try:
+            sample = validate_sample(payload)
+            if sample["member_id"] != self.identity.member_id:
+                raise ControlError("local telemetry sample identity is invalid")
+            self.telemetry_aggregator.update(sample)
+        except TelemetryError as error:
+            raise ControlError(str(error)) from error
+        return {"protocol": TELEMETRY_PROTOCOL, "accepted": True}
+
     def execute_group_job(
         self,
         payload: Mapping[str, Any],

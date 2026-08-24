@@ -892,10 +892,13 @@ class TelemetryPublisher:
                 ):
                     if sample["sequence"] == self.last_sequence:
                         continue
-                    document = signed_sample(sample)
                     if self.local_accept is not None:
-                        self.local_accept(document, self.identity.member_id)
+                        # The main node delivers its own Watchdog sample directly
+                        # inside this process.  Do not invoke the external OpenSSL
+                        # signing path for data that never crosses a trust boundary.
+                        self.local_accept(sample, self.identity.member_id)
                     else:
+                        document = signed_sample(sample)
                         post_member_sample(
                             str(self.endpoint), identity=self.identity, document=document
                         )
