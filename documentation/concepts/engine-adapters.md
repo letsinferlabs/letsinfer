@@ -76,11 +76,26 @@ Publish a new Engine OCI whenever the upstream engine or adapter changes. Pin
 it by OCI manifest digest and image configuration digest in each runtime that
 uses it. An Engine OCI change invalidates prior qualification.
 
-If Protocol 1 remains sufficient, you can publish and qualify that Engine OCI
+If Protocol 2 remains sufficient, you can develop and qualify that Engine OCI
 without a core release. If the engine genuinely needs a new cross-engine
 capability, design the next protocol version in core, update every supported
 adapter, and migrate all runtimes in one clean release. Do not add per-version
 compatibility branches to core.
+
+Runtime authors do not need registry publication access. Keep the complete
+Engine source, adapter, deterministic image recipe, patches, tests, licenses,
+and SBOM inputs in the same runtime candidate PR. A no-code PR sentinel starts
+a secretless default-branch builder that builds twice; a separate trusted
+default-branch finalizer validates the exact verifier artifact without
+executing proposal code. Pin the
+deterministic future production digest before human verification; a mismatch
+produces a patch and no benchmarkable artifact. After qualification, a
+maintainer's `/shipit` promotes those exact bytes to the official Engine
+repository and publishes the runtime that already pins them.
+
+If a runtime only changes model configuration, kernels outside the Engine,
+capacity, or its serving recipe, it can reuse an existing digest-pinned Engine
+without copying that Engine's source into the new candidate.
 
 ## Verification
 

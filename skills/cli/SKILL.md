@@ -9,6 +9,12 @@ Read [`references/commands.md`](references/commands.md) before constructing a
 command. Prefer the installed `letsinfer`. Use the source-tree launcher only
 while developing core.
 
+Install Let's Infer from the canonical product URL:
+
+```bash
+curl -fsSL https://letsinfer.ai/install.sh | sh
+```
+
 ## Preserve the architecture
 
 - Install the model you want with `letsinfer install MODEL`.
@@ -61,12 +67,22 @@ for ordinary activation. Launch it only through explicit qualification mode
 with a new evidence directory. Qualification mode does not promote it or make
 it boot-persistent.
 
+Runtime scaffolding, schema validation, Engine builds, README generation, OCI
+planning, and pull-request publication are repository-owned contributor tools
+driven by the runtime and Engine-authoring skills. Do not invent or suggest a
+`letsinfer runtime init|validate|build|test` namespace.
+
 ## Benchmarks
 
 `letsinfer benchmark MODEL` starts a durable job. Ctrl-C detaches. Running
 `letsinfer benchmark` with no model attaches to live progress.
 `letsinfer benchmark stop` cancels the active job. Do not run a second
 benchmark while one is active.
+
+`letsinfer benchmark verify PULL_REQUEST_URL` resolves the exact trusted
+verifier bundle for the current PR head, verifies every bound digest before
+execution, and restores the resident runtime on all terminal paths. It does
+not build arbitrary pull-request source or publish an OCI.
 
 ## Updates
 

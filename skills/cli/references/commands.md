@@ -35,6 +35,12 @@ Install a local directory, `.letsinfer` archive, or digest-pinned runtime OCI by
 passing that source as the positional `MODEL` value to `install`. Local
 candidates do not become qualified automatically.
 
+There is no `letsinfer runtime init`, `runtime validate`, `runtime build`, or
+`runtime test` command family. Contributor agents use the runtimes repository's
+versioned tools and skills for those operations; the installed product CLI
+keeps only the generic pack, install, inspect, qualification, and benchmark
+surfaces.
+
 ## Benchmark
 
 - `letsinfer benchmark RUNTIME [--c1|--c2|--c4|--c8|--c16] [--32k|--64k|--128k|--256k]`
@@ -42,6 +48,9 @@ candidates do not become qualified automatically.
 - `letsinfer benchmark stop`
 - `letsinfer benchmark clean [--yes]`
 - `letsinfer benchmark RUNTIME --list ...`
+- `letsinfer benchmark verify PULL_REQUEST_URL`
+- `letsinfer benchmark verify status`
+- `letsinfer benchmark verify stop`
 
 Ctrl-C detaches from an active benchmark. It does not stop the worker.
 

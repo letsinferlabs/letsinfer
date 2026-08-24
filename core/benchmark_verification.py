@@ -12,7 +12,9 @@ from __future__ import annotations
 import base64
 import binascii
 import dataclasses
+import gzip
 import hashlib
+import io
 import json
 import math
 import os
@@ -25,6 +27,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import zipfile
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, BinaryIO
 
@@ -37,8 +40,12 @@ from .runtime_packs import PACK_MEDIA_TYPE, canonical_bytes
 SCHEMA_VERSION = 1
 COMMENT_LIMIT_BYTES = 60_000
 MAX_EXPANDED_EVIDENCE_BYTES = 4 << 20
-MIN_GH_VERSION = (2, 45, 0)
+MIN_GH_VERSION = (2, 97, 0)
 REPOSITORY = "letsinferlabs/runtimes"
+FINALIZER_CERT_IDENTITY = (
+    "https://github.com/letsinferlabs/runtimes/"
+    ".github/workflows/finalize-verifier.yml@refs/heads/main"
+)
 COMMENT_MARKER = "letsinfer-verification:v1"
 KIND = "letsinfer.runtime-verification"
 FAILURE_CATEGORIES = {
@@ -51,6 +58,29 @@ FAILURE_CATEGORIES = {
 }
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 OCI_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+OCI_MANIFEST_MEDIA_TYPES = {
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+}
+OCI_INDEX_MEDIA_TYPES = {
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+}
+OCI_CONFIG_MEDIA_TYPES = {
+    "application/vnd.oci.image.config.v1+json",
+    "application/vnd.docker.container.image.v1+json",
+}
+OCI_GZIP_LAYER_MEDIA_TYPES = {
+    "application/vnd.oci.image.layer.v1.tar+gzip",
+    "application/vnd.docker.image.rootfs.diff.tar.gzip",
+}
+OCI_TAR_LAYER_MEDIA_TYPES = {
+    "application/vnd.oci.image.layer.v1.tar",
+    "application/vnd.docker.image.rootfs.diff.tar",
+}
+MAX_ENGINE_LAYOUT_BYTES = 16 << 30
+MAX_ENGINE_ROOTFS_BYTES = 64 << 30
+MAX_GHCR_LAYER_BYTES = 10_000_000_000
 PR_URL_RE = re.compile(
     r"https://github\.com/letsinferlabs/runtimes/pull/([1-9][0-9]*)(?:/)?"
 )
@@ -84,6 +114,7 @@ class PullRequest:
     url: str
     state: str
     base_ref: str
+    base_sha: str
     head_sha: str
     author: GitHubIdentity
     files: tuple[str, ...]
@@ -98,8 +129,30 @@ class DeviceIdentity:
     private_key: pathlib.Path
 
 
+@dataclasses.dataclass(frozen=True)
+class VerifierBundle:
+    root: pathlib.Path
+    document: dict[str, Any]
+    runtime_pack: pathlib.Path
+    engine_archive: pathlib.Path | None
+    engine_config_digest: str | None
+    engine_tag: str | None
+
+    @property
+    def subject(self) -> dict[str, Any]:
+        return dict(self.document["subject"])
+
+
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            value.update(chunk)
+    return value.hexdigest()
 
 
 def parse_pr_url(value: str) -> int:
@@ -118,6 +171,7 @@ def _run(
     input_bytes: bytes | None = None,
     check: bool = True,
     limit: int = 4 << 20,
+    environment: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     try:
         result = subprocess.run(
@@ -126,6 +180,7 @@ def _run(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            env=None if environment is None else dict(environment),
         )
     except OSError as error:
         raise VerificationError(f"cannot run {command[0]}: {error}") from error
@@ -260,7 +315,7 @@ def pull_request(url: str, *, gh: str | None = None) -> PullRequest:
             "--repo",
             REPOSITORY,
             "--json",
-            "number,url,state,baseRefName,headRefOid,author,files,labels",
+            "number,url,state,baseRefName,baseRefOid,headRefOid,author,files,labels",
         ]
     )
     author = value.get("author")
@@ -270,6 +325,8 @@ def pull_request(url: str, *, gh: str | None = None) -> PullRequest:
         or value.get("url") != f"https://github.com/{REPOSITORY}/pull/{number}"
         or value.get("state") != "OPEN"
         or value.get("baseRefName") != "main"
+        or not isinstance(value.get("baseRefOid"), str)
+        or re.fullmatch(r"[0-9a-f]{40}", value["baseRefOid"]) is None
         or not isinstance(value.get("headRefOid"), str)
         or re.fullmatch(r"[0-9a-f]{40}", value["headRefOid"]) is None
         or not isinstance(author, dict)
@@ -305,6 +362,7 @@ def pull_request(url: str, *, gh: str | None = None) -> PullRequest:
         value["url"],
         value["state"],
         value["baseRefName"],
+        value["baseRefOid"],
         value["headRefOid"],
         author_identity,
         tuple(names),
@@ -420,6 +478,766 @@ def fetch_pull_request(pr: PullRequest, destination: pathlib.Path, *, gh: str) -
     finally:
         archive.unlink(missing_ok=True)
     return root
+
+
+def _download_api_file(gh: str, endpoint: str, destination: pathlib.Path) -> None:
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            result = subprocess.run(
+                [gh, "api", endpoint],
+                stdout=output,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        if result.returncode != 0:
+            raise VerificationError(
+                "cannot download the exact verifier artifact: "
+                + result.stderr.decode("utf-8", errors="replace").strip()
+            )
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+
+
+def extract_verifier_artifact(archive: pathlib.Path, destination: pathlib.Path) -> None:
+    """Extract a GitHub artifact zip with an exact flat, regular file surface."""
+
+    ensure_private_directory(destination)
+    total = 0
+    seen: set[str] = set()
+    try:
+        source = zipfile.ZipFile(archive)
+    except (OSError, zipfile.BadZipFile) as error:
+        raise VerificationError("verifier artifact is not a valid zip archive") from error
+    with source:
+        records = source.infolist()
+        if not records or len(records) > 32:
+            raise VerificationError("verifier artifact file count is invalid")
+        for record in records:
+            path = pathlib.PurePosixPath(record.filename)
+            if (
+                path.is_absolute()
+                or len(path.parts) != 1
+                or any(part in {"", ".", ".."} for part in path.parts)
+                or record.is_dir()
+            ):
+                raise VerificationError("verifier artifact contains an unsafe path")
+            mode = record.external_attr >> 16
+            if mode and not stat.S_ISREG(mode):
+                raise VerificationError("verifier artifact contains a special file")
+            if record.filename in seen:
+                raise VerificationError("verifier artifact contains duplicate files")
+            seen.add(record.filename)
+            total += record.file_size
+            if total > (20 << 30) or record.compress_size > (20 << 30):
+                raise VerificationError("verifier artifact exceeds the 20 GiB limit")
+            target = destination / record.filename
+            with source.open(record) as incoming, target.open("xb") as output:
+                shutil.copyfileobj(incoming, output, 1024 * 1024)
+            target.chmod(0o600)
+
+
+def verify_bundle_attestations(root: pathlib.Path, *, gh: str) -> None:
+    """Require provenance from the trusted main-branch finalizer for every file."""
+
+    paths = sorted(root.iterdir(), key=lambda value: value.name)
+    if not paths or any(path.is_symlink() or not path.is_file() for path in paths):
+        raise VerificationError("verifier artifact contains a non-regular entry")
+    environment = None
+    attestation_token = os.environ.get("LETSINFER_ATTESTATION_TOKEN")
+    if attestation_token:
+        environment = dict(os.environ)
+        environment["GH_TOKEN"] = attestation_token
+    for path in paths:
+        _run(
+            [
+                gh,
+                "attestation",
+                "verify",
+                str(path),
+                "--repo",
+                REPOSITORY,
+                "--cert-identity",
+                FINALIZER_CERT_IDENTITY,
+            ],
+            environment=environment,
+        )
+
+
+def _bundle_object(path: pathlib.Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise VerificationError(f"verifier artifact {path.name} is invalid") from error
+    if not isinstance(value, dict):
+        raise VerificationError(f"verifier artifact {path.name} must be an object")
+    return value
+
+
+def _oci_descriptor(value: Any, where: str) -> dict[str, Any]:
+    if (
+        not isinstance(value, Mapping)
+        or not isinstance(value.get("mediaType"), str)
+        or OCI_DIGEST_RE.fullmatch(str(value.get("digest"))) is None
+        or not isinstance(value.get("size"), int)
+        or isinstance(value.get("size"), bool)
+        or value["size"] < 0
+    ):
+        raise VerificationError(f"verifier Engine {where} descriptor is invalid")
+    return dict(value)
+
+
+def _oci_object(data: bytes, where: str) -> dict[str, Any]:
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise VerificationError(f"verifier Engine {where} is invalid JSON") from error
+    if not isinstance(value, dict):
+        raise VerificationError(f"verifier Engine {where} must contain an object")
+    return value
+
+
+def _extract_engine_layout(archive: pathlib.Path, destination: pathlib.Path) -> None:
+    total = 0
+    seen: set[str] = set()
+    try:
+        source = tarfile.open(archive, "r:*")
+    except (OSError, tarfile.TarError) as error:
+        raise VerificationError("verifier Engine OCI layout is invalid") from error
+    with source:
+        try:
+            for count, member in enumerate(source, start=1):
+                if count > 100_000:
+                    raise VerificationError("verifier Engine OCI layout has too many entries")
+                path = pathlib.PurePosixPath(member.name)
+                if path.is_absolute() or any(
+                    part in {"", ".", ".."} for part in path.parts
+                ):
+                    raise VerificationError("verifier Engine OCI layout has an unsafe path")
+                name = path.as_posix()
+                if name in seen:
+                    raise VerificationError("verifier Engine OCI layout has duplicate entries")
+                seen.add(name)
+                if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+                    raise VerificationError("verifier Engine OCI layout has a special entry")
+                target = destination.joinpath(*path.parts)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    continue
+                if not member.isfile() or member.size < 0:
+                    raise VerificationError("verifier Engine OCI layout entry is unsupported")
+                total += member.size
+                if total > MAX_ENGINE_LAYOUT_BYTES:
+                    raise VerificationError("verifier Engine OCI layout exceeds 16 GiB")
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                incoming = source.extractfile(member)
+                if incoming is None:
+                    raise VerificationError("verifier Engine OCI layout entry is unreadable")
+                with target.open("xb") as output:
+                    shutil.copyfileobj(incoming, output, 1024 * 1024)
+                target.chmod(0o600)
+        except (OSError, tarfile.TarError) as error:
+            raise VerificationError(
+                f"cannot extract verifier Engine OCI layout: {error}"
+            ) from error
+
+
+def _oci_blob(
+    root: pathlib.Path, descriptor: Mapping[str, Any], where: str, *, limit: int | None = None
+) -> tuple[pathlib.Path, bytes | None]:
+    item = _oci_descriptor(descriptor, where)
+    path = root / "blobs" / "sha256" / str(item["digest"]).removeprefix("sha256:")
+    if path.is_symlink() or not path.is_file() or path.stat().st_size != item["size"]:
+        raise VerificationError(f"verifier Engine {where} blob is unavailable")
+    if "sha256:" + sha256_file(path) != item["digest"]:
+        raise VerificationError(f"verifier Engine {where} blob digest differs")
+    if limit is not None:
+        if item["size"] > limit:
+            raise VerificationError(f"verifier Engine {where} blob is too large")
+        return path, path.read_bytes()
+    return path, None
+
+
+def _inspect_engine_layout(
+    root: pathlib.Path, expected_platform: str
+) -> tuple[dict[str, Any], bytes, tuple[dict[str, Any], ...], tuple[str, ...]]:
+    try:
+        expected_os, expected_architecture = expected_platform.split("/", 1)
+    except ValueError as error:
+        raise VerificationError("verifier Engine platform is invalid") from error
+    if not expected_os or not expected_architecture:
+        raise VerificationError("verifier Engine platform is invalid")
+    try:
+        layout_data = (root / "oci-layout").read_bytes()
+        index_data = (root / "index.json").read_bytes()
+    except OSError as error:
+        raise VerificationError("verifier Engine OCI metadata is unavailable") from error
+    if _oci_object(layout_data, "OCI layout") != {"imageLayoutVersion": "1.0.0"}:
+        raise VerificationError("verifier Engine OCI layout version is unsupported")
+    index = _oci_object(index_data, "OCI index")
+    manifests = index.get("manifests")
+    if index.get("schemaVersion") != 2 or not isinstance(manifests, list):
+        raise VerificationError("verifier Engine OCI index is invalid")
+
+    def select(values: Sequence[Any], where: str) -> dict[str, Any]:
+        selected = []
+        for offset, raw in enumerate(values):
+            item = _oci_descriptor(raw, f"{where} manifest {offset}")
+            item_platform = item.get("platform")
+            if isinstance(item_platform, Mapping) and (
+                item_platform.get("os"), item_platform.get("architecture")
+            ) == (expected_os, expected_architecture):
+                selected.append(item)
+            elif (
+                len(values) == 1
+                and not isinstance(item_platform, Mapping)
+                and item["mediaType"] in OCI_MANIFEST_MEDIA_TYPES
+            ):
+                selected.append(item)
+        if len(selected) != 1:
+            raise VerificationError(
+                "verifier Engine OCI layout does not contain exactly one target platform"
+            )
+        return selected[0]
+
+    manifest_descriptor = select(manifests, "index")
+    _manifest_path, manifest_data = _oci_blob(
+        root, manifest_descriptor, "platform object", limit=4 << 20
+    )
+    assert manifest_data is not None
+    if manifest_descriptor["mediaType"] in OCI_INDEX_MEDIA_TYPES:
+        nested = _oci_object(manifest_data, "nested OCI index")
+        nested_manifests = nested.get("manifests")
+        if nested.get("schemaVersion") != 2 or not isinstance(nested_manifests, list):
+            raise VerificationError("verifier Engine nested OCI index is invalid")
+        manifest_descriptor = select(nested_manifests, "nested index")
+        _manifest_path, manifest_data = _oci_blob(
+            root, manifest_descriptor, "platform manifest", limit=4 << 20
+        )
+        assert manifest_data is not None
+    if manifest_descriptor["mediaType"] not in OCI_MANIFEST_MEDIA_TYPES:
+        raise VerificationError("verifier Engine platform object is not an image manifest")
+    manifest = _oci_object(manifest_data, "image manifest")
+    config_descriptor = _oci_descriptor(manifest.get("config"), "configuration")
+    layers = manifest.get("layers")
+    if (
+        manifest.get("schemaVersion") != 2
+        or config_descriptor["mediaType"] not in OCI_CONFIG_MEDIA_TYPES
+        or not isinstance(layers, list)
+        or not layers
+    ):
+        raise VerificationError("verifier Engine image manifest is invalid")
+    _config_path, config_data = _oci_blob(
+        root, config_descriptor, "configuration", limit=4 << 20
+    )
+    assert config_data is not None
+    config = _oci_object(config_data, "configuration")
+    if (config.get("os"), config.get("architecture")) != (
+        expected_os,
+        expected_architecture,
+    ):
+        raise VerificationError("verifier Engine configuration platform differs")
+    rootfs = config.get("rootfs")
+    diff_ids = rootfs.get("diff_ids") if isinstance(rootfs, Mapping) else None
+    if (
+        not isinstance(rootfs, Mapping)
+        or rootfs.get("type") != "layers"
+        or not isinstance(diff_ids, list)
+        or len(diff_ids) != len(layers)
+        or any(OCI_DIGEST_RE.fullmatch(str(value)) is None for value in diff_ids)
+    ):
+        raise VerificationError("verifier Engine rootfs identity is invalid")
+    layer_descriptors: list[dict[str, Any]] = []
+    for offset, raw in enumerate(layers):
+        layer = _oci_descriptor(raw, f"layer {offset}")
+        if layer["mediaType"] not in OCI_GZIP_LAYER_MEDIA_TYPES | OCI_TAR_LAYER_MEDIA_TYPES:
+            raise VerificationError("verifier Engine layer compression is unsupported")
+        if layer["size"] > MAX_GHCR_LAYER_BYTES:
+            raise VerificationError("verifier Engine layer exceeds GHCR's 10 GB limit")
+        _oci_blob(root, layer, f"layer {offset}")
+        layer_descriptors.append(layer)
+    identity = {
+        "platform": expected_platform,
+        "manifest_digest": manifest_descriptor["digest"],
+        "manifest_bytes": len(manifest_data),
+        "config_digest": config_descriptor["digest"],
+        "layer_digests": [value["digest"] for value in layer_descriptors],
+    }
+    return identity, config_data, tuple(layer_descriptors), tuple(map(str, diff_ids))
+
+
+def _oci_archive_identity(
+    archive: pathlib.Path,
+    *,
+    expected_manifest: str,
+    expected_config: str,
+    expected_platform: str,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="letsinfer-engine-oci-") as temporary:
+        root = pathlib.Path(temporary)
+        _extract_engine_layout(archive, root)
+        identity, _config, _layers, _diff_ids = _inspect_engine_layout(
+            root, expected_platform
+        )
+    if (
+        identity["manifest_digest"] != expected_manifest
+        or identity["config_digest"] != expected_config
+    ):
+        raise VerificationError("verifier Engine OCI identity differs")
+    return identity
+
+
+def _tar_bytes(archive: tarfile.TarFile, name: str, data: bytes, mode: int = 0o600) -> None:
+    item = tarfile.TarInfo(name)
+    item.size = len(data)
+    item.mode = mode
+    item.mtime = 0
+    archive.addfile(item, io.BytesIO(data))
+
+
+def _docker_archive_from_oci(
+    source_archive: pathlib.Path,
+    destination: pathlib.Path,
+    *,
+    expected_manifest: str,
+    expected_config: str,
+    expected_platform: str,
+    tag: str,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="letsinfer-engine-convert-") as temporary:
+        root = pathlib.Path(temporary)
+        _extract_engine_layout(source_archive, root)
+        identity, config_data, layers, diff_ids = _inspect_engine_layout(
+            root, expected_platform
+        )
+        if (
+            identity["manifest_digest"] != expected_manifest
+            or identity["config_digest"] != expected_config
+        ):
+            raise VerificationError("verifier Engine OCI identity changed before import")
+        layer_names: list[str] = []
+        expanded = 0
+        try:
+            with tarfile.open(destination, "x") as output:
+                config_name = expected_config.removeprefix("sha256:") + ".json"
+                _tar_bytes(output, config_name, config_data)
+                for offset, (layer, diff_id) in enumerate(zip(layers, diff_ids)):
+                    blob = root / "blobs" / "sha256" / str(layer["digest"]).removeprefix("sha256:")
+                    expanded_layer = root / f"docker-layer-{offset}.tar"
+                    hasher = hashlib.sha256()
+                    opener = gzip.open if layer["mediaType"] in OCI_GZIP_LAYER_MEDIA_TYPES else open
+                    with opener(blob, "rb") as incoming, expanded_layer.open("xb") as layer_output:
+                        while True:
+                            chunk = incoming.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            expanded += len(chunk)
+                            if expanded > MAX_ENGINE_ROOTFS_BYTES:
+                                raise VerificationError(
+                                    "verifier Engine rootfs exceeds the 64 GiB conversion limit"
+                                )
+                            hasher.update(chunk)
+                            layer_output.write(chunk)
+                    if "sha256:" + hasher.hexdigest() != diff_id:
+                        raise VerificationError(
+                            f"verifier Engine layer {offset} differs from its rootfs identity"
+                        )
+                    layer_name = f"{offset}/layer.tar"
+                    layer_names.append(layer_name)
+                    info = output.gettarinfo(str(expanded_layer), arcname=layer_name)
+                    info.mode = 0o600
+                    info.mtime = 0
+                    with expanded_layer.open("rb") as layer_input:
+                        output.addfile(info, layer_input)
+                    expanded_layer.unlink()
+                manifest = canonical_bytes(
+                    [{"Config": config_name, "RepoTags": [tag], "Layers": layer_names}]
+                )
+                _tar_bytes(output, "manifest.json", manifest)
+        except (OSError, tarfile.TarError, gzip.BadGzipFile) as error:
+            destination.unlink(missing_ok=True)
+            raise VerificationError(
+                f"cannot convert verifier Engine OCI layout for Docker: {error}"
+            ) from error
+
+
+def validate_verifier_bundle(
+    root: pathlib.Path, *, pr: PullRequest, candidate: str
+) -> VerifierBundle:
+    document = _bundle_object(root / "bundle.json")
+    proposal_base = document.get("proposal_base_sha")
+    build_workflow = document.get("build_workflow")
+    finalizer_workflow = document.get("finalizer_workflow")
+    if (
+        document.get("schema_version") != 1
+        or document.get("repository") != REPOSITORY
+        or document.get("pull_request") != pr.number
+        or document.get("proposal_head_sha") != pr.head_sha
+        or document.get("candidate") != candidate
+        or document.get("artifact_name")
+        != f"verification-bundle-pr-{pr.number}-{pr.head_sha}"
+        or proposal_base != pr.base_sha
+        or not isinstance(build_workflow, dict)
+        or build_workflow.get("path") != ".github/workflows/build-verifier.yml"
+        or not isinstance(build_workflow.get("run_id"), int)
+        or build_workflow["run_id"] <= 0
+        or build_workflow.get("workflow_sha") != proposal_base
+        or not isinstance(finalizer_workflow, dict)
+        or finalizer_workflow.get("path")
+        != ".github/workflows/finalize-verifier.yml"
+        or not isinstance(finalizer_workflow.get("run_id"), int)
+        or finalizer_workflow["run_id"] <= 0
+        or re.fullmatch(
+            r"[0-9a-f]{40}", str(finalizer_workflow.get("workflow_sha"))
+        )
+        is None
+    ):
+        raise VerificationError("verifier artifact does not identify the current proposal")
+    authors = document.get("runtime_authors")
+    if not isinstance(authors, list) or not authors:
+        raise VerificationError("verifier artifact runtime authors are unavailable")
+    author_ids: set[int] = set()
+    for author in authors:
+        if (
+            not isinstance(author, dict)
+            or set(author) != {"github_login", "github_id", "github_type"}
+            or not isinstance(author.get("github_login"), str)
+            or not author["github_login"]
+            or not isinstance(author.get("github_id"), int)
+            or isinstance(author.get("github_id"), bool)
+            or author["github_id"] <= 0
+            or author.get("github_type") not in {"User", "Organization"}
+            or author["github_id"] in author_ids
+        ):
+            raise VerificationError("verifier artifact runtime author identity is invalid")
+        author_ids.add(author["github_id"])
+    mode = document.get("mode")
+    basic = {
+        "runtime.letsinfer",
+        "runtime-plan.json",
+        "candidate-audit.json",
+        "runtime.spdx.json",
+        "provenance.json",
+    }
+    engine_files = {"engine.oci.tar", "engine.spdx.json"}
+    expected = basic | (engine_files if mode == "build-engine" else set())
+    if mode not in {"reuse-engine", "build-engine"}:
+        raise VerificationError("verifier artifact Engine mode is invalid")
+    entries = list(root.iterdir())
+    if any(
+        path.is_symlink()
+        or not path.is_file()
+        or not stat.S_ISREG(path.lstat().st_mode)
+        for path in entries
+    ):
+        raise VerificationError("verifier artifact contains a non-regular entry")
+    actual = {path.name for path in entries}
+    if actual != expected | {"bundle.json", "checksums.json"}:
+        raise VerificationError("verifier artifact file set differs")
+    checksums_path = root / "checksums.json"
+    if sha256_file(checksums_path) != document.get("checksums_sha256"):
+        raise VerificationError("verifier artifact checksum manifest differs")
+    checksums = _bundle_object(checksums_path)
+    if set(checksums) != expected:
+        raise VerificationError("verifier artifact checksum file set differs")
+    for name, record in checksums.items():
+        path = root / name
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"sha256", "bytes"}
+            or record.get("bytes") != path.stat().st_size
+            or record.get("sha256") != sha256_file(path)
+        ):
+            raise VerificationError(f"verifier artifact payload differs: {name}")
+    subject = document.get("subject")
+    if not isinstance(subject, dict):
+        raise VerificationError("verifier artifact execution subject is invalid")
+    subject_without_id = dict(subject)
+    execution = subject_without_id.pop("execution_sha256", None)
+    if execution != sha256_bytes(canonical_bytes(subject_without_id)):
+        raise VerificationError("verifier artifact execution identity differs")
+    if any(
+        subject.get(key) != expected_value
+        for key, expected_value in (
+            ("repository", REPOSITORY),
+            ("pull_request", pr.number),
+            ("proposal_head_sha", pr.head_sha),
+            ("proposal_base_sha", proposal_base),
+            ("candidate_id", candidate),
+            ("engine_mode", mode),
+        )
+    ):
+        raise VerificationError("verifier artifact subject differs from the proposal")
+    runtime_pack = root / "runtime.letsinfer"
+    plan = _bundle_object(root / "runtime-plan.json")
+    if (
+        document.get("runtime") != plan
+        or plan.get("layer_digest") != "sha256:" + sha256_file(runtime_pack)
+        or plan.get("layer_bytes") != runtime_pack.stat().st_size
+        or subject.get("runtime_pack_sha256") != sha256_file(runtime_pack)
+        or subject.get("runtime_oci_manifest_digest") != plan.get("manifest_digest")
+    ):
+        raise VerificationError("verifier artifact runtime plan differs")
+    from .runtime_packs import RuntimePackError, materialize
+
+    try:
+        with materialize(runtime_pack) as pack:
+            if pack.runtime.get("id") != candidate:
+                raise VerificationError("verifier runtime pack candidate differs")
+            calculated = execution_subject(
+                pack.runtime,
+                pack_sha256=sha256_file(runtime_pack),
+                pack_bytes=runtime_pack.stat().st_size,
+            )
+            for key, value in calculated.items():
+                if key != "execution_sha256" and subject.get(key) != value:
+                    raise VerificationError("verifier runtime execution subject differs")
+            runtime_engine = pack.runtime["engine"]["oci"]
+            runtime_platform = pack.runtime["target"]["platform"]
+    except RuntimePackError as error:
+        raise VerificationError(f"verifier runtime pack is invalid: {error}") from error
+    engine = document.get("engine")
+    if (
+        not isinstance(engine, dict)
+        or engine.get("reference") != runtime_engine["reference"]
+        or engine.get("config_digest") != runtime_engine["immutable_id"]
+    ):
+        raise VerificationError("verifier Engine identity differs from runtime.json")
+    engine_archive = None
+    engine_config = None
+    engine_tag = None
+    if mode == "build-engine":
+        if (
+            engine.get("manifest_digest") != str(engine["reference"]).rsplit("@", 1)[-1]
+            or engine.get("config_digest") != runtime_engine["immutable_id"]
+            or engine.get("platform") != runtime_platform
+        ):
+            raise VerificationError("verifier built Engine identity differs")
+        engine_archive = root / "engine.oci.tar"
+        engine_config = str(engine["config_digest"])
+        identity = _oci_archive_identity(
+            engine_archive,
+            expected_manifest=str(engine["manifest_digest"]),
+            expected_config=engine_config,
+            expected_platform=runtime_platform,
+        )
+        if any(engine.get(key) != value for key, value in identity.items()):
+            raise VerificationError("verifier Engine OCI metadata differs")
+        engine_tag = f"letsinfer-verifier/{candidate}:{pr.head_sha[:12]}"
+    provenance = _bundle_object(root / "provenance.json")
+    if provenance.get("subject") != subject or provenance.get("engine") != engine:
+        raise VerificationError("verifier artifact provenance differs")
+    return VerifierBundle(
+        root=root,
+        document=document,
+        runtime_pack=runtime_pack,
+        engine_archive=engine_archive,
+        engine_config_digest=engine_config,
+        engine_tag=engine_tag,
+    )
+
+
+def download_verifier_bundle(
+    pr: PullRequest, candidate: str, destination: pathlib.Path, *, gh: str
+) -> VerifierBundle:
+    """Download the sole trusted-finalizer artifact for the current PR head."""
+
+    name = f"verification-bundle-pr-{pr.number}-{pr.head_sha}"
+    artifacts = _json_output(
+        [
+            gh,
+            "api",
+            f"repos/{REPOSITORY}/actions/artifacts?name={name}&per_page=100",
+        ]
+    ).get("artifacts")
+    if not isinstance(artifacts, list):
+        raise VerificationError("GitHub verifier artifact response is invalid")
+    exact = [
+        item
+        for item in artifacts
+        if isinstance(item, dict)
+        and item.get("name") == name
+        and item.get("expired") is False
+        and isinstance(item.get("id"), int)
+    ]
+    if len(exact) != 1:
+        raise VerificationError("exact verifier artifact is unavailable or ambiguous")
+    artifact = exact[0]
+    workflow = artifact.get("workflow_run")
+    run_id = workflow.get("id") if isinstance(workflow, dict) else None
+    if not isinstance(run_id, int):
+        raise VerificationError("verifier artifact workflow identity is unavailable")
+    finalizer = _json_output([gh, "api", f"repos/{REPOSITORY}/actions/runs/{run_id}"])
+    if (
+        finalizer.get("event") != "workflow_run"
+        or finalizer.get("path") != ".github/workflows/finalize-verifier.yml"
+        or finalizer.get("conclusion") != "success"
+        or finalizer.get("head_branch") != "main"
+    ):
+        raise VerificationError("verifier artifact was not produced by the trusted finalizer")
+    ensure_private_directory(destination)
+    archive = destination / "artifact.zip"
+    _download_api_file(
+        gh,
+        f"repos/{REPOSITORY}/actions/artifacts/{artifact['id']}/zip",
+        archive,
+    )
+    root = destination / "bundle"
+    try:
+        extract_verifier_artifact(archive, root)
+    finally:
+        archive.unlink(missing_ok=True)
+    bundle = validate_verifier_bundle(root, pr=pr, candidate=candidate)
+    finalizer_identity = bundle.document.get("finalizer_workflow")
+    if (
+        not isinstance(finalizer_identity, dict)
+        or finalizer_identity.get("run_id") != run_id
+        or finalizer_identity.get("path") != ".github/workflows/finalize-verifier.yml"
+        or finalizer_identity.get("workflow_sha") != finalizer.get("head_sha")
+    ):
+        raise VerificationError("verifier artifact finalizer identity differs")
+    build_identity = bundle.document.get("build_workflow")
+    build_id = build_identity.get("run_id") if isinstance(build_identity, dict) else None
+    if not isinstance(build_id, int):
+        raise VerificationError("verifier artifact build identity is unavailable")
+    build = _json_output([gh, "api", f"repos/{REPOSITORY}/actions/runs/{build_id}"])
+    if (
+        build.get("event") != "workflow_run"
+        or build.get("path") != ".github/workflows/build-verifier.yml"
+        or build.get("conclusion") != "success"
+        or build.get("head_branch") != "main"
+        or build.get("head_sha") != pr.base_sha
+        or build_identity.get("workflow_sha") != pr.base_sha
+    ):
+        raise VerificationError("verifier artifact untrusted build identity differs")
+    verify_bundle_attestations(root, gh=gh)
+    return bundle
+
+
+def local_engine_receipt_path(output: pathlib.Path) -> pathlib.Path:
+    return output / "local-engine-image.json"
+
+
+def _write_local_engine_receipt(path: pathlib.Path, value: Mapping[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(canonical_bytes(value))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _docker_image_id(docker: str, reference: str) -> str | None:
+    result = _run(
+        [docker, "image", "inspect", reference, "--format", "{{.Id}}"],
+        check=False,
+        limit=64 << 10,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.decode("utf-8", errors="replace").strip()
+    return value if OCI_DIGEST_RE.fullmatch(value) else None
+
+
+def load_local_engine(
+    bundle: VerifierBundle, output: pathlib.Path, *, docker: str = "docker"
+) -> dict[str, Any] | None:
+    """Load the exact bundled image and persist enough state for crash cleanup."""
+
+    if bundle.engine_archive is None or bundle.engine_config_digest is None:
+        return None
+    config = bundle.engine_config_digest
+    preexisting = _docker_image_id(docker, config) == config
+    receipt = {
+        "schema_version": 1,
+        "config_digest": config,
+        "tag": bundle.engine_tag,
+        "preexisting": preexisting,
+        "loaded": False,
+        "cleaned": False,
+    }
+    path = local_engine_receipt_path(output)
+    _write_local_engine_receipt(path, receipt)
+    if not preexisting:
+        if bundle.engine_tag is None:
+            raise VerificationError("bundled Engine local tag is unavailable")
+        docker_archive = output / "engine.docker.tar"
+        receipt["loaded"] = True
+        _write_local_engine_receipt(path, receipt)
+        try:
+            _docker_archive_from_oci(
+                bundle.engine_archive,
+                docker_archive,
+                expected_manifest=str(bundle.document["engine"]["manifest_digest"]),
+                expected_config=config,
+                expected_platform=str(bundle.document["engine"]["platform"]),
+                tag=bundle.engine_tag,
+            )
+            result = _run(
+                [docker, "load", "--input", str(docker_archive)],
+                check=False,
+                limit=1 << 20,
+            )
+        finally:
+            docker_archive.unlink(missing_ok=True)
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", errors="replace").strip()
+            raise VerificationError(f"cannot load bundled Engine image: {detail}")
+    if _docker_image_id(docker, config) != config:
+        raise VerificationError("loaded Engine image configuration identity differs")
+    if (
+        not preexisting
+        and bundle.engine_tag is not None
+        and _docker_image_id(docker, bundle.engine_tag) != config
+    ):
+        raise VerificationError("loaded Engine image tag identifies different bytes")
+    receipt["loaded"] = True
+    _write_local_engine_receipt(path, receipt)
+    return receipt
+
+
+def cleanup_local_engine(output: pathlib.Path, *, docker: str = "docker") -> None:
+    """Remove only an image introduced by verification; preserve prior images."""
+
+    path = local_engine_receipt_path(output)
+    if not path.is_file() or path.is_symlink():
+        return
+    receipt = _bundle_object(path)
+    if (
+        receipt.get("schema_version") != 1
+        or not isinstance(receipt.get("config_digest"), str)
+        or type(receipt.get("preexisting")) is not bool
+        or type(receipt.get("loaded")) is not bool
+        or type(receipt.get("cleaned")) is not bool
+    ):
+        raise VerificationError("local Engine cleanup receipt is invalid")
+    if receipt["cleaned"] or receipt["preexisting"] or not receipt["loaded"]:
+        receipt["cleaned"] = True
+        _write_local_engine_receipt(path, receipt)
+        return
+    config = receipt["config_digest"]
+    tag = receipt.get("tag")
+    for reference in (tag, config):
+        if isinstance(reference, str) and _docker_image_id(docker, reference) is not None:
+            result = _run(
+                [docker, "image", "rm", reference],
+                check=False,
+                limit=1 << 20,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.decode("utf-8", errors="replace").strip()
+                raise VerificationError(
+                    f"cannot remove verifier Engine image {reference}: {detail}"
+                )
+    if _docker_image_id(docker, config) is not None:
+        raise VerificationError("verifier Engine image remains after cleanup")
+    receipt["cleaned"] = True
+    _write_local_engine_receipt(path, receipt)
 
 
 def runtime_oci_manifest_digest(
