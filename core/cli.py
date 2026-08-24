@@ -7429,17 +7429,37 @@ def _group_release_identity(
     """Bind one installed group to the exact signed-catalog release."""
     release = dict(catalog_release_value)
     benchmark = release.get("benchmark")
-    record = runtime.runtime["benchmark"]["record"]
+    runtime_benchmark = runtime.runtime.get("benchmark")
+    record = (
+        runtime_benchmark.get("record")
+        if isinstance(runtime_benchmark, Mapping)
+        else None
+    )
+    authors = release.get("authors")
     if (
         release.get("source") != source
         or release.get("engine") != runtime.runtime["engine"]["id"]
         or release.get("engine_oci") != runtime.runtime["engine"]["oci"]["reference"]
         or release.get("model_uri") != runtime.runtime["model"]["uri"]
-        or release.get("qualified") is not True
-        or release.get("revoked") is not False
         or not isinstance(benchmark, Mapping)
-        or not isinstance(record, Mapping)
-        or benchmark.get("id") != record.get("id")
+        or not isinstance(benchmark.get("id"), str)
+        or not SHA256_RE.fullmatch(benchmark["id"])
+        or not isinstance(runtime_benchmark, Mapping)
+        or (
+            record is not None
+            and (
+                not isinstance(record, Mapping)
+                or benchmark.get("id") != record.get("id")
+            )
+        )
+        or not isinstance(authors, list)
+        or not authors
+        or any(
+            not isinstance(author, Mapping)
+            or not isinstance(author.get("github_login"), str)
+            or not author["github_login"]
+            for author in authors
+        )
     ):
         raise LetsInferError(
             "signed catalog release does not match the installed runtime bytes"
@@ -7468,9 +7488,9 @@ def _group_release_identity(
         "qualification": "qualified",
         "benchmark": {
             "id": benchmark["id"],
-            "evidence": benchmark["evidence"],
+            "evidence": benchmark.get("evidence"),
         },
-        "authors": list(release["authors"]),
+        "authors": [author["github_login"] for author in authors],
         "license": release["license"],
     }
 
