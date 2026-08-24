@@ -4089,6 +4089,7 @@ def run_passthrough(
     command: Sequence[str],
     *,
     visible: bool = False,
+    failure_label: str | None = None,
 ) -> None:
     """Run a child without letting routine build output take over the TTY.
 
@@ -4099,7 +4100,11 @@ def run_passthrough(
     """
 
     interactive = _human_presenter() is not None
-    direct = visible or not interactive or pathlib.Path(command[0]).name == "sudo"
+    direct = (
+        visible
+        or (not interactive and failure_label is None)
+        or pathlib.Path(command[0]).name == "sudo"
+    )
     if direct:
         ui.before_external_output()
         try:
@@ -4133,6 +4138,16 @@ def run_passthrough(
         ) from error
     tail = _safe_diagnostic("\n".join(lines))
     detail = f"\n{tail}" if tail else ""
+    if failure_label is not None:
+        for line in reversed(lines):
+            candidate = line.strip()
+            if candidate.startswith("ERROR:"):
+                concise = _safe_diagnostic(candidate.removeprefix("ERROR:").strip())
+                detail = f": {concise}" if concise else ""
+                break
+        raise LetsInferError(
+            f"{failure_label} failed ({result.returncode}){detail}"
+        )
     raise LetsInferError(
         f"command failed ({result.returncode}): {_display_command(command)}{detail}"
     )
@@ -4568,7 +4583,21 @@ def wait_for_ready(
         if inspection is None or not inspection.get("State", {}).get(
             "Running", False
         ):
-            raise LetsInferError("container exited during startup")
+            state = inspection.get("State", {}) if inspection is not None else {}
+            if state.get("OOMKilled") is True:
+                raise LetsInferError(
+                    "Engine container was OOM-killed during startup; "
+                    "the launch evidence contains its inspect state and server log"
+                )
+            exit_code = state.get("ExitCode")
+            runtime_error = str(state.get("Error") or "").strip()
+            details: list[str] = []
+            if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+                details.append(f"exit code {exit_code}")
+            if runtime_error:
+                details.append(_safe_diagnostic(runtime_error))
+            suffix = f" ({'; '.join(details)})" if details else ""
+            raise LetsInferError(f"Engine container exited during startup{suffix}")
         require_memory_reserve(manifest, phase="runtime")
         docker_health = (
             (inspection.get("State", {}).get("Health") or {}).get("Status")
@@ -14013,7 +14042,7 @@ def _run_benchmark_with_service_isolation(
                 ["systemctl", "--user", "stop", ENGINE_SERVICE_NAME]
             )
             engine_stopped = True
-        run_passthrough(command)
+        run_passthrough(command, failure_label="benchmark runner")
     except BaseException as error:
         benchmark_error = error
     finally:
