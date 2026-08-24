@@ -16,6 +16,10 @@ differences remain visible without compromising apples-to-apples prompt bytes.
 - `code.md` asks for a bounded Python implementation against the canonical
   event ledger.
 - `prose.md` asks for a bounded executive brief against the same ledger shape.
+- `short-code.md` is the fixed TypeScript JSON-RPC implementation task used by
+  schema 5 at C1 with a 512-token completion budget.
+- `short-prose.md` is the fixed coastal-city outage-preparation task used by
+  schema 5 at C1 with a 512-token completion budget.
 - C1 uses canonical stream 1; C2 uses streams 1–2; C4 uses streams 1–4; C8
   uses streams 1–8. Higher concurrency follows the same prefix rule.
 
@@ -39,7 +43,9 @@ Materialization rules:
    prefix state between cells. Generator v4/schema 4 keeps the same one-process
    policy, places the complete immutable ledger before a short stream-specific
    suffix, and runs C1/C2/C4 adjacent within each context so distinct streams
-   reuse the declared shared prefix.
+   reuse the declared shared prefix. Generator v5/schema 5 first runs the fixed
+   short-code and short-prose C1 cells with their own sealed request, then runs
+   the schema-4-style declared context matrix.
 
 Generated prompt files are ignored evidence. They are never committed to core
 or packaged in a runtime.

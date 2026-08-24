@@ -27,6 +27,7 @@ from core.runtime_packs import (  # noqa: E402
     BENCHMARK_SUITE,
     BENCHMARK_TOKENIZER_CAPABILITY,
     PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
+    SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
     canonical_bytes,
     sha256_file,
     validate_benchmark_contract,
@@ -39,6 +40,7 @@ TEMPLATES = {domain: PROMPTS / f"{domain}.md" for domain in DOMAINS}
 PREFIX_SHARED_TEMPLATES = {
     domain: PROMPTS / f"{domain}-shared.md" for domain in DOMAINS
 }
+SHORT_TEMPLATES = {domain: PROMPTS / f"short-{domain}.md" for domain in DOMAINS}
 NODES = ("amber", "blue", "calm", "green", "north", "plain", "silver", "west")
 ITEMS = ("batch", "event", "item", "key", "record", "signal", "task", "value")
 STATES = ("clean", "final", "open", "ready", "safe", "stable", "valid", "warm")
@@ -124,7 +126,11 @@ def _render(
 def _uses_shared_stream_prefix(contract: dict[str, Any]) -> bool:
     execution = contract.get("execution")
     return bool(
-        contract.get("schema_version") == PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION
+        contract.get("schema_version")
+        in {
+            PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
+            SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
+        }
         and isinstance(execution, dict)
         and execution.get("stream_prefix") == "shared-body"
     )
@@ -136,6 +142,19 @@ def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
     request = contract["request"]
     domains = contract.get("domains", list(DOMAINS))
     cells: dict[str, dict[str, Any]] = {}
+    if contract["schema_version"] == SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION:
+        short = contract["short"]
+        for domain in short["domains"]:
+            name = f"short-{domain}-c1"
+            cells[name] = {
+                "name": name,
+                "context": "short",
+                "prompt_domain": domain,
+                "prompt_suite": BENCHMARK_SUITE,
+                "target_prompt_tokens": short["prompt_tokens"],
+                "concurrency": 1,
+                "max_tokens": short["request"]["output_tokens"],
+            }
     for case in contract["cases"]:
         for concurrency in case["concurrencies"]:
             for domain in domains:
@@ -184,8 +203,55 @@ def materialize(
     domains = contract.get("domains", list(DOMAINS))
     prefix_shared = _uses_shared_stream_prefix(contract)
     templates = PREFIX_SHARED_TEMPLATES if prefix_shared else TEMPLATES
+    plan_schema_version = (
+        3
+        if contract["schema_version"] == SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION
+        else 2
+    )
+    materialization_cases: list[dict[str, Any]] = []
+    if contract["schema_version"] == SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION:
+        short = contract["short"]
+        materialization_cases.append(
+            {
+                "case": {
+                    "id": "short",
+                    "prompt_tokens": short["prompt_tokens"],
+                    "concurrencies": [1],
+                },
+                "domains": short["domains"],
+                "request": short["request"],
+                "templates": SHORT_TEMPLATES,
+                "short": True,
+            }
+        )
+    materialization_cases.extend(
+        {
+            "case": case,
+            "domains": domains,
+            "request": request,
+            "templates": templates,
+            "short": False,
+        }
+        for case in contract["cases"]
+    )
+    template_hashes = {
+        domain: sha256_file(templates[domain]) for domain in domains
+    }
+    if contract["schema_version"] == SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION:
+        template_hashes = {
+            **{
+                f"short-{domain}": sha256_file(SHORT_TEMPLATES[domain])
+                for domain in contract["short"]["domains"]
+            },
+            **template_hashes,
+        }
 
-    for case in contract["cases"]:
+    for materialization_case in materialization_cases:
+        case = materialization_case["case"]
+        case_domains = materialization_case["domains"]
+        case_request = materialization_case["request"]
+        case_templates = materialization_case["templates"]
+        short_case = materialization_case["short"]
         cell_map: dict[str, list[str]] = {}
         selected_for_case = [
             all_cells[name]
@@ -194,13 +260,18 @@ def materialize(
         ]
         if not selected_for_case:
             continue
-        for domain in domains:
+        for domain in case_domains:
             domain_cells = [
                 row for row in selected_for_case if row["prompt_domain"] == domain
             ]
             if not domain_cells:
                 continue
-            template = templates[domain].read_text(encoding="utf-8")
+            template_path = case_templates[domain]
+            template = template_path.read_text(encoding="utf-8")
+            if short_case:
+                template = template.rstrip("\n")
+            template_key = f"short-{domain}" if short_case else domain
+            template_hashes[template_key] = sha256_file(template_path)
             maximum = max(row["concurrency"] for row in domain_cells)
             for slot in range(maximum):
                 fixture_id = f"{case['id']}-{domain}-s{slot:02d}"
@@ -219,12 +290,16 @@ def materialize(
                 body_seed = int.from_bytes(
                     hashlib.sha256(body_seed_material).digest()[:4], "big"
                 )
-                text = _render(
-                    template,
-                    fixture_id=fixture_id,
-                    marker=marker,
-                    slot=slot,
-                    body=_source_text(body_seed, case["prompt_tokens"]),
+                text = (
+                    template
+                    if short_case
+                    else _render(
+                        template,
+                        fixture_id=fixture_id,
+                        marker=marker,
+                        slot=slot,
+                        body=_source_text(body_seed, case["prompt_tokens"]),
+                    )
                 )
                 observed = count_tokens(text)
                 if (
@@ -254,23 +329,29 @@ def materialize(
                 cell_map[f"{domain}-c{cell['concurrency']}"] = [
                     row["name"] for row in rows
                 ]
-        contexts.append(
-            {
-                "name": case["id"],
-                "target_prompt_tokens": case["prompt_tokens"],
-                "cells": cell_map,
-                "sealed_c1": None,
+        context_row = {
+            "name": case["id"],
+            "target_prompt_tokens": case["prompt_tokens"],
+            "cells": cell_map,
+            "sealed_c1": None,
+        }
+        if plan_schema_version == 3:
+            context_row["request"] = {
+                "max_tokens": case_request["output_tokens"],
+                "min_completion_tokens": case_request["min_completion_tokens"],
+                "require_natural_stop": case_request["require_natural_stop"],
+                "temperature": case_request["temperature"],
+                "options": {"seed": case_request["seed"]},
             }
-        )
+        contexts.append(context_row)
 
     public_rows = [
         {"relative_path": row["path"], "sha256": row["sha256"]}
         for row in fixtures
     ]
     prompt_set = prompt_set_sha256(public_rows)
-    template_hashes = {domain: sha256_file(templates[domain]) for domain in domains}
     identity = {
-        "schema_version": 2,
+        "schema_version": plan_schema_version,
         "suite": contract["suite"],
         "generator": {
             "id": BENCHMARK_GENERATOR,
@@ -284,7 +365,7 @@ def materialize(
         "prompt_set_sha256": prompt_set,
     }
     plan = {
-        "schema_version": 2,
+        "schema_version": plan_schema_version,
         "prompt_suite": contract["suite"],
         "model_id": model_id,
         "model_revision": model_revision,

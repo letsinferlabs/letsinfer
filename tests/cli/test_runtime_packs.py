@@ -659,6 +659,48 @@ class RuntimePackTests(unittest.TestCase):
         ):
             runtime_packs.validate_benchmark_contract(value)
 
+    def test_short_workload_contract_binds_domains_and_request(self) -> None:
+        value = self._benchmark()
+        value["schema_version"] = (
+            runtime_packs.SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION
+        )
+        value["generator"]["version"] = (  # type: ignore[index]
+            runtime_packs.SHORT_WORKLOAD_BENCHMARK_GENERATOR_VERSION
+        )
+        value["domains"] = ["code"]
+        value["execution"] = {
+            "isolation": "fresh-matrix",
+            "prefix_state": "shared",
+            "samples_per_cell": 1,
+            "stream_prefix": "shared-body",
+        }
+        value["short"] = {
+            "domains": ["code", "prose"],
+            "prompt_tokens": 256,
+            "request": {
+                "output_tokens": 512,
+                "min_completion_tokens": 512,
+                "require_natural_stop": False,
+                "temperature": 0,
+                "seed": 42042,
+            },
+        }
+        self.assertIs(runtime_packs.validate_benchmark_contract(value), value)
+
+        changed = json.loads(json.dumps(value))
+        changed["short"]["domains"] = ["code"]
+        with self.assertRaisesRegex(
+            runtime_packs.RuntimePackError, "must be exactly code and prose"
+        ):
+            runtime_packs.validate_benchmark_contract(changed)
+
+        changed = json.loads(json.dumps(value))
+        changed["short"]["request"]["output_tokens"] = 0
+        with self.assertRaisesRegex(
+            runtime_packs.RuntimePackError, "short.request.output_tokens must be positive"
+        ):
+            runtime_packs.validate_benchmark_contract(changed)
+
     def test_artifact_tampering_and_symlinks_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

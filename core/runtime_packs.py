@@ -59,11 +59,13 @@ SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 BENCHMARK_SCHEMA_VERSION = 2
 SHARED_BENCHMARK_SCHEMA_VERSION = 3
 PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION = 4
+SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION = 5
 BENCHMARK_SUITE = "letsinfer-code-prose-v1"
 BENCHMARK_GENERATOR = "letsinfer-code-prose"
 BENCHMARK_GENERATOR_VERSION = 2
 SHARED_BENCHMARK_GENERATOR_VERSION = 3
 PREFIX_SHARED_BENCHMARK_GENERATOR_VERSION = 4
+SHORT_WORKLOAD_BENCHMARK_GENERATOR_VERSION = 5
 BENCHMARK_TOKENIZER_CAPABILITY = "engine-rendered-chat-count-v1"
 BENCHMARK_RENDER_CONTRACT = "openai-chat-user-v1"
 SELECTION_SCHEMA_VERSION = 3
@@ -405,6 +407,8 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
     }:
         required = common_fields | {"domains", "execution"}
+    elif schema_version == SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION:
+        required = common_fields | {"domains", "execution", "short"}
     else:
         required = common_fields
     if not isinstance(value, dict) or set(value) != required:
@@ -418,6 +422,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             BENCHMARK_SCHEMA_VERSION,
             SHARED_BENCHMARK_SCHEMA_VERSION,
             PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
+            SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         }
     ):
         raise RuntimePackError(f"{where}.schema_version is unsupported")
@@ -433,6 +438,9 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION: (
             PREFIX_SHARED_BENCHMARK_GENERATOR_VERSION
         ),
+        SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION: (
+            SHORT_WORKLOAD_BENCHMARK_GENERATOR_VERSION
+        ),
     }[value["schema_version"]]
     if (
         generator.get("id") != BENCHMARK_GENERATOR
@@ -444,6 +452,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
     if value["schema_version"] in {
         SHARED_BENCHMARK_SCHEMA_VERSION,
         PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
+        SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
     }:
         domains = value.get("domains")
         if (
@@ -456,7 +465,10 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             )
         execution = value.get("execution")
         execution_fields = {"isolation", "prefix_state", "samples_per_cell"}
-        if value["schema_version"] == PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION:
+        if value["schema_version"] in {
+            PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
+            SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
+        }:
             execution_fields.add("stream_prefix")
         if not isinstance(execution, dict) or set(execution) != execution_fields:
             raise RuntimePackError(
@@ -476,7 +488,11 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
                 f"{where}.execution.samples_per_cell must be 1"
             )
         if (
-            value["schema_version"] == PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION
+            value["schema_version"]
+            in {
+                PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
+                SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
+            }
             and execution.get("stream_prefix") != "shared-body"
         ):
             raise RuntimePackError(
@@ -506,43 +522,30 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             raise RuntimePackError(f"{where}.tokenizer.{field} must be a SHA-256")
 
     request = value.get("request")
-    request_fields = {
-        "output_tokens",
-        "min_completion_tokens",
-        "require_natural_stop",
-        "temperature",
-        "seed",
-    }
-    if not isinstance(request, dict) or set(request) != request_fields:
-        raise RuntimePackError(
-            f"{where}.request must contain exactly "
-            + ", ".join(sorted(request_fields))
-        )
-    for field in ("output_tokens", "min_completion_tokens"):
-        item = request.get(field)
-        if not isinstance(item, int) or isinstance(item, bool) or item <= 0:
-            raise RuntimePackError(f"{where}.request.{field} must be positive")
-    temperature = request.get("temperature")
-    if (
-        not isinstance(temperature, (int, float))
-        or isinstance(temperature, bool)
-        or float(temperature) < 0
-        or not math.isfinite(float(temperature))
-    ):
-        raise RuntimePackError(
-            f"{where}.request.temperature must be finite and non-negative"
-        )
-    if request["min_completion_tokens"] > request["output_tokens"]:
-        raise RuntimePackError(
-            f"{where}.request.min_completion_tokens cannot exceed output_tokens"
-        )
-    seed = request.get("seed")
-    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
-        raise RuntimePackError(f"{where}.request.seed must be non-negative")
-    if not isinstance(request.get("require_natural_stop"), bool):
-        raise RuntimePackError(
-            f"{where}.request.require_natural_stop must be boolean"
-        )
+    _validate_benchmark_request(request, f"{where}.request")
+
+    if value["schema_version"] == SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION:
+        short = value.get("short")
+        if not isinstance(short, dict) or set(short) != {
+            "domains",
+            "prompt_tokens",
+            "request",
+        }:
+            raise RuntimePackError(
+                f"{where}.short must contain exactly domains, prompt_tokens, and request"
+            )
+        if short.get("domains") != ["code", "prose"]:
+            raise RuntimePackError(
+                f"{where}.short.domains must be exactly code and prose"
+            )
+        prompt_tokens = short.get("prompt_tokens")
+        if (
+            not isinstance(prompt_tokens, int)
+            or isinstance(prompt_tokens, bool)
+            or prompt_tokens <= 0
+        ):
+            raise RuntimePackError(f"{where}.short.prompt_tokens must be positive")
+        _validate_benchmark_request(short.get("request"), f"{where}.short.request")
 
     interval = value.get("sample_interval_seconds")
     if (
@@ -599,6 +602,48 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
                 f"{case_where}.concurrencies must be sorted unique values from 1 through 128"
             )
     return value
+
+
+def _validate_benchmark_request(request: Any, where: str) -> dict[str, Any]:
+    """Validate one long- or short-workload request contract."""
+    request_fields = {
+        "output_tokens",
+        "min_completion_tokens",
+        "require_natural_stop",
+        "temperature",
+        "seed",
+    }
+    if not isinstance(request, dict) or set(request) != request_fields:
+        raise RuntimePackError(
+            f"{where} must contain exactly "
+            + ", ".join(sorted(request_fields))
+        )
+    for field in ("output_tokens", "min_completion_tokens"):
+        item = request.get(field)
+        if not isinstance(item, int) or isinstance(item, bool) or item <= 0:
+            raise RuntimePackError(f"{where}.{field} must be positive")
+    temperature = request.get("temperature")
+    if (
+        not isinstance(temperature, (int, float))
+        or isinstance(temperature, bool)
+        or float(temperature) < 0
+        or not math.isfinite(float(temperature))
+    ):
+        raise RuntimePackError(
+            f"{where}.temperature must be finite and non-negative"
+        )
+    if request["min_completion_tokens"] > request["output_tokens"]:
+        raise RuntimePackError(
+            f"{where}.min_completion_tokens cannot exceed output_tokens"
+        )
+    seed = request.get("seed")
+    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
+        raise RuntimePackError(f"{where}.seed must be non-negative")
+    if not isinstance(request.get("require_natural_stop"), bool):
+        raise RuntimePackError(
+            f"{where}.require_natural_stop must be boolean"
+        )
+    return request
 
 
 def normalize_hf_uri(value: Any, where: str = "model URI") -> tuple[str, str, str]:

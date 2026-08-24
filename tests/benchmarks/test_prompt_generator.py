@@ -42,7 +42,77 @@ def contract() -> dict[str, object]:
     }
 
 
+def short_workload_contract() -> dict[str, object]:
+    value = contract()
+    value["schema_version"] = 5
+    value["generator"]["version"] = 5  # type: ignore[index]
+    value["domains"] = ["code"]
+    value["execution"] = {
+        "isolation": "fresh-matrix",
+        "prefix_state": "shared",
+        "samples_per_cell": 1,
+        "stream_prefix": "shared-body",
+    }
+    value["short"] = {
+        "domains": ["code", "prose"],
+        "prompt_tokens": 256,
+        "request": {
+            "output_tokens": 512,
+            "min_completion_tokens": 512,
+            "require_natural_stop": False,
+            "temperature": 0,
+            "seed": 42042,
+        },
+    }
+    value["request"] = {
+        "output_tokens": 128,
+        "min_completion_tokens": 128,
+        "require_natural_stop": False,
+        "temperature": 0,
+        "seed": 42042,
+    }
+    value["cases"] = [
+        {"id": "32k", "prompt_tokens": 32768, "concurrencies": [1, 2, 4]}
+    ]
+    return value
+
+
 class PromptGeneratorTests(unittest.TestCase):
+    def test_schema_five_adds_fixed_short_code_and_prose_before_long_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "schema-five"
+            plan_path = prompt_generator.materialize(
+                short_workload_contract(),
+                output,
+                len,
+                model_id="fixture-model",
+                model_revision="a" * 40,
+            )
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            prompts = {
+                row["name"]: (output / row["path"]).read_text(encoding="utf-8")
+                for row in plan["fixtures"]
+            }
+
+        self.assertEqual(plan["schema_version"], 3)
+        self.assertEqual([row["name"] for row in plan["contexts"]], ["short", "32k"])
+        self.assertEqual(plan["contexts"][0]["request"]["max_tokens"], 512)
+        self.assertEqual(plan["contexts"][1]["request"]["max_tokens"], 128)
+        self.assertEqual(len(plan["fixtures"]), 6)
+        self.assertEqual(
+            prompts["short-code-s00"],
+            "Implement a production-quality TypeScript JSON-RPC client with retries, "
+            "cancellation, schema validation, and tests. Keep writing useful code and "
+            "tests until the completion budget is exhausted.",
+        )
+        self.assertEqual(
+            prompts["short-prose-s00"],
+            "Write a polished long-form explanation of how a small coastal city can "
+            "prepare for a week-long power outage. Use concrete scenes, practical "
+            "tradeoffs, and clear paragraphs. Keep writing useful prose until the "
+            "completion budget is exhausted.",
+        )
+
     def test_schema_four_streams_share_the_complete_ledger_prefix(self) -> None:
         value = contract()
         value["schema_version"] = 4
