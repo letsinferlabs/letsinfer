@@ -9,6 +9,7 @@ prefix=""
 launcher_dir="/usr/local/bin"
 user_install=0
 run_setup=1
+repair_docker_access=0
 progress_active=0
 progress_enabled=1
 interactive_output=0
@@ -49,10 +50,13 @@ finish_progress() {
 usage() {
     cat <<'EOF'
 Usage: install.sh [--version VERSION] [--prefix PATH] [--user] [--no-setup] [--no-progress]
+                  [--repair-docker-access]
 
 Install and initialize the latest published Let's Infer core release. Immutable
 core files live under $LETSINFER_HOME/core. The default exposes the command in
 /usr/local/bin; --user exposes it from ~/.local/bin without administrator access.
+On Linux, --repair-docker-access explicitly approves adding the operator to the
+Docker socket group or restarting a stale user service manager when required.
 EOF
 }
 
@@ -67,6 +71,122 @@ fail() {
         printf 'letsinfer install: %s\n' "$*" >&2
     fi
     exit 1
+}
+
+pause_for_login_refresh() {
+    clear_progress
+    progress_active=0
+    if [ "$interactive_output" -eq 1 ]; then
+        printf '%s  %sINSTALL%s\n\n%s!  Login refresh required%s\n   %s\n' \
+            "$badge_text" "$blue" "$reset" "$blue" "$reset" "$*" >&2
+    else
+        printf 'letsinfer install: %s\n' "$*" >&2
+    fi
+    exit 2
+}
+
+approve_docker_repair() {
+    repair_description=$1
+    if [ "$repair_docker_access" -eq 1 ]; then
+        return 0
+    fi
+    if ( : </dev/tty && : >/dev/tty ) 2>/dev/null; then
+        printf '%s\nContinue? [y/N] ' "$repair_description" >/dev/tty
+        answer=
+        IFS= read -r answer </dev/tty || true
+        case "$answer" in
+            y|Y|yes|YES|Yes) return 0 ;;
+        esac
+        fail "Docker access repair was not approved"
+    fi
+    fail "Docker access repair requires approval; rerun with --repair-docker-access"
+}
+
+gid_list_contains() {
+    wanted_gid=$1
+    gid_list=$2
+    case " $gid_list " in
+        *" $wanted_gid "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+preflight_linux_docker() {
+    operator=$1
+    if docker info >/dev/null 2>&1; then
+        return 0
+    fi
+
+    command -v sudo >/dev/null 2>&1 \
+        || fail "Docker is installed, but the operator cannot reach its daemon and sudo is unavailable for diagnosis"
+    if ! sudo docker info >/dev/null 2>&1; then
+        fail "the Docker daemon is unavailable or unhealthy; start it and verify that sudo docker info succeeds"
+    fi
+
+    docker_socket=/var/run/docker.sock
+    socket_group_record=$(stat -Lc '%g:%G' "$docker_socket" 2>/dev/null || true)
+    case "$socket_group_record" in
+        *:*) ;;
+        *) fail "the Docker daemon is healthy, but $docker_socket is unavailable" ;;
+    esac
+    socket_gid=${socket_group_record%%:*}
+    socket_group=${socket_group_record#*:}
+    case "$socket_gid" in
+        ''|*[!0-9]*) fail "the Docker socket group identity is invalid" ;;
+    esac
+    case "$socket_group" in
+        ''|UNKNOWN|root|*[!A-Za-z0-9_.-]*)
+            fail "the Docker socket group cannot be enrolled safely: $socket_group"
+            ;;
+    esac
+
+    active_gids=$(id -G)
+    if gid_list_contains "$socket_gid" "$active_gids"; then
+        fail "the operator already has the Docker socket group, but docker info still fails; inspect the Docker client configuration"
+    fi
+    account_gids=$(id -G "$operator")
+    if gid_list_contains "$socket_gid" "$account_gids"; then
+        pause_for_login_refresh \
+            "$operator belongs to $socket_group, but this login has stale groups. Start a new login session and rerun install.sh."
+    fi
+
+    command -v usermod >/dev/null 2>&1 \
+        || fail "Docker access requires adding $operator to $socket_group, but usermod is unavailable"
+    approve_docker_repair \
+        "Docker is healthy, but $operator cannot access $docker_socket. Add $operator to $socket_group? Membership grants root-equivalent access."
+    sudo usermod -aG "$socket_group" "$operator"
+    account_gids=$(id -G "$operator")
+    gid_list_contains "$socket_gid" "$account_gids" \
+        || fail "Docker group enrollment did not take effect"
+    pause_for_login_refresh \
+        "Added $operator to $socket_group. Start a new login session and rerun install.sh; the installer will also repair a stale user service manager if needed."
+}
+
+docker_user_service_access() {
+    unit_suffix=$1
+    systemd-run --user --quiet --wait --collect \
+        --unit="letsinfer-docker-preflight-$$-$unit_suffix" \
+        docker info >/dev/null 2>&1
+}
+
+preflight_linux_docker_service() {
+    if docker_user_service_access initial; then
+        return 0
+    fi
+    approve_docker_repair \
+        "Docker works in this shell, but the running user service manager has stale groups. Restart it now? This briefly restarts this account's user services."
+    command -v sudo >/dev/null 2>&1 \
+        || fail "sudo is required to restart the stale user service manager"
+    sudo systemctl restart "user@$(id -u).service"
+    attempt=0
+    while [ "$attempt" -lt 10 ]; do
+        attempt=$((attempt + 1))
+        if docker_user_service_access "$attempt"; then
+            return 0
+        fi
+        sleep 1
+    done
+    fail "Docker works in this shell, but user services still cannot reach it; reboot once and rerun install.sh"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -94,6 +214,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-progress)
             progress_enabled=0
+            shift
+            ;;
+        --repair-docker-access)
+            repair_docker_access=1
             shift
             ;;
         --base-url)
@@ -177,6 +301,15 @@ done
 if [ "$user_install" -eq 0 ]; then
     command -v sudo >/dev/null 2>&1 || fail "sudo is required for the default system installation"
     sudo -v
+fi
+
+if [ "$run_setup" -eq 1 ] && [ "$platform_os" = "linux" ]; then
+    for setup_command in docker loginctl systemctl systemd-run stat; do
+        command -v "$setup_command" >/dev/null 2>&1 \
+            || fail "automatic Linux setup requires: $setup_command"
+    done
+    operator=$(id -un)
+    preflight_linux_docker "$operator"
 fi
 
 if [ -n "$version" ]; then
@@ -403,13 +536,6 @@ progress 70 "Installing core"
 
 if [ "$run_setup" -eq 1 ]; then
     if [ "$platform_os" = "linux" ]; then
-        for setup_command in docker cmake ctest cc openssl; do
-            command -v "$setup_command" >/dev/null 2>&1 \
-                || fail "automatic Linux setup requires: $setup_command"
-        done
-        command -v loginctl >/dev/null 2>&1 \
-            || fail "persistent setup requires systemd-logind"
-        operator=$(id -un)
         linger=$(loginctl show-user "$operator" --property Linger --value 2>/dev/null || true)
         if [ "$linger" != "yes" ]; then
             command -v sudo >/dev/null 2>&1 \
@@ -419,6 +545,7 @@ if [ "$run_setup" -eq 1 ]; then
             [ "$linger" = "yes" ] \
                 || fail "persistent user services could not be enabled"
         fi
+        preflight_linux_docker_service
     else
         launchctl print "gui/$(id -u)" >/dev/null 2>&1 \
             || fail "automatic setup requires an active macOS login session"

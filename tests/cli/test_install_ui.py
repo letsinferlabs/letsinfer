@@ -35,14 +35,82 @@ class InstallerUITests(unittest.TestCase):
             self.fake_bin / "uname",
             """#!/bin/sh
 case "$1" in
-    -s) printf '%s\\n' Darwin ;;
-    -m) printf '%s\\n' arm64 ;;
+    -s) printf '%s\\n' "$FAKE_UNAME_S" ;;
+    -m) printf '%s\\n' "$FAKE_UNAME_M" ;;
+    *) exit 2 ;;
+esac
+""",
+        )
+        self._executable(
+            self.fake_bin / "id",
+            """#!/bin/sh
+case "$1" in
+    -u) printf '%s\\n' 501 ;;
+    -un) printf '%s\\n' operator ;;
+    -G)
+        if [ "$#" -eq 1 ]; then
+            printf '%s\\n' "${FAKE_CURRENT_GIDS:-20}"
+        elif [ "${FAKE_ACCOUNT_HAS_DOCKER:-0}" = 1 ] || [ -f "$FAKE_DOCKER_GROUP_MARKER" ]; then
+            printf '%s\\n' '20 999'
+        else
+            printf '%s\\n' 20
+        fi
+        ;;
     *) exit 2 ;;
 esac
 """,
         )
         self._executable(self.fake_bin / "ssh-keygen", "#!/bin/sh\nexit 0\n")
         self._executable(self.fake_bin / "launchctl", "#!/bin/sh\nexit 0\n")
+        self._executable(
+            self.fake_bin / "docker",
+            """#!/bin/sh
+case "${FAKE_DOCKER_MODE:-allowed}" in
+    allowed) exit 0 ;;
+    denied) [ "${FAKE_DOCKER_AS_ROOT:-0}" = 1 ] ;;
+    daemon-down) exit 1 ;;
+    *) exit 2 ;;
+esac
+""",
+        )
+        self._executable(
+            self.fake_bin / "loginctl",
+            """#!/bin/sh
+case "$1" in
+    show-user) printf '%s\\n' yes ;;
+    enable-linger) exit 0 ;;
+    *) exit 2 ;;
+esac
+""",
+        )
+        self._executable(self.fake_bin / "systemctl", "#!/bin/sh\nexit 0\n")
+        self._executable(
+            self.fake_bin / "systemd-run",
+            """#!/bin/sh
+if [ "${FAKE_DOCKER_SERVICE_STALE:-0}" = 1 ] && [ ! -f "$FAKE_USER_MANAGER_RESTARTED" ]; then
+    exit 1
+fi
+exit 0
+""",
+        )
+        self._executable(
+            self.fake_bin / "sudo",
+            """#!/bin/sh
+case "$1" in
+    -v) exit 0 ;;
+    docker) FAKE_DOCKER_AS_ROOT=1 "$@" ;;
+    usermod) touch "$FAKE_DOCKER_GROUP_MARKER" ;;
+    systemctl) touch "$FAKE_USER_MANAGER_RESTARTED" ;;
+    *) "$@" ;;
+esac
+""",
+        )
+        self._executable(
+            self.fake_bin / "stat",
+            "#!/bin/sh\nprintf '%s\\n' '999:docker'\n",
+        )
+        for command in ("cmake", "ctest", "cc", "openssl", "usermod"):
+            self._executable(self.fake_bin / command, "#!/bin/sh\nexit 0\n")
         self._executable(
             self.fake_bin / "curl",
             """#!/bin/sh
@@ -93,12 +161,18 @@ exit "${FAKE_SETUP_STATUS:-0}"
             "raise SystemExit(0)\n", encoding="utf-8"
         )
 
-        archive = self.release / "letsinfer-macos-arm64.tar.gz"
-        with tarfile.open(archive, "w:gz") as handle:
-            handle.add(self.source, arcname="letsinfer")
-        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        checksum_lines = []
+        for archive_name in (
+            "letsinfer-macos-arm64.tar.gz",
+            "letsinfer-linux-arm64.tar.gz",
+        ):
+            archive = self.release / archive_name
+            with tarfile.open(archive, "w:gz") as handle:
+                handle.add(self.source, arcname="letsinfer")
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            checksum_lines.append(f"{digest}  {archive.name}\n")
         (self.release / "SHA256SUMS").write_text(
-            f"{digest}  {archive.name}\n", encoding="ascii"
+            "".join(checksum_lines), encoding="ascii"
         )
         (self.release / "SHA256SUMS.sig").write_text("test\n", encoding="ascii")
         self.signers = self.root / "allowed-signers"
@@ -131,6 +205,12 @@ exit "${FAKE_SETUP_STATUS:-0}"
                     }
                 )
                 + "\n",
+                "FAKE_DOCKER_GROUP_MARKER": str(run_root / "docker-group-added"),
+                "FAKE_UNAME_M": "arm64",
+                "FAKE_UNAME_S": "Darwin",
+                "FAKE_USER_MANAGER_RESTARTED": str(
+                    run_root / "user-manager-restarted"
+                ),
                 "HOME": str(run_root / "home"),
                 "LANG": "en_US.UTF-8",
                 "LETSINFER_ALLOW_INSECURE_RELEASE_URL": "1",
@@ -276,6 +356,93 @@ exit "${FAKE_SETUP_STATUS:-0}"
         self.assertIn("Installation failed", output)
         self.assertIn("site initialization failed", output)
         self.assertTrue(output.rstrip().endswith("site initialization failed"), output)
+
+    def test_linux_fails_before_download_when_docker_daemon_is_unhealthy(self) -> None:
+        environment = self._environment(
+            FAKE_DOCKER_MODE="daemon-down", FAKE_UNAME_S="Linux"
+        )
+
+        result = self._run_pipe(environment)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Docker daemon is unavailable or unhealthy", result.stderr)
+        self.assertFalse(pathlib.Path(environment["LETSINFER_HOME"]).exists())
+
+    def test_linux_no_setup_does_not_require_docker_access(self) -> None:
+        environment = self._environment(
+            FAKE_DOCKER_MODE="daemon-down", FAKE_UNAME_S="Linux"
+        )
+
+        result = self._run_pipe(environment, "--no-setup")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "Let's Infer 1.2.3 installed for linux/arm64.", result.stderr
+        )
+        self.assertFalse(
+            pathlib.Path(environment["FAKE_SETUP_ARGS_FILE"]).exists()
+        )
+
+    def test_linux_requires_explicit_approval_for_docker_group_enrollment(self) -> None:
+        environment = self._environment(
+            FAKE_DOCKER_MODE="denied", FAKE_UNAME_S="Linux"
+        )
+
+        result = self._run_pipe(environment)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rerun with --repair-docker-access", result.stderr)
+        self.assertFalse(
+            pathlib.Path(environment["FAKE_DOCKER_GROUP_MARKER"]).exists()
+        )
+
+    def test_linux_enrolls_docker_group_then_requests_a_fresh_login(self) -> None:
+        environment = self._environment(
+            FAKE_DOCKER_MODE="denied", FAKE_UNAME_S="Linux"
+        )
+
+        result = self._run_pipe(environment, "--repair-docker-access")
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("Added operator to docker", result.stderr)
+        self.assertIn("Start a new login session and rerun", result.stderr)
+        self.assertTrue(
+            pathlib.Path(environment["FAKE_DOCKER_GROUP_MARKER"]).exists()
+        )
+        self.assertFalse(pathlib.Path(environment["LETSINFER_HOME"]).exists())
+
+    def test_linux_reports_a_stale_login_without_readding_the_group(self) -> None:
+        environment = self._environment(
+            FAKE_ACCOUNT_HAS_DOCKER="1",
+            FAKE_DOCKER_MODE="denied",
+            FAKE_UNAME_S="Linux",
+        )
+
+        result = self._run_pipe(environment, "--repair-docker-access")
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("this login has stale groups", result.stderr)
+        self.assertFalse(
+            pathlib.Path(environment["FAKE_DOCKER_GROUP_MARKER"]).exists()
+        )
+
+    def test_linux_repairs_a_stale_user_manager_before_setup(self) -> None:
+        environment = self._environment(
+            FAKE_DOCKER_SERVICE_STALE="1", FAKE_UNAME_S="Linux"
+        )
+
+        result = self._run_pipe(environment, "--repair-docker-access")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            pathlib.Path(environment["FAKE_USER_MANAGER_RESTARTED"]).exists()
+        )
+        self.assertEqual(
+            pathlib.Path(environment["FAKE_SETUP_ARGS_FILE"]).read_text(
+                encoding="utf-8"
+            ),
+            "setup --json\n",
+        )
 
 
 if __name__ == "__main__":

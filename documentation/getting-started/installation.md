@@ -20,8 +20,17 @@ uses the system package manager to install any that are missing before services
 are initialized.
 
 Run the installer as the account that will operate Let's Infer, not as root.
-The default install asks for sudo only to create the launcher. It does not put
-runtime data or secrets in a system directory.
+The default install asks for sudo to create the launcher and enable persistent
+user services. It does not put runtime data or secrets in a system directory.
+
+The Linux installer checks the Docker CLI, daemon, and operator access before
+downloading Let's Infer. Before initialization, it also verifies Docker from a
+transient systemd user service. If Docker is healthy but the operator cannot
+access `/var/run/docker.sock`, the installer can add that account to the
+socket's group after warning that Docker group membership is root-equivalent.
+Linux requires a fresh login before the new group reaches the shell, so sign in
+again and rerun the installer. If an already-running user service manager still
+has stale groups, the rerun offers to restart it before setup continues.
 
 For an install without administrator access:
 
@@ -40,10 +49,13 @@ Useful installer options:
 --prefix ABSOLUTE_PATH
 --no-setup
 --no-progress
+--repair-docker-access
 ```
 
 Use `--no-setup` only when you want to install files without initializing a
-node.
+node. `--repair-docker-access` explicitly approves the otherwise interactive
+Docker group or user-service-manager repair, which is useful for unattended
+installation.
 
 ## Choose the data directory
 
