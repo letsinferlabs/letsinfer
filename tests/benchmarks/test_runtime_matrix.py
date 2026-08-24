@@ -280,6 +280,26 @@ class RuntimeMatrixTests(unittest.TestCase):
             ],
         )
 
+    def test_prefix_shared_matrix_keeps_each_context_adjacent(self) -> None:
+        selected = runtime_matrix.select_cells(
+            self.cells,
+            [1, 2, 4],
+            ["32k", "64k"],
+            "code",
+            context_first=True,
+        )
+        self.assertEqual(
+            [cell["name"] for cell in selected],
+            [
+                "32k-code-c1",
+                "32k-code-c2",
+                "32k-code-c4",
+                "64k-code-c1",
+                "64k-code-c2",
+                "64k-code-c4",
+            ],
+        )
+
     def test_generated_partial_plan_validates_only_materialized_cells(self) -> None:
         manifest = {
             "model": {"id": "fixture-model", "artifact": "model"},
@@ -619,8 +639,16 @@ class RuntimeMatrixTests(unittest.TestCase):
             includes_materializer=True,
             shared_prefix_state=True,
         )
+        prefix_shared = runtime_matrix.expected_duration_range(
+            selected,
+            includes_materializer=True,
+            shared_prefix_state=True,
+            shared_stream_prefix=True,
+        )
         self.assertLess(shared[0], isolated[0])
         self.assertLess(shared[1], isolated[1])
+        self.assertLess(prefix_shared[0], shared[0])
+        self.assertLess(prefix_shared[1], shared[1])
 
     def test_installed_runtime_name_resolves_to_exact_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -870,17 +898,18 @@ class RuntimeMatrixTests(unittest.TestCase):
                 }
             ]
             contract = {
-                "schema_version": 3,
+                "schema_version": 4,
                 "suite": "letsinfer-code-prose-v1",
                 "generator": {
                     "id": "letsinfer-code-prose",
-                    "version": 3,
+                    "version": 4,
                 },
                 "domains": ["code"],
                 "execution": {
                     "isolation": "fresh-matrix",
                     "prefix_state": "shared",
                     "samples_per_cell": 1,
+                    "stream_prefix": "shared-body",
                 },
                 "tokenizer": {
                     "capability": "engine-rendered-chat-count-v1",
@@ -959,6 +988,7 @@ class RuntimeMatrixTests(unittest.TestCase):
             self.assertFalse(index["fresh_process_per_cell"])
             self.assertTrue(index["fresh_process_per_matrix"])
             self.assertEqual(index["prefix_state"], "shared")
+            self.assertEqual(index["stream_prefix"], "shared-body")
             self.assertEqual(
                 [row["container_id"] for row in index["cells"]],
                 ["shared-container", "shared-container"],
