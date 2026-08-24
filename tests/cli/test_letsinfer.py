@@ -19,6 +19,29 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_startup_oom_has_a_concise_engine_error(self) -> None:
+        inspection = {
+            "State": {
+                "Running": False,
+                "OOMKilled": True,
+                "ExitCode": 137,
+                "Error": "",
+            }
+        }
+        with (
+            mock.patch.object(cli, "container_inspect", return_value=inspection),
+            self.assertRaisesRegex(
+                cli.LetsInferError, "Engine container was OOM-killed during startup"
+            ),
+        ):
+            cli.wait_for_ready(
+                "engine",
+                18000,
+                1,
+                pathlib.Path("/tmp/server.crt"),
+                {},
+            )
+
     def test_service_commits_runtime_selection_before_engine_start(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

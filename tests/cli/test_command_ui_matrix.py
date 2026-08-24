@@ -864,6 +864,31 @@ class DispatcherPresentationTests(unittest.TestCase):
 
 
 class ChildFailurePresentationTests(unittest.TestCase):
+    def test_benchmark_child_failure_prefers_concise_error_line(self) -> None:
+        def failed_child(_command, **kwargs):
+            kwargs["stdout"].write(
+                "preparing\nERROR: Engine container was OOM-killed during startup\n"
+            )
+            return subprocess.CompletedProcess([], 1)
+
+        with (
+            mock.patch.object(cli, "_human_presenter", return_value=None),
+            mock.patch.object(cli.subprocess, "run", side_effect=failed_child),
+            self.assertRaises(cli.LetsInferError) as raised,
+        ):
+            cli.run_passthrough(
+                ["runtime_matrix.py", "--api-key", "secret"],
+                failure_label="benchmark runner",
+            )
+
+        message = str(raised.exception)
+        self.assertEqual(
+            message,
+            "benchmark runner failed (1): "
+            "Engine container was OOM-killed during startup",
+        )
+        self.assertNotIn("secret", message)
+
     def test_child_failure_redacts_credentials_and_terminal_controls(self) -> None:
         command = ["tool", "--token", "super-secret", "--mode", "check"]
         failure = subprocess.CalledProcessError(
