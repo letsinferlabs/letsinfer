@@ -43,6 +43,38 @@ def contract() -> dict[str, object]:
 
 
 class PromptGeneratorTests(unittest.TestCase):
+    def test_schema_three_materializes_only_declared_domains(self) -> None:
+        value = contract()
+        value["schema_version"] = 3
+        value["generator"]["version"] = 3  # type: ignore[index]
+        value["domains"] = ["code"]
+        value["execution"] = {
+            "isolation": "fresh-matrix",
+            "prefix_state": "shared",
+            "samples_per_cell": 1,
+        }
+        value["cases"][0]["concurrencies"] = [1, 2, 4]  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "schema-three"
+            plan_path = prompt_generator.materialize(
+                value,
+                output,
+                len,
+                model_id="fixture-model",
+                model_revision="a" * 40,
+            )
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(plan["prompt_suite"], "letsinfer-code-prose-v1")
+        self.assertEqual(len(plan["fixtures"]), 4)
+        self.assertTrue(
+            all(row["prompt_domain"] == "code" for row in plan["fixtures"])
+        )
+        self.assertEqual(
+            sorted(plan["contexts"][0]["cells"]),
+            ["code-c1", "code-c2", "code-c4"],
+        )
+
     def test_materialization_is_deterministic_and_hash_bound(self) -> None:
         # Character count is a deliberately simple exact adapter double.
         counter = len

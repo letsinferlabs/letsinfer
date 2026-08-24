@@ -28,26 +28,29 @@ reuse a prompt merely to reach C16. Connection capacity and active engine
 concurrency are separate: test the declared connection count even when the
 engine queues overflow because memory cannot safely run every request at once.
 
-## Run the generic production matrix
+## Run the declared production matrix
 
-Use `letsinfer benchmark` for the sealed C1/C2/C4/C8/C16 production
-matrix at 32K, 64K, 128K, and 256K when those contexts fit the runtime. Pass
-the installed immutable runtime candidate; it is the only serving
-configuration. The command has no engine-argument surface because the runtime
-owns the command, environment, scheduler, cache, and safety recipe.
+Use `letsinfer benchmark` for the exact domains, contexts, concurrencies, and
+execution policy declared by the installed immutable runtime candidate. It is
+the only serving configuration. The command has no engine-argument surface
+because the runtime owns the command, environment, scheduler, cache, and
+safety recipe.
 
 - Run `--list` first to validate the runtime contract, capacity, tokenizer
   identity, and selected cross-product without inference.
-- With no selectors, run all 20 cells. Combine one concurrency selector and
-  one context selector for a narrow cell, such as `--c4 --64k`.
+- With no selectors, run every declared cell. Combine one concurrency selector
+  and one context selector for a narrow diagnostic cell, such as `--c4 --64k`.
 - Use distinct generated and hash-pinned prompts for every concurrent stream.
   Compare results only when their exact prompt identity and method match.
-- Run one isolated cell at a time, smallest safe context first. If a cell
-  fails correctness, admission, health, memory, or protection, stop and fix
-  that boundary before advancing.
-- Require a new managed container lifecycle and an empty dedicated prefix
-  store for every cell. Reject nonzero cached prompt tokens in the cold matrix;
-  never let an earlier context or concurrency cell warm a later one.
+- For schema-2 cold contracts, run one isolated cell at a time and require a
+  new managed container plus empty dedicated prefix store for every cell.
+  Reject nonzero cached prompt tokens.
+- For schema-3 shared contracts, require exactly one fresh managed container
+  and store for the complete matrix, one sample per cell, deterministic
+  ascending concurrency/context order, and explicitly shared prefix state.
+  Treat this as cache-aware progression, never cold per-cell evidence.
+- If a cell fails correctness, admission, health, memory, or protection, stop
+  and fix that boundary before advancing.
 - Use the telemetry sampling interval declared by the runtime contract. Reject
   a different CLI interval instead of changing polling overhead mid-comparison.
 - Treat queueing as valid only when every admitted request completes and the
@@ -55,9 +58,9 @@ owns the command, environment, scheduler, cache, and safety recipe.
   lower concurrency or publish a separately qualified runtime release to turn
   a failure into a pass.
 
-The 32K/64K/128K/256K production matrix supplements rather than replaces the
-standard context ladder, cache lifecycle, historical parity, pressure, crash,
-and any other gates declared by the release.
+The declared production matrix supplements rather than replaces the standard
+context ladder, cache lifecycle, historical parity, pressure, crash, and any
+other gates declared by the release.
 
 ## Seal inputs before measurement
 
@@ -124,6 +127,10 @@ python3 benchmarks/benchmark_record.py /path/to/runtime/benchmark.json
 ```
 
 `letsinfer pack` runs the same validator again and rejects `benchmark.md`.
+Schema-5 records for a schema-3 shared matrix embed the complete declarative
+benchmark contract, and the validator recomputes its canonical SHA-256 before
+accepting `benchmark_contract_sha256`. Legacy schema-2 cold matrices retain the
+schema-4 record form.
 Every result must use a neutral `ppN,tgN,cN` workload and report aggregate TPS,
 decode TPS, TTFT and its statistic, `is_prefix_cached`, maximum GPU and CPU
 utilization, maximum GPU and CPU temperature, CPU/GPU/VRAM/system-RAM clocks
