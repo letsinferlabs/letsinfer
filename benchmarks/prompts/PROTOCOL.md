@@ -45,7 +45,8 @@ Materialization rules:
    suffix, and runs C1/C2/C4 adjacent within each context so distinct streams
    reuse the declared shared prefix. Generator v5/schema 5 first runs the fixed
    short-code and short-prose C1 cells with their own sealed request, then runs
-   the schema-4-style declared context matrix.
+   the schema-4-style declared context matrix. Generator v6/schema 6 runs each
+   fixed short domain at C1, C2, and C4 before that long matrix.
 
 Generated prompt files are ignored evidence. They are never committed to core
 or packaged in a runtime.

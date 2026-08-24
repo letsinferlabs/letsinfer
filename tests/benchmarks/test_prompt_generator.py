@@ -77,7 +77,32 @@ def short_workload_contract() -> dict[str, object]:
     return value
 
 
+def short_concurrency_contract() -> dict[str, object]:
+    value = short_workload_contract()
+    value["schema_version"] = 6
+    value["generator"]["version"] = 6  # type: ignore[index]
+    value["short"]["concurrencies"] = [1, 2, 4]  # type: ignore[index]
+    return value
+
+
 class PromptGeneratorTests(unittest.TestCase):
+    def test_schema_six_materializes_short_c1_c2_c4_for_both_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = prompt_generator.materialize(
+                short_concurrency_contract(),
+                pathlib.Path(directory) / "schema-six",
+                len,
+                model_id="fixture-model",
+                model_revision="a" * 40,
+            )
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(plan["fixtures"]), 12)
+        self.assertEqual(
+            list(plan["contexts"][0]["cells"]),
+            ["code-c1", "code-c2", "code-c4", "prose-c1", "prose-c2", "prose-c4"],
+        )
+
     def test_schema_five_adds_fixed_short_code_and_prose_before_long_cells(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "schema-five"
