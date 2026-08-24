@@ -189,6 +189,62 @@ class BenchmarkRecordTests(unittest.TestCase):
         ):
             benchmark_record.validate_record(value)
 
+    def test_shared_record_accepts_short_workload_contract(self) -> None:
+        value = self.record()
+        contract = {
+            "schema_version": 5,
+            "suite": "letsinfer-code-prose-v1",
+            "generator": {"id": "letsinfer-code-prose", "version": 5},
+            "domains": ["code"],
+            "execution": {
+                "isolation": "fresh-matrix",
+                "prefix_state": "shared",
+                "samples_per_cell": 1,
+                "stream_prefix": "shared-body",
+            },
+            "short": {
+                "domains": ["code", "prose"],
+                "prompt_tokens": 256,
+                "request": {
+                    "output_tokens": 512,
+                    "min_completion_tokens": 512,
+                    "require_natural_stop": False,
+                    "temperature": 0,
+                    "seed": 42042,
+                },
+            },
+            "tokenizer": {
+                "capability": "engine-rendered-chat-count-v1",
+                "model_sha256": "7" * 64,
+                "engine_image_sha256": "8" * 64,
+                "render_contract": "openai-chat-user-v1",
+            },
+            "request": {
+                "output_tokens": 128,
+                "min_completion_tokens": 128,
+                "require_natural_stop": False,
+                "temperature": 0,
+                "seed": 42042,
+            },
+            "sample_interval_seconds": 5,
+            "cases": [
+                {"id": "32k", "prompt_tokens": 32768, "concurrencies": [1]}
+            ],
+        }
+        value["schema_version"] = benchmark_record.SHARED_SCHEMA_VERSION
+        value["benchmark_contract"] = contract
+        value["benchmark_contract_sha256"] = hashlib.sha256(
+            benchmark_record.canonical_bytes(contract)
+        ).hexdigest()
+        value["id"] = benchmark_record.benchmark_id(
+            value["installation_id"],
+            value["timestamp_unix_ns"],
+            value["subject"],
+            value["benchmark_contract_sha256"],
+            value["results_sha256"],
+        )
+        self.assertIs(benchmark_record.validate_record(value), value)
+
     def test_code_and_prose_rows_share_a_workload_identity(self) -> None:
         value = self.record()
         prose = dict(value["results"][0])

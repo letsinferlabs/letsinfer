@@ -21,6 +21,7 @@ from core.runtime_packs import (  # noqa: E402
     PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
     RuntimePackError,
     SHARED_BENCHMARK_SCHEMA_VERSION,
+    SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
     validate_benchmark_contract,
 )
 
@@ -464,9 +465,10 @@ def validate_record(value: Any) -> dict[str, Any]:
         if contract.get("schema_version") not in {
             SHARED_BENCHMARK_SCHEMA_VERSION,
             PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
+            SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         }:
             raise BenchmarkRecordError(
-                "benchmark_contract must use shared-matrix schema 3 or 4"
+                "benchmark_contract must use shared-matrix schema 3, 4, or 5"
             )
         contract_sha = hashlib.sha256(canonical_bytes(contract)).hexdigest()
         if value.get("benchmark_contract_sha256") != contract_sha:
