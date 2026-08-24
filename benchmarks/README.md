@@ -19,6 +19,8 @@ validated public `benchmark.json`.
   records which policy ran. Schema-5 contracts prepend fixed short-code and
   short-prose C1 workloads with 512-token completions before the declared
   context matrix. Schema-6 expands both short domains to C1, C2, and C4.
+  Schema-7 adds a dedicated 64K cold/warm TTFT pair that reloads one exact
+  prompt with a one-token response budget.
 - **Durable jobs** — Ctrl-C detaches, `letsinfer benchmark` reattaches to live
   progress, and an explicit stop safely restores prior inference.
 - **Full-system evidence** — JSON records throughput, TTFT, prefix state,
@@ -65,7 +67,8 @@ turning distinct requests into duplicates. Schema-5 keeps that policy and adds
 one fixed short code C1 and one fixed short prose C1 before the long-context
 cells. Their request settings are independently sealed in the contract and
 prompt plan. Schema-6 runs those same fixed prompts at C1, C2, and C4 before
-the long matrix. The resident Watchdog
+the long matrix. Schema-7 runs one unique 64K prompt twice after the long
+matrix and requires the reload to report a larger prefix-cache hit. The resident Watchdog
 stays active while the worker temporarily owns inference. On success, failure,
 cancellation, or terminal disconnect, the worker restores the prior service
 state.
@@ -98,13 +101,16 @@ The worker writes a validated `benchmark.json`. Each result row includes:
 - a fixed-schema Watchdog telemetry timeline; and
 - immutable runtime, installation, contract, and result identities.
 
-Schema-5 `benchmark.json` records produced by schema-3 through schema-6 shared
+Schema-5 `benchmark.json` records produced by schema-3 through schema-7 shared
 contracts also
 embed the complete declarative benchmark contract. Its canonical SHA-256 must
 match `benchmark_contract_sha256`, so domains, cells, one-sample policy,
 isolation, stream-prefix, and prefix-state semantics are directly inspectable
 rather than represented only by a digest. Legacy cold-cell records remain
-schema 4.
+schema 4. A complete schema-7 run produces benchmark-record schema 6 and adds
+a hash-bound `ttft_cache` section containing the exact prompt hash, cold and
+warm TTFT, cold and warm cached-token counts, speedup ratio, and reduction
+percentage.
 
 Unavailable clocks are `-1`. Other unavailable optional telemetry is `null`.
 Validate a record independently with:

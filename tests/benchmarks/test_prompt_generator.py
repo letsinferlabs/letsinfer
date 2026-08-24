@@ -85,7 +85,52 @@ def short_concurrency_contract() -> dict[str, object]:
     return value
 
 
+def ttft_cache_contract() -> dict[str, object]:
+    value = short_concurrency_contract()
+    value["schema_version"] = 7
+    value["generator"]["version"] = 7  # type: ignore[index]
+    value["ttft_cache"] = {
+        "prompt_tokens": 64_000,
+        "prompt_domain": "code",
+        "repetitions": 2,
+        "request": {
+            "output_tokens": 1,
+            "min_completion_tokens": 1,
+            "require_natural_stop": False,
+            "temperature": 0,
+            "seed": 42042,
+        },
+    }
+    return value
+
+
 class PromptGeneratorTests(unittest.TestCase):
+    def test_schema_seven_materializes_one_exact_64k_ttft_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "schema-seven"
+            plan_path = prompt_generator.materialize(
+                ttft_cache_contract(),
+                output,
+                len,
+                model_id="fixture-model",
+                model_revision="a" * 40,
+            )
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            contexts = {row["name"]: row for row in plan["contexts"]}
+            cold_name = contexts["ttftcold"]["cells"]["code-c1"][0]
+            warm_name = contexts["ttftwarm"]["cells"]["code-c1"][0]
+            fixtures = {row["name"]: row for row in plan["fixtures"]}
+            cold = (output / fixtures[cold_name]["path"]).read_bytes()
+            warm = (output / fixtures[warm_name]["path"]).read_bytes()
+
+        self.assertEqual(
+            [row["name"] for row in plan["contexts"]],
+            ["short", "32k", "ttftcold", "ttftwarm"],
+        )
+        self.assertEqual(contexts["ttftcold"]["request"]["max_tokens"], 1)
+        self.assertEqual(fixtures[cold_name]["sha256"], fixtures[warm_name]["sha256"])
+        self.assertEqual(cold, warm)
+
     def test_schema_six_materializes_short_c1_c2_c4_for_both_domains(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             plan_path = prompt_generator.materialize(
