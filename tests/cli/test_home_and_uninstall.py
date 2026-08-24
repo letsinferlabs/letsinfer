@@ -168,13 +168,49 @@ class UninstallFlowTests(unittest.TestCase):
             "configuration_sha256": "a" * 64,
         }
         with (
-            mock.patch.object(cli, "site_identity_path") as identity_path,
-            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(cli, "read_site_identity", return_value=mock.Mock()),
+            mock.patch.object(cli, "SiteStore", return_value=store),
             mock.patch.object(cli, "disable_tailscale") as disable,
         ):
-            identity_path.return_value.is_file.return_value = True
             cli._remove_public_exposure()
         disable.assert_called_once_with("a" * 64)
+
+    def test_uninstall_reads_exposure_without_a_valid_site_identity(self) -> None:
+        exposure = {
+            "state": "enabled",
+            "provider": "tailscale-funnel",
+            "configuration_sha256": "b" * 64,
+        }
+        with (
+            mock.patch.object(
+                cli, "read_site_identity", side_effect=cli.SiteError("invalid")
+            ),
+            mock.patch.object(
+                cli, "read_exposure_for_cleanup", return_value=exposure
+            ) as fallback,
+            mock.patch.object(cli, "disable_tailscale") as disable,
+        ):
+            cli._remove_public_exposure()
+        fallback.assert_called_once_with()
+        disable.assert_called_once_with("b" * 64)
+
+    def test_uninstall_reads_live_wal_exposure_when_identity_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(
+            os.environ, {"LETSINFER_HOME": temporary}
+        ):
+            identity = cli.setup_site("Home", "127.0.0.1")
+            with cli.SiteStore(identity=identity) as store:
+                store.set_exposure(
+                    provider="tailscale-funnel",
+                    public_url="https://home.example.ts.net",
+                    state="enabled",
+                    inference_target="http://127.0.0.1:8000",
+                    configuration_sha256="d" * 64,
+                )
+                cli.site_identity_path().unlink()
+                with mock.patch.object(cli, "disable_tailscale") as disable:
+                    cli._remove_public_exposure()
+            disable.assert_called_once_with("d" * 64)
 
     def test_cleanup_of_home_and_core_is_deferred_until_after_audit(self) -> None:
         arguments = mock.Mock(config=None, keep_models=True)
@@ -186,6 +222,10 @@ class UninstallFlowTests(unittest.TestCase):
             ),
             mock.patch.object(cli.benchmark_jobs, "active_state", return_value=None),
             mock.patch.object(cli, "site_identity_path", return_value=pathlib.Path("/absent")),
+            mock.patch.object(cli, "_remove_public_exposure"),
+            mock.patch.object(
+                cli, "has_active_engine_groups_for_cleanup", return_value=False
+            ),
             mock.patch.object(cli, "_retire_qualification_candidate"),
             mock.patch.object(cli.platform, "system", return_value="Linux"),
             mock.patch.object(cli, "_remove_linux_services"),
@@ -204,6 +244,69 @@ class UninstallFlowTests(unittest.TestCase):
                 configured_model_cache=None,
             )
             remove_core.assert_called_once_with()
+
+    def test_invalid_site_identity_does_not_block_confirmed_uninstall(self) -> None:
+        arguments = mock.Mock(config=None, keep_models=True)
+        identity_path = mock.MagicMock()
+        identity_path.is_file.return_value = True
+        with (
+            mock.patch.object(
+                cli, "_uninstall_service_config", return_value=(pathlib.Path("service.json"), {})
+            ),
+            mock.patch.object(cli, "_confirmed", return_value=True),
+            mock.patch.object(cli, "site_identity_path", return_value=identity_path),
+            mock.patch.object(
+                cli, "read_site_identity", side_effect=cli.SiteError("invalid")
+            ),
+            mock.patch.object(cli, "_installed_runtime_image_references", return_value=set()),
+            mock.patch.object(cli.benchmark_jobs, "active_state", return_value=None),
+            mock.patch.object(cli, "_remove_public_exposure"),
+            mock.patch.object(
+                cli, "has_active_engine_groups_for_cleanup", return_value=False
+            ),
+            mock.patch.object(cli, "_remove_all_engine_groups") as remove_groups,
+            mock.patch.object(cli, "_retire_qualification_candidate"),
+            mock.patch.object(cli.platform, "system", return_value="Linux"),
+            mock.patch.object(cli, "_remove_linux_services"),
+            mock.patch.object(cli, "_remove_managed_containers", return_value=(0, 0)),
+            mock.patch.object(cli, "_remove_managed_home"),
+            mock.patch.object(cli, "_remove_installed_core", return_value=True),
+            mock.patch.object(cli, "_human_presenter", return_value=None),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(cli.uninstall(arguments), 0)
+            remove_groups.assert_not_called()
+            self.assertEqual(arguments.after_audit(), 0)
+
+    def test_invalid_identity_with_incomplete_groups_blocks_local_deletion(self) -> None:
+        arguments = mock.Mock(config=None, keep_models=True)
+        identity_path = mock.MagicMock()
+        identity_path.is_file.return_value = True
+        with (
+            mock.patch.object(cli, "_uninstall_service_config", return_value=(None, None)),
+            mock.patch.object(cli, "_confirmed", return_value=True),
+            mock.patch.object(cli, "site_identity_path", return_value=identity_path),
+            mock.patch.object(
+                cli, "read_site_identity", side_effect=cli.SiteError("invalid")
+            ),
+            mock.patch.object(cli, "_installed_runtime_image_references", return_value=set()),
+            mock.patch.object(cli.benchmark_jobs, "active_state", return_value=None),
+            mock.patch.object(cli, "_remove_public_exposure"),
+            mock.patch.object(
+                cli, "has_active_engine_groups_for_cleanup", return_value=True
+            ),
+            mock.patch.object(cli, "_remove_linux_services") as remove_services,
+            mock.patch.object(cli, "_remove_managed_home") as remove_home,
+            mock.patch.object(cli, "_remove_installed_core") as remove_core,
+            mock.patch.object(cli, "_human_presenter", return_value=None),
+        ):
+            with self.assertRaisesRegex(
+                cli.LetsInferError, "unreadable node identity owns active engine groups"
+            ):
+                cli.uninstall(arguments)
+        remove_services.assert_not_called()
+        remove_home.assert_not_called()
+        remove_core.assert_not_called()
 
     def test_progress_begins_only_after_confirmation_and_covers_final_removal(self) -> None:
         arguments = mock.Mock(config=None, keep_models=False)
@@ -228,6 +331,10 @@ class UninstallFlowTests(unittest.TestCase):
             mock.patch.object(cli, "_installed_runtime_image_references", return_value=set()),
             mock.patch.object(cli.benchmark_jobs, "active_state", return_value=None),
             mock.patch.object(cli, "site_identity_path", return_value=pathlib.Path("/absent")),
+            mock.patch.object(cli, "_remove_public_exposure"),
+            mock.patch.object(
+                cli, "has_active_engine_groups_for_cleanup", return_value=False
+            ),
             mock.patch.object(cli, "_retire_qualification_candidate"),
             mock.patch.object(cli.platform, "system", return_value="Linux"),
             mock.patch.object(cli, "_remove_linux_services"),
@@ -281,24 +388,87 @@ class CoreRemovalTests(unittest.TestCase):
             launcher = prefix / "bin/letsinfer"
             launcher.parent.mkdir(parents=True)
             launcher.symlink_to(source / "bin/letsinfer")
+            recovery = prefix / "bin/letsinfer-recovery"
+            recovery.symlink_to(source / "bin/letsinfer-recovery")
+            system_launchers = root / "usr/local/bin"
+            system_launchers.mkdir(parents=True)
+            system_cli = system_launchers / "letsinfer"
+            system_cli.symlink_to(source / "bin/letsinfer")
+            system_recovery = system_launchers / "letsinfer-recovery"
+            system_recovery.symlink_to(source / "bin/letsinfer-recovery")
             (home / "core/current").symlink_to(source)
             unrelated = prefix / "lib/unrelated"
             unrelated.mkdir(parents=True)
 
             result = remove(
                 source,
-                launcher_directory=prefix / "bin",
+                launcher_directory=system_launchers,
                 letsinfer_home=home,
             )
 
             self.assertFalse((prefix / "lib/letsinfer").exists())
             self.assertFalse((home / "core").exists())
             self.assertFalse(launcher.exists())
+            self.assertFalse(recovery.exists())
+            self.assertFalse(system_cli.exists())
+            self.assertFalse(system_recovery.exists())
             self.assertTrue(unrelated.is_dir())
             self.assertEqual(
                 pathlib.Path(result["removed_store"]),
                 (home / "core").resolve(strict=False),
             )
+
+    def test_validates_every_launcher_before_removing_any(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            prefix = root / "operator/.local"
+            home = prefix / "share/letsinfer"
+            source = home / "core/versions/1.0.0/identity"
+            source.mkdir(parents=True)
+            (source / "SOURCE-MANIFEST.json").write_text(
+                json.dumps({"product": "letsinfer"}), encoding="utf-8"
+            )
+            launchers = prefix / "bin"
+            launchers.mkdir(parents=True)
+            primary = launchers / "letsinfer"
+            primary.symlink_to(source / "bin/letsinfer")
+            invalid = launchers / "letsinfer-recovery"
+            invalid.write_text("unowned", encoding="utf-8")
+            (home / "core/current").symlink_to(source)
+
+            with self.assertRaisesRegex(CoreUninstallError, "non-symlink"):
+                remove(source, launcher_directory=launchers, letsinfer_home=home)
+
+            self.assertTrue(primary.is_symlink())
+            self.assertTrue(invalid.is_file())
+            self.assertTrue((home / "core").is_dir())
+
+    def test_leaves_unrelated_alternate_launcher_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            prefix = root / "operator/.local"
+            home = prefix / "share/letsinfer"
+            source = home / "core/versions/1.0.0/identity"
+            source.mkdir(parents=True)
+            (source / "SOURCE-MANIFEST.json").write_text(
+                json.dumps({"product": "letsinfer"}), encoding="utf-8"
+            )
+            system_launchers = root / "usr/local/bin"
+            system_launchers.mkdir(parents=True)
+            for name in ("letsinfer", "letsinfer-recovery"):
+                (system_launchers / name).symlink_to(source / "bin" / name)
+            alternate = prefix / "bin/letsinfer"
+            alternate.parent.mkdir(parents=True)
+            alternate.write_text("unrelated", encoding="utf-8")
+            (home / "core/current").symlink_to(source)
+
+            remove(
+                source,
+                launcher_directory=system_launchers,
+                letsinfer_home=home,
+            )
+
+            self.assertEqual(alternate.read_text(encoding="utf-8"), "unrelated")
 
     def test_refuses_a_source_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

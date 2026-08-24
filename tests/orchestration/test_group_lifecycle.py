@@ -193,6 +193,43 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         orchestrator.remove.assert_called_once_with()
         self.assertEqual(sync.call_args_list, [mock.call(store, stopped), mock.call(store, removed)])
 
+    def test_remove_retries_incomplete_group_without_stopping_again(self) -> None:
+        for incomplete_state in ("failed", "removing"):
+            with self.subTest(state=incomplete_state):
+                store = _Store()
+                store.group["desired_state"] = "removed"
+                store.group["state"] = incomplete_state
+                removed = {
+                    "group_id": store.group_id,
+                    "placement_id": store.placement_id,
+                    "desired_state": "removed",
+                    "state": "removed",
+                    "member_states": [],
+                }
+                orchestrator = mock.Mock()
+                orchestrator.remove.return_value = removed
+                with (
+                    mock.patch.object(
+                        cli,
+                        "read_site_identity",
+                        return_value=types.SimpleNamespace(role="main"),
+                    ),
+                    mock.patch.object(cli, "_site_store", return_value=store),
+                    mock.patch.object(
+                        cli,
+                        "_restore_engine_group_orchestrator",
+                        return_value=(orchestrator, {}),
+                    ),
+                    mock.patch.object(cli, "_sync_group_placement") as sync,
+                ):
+                    self.assertEqual(
+                        cli._engine_group_lifecycle("example-model", "remove"),
+                        removed,
+                    )
+                orchestrator.stop.assert_not_called()
+                orchestrator.remove.assert_called_once_with()
+                sync.assert_called_once_with(store, removed)
+
 
 if __name__ == "__main__":
     unittest.main()

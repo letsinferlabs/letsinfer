@@ -436,6 +436,158 @@ def read_identity(path: pathlib.Path | None = None) -> SiteIdentity:
     return identity
 
 
+def read_exposure_for_cleanup(
+    path: pathlib.Path | None = None,
+) -> dict[str, Any] | None:
+    """Read only the owned exposure row when the site identity is unreadable.
+
+    Uninstall must remain able to remove a corrupt or obsolete control plane,
+    but it must not reset an unrelated public endpoint.  This narrow reader
+    accepts only the exact private database and exposure-table shape that
+    Let's Infer owns.  It never creates or migrates state.
+    """
+
+    source = path or database_path()
+    if source.is_symlink():
+        raise SiteError(f"site database cannot be a symlink: {source}")
+    if not source.exists():
+        return None
+    try:
+        details = source.stat()
+    except OSError as error:
+        raise SiteError(f"cannot inspect site database {source}: {error}") from error
+    if (
+        not stat.S_ISREG(details.st_mode)
+        or details.st_uid != os.getuid()
+        or stat.S_IMODE(details.st_mode) & 0o077
+    ):
+        raise SiteError(
+            f"site database must be regular, user-owned, and mode 0600: {source}"
+        )
+    for sidecar in (
+        source.with_name(source.name + "-wal"),
+        source.with_name(source.name + "-shm"),
+    ):
+        if not sidecar.exists() and not sidecar.is_symlink():
+            continue
+        try:
+            sidecar_details = sidecar.stat()
+        except OSError as error:
+            raise SiteError(
+                f"cannot inspect site database sidecar {sidecar}: {error}"
+            ) from error
+        if (
+            sidecar.is_symlink()
+            or not stat.S_ISREG(sidecar_details.st_mode)
+            or sidecar_details.st_uid != os.getuid()
+            or stat.S_IMODE(sidecar_details.st_mode) & 0o077
+        ):
+            raise SiteError(f"site database sidecar is unsafe: {sidecar}")
+    expected_columns = (
+        "singleton",
+        "provider",
+        "public_url",
+        "state",
+        "inference_target",
+        "configuration_sha256",
+        "updated_at_unix",
+    )
+    encoded = urllib.parse.quote(str(source), safe="/")
+    try:
+        connection = sqlite3.connect(f"file:{encoded}?mode=ro", uri=True, timeout=1.0)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA trusted_schema=OFF")
+            table = connection.execute(
+                "SELECT type FROM sqlite_master WHERE name='exposure'"
+            ).fetchone()
+            if table is None:
+                return None
+            if table["type"] != "table":
+                raise SiteError("site exposure storage is not a table")
+            columns = tuple(
+                row["name"]
+                for row in connection.execute('PRAGMA table_info("exposure")')
+            )
+            if columns != expected_columns:
+                raise SiteError("site exposure schema is invalid")
+            rows = connection.execute(
+                "SELECT singleton,provider,public_url,state,inference_target,"
+                "configuration_sha256,updated_at_unix FROM exposure"
+            ).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error as error:
+        raise SiteError("site exposure state cannot be read safely") from error
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise SiteError("site exposure state contains multiple records")
+    value = dict(rows[0])
+    if (
+        value.get("singleton") != 1
+        or value.get("provider") != "tailscale-funnel"
+        or value.get("state") not in {"disabled", "enabled", "failed"}
+        or not isinstance(value.get("public_url"), str)
+        or not isinstance(value.get("inference_target"), str)
+        or not value["inference_target"]
+        or not isinstance(value.get("configuration_sha256"), str)
+        or not SHA256_RE.fullmatch(value["configuration_sha256"])
+        or type(value.get("updated_at_unix")) is not int
+        or value["updated_at_unix"] <= 0
+    ):
+        raise SiteError("site exposure record is invalid")
+    return value
+
+
+def has_active_engine_groups_for_cleanup(
+    path: pathlib.Path | None = None,
+) -> bool:
+    """Fail closed if unreadable node identity hides live distributed work."""
+
+    source = path or database_path()
+    if source.is_symlink():
+        raise SiteError(f"site database cannot be a symlink: {source}")
+    if not source.exists():
+        return False
+    # Reuse the same file and WAL safety validation as the exposure reader.
+    # Its return value is irrelevant here; a malformed exposure row must still
+    # block deletion because it may represent an owned public endpoint.
+    read_exposure_for_cleanup(source)
+    encoded = urllib.parse.quote(str(source), safe="/")
+    try:
+        connection = sqlite3.connect(f"file:{encoded}?mode=ro", uri=True, timeout=1.0)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA trusted_schema=OFF")
+            table = connection.execute(
+                "SELECT type FROM sqlite_master WHERE name='engine_groups'"
+            ).fetchone()
+            if table is None:
+                return False
+            if table["type"] != "table":
+                raise SiteError("engine-group storage is not a table")
+            columns = {
+                row["name"]
+                for row in connection.execute('PRAGMA table_info("engine_groups")')
+            }
+            if not {"group_id", "desired_state", "state", "members_json"}.issubset(
+                columns
+            ):
+                raise SiteError("engine-group cleanup schema is invalid")
+            row = connection.execute(
+                "SELECT COUNT(*) AS active FROM engine_groups "
+                "WHERE desired_state IS NOT 'removed' OR state IS NOT 'removed'"
+            ).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error as error:
+        raise SiteError("engine-group cleanup state cannot be read safely") from error
+    return bool(row["active"])
+
+
 def setup_site(display_name: str = "Home", coordinator_address: str | None = None) -> SiteIdentity:
     destination = identity_path()
     if destination.exists():
