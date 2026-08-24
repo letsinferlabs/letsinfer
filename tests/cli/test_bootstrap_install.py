@@ -59,7 +59,14 @@ class BootstrapInstallTests(unittest.TestCase):
         self.assertIn('$LETSINFER_HOME/core/current/bin/$launcher_name', script)
         self.assertIn('launcher_dir="/usr/local/bin"', script)
         self.assertIn('prefix="$HOME/.local"', script)
-        self.assertIn('for setup_command in docker cmake ctest cc openssl', script)
+        self.assertIn(
+            'for setup_command in docker loginctl systemctl systemd-run stat',
+            script,
+        )
+        self.assertIn('preflight_linux_docker "$operator"', script)
+        self.assertIn("preflight_linux_docker_service", script)
+        self.assertIn('sudo usermod -aG "$socket_group" "$operator"', script)
+        self.assertIn('sudo systemctl restart "user@$(id -u).service"', script)
         self.assertIn("openssl_development_ready", script)
         self.assertIn("build-essential cmake openssl libssl-dev", script)
         self.assertIn("gcc gcc-c++ make cmake openssl openssl-devel", script)
