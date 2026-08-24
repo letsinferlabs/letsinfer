@@ -133,6 +133,30 @@ Classify the Engine path before editing:
   a mechanical patch and blocks verification for that head. Do not publish an
   unofficial Engine OCI or split the work into a preliminary Engine PR.
 
+## Handle the persistent NVMe cache
+
+For every new or ported runtime, explicitly evaluate and document Let’s
+Infer's persistent inference-state cache instead of relying only on the
+engine's process-local prefix cache. When the engine exposes safe KV or
+prefix-state hooks, implement the provider and format in the Engine OCI, set
+`cache.persistent` to true, and use the Core-provided
+`LETSINFER_CACHE_ROOT`; do not invent a host path or runtime-specific mount.
+
+Bind records to every input that affects safe replay, including the exact
+model and tokenizer revisions, Engine OCI, cache format/ABI, tensor layout and
+dtype, attention backend, relevant kernels, and rendered prompt tokens. Commit
+records atomically; validate lengths, checksums, and identity before restore;
+treat incomplete, stale, incompatible, or corrupt records as misses. Enforce a
+declared byte capacity and TTL with deterministic eviction, and avoid a RAM
+mirror on unified-memory targets unless measurements justify it.
+
+If safe durable restore is unavailable for that engine or recipe, declare the
+cache non-persistent and explain the limitation in the candidate README;
+never claim NVMe reuse from an engine's in-memory cache. Qualification must
+exercise a cold request, an exact warm repeat, a graceful engine restart, and
+a restored repeat while recording TTFT, reported cached tokens, NVMe I/O,
+correctness, corruption-as-miss behavior, and capacity enforcement.
+
 ## Define one measured recipe
 
 Publish one recipe per candidate. Declare the target capability contract,
