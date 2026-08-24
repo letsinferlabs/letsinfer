@@ -49,6 +49,10 @@ safety recipe.
   and store for the complete matrix, one sample per cell, deterministic
   ascending concurrency/context order, and explicitly shared prefix state.
   Treat this as cache-aware progression, never cold per-cell evidence.
+- For schema-4 prefix-shared contracts, additionally require a complete common
+  ledger prefix followed by a distinct stream suffix and C1/C2/C4 adjacency
+  within each context. Verify reported cached tokens rather than inferring reuse
+  from timing.
 - If a cell fails correctness, admission, health, memory, or protection, stop
   and fix that boundary before advancing.
 - Use the telemetry sampling interval declared by the runtime contract. Reject
@@ -127,7 +131,7 @@ python3 benchmarks/benchmark_record.py /path/to/runtime/benchmark.json
 ```
 
 `letsinfer pack` runs the same validator again and rejects `benchmark.md`.
-Schema-5 records for a schema-3 shared matrix embed the complete declarative
+Schema-5 records for schema-3 and schema-4 shared matrices embed the complete declarative
 benchmark contract, and the validator recomputes its canonical SHA-256 before
 accepting `benchmark_contract_sha256`. Legacy schema-2 cold matrices retain the
 schema-4 record form.

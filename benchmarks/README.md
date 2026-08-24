@@ -14,7 +14,9 @@ validated public `benchmark.json`.
 - **Sealed isolation** — schema-2 contracts give every cell a fresh process and
   empty prefix state. Schema-3 contracts may instead seal one fresh process and
   store for the complete matrix, one sample per cell, and explicitly shared
-  prefix state; the evidence records which policy ran.
+  prefix state. Schema-4 contracts additionally give distinct streams one
+  shared ledger prefix and keep C1/C2/C4 adjacent per context; the evidence
+  records which policy ran.
 - **Durable jobs** — Ctrl-C detaches, `letsinfer benchmark` reattaches to live
   progress, and an explicit stop safely restores prior inference.
 - **Full-system evidence** — JSON records throughput, TTFT, prefix state,
@@ -54,7 +56,10 @@ instance and empty prefix state. Schema-3 shared-matrix contracts launch one
 fresh instance and store, run every declared cell once in deterministic order,
 and intentionally retain prefix state between cells. That mode measures the
 declared cache-aware progression and is a different benchmark identity; its
-results are never compared as cold per-cell evidence. The resident Watchdog
+results are never compared as cold per-cell evidence. Schema-4 prefix-shared
+contracts also place the immutable ledger before each stream-specific suffix
+and run C1/C2/C4 together per context, making reuse directly measurable without
+turning distinct requests into duplicates. The resident Watchdog
 stays active while the worker temporarily owns inference. On success, failure,
 cancellation, or terminal disconnect, the worker restores the prior service
 state.
@@ -87,10 +92,11 @@ The worker writes a validated `benchmark.json`. Each result row includes:
 - a fixed-schema Watchdog telemetry timeline; and
 - immutable runtime, installation, contract, and result identities.
 
-Schema-5 `benchmark.json` records produced by a shared-matrix contract also
+Schema-5 `benchmark.json` records produced by schema-3 or schema-4 shared
+contracts also
 embed the complete declarative benchmark contract. Its canonical SHA-256 must
 match `benchmark_contract_sha256`, so domains, cells, one-sample policy,
-isolation, and prefix-state semantics are directly inspectable rather than
+isolation, stream-prefix, and prefix-state semantics are directly inspectable rather than
 represented only by a digest. Legacy cold-cell records remain schema 4.
 
 Unavailable clocks are `-1`. Other unavailable optional telemetry is `null`.

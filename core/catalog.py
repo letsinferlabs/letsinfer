@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import hashlib
 import json
 import os
@@ -311,7 +312,9 @@ class CatalogManager:
             destination = self._objects / identity
             try:
                 incoming.replace(destination)
-            except FileExistsError:
+            except OSError as error:
+                if error.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                    raise
                 shutil.rmtree(incoming)
             self._write_pointer(identity)
             return CatalogSnapshot(
