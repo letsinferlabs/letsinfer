@@ -202,6 +202,44 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         self.assertEqual(removed["state"], "removed")
         self.assertEqual(removed["desired_state"], "removed")
 
+    def test_failed_removal_retry_skips_already_removed_tasks(self) -> None:
+        calls: list[tuple[str, str]] = []
+        fail_task_two = True
+
+        def submit(_member, job, _credential):
+            nonlocal fail_task_two
+            calls.append((job["action"], job["task"]["task_id"]))
+            if (
+                job["action"] == "remove"
+                and job["task"]["task_id"] == "task-2"
+                and fail_task_two
+            ):
+                fail_task_two = False
+                raise RuntimeError("synthetic removal failure")
+            return {
+                "protocol": PROTOCOL,
+                "operation_id": job["operation_id"],
+                "replayed": False,
+                "state": "succeeded",
+                "result": {"state": job["action"]},
+            }
+
+        orchestrator = self.orchestrator(submit)
+        orchestrator.stage()
+        orchestrator.start()
+        orchestrator.stop()
+        with self.assertRaisesRegex(GroupOrchestrationError, "removal failed"):
+            orchestrator.remove()
+        first_removals = [item for item in calls if item[0] == "remove"]
+        self.assertEqual({item[1] for item in first_removals}, {"task-0", "task-1", "task-2"})
+
+        removed = orchestrator.remove()
+        second_removals = [item for item in calls if item[0] == "remove"][
+            len(first_removals):
+        ]
+        self.assertEqual(second_removals, [("remove", "task-2")])
+        self.assertEqual(removed["state"], "removed")
+
     def test_reconcile_fails_distributed_group_when_one_member_is_missing(self) -> None:
         orchestrator = self.orchestrator(
             lambda _member, job, _credential: {

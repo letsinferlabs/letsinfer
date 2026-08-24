@@ -807,6 +807,70 @@ class TerminalTests(unittest.TestCase):
         self.assertNotIn("\033[H\033[J", rendered)
         self.assertIn("fixture-model", rendered)
 
+    def test_live_runtime_status_refreshes_without_an_installed_runtime(self) -> None:
+        stream = FakeStream(tty=True)
+        payload = {
+            "identity": {"display_name": "Home", "role": "main"},
+            "endpoint": "http://homeai.local:8000/v1",
+            "services": {
+                "node_active": "active",
+                "gateway_active": "active",
+                "gateway_health": True,
+            },
+            "runtime": None,
+        }
+        snapshots = mock.Mock(return_value=payload)
+        with (
+            mock.patch.object(ui.sys, "stdout", stream),
+            mock.patch.object(ui.time, "sleep", side_effect=[None, KeyboardInterrupt]),
+        ):
+            self.assertEqual(ui.live_runtime_status(snapshots), 0)
+        rendered = stream.getvalue()
+        self.assertEqual(snapshots.call_count, 2)
+        self.assertGreaterEqual(rendered.count("Not installed"), 2)
+        self.assertIn("\033[?25l", rendered)
+        self.assertIn("\033[?25h", rendered)
+        self.assertIn("\033[?1049h", rendered)
+        self.assertIn("\033[?1049l", rendered)
+
+    def test_live_runtime_status_transitions_from_node_to_runtime(self) -> None:
+        stream = FakeStream(tty=True)
+        payloads = [
+            {
+                "identity": {"display_name": "Home", "role": "main"},
+                "endpoint": "http://homeai.local:8000/v1",
+                "services": {"node_active": "active"},
+                "runtime": None,
+            },
+            {
+                "service": {
+                    "active": "active",
+                    "engine_active": "active",
+                    "gateway_active": "active",
+                    "gateway_health": True,
+                },
+                "container": {
+                    "state": "running",
+                    "healthy": True,
+                    "model": "fixture-model",
+                    "engine": "sglang",
+                    "target": "dgx-spark",
+                    "runtime_version": "1.0.0",
+                },
+                "protection": {"armed": True, "trip_latched": False},
+                "lifecycle": {"state": "ready", "runtime_ready": True},
+            },
+        ]
+        with (
+            mock.patch.object(ui.sys, "stdout", stream),
+            mock.patch.object(ui.time, "sleep", side_effect=[None, KeyboardInterrupt]),
+        ):
+            self.assertEqual(ui.live_runtime_status(lambda: payloads.pop(0)), 0)
+        rendered = stream.getvalue()
+        self.assertIn("Not installed", rendered)
+        self.assertIn("fixture-model", rendered)
+        self.assertEqual(rendered.count("\033[?1049h"), 1)
+
     def test_live_runtime_status_keeps_last_good_telemetry_during_reconnect(self) -> None:
         stream = FakeStream(tty=True)
         base = {
