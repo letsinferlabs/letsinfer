@@ -616,6 +616,26 @@ class RuntimePackTests(unittest.TestCase):
         with self.assertRaisesRegex(runtime_packs.RuntimePackError, "must be a SHA-256"):
             runtime_packs.validate_benchmark_contract(value)
 
+    def test_shared_matrix_benchmark_contract_is_explicit_and_single_sample(self) -> None:
+        value = self._benchmark()
+        value["schema_version"] = runtime_packs.SHARED_BENCHMARK_SCHEMA_VERSION
+        value["generator"]["version"] = (  # type: ignore[index]
+            runtime_packs.SHARED_BENCHMARK_GENERATOR_VERSION
+        )
+        value["domains"] = ["code"]
+        value["execution"] = {
+            "isolation": "fresh-matrix",
+            "prefix_state": "shared",
+            "samples_per_cell": 1,
+        }
+        self.assertIs(runtime_packs.validate_benchmark_contract(value), value)
+
+        value["execution"]["samples_per_cell"] = 2  # type: ignore[index]
+        with self.assertRaisesRegex(
+            runtime_packs.RuntimePackError, "samples_per_cell must be 1"
+        ):
+            runtime_packs.validate_benchmark_contract(value)
+
     def test_artifact_tampering_and_symlinks_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

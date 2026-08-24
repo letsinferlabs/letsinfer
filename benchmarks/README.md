@@ -11,8 +11,10 @@ validated public `benchmark.json`.
   concurrency cells from the CLI.
 - **Apples-to-apples prompts** — every model receives the same canonical code
   and prose tasks, rendered and counted by its own Engine adapter.
-- **Real isolation** — every cell gets a fresh process and empty prefix state;
-  the runner rejects identity, configuration, prompt, cache, or sampling drift.
+- **Sealed isolation** — schema-2 contracts give every cell a fresh process and
+  empty prefix state. Schema-3 contracts may instead seal one fresh process and
+  store for the complete matrix, one sample per cell, and explicitly shared
+  prefix state; the evidence records which policy ran.
 - **Durable jobs** — Ctrl-C detaches, `letsinfer benchmark` reattaches to live
   progress, and an explicit stop safely restores prior inference.
 - **Full-system evidence** — JSON records throughput, TTFT, prefix state,
@@ -31,9 +33,9 @@ Use the CLI:
 letsinfer benchmark qwen3.8-27b --c1
 ```
 
-With no selectors, the standard contract runs 32K, 64K, 128K, and 256K at C1,
-C2, C4, C8, and C16 for both code and prose. Select only the cells you need
-with flags such as `--32k`, `--64k`, `--c1`, or `--c8`.
+With no selectors, the runner executes exactly the contexts, concurrencies, and
+domains declared by the installed runtime contract. Select a smaller supported
+cross-product with flags such as `--32k`, `--64k`, `--c1`, or `--c4`.
 
 The benchmark is a durable job:
 
@@ -47,10 +49,15 @@ Ctrl-C detaches. It does not cancel the worker.
 
 ## Isolation
 
-Each measured cell gets a fresh Let's Infer-managed runtime instance and empty
-prefix state. The resident Watchdog stays active while the worker temporarily
-owns inference. On success, failure, cancellation, or terminal disconnect, the
-worker restores the exact prior service state.
+Schema-2 contracts give each measured cell a fresh Let's Infer-managed runtime
+instance and empty prefix state. Schema-3 shared-matrix contracts launch one
+fresh instance and store, run every declared cell once in deterministic order,
+and intentionally retain prefix state between cells. That mode measures the
+declared cache-aware progression and is a different benchmark identity; its
+results are never compared as cold per-cell evidence. The resident Watchdog
+stays active while the worker temporarily owns inference. On success, failure,
+cancellation, or terminal disconnect, the worker restores the prior service
+state.
 
 The runner rejects runtime, model, Engine OCI, tokenizer, prompt, source,
 container, cache, or sampling drift. It also rejects unsafe launch headroom and
@@ -79,6 +86,12 @@ The worker writes a validated `benchmark.json`. Each result row includes:
 - utilization, clock, temperature, memory, NVMe, power, and network maxima;
 - a fixed-schema Watchdog telemetry timeline; and
 - immutable runtime, installation, contract, and result identities.
+
+Schema-5 `benchmark.json` records produced by a shared-matrix contract also
+embed the complete declarative benchmark contract. Its canonical SHA-256 must
+match `benchmark_contract_sha256`, so domains, cells, one-sample policy,
+isolation, and prefix-state semantics are directly inspectable rather than
+represented only by a digest. Legacy cold-cell records remain schema 4.
 
 Unavailable clocks are `-1`. Other unavailable optional telemetry is `null`.
 Validate a record independently with:

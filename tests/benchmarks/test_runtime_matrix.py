@@ -223,6 +223,33 @@ class RuntimeMatrixTests(unittest.TestCase):
         self.assertEqual(concurrencies, [1, 2, 4, 8, 16])
         self.assertEqual(contexts, ["32k", "64k", "128k", "256k"])
 
+    def test_no_selectors_respects_runtime_declared_axes(self) -> None:
+        arguments = types.SimpleNamespace(
+            c1=False,
+            c2=False,
+            c4=False,
+            c8=False,
+            c16=False,
+            context_32k=False,
+            context_64k=False,
+            context_128k=False,
+            context_256k=False,
+        )
+        declared = {
+            name: cell
+            for name, cell in self.cells.items()
+            if cell["prompt_domain"] == "code"
+            and name.endswith(("-c1", "-c2", "-c4"))
+        }
+        concurrencies, contexts = runtime_matrix.selected_axes(arguments, declared)
+        selected = runtime_matrix.select_cells(
+            declared, concurrencies, contexts
+        )
+        self.assertEqual(concurrencies, [1, 2, 4])
+        self.assertEqual(contexts, ["32k", "64k", "128k", "256k"])
+        self.assertEqual(len(selected), 12)
+        self.assertTrue(all(cell["prompt_domain"] == "code" for cell in selected))
+
     def test_selectors_form_cross_product_with_c1_first(self) -> None:
         arguments = types.SimpleNamespace(
             c1=True,
@@ -438,6 +465,19 @@ class RuntimeMatrixTests(unittest.TestCase):
                     root, path, manifest, "b" * 40, None
                 )
 
+    def test_control_bundle_with_null_gate_fails_cleanly(self) -> None:
+        manifest = {"serving": {"gate": None}}
+        with tempfile.TemporaryDirectory() as directory:
+            root, path, _core_identity = self._control_bundle(
+                pathlib.Path(directory), manifest
+            )
+            with self.assertRaisesRegex(
+                runtime_matrix.RuntimeMatrixError, "sealed measured commit"
+            ):
+                runtime_matrix.verified_source_identity(
+                    root, path, manifest, "b" * 40, None
+                )
+
     def test_post_load_memory_records_stable_warning_headroom(self) -> None:
         manifest = {
             "watchdog": {
@@ -527,6 +567,25 @@ class RuntimeMatrixTests(unittest.TestCase):
             cells["32k-code-c1"]["fixtures"][0]["expected_prompt_tokens"], 32768
         )
 
+    def test_contract_cells_honor_declared_domain_subset(self) -> None:
+        cells = runtime_matrix.contract_cells(
+            {
+                "domains": ["code"],
+                "request": {"output_tokens": 128},
+                "cases": [
+                    {
+                        "id": "32k",
+                        "prompt_tokens": 32768,
+                        "concurrencies": [1, 2, 4],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(
+            sorted(cells),
+            ["32k-code-c1", "32k-code-c2", "32k-code-c4"],
+        )
+
     def test_expected_duration_scales_with_selected_prompt_volume(self) -> None:
         short = [{"fixtures": [{"expected_prompt_tokens": 32_768}]}]
         long = [{"fixtures": [{"expected_prompt_tokens": 262_144}]}]
@@ -539,6 +598,29 @@ class RuntimeMatrixTests(unittest.TestCase):
         self.assertLess(short_range[0], long_range[0])
         self.assertLess(short_range[1], long_range[1])
         self.assertLessEqual(short_range[0], short_range[1])
+
+    def test_shared_duration_counts_reused_prefix_streams_once(self) -> None:
+        selected = [
+            {
+                "prompt_domain": "code",
+                "target_prompt_tokens": 32_768,
+                "fixtures": [
+                    {"expected_prompt_tokens": 32_768}
+                    for _ in range(concurrency)
+                ],
+            }
+            for concurrency in (1, 2, 4)
+        ]
+        isolated = runtime_matrix.expected_duration_range(
+            selected, includes_materializer=True
+        )
+        shared = runtime_matrix.expected_duration_range(
+            selected,
+            includes_materializer=True,
+            shared_prefix_state=True,
+        )
+        self.assertLess(shared[0], isolated[0])
+        self.assertLess(shared[1], isolated[1])
 
     def test_installed_runtime_name_resolves_to_exact_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -644,6 +726,307 @@ class RuntimeMatrixTests(unittest.TestCase):
             self.assertEqual(metadata["returncode"], 0)
             self.assertEqual(len(metadata["stdout_sha256"]), 64)
             self.assertEqual(len(metadata["stderr_sha256"]), 64)
+
+    def test_shared_matrix_uses_one_process_and_store_for_all_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            output = root / "evidence"
+            manifest_path = root / "runtime-execution.json"
+            runtime_config = root / "runtime.json"
+            plan_path = root / "plan.json"
+            plan_path.write_text("{}", encoding="utf-8")
+            manifest = {
+                "release": "release-r1",
+                "model": {"id": "fixture-model", "artifact": "model"},
+                "artifacts": [{"name": "model", "revision": "4" * 40}],
+                "serving": {
+                    "max_connections": 4,
+                    "max_active_requests": 1,
+                    "max_context_tokens": 262_144,
+                },
+            }
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            runtime_matrix.common.write_json_atomic(
+                runtime_config,
+                {
+                    "id": "sparkinfer--example--model--dgx-spark",
+                    "version": "1.2.3",
+                    "model": {"uri": "hf://example/model", "artifact": "model"},
+                    "artifacts": [{"name": "model", "revision": "4" * 40}],
+                    "engine": {
+                        "oci": {
+                            "reference": "ghcr.io/example/engine@sha256:" + "5" * 64
+                        }
+                    },
+                    "target": {"id": "dgx-spark"},
+                },
+            )
+            for path in (root / "engine-api-key", root / "server.crt"):
+                path.write_text("fixture\n", encoding="utf-8")
+            arguments = types.SimpleNamespace(
+                output_directory=output,
+                store_root=None,
+                launch_directory=None,
+                container="letsinfer-benchmark",
+                letsinfer_bin=pathlib.Path("/opt/letsinfer"),
+                engine_port=18000,
+                base_url="https://127.0.0.1:8000",
+                api_key_file=root / "api-key",
+                token_count_path="/v1/token-count",
+                token_count_protocol="letsinfer-token-count-v1",
+                token_count_base_url="https://127.0.0.1:18000",
+                token_count_api_key_file=root / "engine-api-key",
+                ca_cert_file=root / "server.crt",
+                measured_commit="a" * 40,
+                watchdog_trip_file=root / "trip.json",
+                timeout=3600,
+                sample_interval_seconds=5,
+                source_attestation=None,
+                installation_id="1" * 64,
+                benchmark_timestamp_unix_ns=1_800_000_000_123_456_789,
+                benchmark_contract_sha256="2" * 64,
+                runtime_config=runtime_config,
+                watchdog_port=9768,
+                watchdog_ca_file=root / "controller-ca.crt",
+                watchdog_controller_cert_file=root / "local-controller.crt",
+                watchdog_controller_key_file=root / "local-controller.key",
+            )
+            cells = [
+                {
+                    "name": f"32k-code-c{concurrency}",
+                    "prompt_domain": "code",
+                    "prompt_suite": "letsinfer-code-prose-v1",
+                    "prompt_set_sha256": str(concurrency) * 64,
+                    "target_prompt_tokens": 32_768,
+                    "fixtures": [
+                        {"expected_prompt_tokens": 32_711}
+                        for _ in range(concurrency)
+                    ],
+                    "max_tokens": 128,
+                }
+                for concurrency in (1, 2)
+            ]
+            process_number = 0
+
+            def worker(command: list[str]) -> types.SimpleNamespace:
+                nonlocal process_number
+                process_number += 1
+                result_root = pathlib.Path(
+                    command[command.index("--output-directory") + 1]
+                )
+                concurrency = int(
+                    next(
+                        value[3:]
+                        for value in command
+                        if value.startswith("--c") and value[3:].isdigit()
+                    )
+                )
+                cell = f"32k-code-c{concurrency}"
+                runtime_matrix.common.write_json_atomic(
+                    result_root / "results.json",
+                    {
+                        "qualification_passed": True,
+                        "selected_cells": [cell],
+                        "container_before": {"id": "shared-container"},
+                        "summaries": [
+                            {
+                                "cell": cell,
+                                "concurrency": concurrency,
+                                "prompt_tokens": [32_711] * concurrency,
+                                "decode_tokens_per_second": {"mean": 24.5},
+                                "ttft_ms": {
+                                    "mean": 32_000.0,
+                                    "p50": 32_000.0,
+                                    "p95": 32_000.0,
+                                },
+                                "cached_prompt_tokens": {
+                                    "max": 0.0 if concurrency == 1 else 32_000.0
+                                },
+                                "aggregate_completion_tokens_per_second": 3.5,
+                                "measurement_started_unix_ms": 1_800_000_000_000,
+                                "measurement_ended_unix_ms": 1_800_000_002_000,
+                            }
+                        ],
+                    },
+                )
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            telemetry = [
+                {
+                    "sequence": 1,
+                    "unix_ms": 1_800_000_000_000,
+                    "cpu_percent": 50,
+                    "gpu_percent": 90,
+                    "system_temp_deci_c": 650,
+                    "gpu_temp_deci_c": 700,
+                    "disk_percent": 71,
+                    "nvme_temp_deci_c": 470,
+                    "disk_read_kib_s": 512,
+                    "disk_write_kib_s": 256,
+                    "cpu_clock_mhz": 3200,
+                    "gpu_clock_mhz": 1500,
+                    "vram_clock_mhz": -1,
+                    "system_ram_clock_mhz": -1,
+                }
+            ]
+            contract = {
+                "schema_version": 3,
+                "suite": "letsinfer-code-prose-v1",
+                "generator": {
+                    "id": "letsinfer-code-prose",
+                    "version": 3,
+                },
+                "domains": ["code"],
+                "execution": {
+                    "isolation": "fresh-matrix",
+                    "prefix_state": "shared",
+                    "samples_per_cell": 1,
+                },
+                "tokenizer": {
+                    "capability": "engine-rendered-chat-count-v1",
+                    "model_sha256": "6" * 64,
+                    "engine_image_sha256": "5" * 64,
+                    "render_contract": "openai-chat-user-v1",
+                },
+                "request": {
+                    "output_tokens": 128,
+                    "min_completion_tokens": 128,
+                    "require_natural_stop": False,
+                    "temperature": 0,
+                    "seed": 42042,
+                },
+                "sample_interval_seconds": 5,
+                "cases": [
+                    {
+                        "id": "32k",
+                        "prompt_tokens": 32768,
+                        "concurrencies": [1, 2],
+                    }
+                ],
+            }
+            arguments.benchmark_contract_sha256 = hashlib.sha256(
+                runtime_matrix.benchmark_record.canonical_bytes(contract)
+            ).hexdigest()
+            with (
+                mock.patch.object(runtime_matrix, "_command_output", return_value="") as lifecycle,
+                mock.patch.object(runtime_matrix.common, "read_private_file", return_value="secret"),
+                mock.patch.object(runtime_matrix.ssl, "create_default_context"),
+                mock.patch.object(runtime_matrix, "token_count_client", return_value=len),
+                mock.patch.object(
+                    runtime_matrix.prompt_generator,
+                    "materialize",
+                    return_value=plan_path,
+                ),
+                mock.patch.object(
+                    runtime_matrix,
+                    "load_prompt_plan",
+                    return_value=({}, {cell["name"]: cell for cell in cells}),
+                ),
+                mock.patch.object(
+                    runtime_matrix.common, "run_command", side_effect=worker
+                ),
+                mock.patch.object(
+                    runtime_matrix.watchdog_client,
+                    "query_range",
+                    return_value=telemetry,
+                ),
+            ):
+                runtime_matrix.run_isolated_matrix(
+                    arguments,
+                    manifest_path,
+                    "model/engine/target",
+                    manifest,
+                    None,
+                    cells,
+                    {"commit": "a" * 40},
+                    contract,
+                )
+
+            index = json.loads((output / "matrix-index.json").read_text())
+            self.assertEqual(process_number, 2)
+            serve_commands = [
+                call.args[0]
+                for call in lifecycle.call_args_list
+                if "serve" in call.args[0]
+            ]
+            stop_commands = [
+                call.args[0]
+                for call in lifecycle.call_args_list
+                if "stop" in call.args[0]
+            ]
+            self.assertEqual(len(serve_commands), 1)
+            self.assertEqual(len(stop_commands), 1)
+            self.assertFalse(index["fresh_process_per_cell"])
+            self.assertTrue(index["fresh_process_per_matrix"])
+            self.assertEqual(index["prefix_state"], "shared")
+            self.assertEqual(
+                [row["container_id"] for row in index["cells"]],
+                ["shared-container", "shared-container"],
+            )
+
+            arguments.output_directory = root / "failed-evidence"
+            process_number = 0
+            with (
+                mock.patch.object(
+                    runtime_matrix, "_command_output", return_value=""
+                ) as failed_lifecycle,
+                mock.patch.object(
+                    runtime_matrix.common,
+                    "read_private_file",
+                    return_value="secret",
+                ),
+                mock.patch.object(runtime_matrix.ssl, "create_default_context"),
+                mock.patch.object(
+                    runtime_matrix, "token_count_client", return_value=len
+                ),
+                mock.patch.object(
+                    runtime_matrix.prompt_generator,
+                    "materialize",
+                    return_value=plan_path,
+                ),
+                mock.patch.object(
+                    runtime_matrix,
+                    "load_prompt_plan",
+                    return_value=({}, {cell["name"]: cell for cell in cells}),
+                ),
+                mock.patch.object(
+                    runtime_matrix.common, "run_command", side_effect=worker
+                ),
+                mock.patch.object(
+                    runtime_matrix,
+                    "_collect_cell_evidence",
+                    side_effect=runtime_matrix.RuntimeMatrixError(
+                        "malformed shared evidence"
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    runtime_matrix.RuntimeMatrixError,
+                    "malformed shared evidence",
+                ):
+                    runtime_matrix.run_isolated_matrix(
+                        arguments,
+                        manifest_path,
+                        "model/engine/target",
+                        manifest,
+                        None,
+                        cells,
+                        {"commit": "a" * 40},
+                        contract,
+                    )
+
+            failed_serve_commands = [
+                call.args[0]
+                for call in failed_lifecycle.call_args_list
+                if "serve" in call.args[0]
+            ]
+            failed_stop_commands = [
+                call.args[0]
+                for call in failed_lifecycle.call_args_list
+                if "stop" in call.args[0]
+            ]
+            self.assertEqual(len(failed_serve_commands), 1)
+            self.assertEqual(len(failed_stop_commands), 1)
 
     def test_isolated_matrix_uses_one_process_and_store_per_cell(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
