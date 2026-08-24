@@ -8781,6 +8781,7 @@ def _install_catalog_nodes(
                     if getattr(arguments, "runtime", None)
                     else "recommended"
                 ),
+                qualified=True,
                 requested_runtime=getattr(arguments, "runtime", None),
                 requested_target=target_id,
                 expected_version=version,
@@ -8890,6 +8891,7 @@ def scale_command(arguments: argparse.Namespace) -> int:
         manifest_path, manifest, control_root, receipt = prepare_runtime_install(
             source,
             policy=f"runtime:{candidate}" if arguments.runtime else "recommended",
+            qualified=True,
             requested_runtime=arguments.runtime,
             requested_target=target_id,
             expected_version=version,
@@ -9520,6 +9522,8 @@ def _local_controller_telemetry(
         if response.status != 200 or len(body) > 1024 * 1024:
             return None
         value = json.loads(body)
+        if not isinstance(value, dict):
+            return None
         telemetry = value.get("telemetry")
         aggregate = telemetry.get("aggregate") if isinstance(telemetry, dict) else None
         if not isinstance(aggregate, dict):
@@ -9557,11 +9561,50 @@ def _local_controller_telemetry(
                 result["system"] = sample.get("system")
                 result["workload"] = sample.get("workload")
         return result
-    except (OSError, ssl.SSLError, http.client.HTTPException, json.JSONDecodeError):
+    except (
+        OSError,
+        UnicodeDecodeError,
+        ssl.SSLError,
+        http.client.HTTPException,
+        json.JSONDecodeError,
+    ):
         return None
     finally:
         if connection is not None:
             connection.close()
+
+
+def _local_status_node(identity: Any) -> dict[str, Any]:
+    """Return the cached local identity and inventory used by live status."""
+
+    summary: dict[str, Any] = {
+        **identity_json(identity),
+        "hostname": socket.gethostname(),
+    }
+    if identity.role != "main":
+        return summary
+    try:
+        with SiteStore(identity=identity) as store:
+            member = next(
+                (
+                    row
+                    for row in store.members()
+                    if row.get("member_id") == identity.member_id
+                ),
+                None,
+            )
+    except (OSError, SiteError):
+        return summary
+    facts = member.get("facts") if isinstance(member, dict) else None
+    inventory = facts.get("inventory") if isinstance(facts, dict) else None
+    if isinstance(inventory, dict):
+        summary["hardware_name"] = (
+            inventory.get("dgx_name")
+            or inventory.get("product_name")
+            or inventory.get("board_name")
+        )
+        summary["uptime_seconds"] = inventory.get("uptime_seconds")
+    return summary
 
 
 def status(arguments: argparse.Namespace) -> int:
@@ -9640,6 +9683,7 @@ def status(arguments: argparse.Namespace) -> int:
         if not site_identity_path().exists():
             raise LetsInferError("no service configuration exists; specify --name")
         identity = read_site_identity()
+        watchdog_enabled, watchdog_active, watchdog_memory_bytes = _service_state()
         node_enabled, node_active, node_memory_bytes = _service_state(
             NODE_SERVICE_NAME
         )
@@ -9673,10 +9717,32 @@ def status(arguments: argparse.Namespace) -> int:
                 == 200
             )
             endpoint = local_inference_endpoint(gateway_port)
+        service = {
+            "active": watchdog_active,
+            "enabled": watchdog_enabled,
+            "watchdog_expected": platform.system() == "Linux",
+            "memory_current_bytes": watchdog_memory_bytes,
+            "memory_limit_bytes": CONTROL_PLANE_MEMORY_LIMIT_BYTES,
+            "runtime_installed": False,
+            "gateway_expected": is_main,
+            "node_enabled": node_enabled,
+            "node_active": node_active,
+            "node_memory_current_bytes": node_memory_bytes,
+            "gateway_enabled": gateway_enabled,
+            "gateway_active": gateway_active,
+            "gateway_health": gateway_health,
+            "gateway_auth_required": gateway_auth_required,
+            "gateway_authenticated": gateway_authenticated,
+            "gateway_model_identity": False,
+            "gateway_endpoint": endpoint,
+        }
         payload = {
             "identity": identity_json(identity),
             "endpoint": endpoint,
             "services": {
+                "watchdog_enabled": watchdog_enabled,
+                "watchdog_active": watchdog_active,
+                "watchdog_memory_current_bytes": watchdog_memory_bytes,
                 "node_enabled": node_enabled,
                 "node_active": node_active,
                 "node_memory_current_bytes": node_memory_bytes,
@@ -9687,8 +9753,20 @@ def status(arguments: argparse.Namespace) -> int:
                 "gateway_auth_required": gateway_auth_required,
                 "gateway_authenticated": gateway_authenticated,
             },
+            "service": service,
+            "container": {},
+            "protection": None,
             "runtime": None,
+            "node": _local_status_node(identity),
+            "telemetry": (
+                _local_controller_telemetry(
+                    preferred_member_id=identity.member_id,
+                )
+                if identity.role == "main" and node_active == "active"
+                else None
+            ),
         }
+        payload["lifecycle"] = runtime_lifecycle(payload)
         if arguments.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         elif ui.Terminal(sys.stdout).interactive:
@@ -9705,20 +9783,7 @@ def status(arguments: argparse.Namespace) -> int:
                 )
                 print(f"endpoint={endpoint}")
             print("runtime=not-installed")
-        return (
-            0
-            if node_active == "active"
-            and (
-                not is_main
-                or (
-                    gateway_active == "active"
-                    and gateway_health
-                    and gateway_auth_required
-                    and gateway_authenticated
-                )
-            )
-            else 1
-        )
+        return 0 if payload["lifecycle"]["state"] == "ready" else 1
 
     enabled, active, memory_bytes = _service_state()
     inspection = container_inspect(name)
@@ -9895,29 +9960,7 @@ def status(arguments: argparse.Namespace) -> int:
     try:
         identity = read_site_identity()
         local_member_id = identity.member_id
-        site_summary: dict[str, Any] = {
-            **identity_json(identity),
-            "hostname": identity.coordinator_address or socket.gethostname(),
-        }
-        with SiteStore(identity=identity) as store:
-            member = next(
-                (
-                    row
-                    for row in store.members()
-                    if row.get("member_id") == identity.member_id
-                ),
-                None,
-            )
-        facts = member.get("facts") if isinstance(member, dict) else None
-        inventory = facts.get("inventory") if isinstance(facts, dict) else None
-        if isinstance(inventory, dict):
-            site_summary["hardware_name"] = (
-                inventory.get("dgx_name")
-                or inventory.get("board_model")
-                or inventory.get("product_name")
-            )
-            site_summary["uptime_seconds"] = inventory.get("uptime_seconds")
-        payload["node"] = site_summary
+        payload["node"] = _local_status_node(identity)
     except (OSError, SiteError, StopIteration):
         payload["node"] = None
     payload["lifecycle"] = runtime_lifecycle(payload)
@@ -11354,16 +11397,34 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
         for row in rows
     ]
     if presenter is not None:
-        presenter.table(
-            tuple(
-                command_ui.TableColumn(
-                    str(index), heading, min_width=5 if index else 8
+        if presenter.terminal.width < 100:
+            for index, row in enumerate(rendered):
+                model, authors, version, engine, target, verified, status = row
+                presenter.result(
+                    f"{model}  {version}",
+                    semantic=(
+                        command_ui.Semantic.SUCCESS
+                        if "installed" in status
+                        else command_ui.Semantic.INFO
+                    ),
+                    detail=(
+                        f"{engine} · {target} · {status}\n"
+                        f"By {authors} · {verified} verification"
+                    ),
                 )
-                for index, heading in enumerate(headings)
-            ),
-            rendered,
-            empty_message="No qualified runtimes are available",
-        )
+                if index + 1 < len(rendered):
+                    presenter.wrapped("")
+        else:
+            presenter.table(
+                tuple(
+                    command_ui.TableColumn(
+                        str(index), heading, min_width=5 if index else 8
+                    )
+                    for index, heading in enumerate(headings)
+                ),
+                rendered,
+                empty_message="No qualified runtimes are available",
+            )
         if snapshot.stale:
             presenter.result(
                 "Using the last verified catalog",
@@ -11824,6 +11885,7 @@ def _install_retained_group_release(
         manifest_path, manifest, control_root, receipt = prepare_runtime_install(
             str(release["source"]),
             policy=f"runtime:{release['candidate_id']}",
+            qualified=True,
             requested_runtime=str(release["candidate_id"]),
             requested_target=str(release["target_id"]),
             expected_version=str(release["version"]),
@@ -12007,6 +12069,7 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
             manifest_path, manifest, control_root, receipt = prepare_runtime_install(
                 item["source"],
                 policy=f"runtime:{item['candidate_id']}",
+                qualified=True,
                 requested_runtime=item["candidate_id"],
                 requested_target=old_release["target_id"],
                 expected_version=item["version"],
@@ -15854,10 +15917,10 @@ def _refresh_site_links_once() -> dict[str, list[str]]:
 
 
 def _accept_local_telemetry(
-    state: SiteControlState, document: Mapping[str, Any], member_id: str
+    state: SiteControlState, sample: Mapping[str, Any], member_id: str
 ) -> None:
     try:
-        state.accept_telemetry(document, requester_member_id=member_id)
+        state.accept_local_telemetry(sample, requester_member_id=member_id)
     except ControlError as error:
         raise TelemetryError(str(error)) from error
 
@@ -16262,8 +16325,8 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
             watchdog_controller_cert_file=default_watchdog_local_controller_cert_path(),
             watchdog_controller_key_file=default_watchdog_local_controller_key_path(),
             local_accept=(
-                lambda document, member_id: _accept_local_telemetry(
-                    state, document, member_id
+                lambda sample, member_id: _accept_local_telemetry(
+                    state, sample, member_id
                 )
             )
             if identity.role == "main"

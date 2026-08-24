@@ -75,15 +75,17 @@ SHA256SUMS.sig
 install.sh
 ```
 
-Install stable releases through the website's reviewed bootstrap. It then
-fetches signed immutable GitHub Release assets:
+Install the latest published release through the website's reviewed bootstrap.
+Until a stable release exists, this resolves the newest release candidate; a
+stable release takes precedence over a candidate at the same version. The
+bootstrap then fetches signed immutable GitHub Release assets:
 
 ```bash
 curl -fsSL https://letsinfer.ai/install.sh | sh
 ```
 
-An RC or historical release uses its explicit published version (replace
-`X.Y.Z` below):
+To pin a specific release or release candidate, pass its explicit published
+version (replace `X.Y.Z` below):
 
 ```bash
 curl -fsSL https://letsinfer.ai/install.sh \

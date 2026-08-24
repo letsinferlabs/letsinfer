@@ -15,6 +15,10 @@ verifies its checksum and complete source manifest, installs immutable core
 files below `$LETSINFER_HOME/core`, exposes `letsinfer` in
 `/usr/local/bin`, and runs `letsinfer setup`.
 
+On Linux, setup checks for its compiler, CMake, and OpenSSL requirements and
+uses the system package manager to install any that are missing before services
+are initialized.
+
 Run the installer as the account that will operate Let's Infer, not as root.
 The default install asks for sudo only to create the launcher. It does not put
 runtime data or secrets in a system directory.

@@ -13,11 +13,18 @@ import tempfile
 import unittest
 from unittest import mock
 
-from core import cli, runtime_packs
+from core import cli, command_ui, runtime_packs
 from core.catalog import CatalogManager, CatalogSnapshot, _snapshot_identity
 
 
 CANDIDATE = "sglang--radixark--qwen3.8-27b-nvfp4--dgx-spark"
+
+
+class _TerminalStream(io.StringIO):
+    encoding = "utf-8"
+
+    def isatty(self) -> bool:
+        return True
 
 
 def catalog() -> dict:
@@ -221,6 +228,59 @@ class CatalogTests(unittest.TestCase):
                 {"github_login": "letsinferlabs", "github_id": 2, "github_type": "Organization"},
             ],
         )
+
+    def test_list_uses_compact_records_on_an_eighty_column_terminal(self) -> None:
+        snapshot = CatalogSnapshot(catalog(), "catalog.json", "5" * 64, 100, False)
+        arguments = argparse.Namespace(
+            catalog="catalog.json",
+            refresh=False,
+            all_targets=True,
+            model=None,
+            versions=False,
+            json=False,
+        )
+        output = _TerminalStream()
+        presenter = command_ui.CommandUI(
+            output,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1", "COLUMNS": "80"},
+        )
+        with (
+            mock.patch.object(cli.CatalogManager, "load", return_value=snapshot),
+            mock.patch.object(cli, "selections", return_value=[]),
+            mock.patch.object(cli, "_human_presenter", return_value=presenter),
+        ):
+            self.assertEqual(cli.list_available_runtimes(arguments), 0)
+        rendered = output.getvalue()
+        self.assertIn("qwen3.8-27b  0.1.0-rc.12", rendered)
+        self.assertIn("sglang · dgx-spark · recommended", rendered)
+        self.assertIn("By MiaAI-Lab, letsinferlabs · legacy verification", rendered)
+        self.assertNotIn("MODEL", rendered)
+
+    def test_list_keeps_the_table_on_a_wide_terminal(self) -> None:
+        snapshot = CatalogSnapshot(catalog(), "catalog.json", "5" * 64, 100, False)
+        arguments = argparse.Namespace(
+            catalog="catalog.json",
+            refresh=False,
+            all_targets=True,
+            model=None,
+            versions=False,
+            json=False,
+        )
+        output = _TerminalStream()
+        presenter = command_ui.CommandUI(
+            output,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1", "COLUMNS": "140"},
+        )
+        with (
+            mock.patch.object(cli.CatalogManager, "load", return_value=snapshot),
+            mock.patch.object(cli, "selections", return_value=[]),
+            mock.patch.object(cli, "_human_presenter", return_value=presenter),
+        ):
+            self.assertEqual(cli.list_available_runtimes(arguments), 0)
+        rendered = output.getvalue()
+        self.assertIn("MODEL", rendered)
+        self.assertIn("AUTHOR", rendered)
+        self.assertNotIn("By MiaAI-Lab", rendered)
 
     def test_list_shows_community_verifier_count(self) -> None:
         document = catalog()
