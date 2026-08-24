@@ -57,9 +57,11 @@ MAX_CATALOG_BYTES = 4 << 20
 MAX_CATALOG_SIGNATURE_BYTES = 16 << 10
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 BENCHMARK_SCHEMA_VERSION = 2
+SHARED_BENCHMARK_SCHEMA_VERSION = 3
 BENCHMARK_SUITE = "letsinfer-code-prose-v1"
 BENCHMARK_GENERATOR = "letsinfer-code-prose"
 BENCHMARK_GENERATOR_VERSION = 2
+SHARED_BENCHMARK_GENERATOR_VERSION = 3
 BENCHMARK_TOKENIZER_CAPABILITY = "engine-rendered-chat-count-v1"
 BENCHMARK_RENDER_CONTRACT = "openai-chat-user-v1"
 SELECTION_SCHEMA_VERSION = 3
@@ -384,7 +386,7 @@ def benchmark_model_sha256(manifest: dict[str, Any]) -> str:
 def validate_benchmark_contract(value: Any) -> dict[str, Any]:
     """Validate the declarative, engine-neutral runtime benchmark contract."""
     where = "runtime.benchmark"
-    required = {
+    common_fields = {
         "schema_version",
         "suite",
         "generator",
@@ -393,13 +395,21 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         "sample_interval_seconds",
         "cases",
     }
+    schema_version = value.get("schema_version") if isinstance(value, dict) else None
+    if schema_version == BENCHMARK_SCHEMA_VERSION:
+        required = common_fields
+    elif schema_version == SHARED_BENCHMARK_SCHEMA_VERSION:
+        required = common_fields | {"domains", "execution"}
+    else:
+        required = common_fields
     if not isinstance(value, dict) or set(value) != required:
         raise RuntimePackError(
             f"{where} must contain exactly {', '.join(sorted(required))}"
         )
     if (
         type(value.get("schema_version")) is not int
-        or value.get("schema_version") != BENCHMARK_SCHEMA_VERSION
+        or value.get("schema_version")
+        not in {BENCHMARK_SCHEMA_VERSION, SHARED_BENCHMARK_SCHEMA_VERSION}
     ):
         raise RuntimePackError(f"{where}.schema_version is unsupported")
     if value.get("suite") != BENCHMARK_SUITE:
@@ -408,12 +418,47 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
     generator = value.get("generator")
     if not isinstance(generator, dict) or set(generator) != {"id", "version"}:
         raise RuntimePackError(f"{where}.generator must contain exactly id and version")
+    expected_generator_version = (
+        BENCHMARK_GENERATOR_VERSION
+        if value["schema_version"] == BENCHMARK_SCHEMA_VERSION
+        else SHARED_BENCHMARK_GENERATOR_VERSION
+    )
     if (
         generator.get("id") != BENCHMARK_GENERATOR
         or type(generator.get("version")) is not int
-        or generator.get("version") != BENCHMARK_GENERATOR_VERSION
+        or generator.get("version") != expected_generator_version
     ):
         raise RuntimePackError(f"{where}.generator is unsupported")
+
+    if value["schema_version"] == SHARED_BENCHMARK_SCHEMA_VERSION:
+        domains = value.get("domains")
+        if (
+            not isinstance(domains, list)
+            or not domains
+            or domains != [domain for domain in ("code", "prose") if domain in domains]
+        ):
+            raise RuntimePackError(
+                f"{where}.domains must be a non-empty ordered subset of code and prose"
+            )
+        execution = value.get("execution")
+        execution_fields = {"isolation", "prefix_state", "samples_per_cell"}
+        if not isinstance(execution, dict) or set(execution) != execution_fields:
+            raise RuntimePackError(
+                f"{where}.execution must contain exactly "
+                + ", ".join(sorted(execution_fields))
+            )
+        if execution.get("isolation") != "fresh-matrix":
+            raise RuntimePackError(
+                f"{where}.execution.isolation must be fresh-matrix"
+            )
+        if execution.get("prefix_state") != "shared":
+            raise RuntimePackError(
+                f"{where}.execution.prefix_state must be shared"
+            )
+        if execution.get("samples_per_cell") != 1:
+            raise RuntimePackError(
+                f"{where}.execution.samples_per_cell must be 1"
+            )
 
     tokenizer = value.get("tokenizer")
     tokenizer_fields = {

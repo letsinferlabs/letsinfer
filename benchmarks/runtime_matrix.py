@@ -126,17 +126,47 @@ def benchmark_state(message: str, *, phase: str) -> None:
 
 
 def expected_duration_range(
-    selected: list[dict[str, Any]], *, includes_materializer: bool
+    selected: list[dict[str, Any]],
+    *,
+    includes_materializer: bool,
+    shared_prefix_state: bool = False,
 ) -> tuple[int, int]:
     """Return a deliberately broad first-run estimate in whole minutes."""
-    launches = len(selected) + (1 if includes_materializer else 0)
-    prompt_tokens = sum(
-        value
-        for cell in selected
-        for fixture in cell["fixtures"]
-        for value in (fixture.get("expected_prompt_tokens", 0),)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0
-    )
+    if shared_prefix_state:
+        launches = 1
+        groups: dict[tuple[int, str], tuple[int, int]] = {}
+        for cell in selected:
+            target = cell.get("target_prompt_tokens", 0)
+            domain = cell.get("prompt_domain", "")
+            if not isinstance(target, int) or isinstance(target, bool) or target <= 0:
+                continue
+            key = (target, domain)
+            observed = [
+                fixture.get("expected_prompt_tokens", target)
+                for fixture in cell["fixtures"]
+            ]
+            positive = [
+                value
+                for value in observed
+                if isinstance(value, int)
+                and not isinstance(value, bool)
+                and value > 0
+            ]
+            if positive:
+                groups[key] = (
+                    max(groups.get(key, (0, 0))[0], len(positive)),
+                    max(groups.get(key, (0, 0))[1], max(positive)),
+                )
+        prompt_tokens = sum(count * tokens for count, tokens in groups.values())
+    else:
+        launches = len(selected) + (1 if includes_materializer else 0)
+        prompt_tokens = sum(
+            value
+            for cell in selected
+            for fixture in cell["fixtures"]
+            for value in (fixture.get("expected_prompt_tokens", 0),)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        )
     lower_seconds = launches * 150 + prompt_tokens / 1500
     upper_seconds = launches * 240 + prompt_tokens / 500
     lower_minutes = max(1, int((lower_seconds + 59) // 60))
@@ -334,14 +364,31 @@ def resolve_runtime(
     )
 
 
-def selected_axes(arguments: argparse.Namespace) -> tuple[list[int], list[str]]:
+def selected_axes(
+    arguments: argparse.Namespace,
+    cells: dict[str, dict[str, Any]] | None = None,
+) -> tuple[list[int], list[str]]:
     concurrencies = [
         value for value in CONCURRENCIES if getattr(arguments, f"c{value}")
     ]
     contexts = [
         value for value in CONTEXTS if getattr(arguments, f"context_{value}")
     ]
-    return concurrencies or list(CONCURRENCIES), contexts or list(CONTEXTS)
+    if cells is None:
+        declared_concurrencies = list(CONCURRENCIES)
+        declared_contexts = list(CONTEXTS)
+    else:
+        declared_concurrencies = [
+            concurrency
+            for concurrency in CONCURRENCIES
+            if any(name.endswith(f"-c{concurrency}") for name in cells)
+        ]
+        declared_contexts = [
+            context
+            for context in CONTEXTS
+            if any(name.startswith(f"{context}-") for name in cells)
+        ]
+    return concurrencies or declared_concurrencies, contexts or declared_contexts
 
 
 def load_benchmark_contract(
@@ -360,9 +407,14 @@ def load_benchmark_contract(
         raise RuntimeMatrixError(
             "runtime benchmark cases must be ordered 32k, 64k, 128k, and 256k"
         )
-    if any(row["concurrencies"] != list(CONCURRENCIES) for row in cases):
+    declared = cases[0]["concurrencies"]
+    if (
+        any(row["concurrencies"] != declared for row in cases)
+        or any(concurrency not in CONCURRENCIES for concurrency in declared)
+    ):
         raise RuntimeMatrixError(
-            "runtime benchmark cases must declare c1, c2, c4, c8, and c16"
+            "runtime benchmark cases must declare one uniform subset of "
+            "c1, c2, c4, c8, and c16"
         )
     tokenizer = contract["tokenizer"]
     try:
@@ -385,10 +437,11 @@ def load_benchmark_contract(
 def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Build selection/capacity rows before prompt bytes are materialized."""
     request = contract["request"]
+    domains = contract.get("domains", list(prompt_generator.DOMAINS))
     cells: dict[str, dict[str, Any]] = {}
     for case in contract["cases"]:
         for concurrency in case["concurrencies"]:
-            for domain in prompt_generator.DOMAINS:
+            for domain in domains:
                 name = f"{case['id']}-{domain}-c{concurrency}"
                 cells[name] = {
                     "name": name,
@@ -779,11 +832,16 @@ def select_cells(
 ) -> list[dict[str, Any]]:
     # C1 is intentionally completed before higher concurrency so sealed parity
     # is known before the expensive load cells begin.
+    declared_domains = [
+        domain
+        for domain in prompt_generator.DOMAINS
+        if any(cell.get("prompt_domain") == domain for cell in cells.values())
+    ]
     names = [
         f"{context}-{domain}-c{concurrency}"
         for concurrency in concurrencies
         for context in contexts
-        for domain in prompt_generator.DOMAINS
+        for domain in declared_domains
         if prompt_domain is None or domain == prompt_domain
     ]
     missing = [name for name in names if name not in cells]
@@ -1071,9 +1129,9 @@ def verified_source_identity(
             "deployment tree is not a hash-addressed control bundle; "
             "--source-attestation is required"
         )
-    sealed_commit = manifest.get("serving", {}).get("gate", {}).get(
-        "measured_commit"
-    )
+    serving = manifest.get("serving")
+    gate = serving.get("gate") if isinstance(serving, dict) else None
+    sealed_commit = gate.get("measured_commit") if isinstance(gate, dict) else None
     if measured_commit != sealed_commit:
         raise RuntimeMatrixError(
             "a verified control bundle must use its sealed measured commit"
@@ -1220,6 +1278,85 @@ def _serve_command(
     ]
 
 
+def _collect_cell_evidence(
+    arguments: argparse.Namespace,
+    cell: dict[str, Any],
+    cell_output: pathlib.Path,
+    cell_store: pathlib.Path,
+    cell_launch: pathlib.Path,
+    container_ids: set[str],
+    *,
+    shared_matrix: bool,
+) -> dict[str, Any]:
+    """Validate one worker result and bind its independent Watchdog evidence."""
+    name = cell["name"]
+    result_path = cell_output / "results.json"
+    result = common.read_json_object(result_path, f"{name} result")
+    summaries = result.get("summaries")
+    if (
+        result.get("qualification_passed") is not True
+        or result.get("selected_cells") != [name]
+        or not isinstance(summaries, list)
+        or len(summaries) != 1
+    ):
+        raise RuntimeMatrixError(f"{name} worker evidence is incomplete")
+    before = result.get("container_before")
+    container_id = before.get("id") if isinstance(before, dict) else None
+    if not isinstance(container_id, str) or not container_id:
+        raise RuntimeMatrixError(f"{name} evidence has no container identity")
+    if not shared_matrix and container_id in container_ids:
+        raise RuntimeMatrixError(f"{name} reused a prior container process")
+    container_ids.add(container_id)
+    measurement_started = summaries[0].get("measurement_started_unix_ms")
+    measurement_ended = summaries[0].get("measurement_ended_unix_ms")
+    if (
+        not isinstance(measurement_started, int)
+        or isinstance(measurement_started, bool)
+        or not isinstance(measurement_ended, int)
+        or isinstance(measurement_ended, bool)
+        or measurement_ended < measurement_started
+    ):
+        raise RuntimeMatrixError(f"{name} evidence has no valid measurement range")
+    assert arguments.watchdog_port is not None
+    assert arguments.watchdog_ca_file is not None
+    assert arguments.watchdog_controller_cert_file is not None
+    assert arguments.watchdog_controller_key_file is not None
+    try:
+        watchdog_samples = watchdog_client.query_range(
+            start_unix_ms=measurement_started,
+            end_unix_ms=measurement_ended,
+            port=arguments.watchdog_port,
+            ca_file=arguments.watchdog_ca_file,
+            controller_cert_file=arguments.watchdog_controller_cert_file,
+            controller_key_file=arguments.watchdog_controller_key_file,
+            timeout=min(arguments.timeout, 30),
+        )
+    except watchdog_client.WatchdogClientError as error:
+        raise RuntimeMatrixError(str(error)) from error
+    watchdog_path = cell_output / "watchdog-telemetry.json"
+    common.write_json_atomic(
+        watchdog_path,
+        {
+            "schema_version": 1,
+            "source": "letsinfer-watchdog-raw-1-second",
+            "measurement_started_unix_ms": measurement_started,
+            "measurement_ended_unix_ms": measurement_ended,
+            "samples": watchdog_samples,
+        },
+    )
+    return {
+        "cell": name,
+        "container_id": container_id,
+        "result_directory": str(cell_output),
+        "results_sha256": common.sha256_file(result_path),
+        "store_root": str(cell_store),
+        "launch_directory": str(cell_launch),
+        "summary": summaries[0],
+        "watchdog_telemetry": str(watchdog_path),
+        "watchdog_telemetry_sha256": common.sha256_file(watchdog_path),
+    }
+
+
 def run_isolated_matrix(
     arguments: argparse.Namespace,
     manifest_path: pathlib.Path,
@@ -1258,8 +1395,21 @@ def run_isolated_matrix(
         if isinstance(model, dict) and isinstance(model.get("alias"), str)
         else runtime_selector
     )
+    execution = (
+        benchmark_contract.get("execution")
+        if isinstance(benchmark_contract, dict)
+        else None
+    )
+    shared_matrix = bool(
+        isinstance(execution, dict)
+        and execution.get("isolation") == "fresh-matrix"
+        and execution.get("prefix_state") == "shared"
+        and execution.get("samples_per_cell") == 1
+    )
     expected_low, expected_high = expected_duration_range(
-        selected, includes_materializer=benchmark_contract is not None
+        selected,
+        includes_materializer=benchmark_contract is not None,
+        shared_prefix_state=shared_matrix,
     )
     global _COMPLETED_CELLS, _CURRENT_CELL, _EXPECTED_MINUTES, _SELECTED_CELLS
     _EXPECTED_MINUTES = (expected_low, expected_high)
@@ -1291,8 +1441,12 @@ def run_isolated_matrix(
             raise RuntimeMatrixError(
                 "isolated benchmark requires the private engine token-count endpoint"
             )
-        materialization_store = stores_root / "materialization"
-        materialization_launch = launches_root / "materialization"
+        materialization_store = stores_root / (
+            "matrix" if shared_matrix else "materialization"
+        )
+        materialization_launch = launches_root / (
+            "matrix" if shared_matrix else "materialization"
+        )
         materialization_started = False
         materialization_error: BaseException | None = None
         try:
@@ -1344,13 +1498,15 @@ def run_isolated_matrix(
                     output / "inputs",
                     counter,
                     model_id=manifest["model"]["id"],
-                model_revision=common.model_revision(manifest),
+                    model_revision=common.model_revision(manifest),
                     selected_cells=(cell["name"] for cell in selected),
                 )
         except BaseException as error:
             materialization_error = error
         stop_error: BaseException | None = None
-        if materialization_started:
+        if materialization_started and (
+            materialization_error is not None or not shared_matrix
+        ):
             try:
                 stop_output = _command_output(
                     [
@@ -1375,10 +1531,24 @@ def run_isolated_matrix(
         if stop_error is not None:
             raise stop_error
         assert plan_path is not None
-        _, materialized_cells = load_prompt_plan(plan_path, manifest)
-        requested_names = [cell["name"] for cell in selected]
-        selected = [materialized_cells[name] for name in requested_names]
-        validate_capacity(manifest, selected)
+        try:
+            _, materialized_cells = load_prompt_plan(plan_path, manifest)
+            requested_names = [cell["name"] for cell in selected]
+            selected = [materialized_cells[name] for name in requested_names]
+            validate_capacity(manifest, selected)
+        except BaseException:
+            if shared_matrix:
+                _command_output(
+                    [
+                        str(arguments.letsinfer_bin),
+                        "stop",
+                        "--container-only",
+                        "--name",
+                        arguments.container,
+                    ],
+                    "stopping failed shared benchmark matrix",
+                )
+            raise
 
     if plan_path is None:
         raise RuntimeMatrixError("benchmark prompt plan was not materialized")
@@ -1389,43 +1559,49 @@ def run_isolated_matrix(
         name = cell["name"]
         _CURRENT_CELL = name
         cell_output = results_root / name
-        cell_store = stores_root / name
-        cell_launch = launches_root / name
-        for path, label in (
-            (cell_output, "result"),
-            (cell_store, "store"),
-            (cell_launch, "launch evidence"),
-        ):
-            if path.exists():
-                raise RuntimeMatrixError(
-                    f"refusing existing {label} path for {name}: {path}"
-                )
-
-        benchmark_state(
-            f"Workload {cell_index}/{len(selected)} · {name} · "
-            f"{len(selected) - cell_index} remaining",
-            phase=f"workload:{name}:starting",
-        )
-        launch_attempted = False
+        cell_store = stores_root / ("matrix" if shared_matrix else name)
+        cell_launch = launches_root / ("matrix" if shared_matrix else name)
+        launch_attempted = shared_matrix
         cell_error: BaseException | None = None
+        row: dict[str, Any] | None = None
         try:
-            launch_attempted = True
-            with benchmark_activity(
-                f"Loading runtime for {name}",
-                done=f"Runtime ready for {name}",
-                phase=f"workload:{name}:loading",
-            ):
-                launch_output = _command_output(
-                    _serve_command(
-                        arguments,
-                        runtime_selector,
-                        cell_store,
-                        cell_launch,
-                    ),
-                    f"launching {name}",
+            paths = [(cell_output, "result")]
+            if not shared_matrix:
+                paths.extend(
+                    [
+                        (cell_store, "store"),
+                        (cell_launch, "launch evidence"),
+                    ]
                 )
-            if launch_output.strip():
-                print(launch_output.strip(), flush=True)
+            for path, label in paths:
+                if path.exists():
+                    raise RuntimeMatrixError(
+                        f"refusing existing {label} path for {name}: {path}"
+                    )
+
+            benchmark_state(
+                f"Workload {cell_index}/{len(selected)} · {name} · "
+                f"{len(selected) - cell_index} remaining",
+                phase=f"workload:{name}:starting",
+            )
+            if not shared_matrix:
+                launch_attempted = True
+                with benchmark_activity(
+                    f"Loading runtime for {name}",
+                    done=f"Runtime ready for {name}",
+                    phase=f"workload:{name}:loading",
+                ):
+                    launch_output = _command_output(
+                        _serve_command(
+                            arguments,
+                            runtime_selector,
+                            cell_store,
+                            cell_launch,
+                        ),
+                        f"launching {name}",
+                    )
+                if launch_output.strip():
+                    print(launch_output.strip(), flush=True)
             with benchmark_activity(
                 f"Measuring {name}",
                 done=f"Measurement complete for {name}",
@@ -1442,11 +1618,24 @@ def run_isolated_matrix(
                 raise RuntimeMatrixError(
                     f"{name} worker failed: {(worker.stderr or worker.stdout).strip()}"
                 )
+            row = _collect_cell_evidence(
+                arguments,
+                cell,
+                cell_output,
+                cell_store,
+                cell_launch,
+                container_ids,
+                shared_matrix=shared_matrix,
+            )
         except BaseException as error:
             cell_error = error
 
         stop_error: BaseException | None = None
-        if launch_attempted:
+        if launch_attempted and (
+            not shared_matrix
+            or cell_error is not None
+            or cell_index == len(selected)
+        ):
             try:
                 stop_output = _command_output(
                     [
@@ -1470,74 +1659,8 @@ def run_isolated_matrix(
             raise cell_error
         if stop_error is not None:
             raise stop_error
-
-        result_path = cell_output / "results.json"
-        result = common.read_json_object(result_path, f"{name} result")
-        summaries = result.get("summaries")
-        if (
-            result.get("qualification_passed") is not True
-            or result.get("selected_cells") != [name]
-            or not isinstance(summaries, list)
-            or len(summaries) != 1
-        ):
-            raise RuntimeMatrixError(f"{name} worker evidence is incomplete")
-        before = result.get("container_before")
-        container_id = before.get("id") if isinstance(before, dict) else None
-        if not isinstance(container_id, str) or not container_id:
-            raise RuntimeMatrixError(f"{name} evidence has no container identity")
-        if container_id in container_ids:
-            raise RuntimeMatrixError(f"{name} reused a prior container process")
-        container_ids.add(container_id)
-        measurement_started = summaries[0].get("measurement_started_unix_ms")
-        measurement_ended = summaries[0].get("measurement_ended_unix_ms")
-        if (
-            not isinstance(measurement_started, int)
-            or isinstance(measurement_started, bool)
-            or not isinstance(measurement_ended, int)
-            or isinstance(measurement_ended, bool)
-            or measurement_ended < measurement_started
-        ):
-            raise RuntimeMatrixError(f"{name} evidence has no valid measurement range")
-        assert arguments.watchdog_port is not None
-        assert arguments.watchdog_ca_file is not None
-        assert arguments.watchdog_controller_cert_file is not None
-        assert arguments.watchdog_controller_key_file is not None
-        try:
-            watchdog_samples = watchdog_client.query_range(
-                start_unix_ms=measurement_started,
-                end_unix_ms=measurement_ended,
-                port=arguments.watchdog_port,
-                ca_file=arguments.watchdog_ca_file,
-                controller_cert_file=arguments.watchdog_controller_cert_file,
-                controller_key_file=arguments.watchdog_controller_key_file,
-                timeout=min(arguments.timeout, 30),
-            )
-        except watchdog_client.WatchdogClientError as error:
-            raise RuntimeMatrixError(str(error)) from error
-        watchdog_path = cell_output / "watchdog-telemetry.json"
-        common.write_json_atomic(
-            watchdog_path,
-            {
-                "schema_version": 1,
-                "source": "letsinfer-watchdog-raw-1-second",
-                "measurement_started_unix_ms": measurement_started,
-                "measurement_ended_unix_ms": measurement_ended,
-                "samples": watchdog_samples,
-            },
-        )
-        rows.append(
-            {
-                "cell": name,
-                "container_id": container_id,
-                "result_directory": str(cell_output),
-                "results_sha256": common.sha256_file(result_path),
-                "store_root": str(cell_store),
-                "launch_directory": str(cell_launch),
-                "summary": summaries[0],
-                "watchdog_telemetry": str(watchdog_path),
-                "watchdog_telemetry_sha256": common.sha256_file(watchdog_path),
-            }
-        )
+        assert row is not None
+        rows.append(row)
         _COMPLETED_CELLS.append(name)
         benchmark_state(
             f"Completed workload {cell_index}/{len(selected)} · {name}",
@@ -1599,7 +1722,11 @@ def run_isolated_matrix(
         raise RuntimeMatrixError(str(error)) from error
     public_results_sha = benchmark_record.results_sha256(public_results)
     public_record = {
-        "schema_version": benchmark_record.SCHEMA_VERSION,
+        "schema_version": (
+            benchmark_record.SHARED_SCHEMA_VERSION
+            if shared_matrix
+            else benchmark_record.SCHEMA_VERSION
+        ),
         "id": benchmark_record.benchmark_id(
             arguments.installation_id,
             arguments.benchmark_timestamp_unix_ns,
@@ -1615,6 +1742,12 @@ def run_isolated_matrix(
         "results_sha256": public_results_sha,
         "results": public_results,
     }
+    if shared_matrix:
+        if benchmark_contract is None:
+            raise RuntimeMatrixError(
+                "shared benchmark record requires its complete benchmark contract"
+            )
+        public_record["benchmark_contract"] = benchmark_contract
     try:
         benchmark_record.validate_record(public_record)
     except benchmark_record.BenchmarkRecordError as error:
@@ -1632,7 +1765,11 @@ def run_isolated_matrix(
 
     index = {
         "schema_version": 1,
-        "contract": "letsinfer-isolated-runtime-matrix",
+        "contract": (
+            "letsinfer-shared-runtime-matrix"
+            if shared_matrix
+            else "letsinfer-isolated-runtime-matrix"
+        ),
         "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "benchmark_id": public_record["id"],
         "installation_id": arguments.installation_id,
@@ -1654,8 +1791,12 @@ def run_isolated_matrix(
             else None
         ),
         "selected_cells": [cell["name"] for cell in selected],
-        "fresh_process_per_cell": True,
-        "fresh_store_per_cell": True,
+        "fresh_process_per_cell": not shared_matrix,
+        "fresh_store_per_cell": not shared_matrix,
+        "fresh_process_per_matrix": shared_matrix,
+        "fresh_store_per_matrix": shared_matrix,
+        "prefix_state": "shared" if shared_matrix else "per-cell",
+        "samples_per_cell": 1,
         "cells": rows,
         "qualification_passed": True,
     }
@@ -1666,7 +1807,8 @@ def run_isolated_matrix(
         output / "matrix-index.sha256", f"{index_sha}  matrix-index.json\n"
     )
     print(
-        f"ISOLATED MATRIX PASS cells={len(rows)} index_sha256={index_sha} "
+        f"{'SHARED' if shared_matrix else 'ISOLATED'} MATRIX PASS "
+        f"cells={len(rows)} index_sha256={index_sha} "
         f"evidence={output}",
         flush=True,
     )
@@ -1714,7 +1856,7 @@ def main() -> int:
                 ]
             },
         )
-    concurrencies, contexts = selected_axes(arguments)
+    concurrencies, contexts = selected_axes(arguments, cells)
     selected = select_cells(
         cells, concurrencies, contexts, arguments.prompt_domain
     )
