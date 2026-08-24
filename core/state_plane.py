@@ -71,6 +71,63 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
         and service.get("gateway_auth_required") is True
         and service.get("gateway_authenticated") is True
     )
+    if service.get("runtime_installed") is False:
+        # A node without a runtime is still a complete, useful control plane.
+        # Keep this in the same state plane so status can move between an idle
+        # node and a serving runtime without switching collectors or inventing
+        # a second health model.
+        gateway_expected = service.get("gateway_expected") is not False
+        watchdog_expected = service.get("watchdog_expected") is not False
+        unit_states = (
+            *((service.get("active") == "active",) if watchdog_expected else ()),
+            service.get("node_active") == "active",
+            *(
+                (service.get("gateway_active") == "active",)
+                if gateway_expected
+                else ()
+            ),
+        )
+        ready_units = sum(unit_states)
+        details = {
+            "ready": False,
+            "transitional": False,
+            "runtime_ready": False,
+            "ready_services": ready_units,
+            "total_services": len(unit_states),
+        }
+        states = {
+            *(
+                (str(service.get("active") or "unknown"),)
+                if watchdog_expected
+                else ()
+            ),
+            str(service.get("node_active") or "unknown"),
+            *(
+                (str(service.get("gateway_active") or "unknown"),)
+                if gateway_expected
+                else ()
+            ),
+        }
+        if states & {"activating", "reloading"}:
+            return {
+                **details,
+                "state": "starting",
+                "reason": "node-startup",
+                "transitional": True,
+            }
+        if states & {"failed"}:
+            return {**details, "state": "failed", "reason": "node-failure"}
+        if (
+            ready_units == len(unit_states)
+            and (api_ready if gateway_expected else True)
+        ):
+            return {
+                **details,
+                "state": "ready",
+                "reason": "runtime-not-installed",
+                "ready": True,
+            }
+        return {**details, "state": "degraded", "reason": "node-not-ready"}
     runtime_metadata_ready = service.get("runtime_metadata_ready") is not False
     route_ready = service.get("gateway_model_identity") is True
     safety_ready = (

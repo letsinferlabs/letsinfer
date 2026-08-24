@@ -50,7 +50,7 @@ usage() {
     cat <<'EOF'
 Usage: install.sh [--version VERSION] [--prefix PATH] [--user] [--no-setup] [--no-progress]
 
-Install and initialize the latest stable Let's Infer core release. Immutable
+Install and initialize the latest published Let's Infer core release. Immutable
 core files live under $LETSINFER_HOME/core. The default exposes the command in
 /usr/local/bin; --user exposes it from ~/.local/bin without administrator access.
 EOF
@@ -200,7 +200,67 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+openssl_development_ready() {
+    command -v cc >/dev/null 2>&1 || return 1
+    printf '#include <openssl/ssl.h>\n' \
+        | cc -E - >/dev/null 2>&1
+}
+
+ensure_setup_dependencies() {
+    [ "$run_setup" -eq 1 ] || return 0
+    if [ "$platform_os" = "linux" ]; then
+        ready=1
+        for setup_command in cmake ctest cc openssl; do
+            command -v "$setup_command" >/dev/null 2>&1 || ready=0
+        done
+        openssl_development_ready || ready=0
+        [ "$ready" -eq 0 ] || return 0
+        command -v sudo >/dev/null 2>&1 \
+            || fail "sudo is required to install system build requirements"
+        progress 10 "Installing system requirements"
+        dependency_log="$temporary/dependencies.log"
+        if command -v apt-get >/dev/null 2>&1; then
+            if ! {
+                sudo apt-get update -qq &&
+                sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                    build-essential cmake openssl libssl-dev
+            } >"$dependency_log" 2>&1; then
+                tail -n 40 "$dependency_log" >&2
+                fail "apt could not install system build requirements"
+            fi
+        elif command -v dnf >/dev/null 2>&1; then
+            if ! sudo dnf install -y gcc gcc-c++ make cmake openssl openssl-devel \
+                >"$dependency_log" 2>&1; then
+                tail -n 40 "$dependency_log" >&2
+                fail "dnf could not install system build requirements"
+            fi
+        elif command -v zypper >/dev/null 2>&1; then
+            if ! sudo zypper --non-interactive install \
+                gcc gcc-c++ make cmake openssl libopenssl-devel \
+                >"$dependency_log" 2>&1; then
+                tail -n 40 "$dependency_log" >&2
+                fail "zypper could not install system build requirements"
+            fi
+        elif command -v pacman >/dev/null 2>&1; then
+            if ! sudo pacman --sync --needed --noconfirm \
+                base-devel cmake openssl >"$dependency_log" 2>&1; then
+                tail -n 40 "$dependency_log" >&2
+                fail "pacman could not install system build requirements"
+            fi
+        else
+            fail "install a C compiler, CMake, and OpenSSL development headers"
+        fi
+        for setup_command in cmake ctest cc openssl; do
+            command -v "$setup_command" >/dev/null 2>&1 \
+                || fail "system requirement remains unavailable: $setup_command"
+        done
+        openssl_development_ready \
+            || fail "OpenSSL development headers remain unavailable"
+    fi
+}
+
 progress 5 "Resolving release"
+ensure_setup_dependencies
 
 checksums="$temporary/SHA256SUMS"
 signature="$temporary/SHA256SUMS.sig"
@@ -235,8 +295,8 @@ elif [ -n "$version" ]; then
     release_base="https://github.com/$repository/releases/download/v$version"
     download "$release_base/SHA256SUMS" "$checksums"
 else
-    metadata="$temporary/latest.json"
-    download "https://api.github.com/repos/$repository/releases/latest" "$metadata"
+    metadata="$temporary/releases.json"
+    download "https://api.github.com/repos/$repository/releases?per_page=30" "$metadata"
     version=$(python3 - "$metadata" <<'PY'
 import json
 import pathlib
@@ -247,14 +307,29 @@ try:
     value = pathlib.Path(sys.argv[1]).read_bytes()
     if len(value) > 1024 * 1024:
         raise ValueError
-    tag = json.loads(value)["tag_name"]
-except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+    releases = json.loads(value)
+except (OSError, ValueError, TypeError, json.JSONDecodeError):
     raise SystemExit(1)
-if not isinstance(tag, str) or re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) is None:
+if not isinstance(releases, list):
     raise SystemExit(1)
-print(tag[1:])
+pattern = re.compile(r"v([0-9]+)\.([0-9]+)\.([0-9]+)(?:-rc\.([0-9]+))?")
+candidates = []
+for release in releases:
+    if not isinstance(release, dict) or release.get("draft") is not False:
+        continue
+    tag = release.get("tag_name")
+    match = pattern.fullmatch(tag) if isinstance(tag, str) else None
+    if match is None:
+        continue
+    major, minor, patch = (int(match.group(index)) for index in range(1, 4))
+    rc = match.group(4)
+    key = (major, minor, patch, 1 if rc is None else 0, int(rc or 0))
+    candidates.append((key, tag[1:]))
+if not candidates:
+    raise SystemExit(1)
+print(max(candidates)[1])
 PY
-    ) || fail "latest stable release metadata is invalid"
+    ) || fail "latest published release metadata is invalid"
     release_base="https://github.com/$repository/releases/download/v$version"
     download "$release_base/SHA256SUMS" "$checksums"
 fi

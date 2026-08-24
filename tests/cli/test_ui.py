@@ -1058,6 +1058,151 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("Core 0.11.0-rc.30", rendered)
         self.assertNotIn("\033[", rendered)
 
+    def test_no_runtime_dashboard_keeps_device_and_monitoring_visible(self) -> None:
+        stream = FakeStream(tty=True)
+        payload = {
+            "service": {
+                "active": "active",
+                "node_active": "active",
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+                "gateway_endpoint": "http://homeai.local:8000/v1",
+                "runtime_installed": False,
+                "gateway_expected": True,
+                "memory_current_bytes": 18 * 1024 * 1024,
+                "memory_limit_bytes": 30 * 1024 * 1024,
+            },
+            "container": {},
+            "protection": None,
+            "runtime": None,
+            "node": {
+                "display_name": "Home",
+                "hostname": "homeai",
+                "hardware_name": "NVIDIA DGX Spark",
+                "role": "main",
+                "uptime_seconds": 3720,
+            },
+            "telemetry": {
+                "fresh": True,
+                "system": {
+                    "gpu_percent": 73,
+                    "memory_percent": 41,
+                    "cpu_percent": 8,
+                    "disk_percent": 20,
+                    "gpu_temp_deci_c": 420,
+                    "system_temp_deci_c": 510,
+                    "nvme_temp_deci_c": 390,
+                },
+            },
+        }
+        payload["lifecycle"] = letsinfer.runtime_lifecycle(payload)
+        ui.runtime_status(
+            payload,
+            stream=stream,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
+        )
+        rendered = stream.getvalue()
+        self.assertIn("State        ✓  READY", rendered)
+        self.assertIn("NVIDIA DGX Spark · homeai · main", rendered)
+        self.assertIn("Runtime      Not installed", rendered)
+        self.assertIn("RUNTIME   NOT INSTALLED", rendered)
+        self.assertIn("Monitoring", rendered)
+        self.assertIn("Watchdog", rendered)
+        self.assertIn("System", rendered)
+        self.assertIn("Temperature", rendered)
+        self.assertIn("73%", rendered)
+        self.assertNotIn("Scheduler", rendered)
+        self.assertNotIn("Tokens", rendered)
+
+    def test_no_runtime_worker_ignores_an_unused_gateway_failure(self) -> None:
+        lifecycle = letsinfer.runtime_lifecycle(
+            {
+                "service": {
+                    "active": "active",
+                    "node_active": "active",
+                    "gateway_active": "failed",
+                    "gateway_expected": False,
+                    "runtime_installed": False,
+                }
+            }
+        )
+        self.assertEqual(lifecycle["state"], "ready")
+        self.assertEqual(lifecycle["reason"], "runtime-not-installed")
+        self.assertFalse(lifecycle["runtime_ready"])
+
+    def test_no_runtime_darwin_main_does_not_require_watchdog(self) -> None:
+        lifecycle = letsinfer.runtime_lifecycle(
+            {
+                "service": {
+                    "active": "inactive",
+                    "watchdog_expected": False,
+                    "node_active": "active",
+                    "gateway_active": "active",
+                    "gateway_health": True,
+                    "gateway_auth_required": True,
+                    "gateway_authenticated": True,
+                    "gateway_expected": True,
+                    "runtime_installed": False,
+                }
+            }
+        )
+        self.assertEqual(lifecycle["state"], "ready")
+        self.assertEqual(lifecycle["ready_services"], 2)
+        self.assertEqual(lifecycle["total_services"], 2)
+
+    def test_no_runtime_darwin_worker_only_requires_node_agent(self) -> None:
+        lifecycle = letsinfer.runtime_lifecycle(
+            {
+                "service": {
+                    "active": "inactive",
+                    "watchdog_expected": False,
+                    "node_active": "active",
+                    "gateway_active": "inactive",
+                    "gateway_expected": False,
+                    "runtime_installed": False,
+                }
+            }
+        )
+        self.assertEqual(lifecycle["state"], "ready")
+        self.assertEqual(lifecycle["ready_services"], 1)
+        self.assertEqual(lifecycle["total_services"], 1)
+
+    def test_no_runtime_darwin_dashboard_omits_linux_watchdog_rows(self) -> None:
+        payload = {
+            "service": {
+                "active": "inactive",
+                "watchdog_expected": False,
+                "node_active": "active",
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+                "gateway_endpoint": "http://mac.local:8000/v1",
+                "gateway_expected": True,
+                "runtime_installed": False,
+            },
+            "node": {
+                "display_name": "Mac",
+                "hostname": "mac.local",
+                "hardware_name": "Apple silicon",
+                "role": "main",
+            },
+        }
+        payload["lifecycle"] = letsinfer.runtime_lifecycle(payload)
+        stream = FakeStream(tty=True)
+        ui.runtime_status(
+            payload,
+            stream=stream,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
+        )
+        rendered = stream.getvalue()
+        self.assertIn("State        ✓  READY", rendered)
+        self.assertIn("Runtime      Not installed", rendered)
+        self.assertNotIn("Guard", rendered)
+        self.assertNotIn("Watchdog", rendered)
+
     def test_runtime_status_fits_an_eighty_column_terminal(self) -> None:
         stream = FakeStream(tty=True)
         ui.runtime_status(
