@@ -694,6 +694,41 @@ class RuntimePackTests(unittest.TestCase):
         ):
             runtime_packs.validate_benchmark_contract(changed)
 
+    def test_short_concurrency_contract_requires_c1_c2_c4(self) -> None:
+        value = self._benchmark()
+        value["schema_version"] = (
+            runtime_packs.SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION
+        )
+        value["generator"]["version"] = (  # type: ignore[index]
+            runtime_packs.SHORT_CONCURRENCY_BENCHMARK_GENERATOR_VERSION
+        )
+        value["domains"] = ["code"]
+        value["execution"] = {
+            "isolation": "fresh-matrix",
+            "prefix_state": "shared",
+            "samples_per_cell": 1,
+            "stream_prefix": "shared-body",
+        }
+        value["short"] = {
+            "domains": ["code", "prose"],
+            "prompt_tokens": 256,
+            "concurrencies": [1, 2, 4],
+            "request": {
+                "output_tokens": 512,
+                "min_completion_tokens": 512,
+                "require_natural_stop": False,
+                "temperature": 0,
+                "seed": 42042,
+            },
+        }
+        self.assertIs(runtime_packs.validate_benchmark_contract(value), value)
+
+        value["short"]["concurrencies"] = [1, 2]  # type: ignore[index]
+        with self.assertRaisesRegex(
+            runtime_packs.RuntimePackError, "must be exactly 1, 2, and 4"
+        ):
+            runtime_packs.validate_benchmark_contract(value)
+
         changed = json.loads(json.dumps(value))
         changed["short"]["request"]["output_tokens"] = 0
         with self.assertRaisesRegex(
