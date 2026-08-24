@@ -18,7 +18,7 @@ validated public `benchmark.json`.
   shared ledger prefix and keep C1/C2/C4 adjacent per context; the evidence
   records which policy ran. Schema-5 contracts prepend fixed short-code and
   short-prose C1 workloads with 512-token completions before the declared
-  context matrix.
+  context matrix. Schema-6 expands both short domains to C1, C2, and C4.
 - **Durable jobs** — Ctrl-C detaches, `letsinfer benchmark` reattaches to live
   progress, and an explicit stop safely restores prior inference.
 - **Full-system evidence** — JSON records throughput, TTFT, prefix state,
@@ -64,7 +64,8 @@ and run C1/C2/C4 together per context, making reuse directly measurable without
 turning distinct requests into duplicates. Schema-5 keeps that policy and adds
 one fixed short code C1 and one fixed short prose C1 before the long-context
 cells. Their request settings are independently sealed in the contract and
-prompt plan. The resident Watchdog
+prompt plan. Schema-6 runs those same fixed prompts at C1, C2, and C4 before
+the long matrix. The resident Watchdog
 stays active while the worker temporarily owns inference. On success, failure,
 cancellation, or terminal disconnect, the worker restores the prior service
 state.
@@ -97,8 +98,8 @@ The worker writes a validated `benchmark.json`. Each result row includes:
 - a fixed-schema Watchdog telemetry timeline; and
 - immutable runtime, installation, contract, and result identities.
 
-Schema-5 `benchmark.json` records produced by schema-3, schema-4, or schema-5
-shared contracts also
+Schema-5 `benchmark.json` records produced by schema-3 through schema-6 shared
+contracts also
 embed the complete declarative benchmark contract. Its canonical SHA-256 must
 match `benchmark_contract_sha256`, so domains, cells, one-sample policy,
 isolation, stream-prefix, and prefix-state semantics are directly inspectable
