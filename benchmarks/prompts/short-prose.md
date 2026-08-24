@@ -1,0 +1,1 @@
+Write a polished long-form explanation of how a small coastal city can prepare for a week-long power outage. Use concrete scenes, practical tradeoffs, and clear paragraphs. Keep writing useful prose until the completion budget is exhausted.

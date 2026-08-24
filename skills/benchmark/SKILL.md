@@ -131,10 +131,10 @@ python3 benchmarks/benchmark_record.py /path/to/runtime/benchmark.json
 ```
 
 `letsinfer pack` runs the same validator again and rejects `benchmark.md`.
-Schema-5 records for schema-3 and schema-4 shared matrices embed the complete declarative
-benchmark contract, and the validator recomputes its canonical SHA-256 before
-accepting `benchmark_contract_sha256`. Legacy schema-2 cold matrices retain the
-schema-4 record form.
+Schema-5 records for schema-3, schema-4, and schema-5 shared matrices embed the
+complete declarative benchmark contract, and the validator recomputes its
+canonical SHA-256 before accepting `benchmark_contract_sha256`. Legacy schema-2
+cold matrices retain the schema-4 record form.
 Every result must use a neutral `ppN,tgN,cN` workload and report aggregate TPS,
 decode TPS, TTFT and its statistic, `is_prefix_cached`, maximum GPU and CPU
 utilization, maximum GPU and CPU temperature, CPU/GPU/VRAM/system-RAM clocks

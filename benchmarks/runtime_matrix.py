@@ -51,8 +51,9 @@ from core.runtime_packs import (  # pylint: disable=wrong-import-position
 
 CONCURRENCIES = (1, 2, 4, 8, 16)
 CONTEXTS = ("32k", "64k", "128k", "256k")
+PLAN_CONTEXTS = ("short",) + CONTEXTS
 SAFE_CELL = re.compile(
-    r"(?:32k|64k|128k|256k)-(?:code|prose)-c(?:1|2|4|8|16)"
+    r"(?:short|32k|64k|128k|256k)-(?:code|prose)-c(?:1|2|4|8|16)"
 )
 _PROGRESS_FILE: pathlib.Path | None = None
 _PROGRESS_STARTED_UNIX_NS: int | None = None
@@ -300,6 +301,9 @@ def parse_arguments() -> argparse.Namespace:
             help=f"select the {context.upper()} context",
         )
     parser.add_argument(
+        "--short", action="store_true", dest="context_short", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         help="validate inputs and print selected cells without running inference",
@@ -372,10 +376,12 @@ def selected_axes(
     cells: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[int], list[str]]:
     concurrencies = [
-        value for value in CONCURRENCIES if getattr(arguments, f"c{value}")
+        value for value in CONCURRENCIES if getattr(arguments, f"c{value}", False)
     ]
     contexts = [
-        value for value in CONTEXTS if getattr(arguments, f"context_{value}")
+        value
+        for value in PLAN_CONTEXTS
+        if getattr(arguments, f"context_{value}", False)
     ]
     if cells is None:
         declared_concurrencies = list(CONCURRENCIES)
@@ -388,7 +394,7 @@ def selected_axes(
         ]
         declared_contexts = [
             context
-            for context in CONTEXTS
+            for context in PLAN_CONTEXTS
             if any(name.startswith(f"{context}-") for name in cells)
         ]
     return concurrencies or declared_concurrencies, contexts or declared_contexts
@@ -442,6 +448,21 @@ def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
     request = contract["request"]
     domains = contract.get("domains", list(prompt_generator.DOMAINS))
     cells: dict[str, dict[str, Any]] = {}
+    short = contract.get("short")
+    if isinstance(short, dict):
+        short_request = short["request"]
+        for domain in short["domains"]:
+            name = f"short-{domain}-c1"
+            cells[name] = {
+                "name": name,
+                "prompt_domain": domain,
+                "prompt_suite": prompt_generator.BENCHMARK_SUITE,
+                "target_prompt_tokens": short["prompt_tokens"],
+                "fixtures": [
+                    {"expected_prompt_tokens": short["prompt_tokens"]}
+                ],
+                "max_tokens": short_request["output_tokens"],
+            }
     for case in contract["cases"]:
         for concurrency in case["concurrencies"]:
             for domain in domains:
@@ -551,6 +572,29 @@ def _number(value: Any, where: str) -> float:
     return result
 
 
+def _validate_plan_request(value: Any, where: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RuntimeMatrixError(f"{where} must be an object")
+    max_tokens = common.require_positive_int(value, "max_tokens", where)
+    minimum = common.require_positive_int(value, "min_completion_tokens", where)
+    if minimum > max_tokens:
+        raise RuntimeMatrixError(f"{where} minimum completion tokens exceed max_tokens")
+    natural_stop = value.get("require_natural_stop")
+    if not isinstance(natural_stop, bool):
+        raise RuntimeMatrixError(f"{where}.require_natural_stop must be boolean")
+    options = common.validate_request_options(value.get("options"), f"{where}.options")
+    temperature = common.validate_temperature(
+        value.get("temperature", 0), f"{where}.temperature"
+    )
+    return {
+        "max_tokens": max_tokens,
+        "min_completion_tokens": minimum,
+        "require_natural_stop": natural_stop,
+        "temperature": temperature,
+        "options": options,
+    }
+
+
 def host_mem_available_bytes(
     meminfo: pathlib.Path = pathlib.Path("/proc/meminfo"),
 ) -> int:
@@ -607,8 +651,9 @@ def load_prompt_plan(
     path: pathlib.Path, manifest: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     plan = common.read_json_object(path, "runtime matrix prompt plan")
-    if type(plan.get("schema_version")) is not int or plan.get("schema_version") != 2:
-        raise RuntimeMatrixError("runtime matrix schema_version must be 2")
+    plan_schema = plan.get("schema_version")
+    if type(plan_schema) is not int or plan_schema not in {2, 3}:
+        raise RuntimeMatrixError("runtime matrix schema_version must be 2 or 3")
     prompt_suite = plan.get("prompt_suite")
     if prompt_suite != prompt_generator.BENCHMARK_SUITE:
         raise RuntimeMatrixError("prompt plan suite is unsupported")
@@ -624,24 +669,7 @@ def load_prompt_plan(
     tokenizer = plan.get("tokenizer_identity")
     if not isinstance(tokenizer, dict) or not tokenizer:
         raise RuntimeMatrixError("prompt plan tokenizer_identity must be an object")
-    request = plan.get("request")
-    if not isinstance(request, dict):
-        raise RuntimeMatrixError("prompt plan request must be an object")
-    max_tokens = common.require_positive_int(request, "max_tokens", "prompt plan.request")
-    minimum = common.require_positive_int(
-        request, "min_completion_tokens", "prompt plan.request"
-    )
-    if minimum > max_tokens:
-        raise RuntimeMatrixError("minimum completion tokens exceed max_tokens")
-    natural_stop = request.get("require_natural_stop")
-    if not isinstance(natural_stop, bool):
-        raise RuntimeMatrixError("prompt plan.request.require_natural_stop must be boolean")
-    options = common.validate_request_options(
-        request.get("options"), "prompt plan.request.options"
-    )
-    temperature = common.validate_temperature(
-        request.get("temperature", 0), "prompt plan.request.temperature"
-    )
+    request = _validate_plan_request(plan.get("request"), "prompt plan.request")
 
     fixture_rows = plan.get("fixtures")
     if not isinstance(fixture_rows, list) or not fixture_rows:
@@ -691,7 +719,8 @@ def load_prompt_plan(
     context_rows = plan.get("contexts")
     if not isinstance(context_rows, list) or not context_rows:
         raise RuntimeMatrixError("prompt plan contexts must be a non-empty array")
-    if len(context_rows) > len(CONTEXTS):
+    valid_contexts = PLAN_CONTEXTS if plan_schema == 3 else CONTEXTS
+    if len(context_rows) > len(valid_contexts):
         raise RuntimeMatrixError("prompt plan defines too many contexts")
     cells: dict[str, dict[str, Any]] = {}
     public_contexts: list[dict[str, Any]] = []
@@ -702,9 +731,9 @@ def load_prompt_plan(
         if not isinstance(row, dict):
             raise RuntimeMatrixError(f"{where} must be an object")
         context = common.require_string(row, "name", where)
-        if context not in CONTEXTS:
+        if context not in valid_contexts:
             raise RuntimeMatrixError(f"{where}.name is not a standard context")
-        context_index = CONTEXTS.index(context)
+        context_index = valid_contexts.index(context)
         if context_index <= previous_context_index:
             raise RuntimeMatrixError(
                 "prompt plan contexts must be unique and in standard order"
@@ -712,6 +741,11 @@ def load_prompt_plan(
         previous_context_index = context_index
         target_prompt_tokens = common.require_positive_int(
             row, "target_prompt_tokens", where
+        )
+        context_request = (
+            _validate_plan_request(row.get("request"), f"{where}.request")
+            if plan_schema == 3
+            else request
         )
         mappings = row.get("cells")
         if not isinstance(mappings, dict) or not mappings:
@@ -726,6 +760,8 @@ def load_prompt_plan(
             raise RuntimeMatrixError(
                 f"{where}.cells contains unknown cells: {', '.join(unknown_keys)}"
             )
+        if context == "short" and any(not key.endswith("-c1") for key in mappings):
+            raise RuntimeMatrixError(f"{where}.cells may contain only short C1 cells")
         public_cells: dict[str, list[str]] = {}
         for concurrency in CONCURRENCIES:
             for domain in prompt_generator.DOMAINS:
@@ -768,11 +804,15 @@ def load_prompt_plan(
                     "prompt_set_sha256": prompt_set_sha256(selected_rows),
                     "target_prompt_tokens": target_prompt_tokens,
                     "fixtures": [fixtures[name] for name in names],
-                    "max_tokens": max_tokens,
-                    "min_completion_tokens": minimum,
-                    "require_natural_stop": natural_stop,
-                    "request_options": options,
-                    "temperature": temperature,
+                    "max_tokens": context_request["max_tokens"],
+                    "min_completion_tokens": context_request[
+                        "min_completion_tokens"
+                    ],
+                    "require_natural_stop": context_request[
+                        "require_natural_stop"
+                    ],
+                    "request_options": context_request["options"],
+                    "temperature": context_request["temperature"],
                 }
                 public_cells[key] = names
         sealed = row.get("sealed_c1")
@@ -791,30 +831,31 @@ def load_prompt_plan(
                     sealed, "evidence", f"{where}.sealed_c1"
                 ),
             }
-        public_contexts.append(
-            {
-                "name": context,
-                "target_prompt_tokens": target_prompt_tokens,
-                "cells": public_cells,
-                "sealed_c1": sealed,
-            }
-        )
+        public_context = {
+            "name": context,
+            "target_prompt_tokens": target_prompt_tokens,
+            "cells": public_cells,
+            "sealed_c1": sealed,
+        }
+        if plan_schema == 3:
+            public_context["request"] = context_request
+        public_contexts.append(public_context)
     if set(fixtures) != allocated:
         unused = sorted(set(fixtures) - allocated)
         raise RuntimeMatrixError("prompt plan has unused fixtures: " + ", ".join(unused))
     public_plan = {
-        "schema_version": 2,
+        "schema_version": plan_schema,
         "prompt_suite": prompt_suite,
         "model_id": plan["model_id"],
         "model_revision": plan["model_revision"],
         "tokenizer_identity": tokenizer,
         "sample_interval_seconds": bind_sample_interval(None, plan),
         "request": {
-            "max_tokens": max_tokens,
-            "min_completion_tokens": minimum,
-            "require_natural_stop": natural_stop,
-            "temperature": temperature,
-            "options": options,
+            "max_tokens": request["max_tokens"],
+            "min_completion_tokens": request["min_completion_tokens"],
+            "require_natural_stop": request["require_natural_stop"],
+            "temperature": request["temperature"],
+            "options": request["options"],
         },
         "prompt_set_sha256": actual_set_sha,
         "contexts": public_contexts,
@@ -838,26 +879,39 @@ def select_cells(
     # Legacy matrices complete C1 before higher concurrency. Prefix-shared
     # matrices keep every concurrency for one context adjacent so cache state
     # cannot be evicted by a larger context before reuse is measured.
-    declared_domains = [
-        domain
-        for domain in prompt_generator.DOMAINS
-        if any(cell.get("prompt_domain") == domain for cell in cells.values())
-    ]
+    def names_for(context: str, concurrency: int) -> list[str]:
+        if context == "short" and concurrency != 1:
+            return []
+        prefix = f"{context}-"
+        if not any(name.startswith(prefix) for name in cells):
+            raise RuntimeMatrixError(
+                f"prompt plan does not define selected context: {context}"
+            )
+        domains = [
+            domain
+            for domain in prompt_generator.DOMAINS
+            if any(
+                name.startswith(prefix)
+                and cell.get("prompt_domain") == domain
+                for name, cell in cells.items()
+            )
+            and (prompt_domain is None or domain == prompt_domain)
+        ]
+        return [f"{context}-{domain}-c{concurrency}" for domain in domains]
+
     if context_first:
         names = [
-            f"{context}-{domain}-c{concurrency}"
+            name
             for context in contexts
             for concurrency in concurrencies
-            for domain in declared_domains
-            if prompt_domain is None or domain == prompt_domain
+            for name in names_for(context, concurrency)
         ]
     else:
         names = [
-            f"{context}-{domain}-c{concurrency}"
+            name
             for concurrency in concurrencies
             for context in contexts
-            for domain in declared_domains
-            if prompt_domain is None or domain == prompt_domain
+            for name in names_for(context, concurrency)
         ]
     missing = [name for name in names if name not in cells]
     if missing:
