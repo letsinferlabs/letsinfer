@@ -58,10 +58,12 @@ MAX_CATALOG_SIGNATURE_BYTES = 16 << 10
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 BENCHMARK_SCHEMA_VERSION = 2
 SHARED_BENCHMARK_SCHEMA_VERSION = 3
+PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION = 4
 BENCHMARK_SUITE = "letsinfer-code-prose-v1"
 BENCHMARK_GENERATOR = "letsinfer-code-prose"
 BENCHMARK_GENERATOR_VERSION = 2
 SHARED_BENCHMARK_GENERATOR_VERSION = 3
+PREFIX_SHARED_BENCHMARK_GENERATOR_VERSION = 4
 BENCHMARK_TOKENIZER_CAPABILITY = "engine-rendered-chat-count-v1"
 BENCHMARK_RENDER_CONTRACT = "openai-chat-user-v1"
 SELECTION_SCHEMA_VERSION = 3
@@ -398,7 +400,10 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
     schema_version = value.get("schema_version") if isinstance(value, dict) else None
     if schema_version == BENCHMARK_SCHEMA_VERSION:
         required = common_fields
-    elif schema_version == SHARED_BENCHMARK_SCHEMA_VERSION:
+    elif schema_version in {
+        SHARED_BENCHMARK_SCHEMA_VERSION,
+        PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
+    }:
         required = common_fields | {"domains", "execution"}
     else:
         required = common_fields
@@ -409,7 +414,11 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
     if (
         type(value.get("schema_version")) is not int
         or value.get("schema_version")
-        not in {BENCHMARK_SCHEMA_VERSION, SHARED_BENCHMARK_SCHEMA_VERSION}
+        not in {
+            BENCHMARK_SCHEMA_VERSION,
+            SHARED_BENCHMARK_SCHEMA_VERSION,
+            PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
+        }
     ):
         raise RuntimePackError(f"{where}.schema_version is unsupported")
     if value.get("suite") != BENCHMARK_SUITE:
@@ -418,11 +427,13 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
     generator = value.get("generator")
     if not isinstance(generator, dict) or set(generator) != {"id", "version"}:
         raise RuntimePackError(f"{where}.generator must contain exactly id and version")
-    expected_generator_version = (
-        BENCHMARK_GENERATOR_VERSION
-        if value["schema_version"] == BENCHMARK_SCHEMA_VERSION
-        else SHARED_BENCHMARK_GENERATOR_VERSION
-    )
+    expected_generator_version = {
+        BENCHMARK_SCHEMA_VERSION: BENCHMARK_GENERATOR_VERSION,
+        SHARED_BENCHMARK_SCHEMA_VERSION: SHARED_BENCHMARK_GENERATOR_VERSION,
+        PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION: (
+            PREFIX_SHARED_BENCHMARK_GENERATOR_VERSION
+        ),
+    }[value["schema_version"]]
     if (
         generator.get("id") != BENCHMARK_GENERATOR
         or type(generator.get("version")) is not int
@@ -430,7 +441,10 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
     ):
         raise RuntimePackError(f"{where}.generator is unsupported")
 
-    if value["schema_version"] == SHARED_BENCHMARK_SCHEMA_VERSION:
+    if value["schema_version"] in {
+        SHARED_BENCHMARK_SCHEMA_VERSION,
+        PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
+    }:
         domains = value.get("domains")
         if (
             not isinstance(domains, list)
@@ -442,6 +456,8 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             )
         execution = value.get("execution")
         execution_fields = {"isolation", "prefix_state", "samples_per_cell"}
+        if value["schema_version"] == PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION:
+            execution_fields.add("stream_prefix")
         if not isinstance(execution, dict) or set(execution) != execution_fields:
             raise RuntimePackError(
                 f"{where}.execution must contain exactly "
@@ -458,6 +474,13 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         if execution.get("samples_per_cell") != 1:
             raise RuntimePackError(
                 f"{where}.execution.samples_per_cell must be 1"
+            )
+        if (
+            value["schema_version"] == PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION
+            and execution.get("stream_prefix") != "shared-body"
+        ):
+            raise RuntimePackError(
+                f"{where}.execution.stream_prefix must be shared-body"
             )
 
     tokenizer = value.get("tokenizer")

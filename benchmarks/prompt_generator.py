@@ -26,6 +26,7 @@ from core.runtime_packs import (  # noqa: E402
     BENCHMARK_RENDER_CONTRACT,
     BENCHMARK_SUITE,
     BENCHMARK_TOKENIZER_CAPABILITY,
+    PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
     canonical_bytes,
     sha256_file,
     validate_benchmark_contract,
@@ -35,6 +36,9 @@ from core.runtime_packs import (  # noqa: E402
 PROMPTS = pathlib.Path(__file__).resolve().parent / "prompts"
 DOMAINS = ("code", "prose")
 TEMPLATES = {domain: PROMPTS / f"{domain}.md" for domain in DOMAINS}
+PREFIX_SHARED_TEMPLATES = {
+    domain: PROMPTS / f"{domain}-shared.md" for domain in DOMAINS
+}
 NODES = ("amber", "blue", "calm", "green", "north", "plain", "silver", "west")
 ITEMS = ("batch", "event", "item", "key", "record", "signal", "task", "value")
 STATES = ("clean", "final", "open", "ready", "safe", "stable", "valid", "warm")
@@ -117,6 +121,15 @@ def _render(
     return rendered
 
 
+def _uses_shared_stream_prefix(contract: dict[str, Any]) -> bool:
+    execution = contract.get("execution")
+    return bool(
+        contract.get("schema_version") == PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION
+        and isinstance(execution, dict)
+        and execution.get("stream_prefix") == "shared-body"
+    )
+
+
 def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Return both standard prompt domains for every declared matrix cell."""
     validate_benchmark_contract(contract)
@@ -169,6 +182,8 @@ def materialize(
     contexts: list[dict[str, Any]] = []
     request = contract["request"]
     domains = contract.get("domains", list(DOMAINS))
+    prefix_shared = _uses_shared_stream_prefix(contract)
+    templates = PREFIX_SHARED_TEMPLATES if prefix_shared else TEMPLATES
 
     for case in contract["cases"]:
         cell_map: dict[str, list[str]] = {}
@@ -185,26 +200,31 @@ def materialize(
             ]
             if not domain_cells:
                 continue
-            template = TEMPLATES[domain].read_text(encoding="utf-8")
+            template = templates[domain].read_text(encoding="utf-8")
             maximum = max(row["concurrency"] for row in domain_cells)
             for slot in range(maximum):
                 fixture_id = f"{case['id']}-{domain}-s{slot:02d}"
                 seed_material = (
                     f"{BENCHMARK_SUITE}\0{case['id']}\0{slot}".encode("utf-8")
                 )
-                seed = int.from_bytes(
-                    hashlib.sha256(seed_material).digest()[:4], "big"
-                )
                 marker = (
                     "LETSINFER-"
                     + hashlib.sha256(seed_material).hexdigest()[:24].upper()
+                )
+                body_seed_material = (
+                    f"{BENCHMARK_SUITE}\0{case['id']}\0shared-body".encode("utf-8")
+                    if prefix_shared
+                    else seed_material
+                )
+                body_seed = int.from_bytes(
+                    hashlib.sha256(body_seed_material).digest()[:4], "big"
                 )
                 text = _render(
                     template,
                     fixture_id=fixture_id,
                     marker=marker,
                     slot=slot,
-                    body=_source_text(seed, case["prompt_tokens"]),
+                    body=_source_text(body_seed, case["prompt_tokens"]),
                 )
                 observed = count_tokens(text)
                 if (
@@ -248,7 +268,7 @@ def materialize(
         for row in fixtures
     ]
     prompt_set = prompt_set_sha256(public_rows)
-    template_hashes = {domain: sha256_file(TEMPLATES[domain]) for domain in domains}
+    template_hashes = {domain: sha256_file(templates[domain]) for domain in domains}
     identity = {
         "schema_version": 2,
         "suite": contract["suite"],

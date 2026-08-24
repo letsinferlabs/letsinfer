@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import io
 import json
 import pathlib
@@ -13,8 +14,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from core import cli, command_ui, runtime_packs
+from core import catalog as catalog_module, cli, command_ui, runtime_packs
 from core.catalog import CatalogManager, CatalogSnapshot, _snapshot_identity
+from core.revocations import canonical_bytes as revocation_bytes, empty_ledger
 
 
 CANDIDATE = "sglang--radixark--qwen3.8-27b-nvfp4--dgx-spark"
@@ -180,6 +182,56 @@ class CatalogTests(unittest.TestCase):
             with mock.patch.object(manager, "refresh", return_value=fresh) as refresh:
                 self.assertIs(manager.load(), fresh)
             refresh.assert_called_once_with()
+
+    def test_refresh_reuses_existing_snapshot_on_linux_enotempty(self) -> None:
+        data = runtime_packs.canonical_bytes(catalog())
+        ledger = empty_ledger()
+        ledger_data = revocation_bytes(ledger)
+        identity = _snapshot_identity(data, ledger_data)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            destination = root / "objects" / identity
+            destination.mkdir(parents=True)
+            manager = CatalogManager(
+                "https://example.invalid/catalog.json",
+                root=root,
+                clock=lambda: 100,
+            )
+            with (
+                mock.patch.object(
+                    catalog_module,
+                    "_download",
+                    side_effect=[data, b"catalog-signature"],
+                ),
+                mock.patch.object(
+                    catalog_module,
+                    "_catalog_public_key",
+                    return_value=b"public-key",
+                ),
+                mock.patch.object(
+                    catalog_module,
+                    "load_ledger",
+                    return_value=(ledger, ledger_data, b"ledger-signature"),
+                ),
+                mock.patch.object(
+                    catalog_module,
+                    "load_catalog",
+                    return_value=catalog(),
+                ),
+                mock.patch.object(
+                    pathlib.Path,
+                    "replace",
+                    side_effect=OSError(errno.ENOTEMPTY, "Directory not empty"),
+                ),
+            ):
+                snapshot = manager.refresh()
+
+            self.assertEqual(snapshot.document, catalog())
+            self.assertEqual(
+                json.loads((root / "current.json").read_text(encoding="utf-8")),
+                {"schema_version": 2, "snapshot_sha256": identity},
+            )
+            self.assertFalse(any(root.glob(".incoming-*")))
 
     def test_list_shows_all_runtime_authors_and_recommendation(self) -> None:
         snapshot = CatalogSnapshot(catalog(), "catalog.json", "5" * 64, 100, False)

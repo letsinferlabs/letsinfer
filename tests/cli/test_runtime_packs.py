@@ -636,6 +636,29 @@ class RuntimePackTests(unittest.TestCase):
         ):
             runtime_packs.validate_benchmark_contract(value)
 
+    def test_prefix_shared_contract_binds_generator_and_stream_layout(self) -> None:
+        value = self._benchmark()
+        value["schema_version"] = (
+            runtime_packs.PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION
+        )
+        value["generator"]["version"] = (  # type: ignore[index]
+            runtime_packs.PREFIX_SHARED_BENCHMARK_GENERATOR_VERSION
+        )
+        value["domains"] = ["code"]
+        value["execution"] = {
+            "isolation": "fresh-matrix",
+            "prefix_state": "shared",
+            "samples_per_cell": 1,
+            "stream_prefix": "shared-body",
+        }
+        self.assertIs(runtime_packs.validate_benchmark_contract(value), value)
+
+        value["execution"]["stream_prefix"] = "distinct"  # type: ignore[index]
+        with self.assertRaisesRegex(
+            runtime_packs.RuntimePackError, "stream_prefix must be shared-body"
+        ):
+            runtime_packs.validate_benchmark_contract(value)
+
     def test_artifact_tampering_and_symlinks_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

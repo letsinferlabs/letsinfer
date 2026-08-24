@@ -43,6 +43,39 @@ def contract() -> dict[str, object]:
 
 
 class PromptGeneratorTests(unittest.TestCase):
+    def test_schema_four_streams_share_the_complete_ledger_prefix(self) -> None:
+        value = contract()
+        value["schema_version"] = 4
+        value["generator"]["version"] = 4  # type: ignore[index]
+        value["domains"] = ["code"]
+        value["execution"] = {
+            "isolation": "fresh-matrix",
+            "prefix_state": "shared",
+            "samples_per_cell": 1,
+            "stream_prefix": "shared-body",
+        }
+        value["cases"][0]["concurrencies"] = [1, 2, 4]  # type: ignore[index]
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "schema-four"
+            plan_path = prompt_generator.materialize(
+                value,
+                output,
+                len,
+                model_id="fixture-model",
+                model_revision="a" * 40,
+            )
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            prompts = [
+                (output / row["path"]).read_text(encoding="utf-8")
+                for row in plan["fixtures"]
+            ]
+
+        boundary = "--- END EVENT LEDGER ---"
+        prefixes = [text.split(boundary, 1)[0] for text in prompts]
+        self.assertEqual(len(prompts), 4)
+        self.assertTrue(all(prefix == prefixes[0] for prefix in prefixes[1:]))
+        self.assertEqual(len(set(prompts)), 4)
+
     def test_schema_three_materializes_only_declared_domains(self) -> None:
         value = contract()
         value["schema_version"] = 3
