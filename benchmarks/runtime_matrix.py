@@ -451,18 +451,20 @@ def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
     short = contract.get("short")
     if isinstance(short, dict):
         short_request = short["request"]
-        for domain in short["domains"]:
-            name = f"short-{domain}-c1"
-            cells[name] = {
-                "name": name,
-                "prompt_domain": domain,
-                "prompt_suite": prompt_generator.BENCHMARK_SUITE,
-                "target_prompt_tokens": short["prompt_tokens"],
-                "fixtures": [
-                    {"expected_prompt_tokens": short["prompt_tokens"]}
-                ],
-                "max_tokens": short_request["output_tokens"],
-            }
+        for concurrency in short.get("concurrencies", [1]):
+            for domain in short["domains"]:
+                name = f"short-{domain}-c{concurrency}"
+                cells[name] = {
+                    "name": name,
+                    "prompt_domain": domain,
+                    "prompt_suite": prompt_generator.BENCHMARK_SUITE,
+                    "target_prompt_tokens": short["prompt_tokens"],
+                    "fixtures": [
+                        {"expected_prompt_tokens": short["prompt_tokens"]}
+                        for _ in range(concurrency)
+                    ],
+                    "max_tokens": short_request["output_tokens"],
+                }
     for case in contract["cases"]:
         for concurrency in case["concurrencies"]:
             for domain in domains:
@@ -760,8 +762,12 @@ def load_prompt_plan(
             raise RuntimeMatrixError(
                 f"{where}.cells contains unknown cells: {', '.join(unknown_keys)}"
             )
-        if context == "short" and any(not key.endswith("-c1") for key in mappings):
-            raise RuntimeMatrixError(f"{where}.cells may contain only short C1 cells")
+        if context == "short" and any(
+            not key.endswith(("-c1", "-c2", "-c4")) for key in mappings
+        ):
+            raise RuntimeMatrixError(
+                f"{where}.cells may contain only short C1, C2, and C4 cells"
+            )
         public_cells: dict[str, list[str]] = {}
         for concurrency in CONCURRENCIES:
             for domain in prompt_generator.DOMAINS:
@@ -880,13 +886,16 @@ def select_cells(
     # matrices keep every concurrency for one context adjacent so cache state
     # cannot be evicted by a larger context before reuse is measured.
     def names_for(context: str, concurrency: int) -> list[str]:
-        if context == "short" and concurrency != 1:
-            return []
         prefix = f"{context}-"
         if not any(name.startswith(prefix) for name in cells):
             raise RuntimeMatrixError(
                 f"prompt plan does not define selected context: {context}"
             )
+        if context == "short" and not any(
+            name.startswith(prefix) and name.endswith(f"-c{concurrency}")
+            for name in cells
+        ):
+            return []
         domains = [
             domain
             for domain in prompt_generator.DOMAINS

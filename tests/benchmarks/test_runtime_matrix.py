@@ -250,7 +250,7 @@ class RuntimeMatrixTests(unittest.TestCase):
         self.assertEqual(len(selected), 12)
         self.assertTrue(all(cell["prompt_domain"] == "code" for cell in selected))
 
-    def test_schema_five_selects_short_code_and_prose_then_twelve_long_cells(self) -> None:
+    def test_schema_six_selects_six_short_then_twelve_long_cells(self) -> None:
         arguments = types.SimpleNamespace(
             c1=False,
             c2=False,
@@ -269,14 +269,15 @@ class RuntimeMatrixTests(unittest.TestCase):
             if cell["prompt_domain"] == "code"
             and name.endswith(("-c1", "-c2", "-c4"))
         }
-        for domain in runtime_matrix.prompt_generator.DOMAINS:
-            name = f"short-{domain}-c1"
-            declared[name] = {
-                **self.cells[f"32k-{domain}-c1"],
-                "name": name,
-                "target_prompt_tokens": 256,
-                "max_tokens": 512,
-            }
+        for concurrency in (1, 2, 4):
+            for domain in runtime_matrix.prompt_generator.DOMAINS:
+                name = f"short-{domain}-c{concurrency}"
+                declared[name] = {
+                    **self.cells[f"32k-{domain}-c{concurrency}"],
+                    "name": name,
+                    "target_prompt_tokens": 256,
+                    "max_tokens": 512,
+                }
 
         concurrencies, contexts = runtime_matrix.selected_axes(arguments, declared)
         selected = runtime_matrix.select_cells(
@@ -286,14 +287,18 @@ class RuntimeMatrixTests(unittest.TestCase):
         self.assertEqual(contexts, ["short", "32k", "64k", "128k", "256k"])
         self.assertEqual(
             [cell["name"] for cell in selected],
-            ["short-code-c1", "short-prose-c1"]
+            [
+                f"short-{domain}-c{concurrency}"
+                for concurrency in (1, 2, 4)
+                for domain in runtime_matrix.prompt_generator.DOMAINS
+            ]
             + [
                 f"{context}-code-c{concurrency}"
                 for context in runtime_matrix.CONTEXTS
                 for concurrency in (1, 2, 4)
             ],
         )
-        self.assertEqual(len(selected), 14)
+        self.assertEqual(len(selected), 18)
 
     def test_selectors_form_cross_product_with_c1_first(self) -> None:
         arguments = types.SimpleNamespace(

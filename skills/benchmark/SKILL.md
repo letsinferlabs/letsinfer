@@ -131,7 +131,7 @@ python3 benchmarks/benchmark_record.py /path/to/runtime/benchmark.json
 ```
 
 `letsinfer pack` runs the same validator again and rejects `benchmark.md`.
-Schema-5 records for schema-3, schema-4, and schema-5 shared matrices embed the
+Schema-5 records for schema-3 through schema-6 shared matrices embed the
 complete declarative benchmark contract, and the validator recomputes its
 canonical SHA-256 before accepting `benchmark_contract_sha256`. Legacy schema-2
 cold matrices retain the schema-4 record form.

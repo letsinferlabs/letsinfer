@@ -189,12 +189,12 @@ class BenchmarkRecordTests(unittest.TestCase):
         ):
             benchmark_record.validate_record(value)
 
-    def test_shared_record_accepts_short_workload_contract(self) -> None:
+    def test_shared_record_accepts_short_concurrency_contract(self) -> None:
         value = self.record()
         contract = {
-            "schema_version": 5,
+            "schema_version": 6,
             "suite": "letsinfer-code-prose-v1",
-            "generator": {"id": "letsinfer-code-prose", "version": 5},
+            "generator": {"id": "letsinfer-code-prose", "version": 6},
             "domains": ["code"],
             "execution": {
                 "isolation": "fresh-matrix",
@@ -205,6 +205,7 @@ class BenchmarkRecordTests(unittest.TestCase):
             "short": {
                 "domains": ["code", "prose"],
                 "prompt_tokens": 256,
+                "concurrencies": [1, 2, 4],
                 "request": {
                     "output_tokens": 512,
                     "min_completion_tokens": 512,
