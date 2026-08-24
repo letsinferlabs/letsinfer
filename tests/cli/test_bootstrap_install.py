@@ -47,8 +47,11 @@ class BootstrapInstallTests(unittest.TestCase):
         self.assertLess(private_setup_umask, setup)
         self.assertIn('curl_protocols="=https"', script)
         self.assertIn('--proto "$curl_protocols"', script)
-        self.assertIn("api.github.com/repos/$repository/releases/latest", script)
-        self.assertIn('re.fullmatch(r"v[0-9]+\\.[0-9]+\\.[0-9]+", tag)', script)
+        self.assertIn(
+            "api.github.com/repos/$repository/releases?per_page=30", script
+        )
+        self.assertIn('(?:-rc\\.([0-9]+))?', script)
+        self.assertIn('release.get("draft") is not False', script)
         self.assertIn('archive_name="letsinfer-$platform_os-$platform_arch.tar.gz"', script)
         self.assertIn('"$command_path" setup', script)
         self.assertIn('letsinfer_home="$HOME/.local/share/letsinfer"', script)
@@ -57,6 +60,9 @@ class BootstrapInstallTests(unittest.TestCase):
         self.assertIn('launcher_dir="/usr/local/bin"', script)
         self.assertIn('prefix="$HOME/.local"', script)
         self.assertIn('for setup_command in docker cmake ctest cc openssl', script)
+        self.assertIn("openssl_development_ready", script)
+        self.assertIn("build-essential cmake openssl libssl-dev", script)
+        self.assertIn("gcc gcc-c++ make cmake openssl openssl-devel", script)
         self.assertIn('launchctl print "gui/$(id -u)"', script)
         self.assertIn('progress 5 "Resolving release"', script)
         self.assertIn('progress 80 "Initializing services"', script)

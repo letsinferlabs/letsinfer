@@ -185,7 +185,7 @@ class TelemetryTests(unittest.TestCase):
 
         with (
             mock.patch("core.site.telemetry.watchdog_live_samples", side_effect=live),
-            mock.patch("core.site.telemetry.signed_sample", side_effect=lambda value: value),
+            mock.patch("core.site.telemetry.signed_sample") as signer,
         ):
             publisher = TelemetryPublisher(
                 identity,
@@ -202,9 +202,48 @@ class TelemetryTests(unittest.TestCase):
             self.assertTrue(publisher.alive())
             publisher.close()
             self.assertFalse(publisher.alive())
+            signer.assert_not_called()
         self.assertEqual(
             [row["inference"]["active_requests"] for row in accepted], [1, 0]
         )
+
+    def test_remote_publisher_keeps_signed_transport(self) -> None:
+        sample = decode_watchdog_protocol_sample(
+            protocol_payload(sequence=9), member_id=MEMBER
+        )
+        document = {"protocol": "signed", "sample": sample, "signature": "value"}
+        posted: list[dict[str, object]] = []
+        identity = SimpleNamespace(member_id=MEMBER)
+
+        def live(**_: object):
+            yield sample
+
+        with (
+            mock.patch("core.site.telemetry.watchdog_live_samples", side_effect=live),
+            mock.patch(
+                "core.site.telemetry.signed_sample", return_value=document
+            ) as signer,
+            mock.patch(
+                "core.site.telemetry.post_member_sample",
+                side_effect=lambda _endpoint, **values: posted.append(values),
+            ) as post,
+        ):
+            publisher = TelemetryPublisher(
+                identity,
+                watchdog_port=9768,
+                watchdog_ca_file=pathlib.Path("ca"),
+                watchdog_controller_cert_file=pathlib.Path("cert"),
+                watchdog_controller_key_file=pathlib.Path("key"),
+                endpoint="https://coordinator.local:9770",
+            )
+            publisher.start()
+            deadline = time.monotonic() + 1
+            while not posted and time.monotonic() < deadline:
+                time.sleep(0.01)
+            publisher.close()
+            signer.assert_called_once_with(sample)
+            post.assert_called_once()
+        self.assertEqual(posted[0]["document"], document)
 
     def test_watchdog_record_decodes_exact_counters_and_unknowns(self) -> None:
         sample = decode_watchdog_record(record(), member_id=MEMBER)
