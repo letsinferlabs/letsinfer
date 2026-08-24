@@ -153,8 +153,12 @@ model- and engine-agnostic.
 
 ## Contributing
 
-Runtime authors should start with the [runtime skill](skills/runtime/SKILL.md)
-and [benchmark skill](skills/benchmark/SKILL.md). Run the core tests with:
+Runtime authors should start with the [runtime skill](skills/runtime/SKILL.md).
+It routes radical or new Engine work through the
+[Engine-authoring skill](skills/engine-authoring/SKILL.md), and qualification
+through the [benchmark skill](skills/benchmark/SKILL.md). Maintainers use the
+[runtime-review skill](skills/runtime-review/SKILL.md) for `/shipit`. Run the
+core tests with:
 
 ```bash
 python3 -m tools.core_regression

@@ -150,9 +150,11 @@ starts GitHub CLI's official browser/device-code flow. Let's Infer never reads
 or stores the GitHub token and never exposes it to candidate code.
 
 Runtime and PR authors may submit useful informational results, but their runs
-do not count toward the three independent verifier threshold. One GitHub user
-and one pseudonymous device identity can contribute at most one active vote to
-an execution subject.
+do not count toward the two independent verifier threshold. One GitHub user
+and one pseudonymous device identity can contribute at most one slot to an
+execution subject, regardless of reruns. A blocking correctness or safety
+failure remains terminal for that subject. Performance differences are shown
+for review but do not add a disagreement state or require more reviewers.
 
 ## Core and runtime updates
 
@@ -185,6 +187,10 @@ letsinfer serve <candidate-id> --qualification-mode \
 
 Local candidates are unqualified. Qualification mode never promotes a
 candidate automatically or makes it boot-persistent.
+
+Schema checks, README generation, Engine builds, OCI planning, and `/shipit`
+live in the runtimes repository's contributor tooling and skills. They are not
+a second public `letsinfer runtime ...` command namespace.
 
 ## Local data and removal
 

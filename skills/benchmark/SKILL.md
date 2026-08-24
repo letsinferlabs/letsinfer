@@ -155,11 +155,15 @@ increase runner-side polling or derive the timeline from a post-run snapshot.
 The validator must enforce the fixed column order, monotonic elapsed times,
 numeric bounds, and equality between each published maximum and its timeline.
 
-The bot accepts one active vote per GitHub account and pseudonymous device,
-requires three agreeing independent non-author verifiers, and writes the full
-records plus aggregate into bot-owned `benchmark.consensus.json`. Do not upload
-community evidence to an OCI, hand-edit consensus, or add qualification state
-to a runtime manifest.
+The bot accepts one slot per GitHub account and pseudonymous device and
+requires two successful independent non-author verifiers. Rerunning does not
+create a second slot. Any accepted correctness, safety, crash, OOM,
+incomplete-workload, or restoration failure blocks that exact execution
+subject and cannot be rerun away. Performance differences remain visible but
+do not create a disagreement state or expand the verifier count. The bot
+writes the full records plus aggregate into bot-owned
+`benchmark.consensus.json`. Do not upload community evidence to an OCI,
+hand-edit consensus, or add qualification state to a runtime manifest.
 
 Keep generated prompts, plans, complete outputs, private evidence, and
 machine-specific details in ignored evidence storage; generic runners and

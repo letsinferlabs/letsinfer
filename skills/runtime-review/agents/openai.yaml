@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Let's Infer Runtime"
+  short_description: "Review exact artifacts and authorize /shipit"
+  default_prompt: "Use $runtime-review to review this qualified Let's Infer runtime PR and process /shipit safely."
