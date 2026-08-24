@@ -45,6 +45,7 @@ from core.exact_tokens import (  # pylint: disable=wrong-import-position
 )
 from core.runtime_packs import (  # pylint: disable=wrong-import-position
     RuntimePackError,
+    TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
     benchmark_model_sha256,
 )
 
@@ -52,8 +53,11 @@ from core.runtime_packs import (  # pylint: disable=wrong-import-position
 CONCURRENCIES = (1, 2, 4, 8, 16)
 CONTEXTS = ("32k", "64k", "128k", "256k")
 PLAN_CONTEXTS = ("short",) + CONTEXTS
+TTFT_CONTEXTS = ("ttftcold", "ttftwarm")
+ALL_PLAN_CONTEXTS = PLAN_CONTEXTS + TTFT_CONTEXTS
 SAFE_CELL = re.compile(
-    r"(?:short|32k|64k|128k|256k)-(?:code|prose)-c(?:1|2|4|8|16)"
+    r"(?:(?:short|32k|64k|128k|256k)-(?:code|prose)-c(?:1|2|4|8|16)"
+    r"|ttft(?:cold|warm)-code-c1)"
 )
 _PROGRESS_FILE: pathlib.Path | None = None
 _PROGRESS_STARTED_UNIX_NS: int | None = None
@@ -65,6 +69,16 @@ _CURRENT_CELL: str | None = None
 
 class RuntimeMatrixError(common.QualificationError):
     """The runtime matrix contract was invalid or failed."""
+
+
+def prefer_monitor_failure(
+    failure: BaseException | None,
+    monitor_errors: list[str],
+) -> BaseException | None:
+    """Keep a concurrent safety stop as the primary qualification failure."""
+    if monitor_errors:
+        return RuntimeMatrixError(monitor_errors[0])
+    return failure
 
 
 def _write_benchmark_progress(phase: str, message: str, state: str) -> None:
@@ -303,6 +317,13 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--short", action="store_true", dest="context_short", help=argparse.SUPPRESS
     )
+    for context in TTFT_CONTEXTS:
+        parser.add_argument(
+            f"--{context}",
+            action="store_true",
+            dest=f"context_{context}",
+            help=argparse.SUPPRESS,
+        )
     parser.add_argument(
         "--list",
         action="store_true",
@@ -380,7 +401,7 @@ def selected_axes(
     ]
     contexts = [
         value
-        for value in PLAN_CONTEXTS
+        for value in ALL_PLAN_CONTEXTS
         if getattr(arguments, f"context_{value}", False)
     ]
     if cells is None:
@@ -394,7 +415,7 @@ def selected_axes(
         ]
         declared_contexts = [
             context
-            for context in PLAN_CONTEXTS
+            for context in ALL_PLAN_CONTEXTS
             if any(name.startswith(f"{context}-") for name in cells)
         ]
     return concurrencies or declared_concurrencies, contexts or declared_contexts
@@ -465,6 +486,20 @@ def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
                     ],
                     "max_tokens": short_request["output_tokens"],
                 }
+    ttft_cache = contract.get("ttft_cache")
+    if isinstance(ttft_cache, dict):
+        for phase in TTFT_CONTEXTS:
+            name = f"{phase}-code-c1"
+            cells[name] = {
+                "name": name,
+                "prompt_domain": ttft_cache["prompt_domain"],
+                "prompt_suite": prompt_generator.BENCHMARK_SUITE,
+                "target_prompt_tokens": ttft_cache["prompt_tokens"],
+                "fixtures": [
+                    {"expected_prompt_tokens": ttft_cache["prompt_tokens"]}
+                ],
+                "max_tokens": ttft_cache["request"]["output_tokens"],
+            }
     for case in contract["cases"]:
         for concurrency in case["concurrencies"]:
             for domain in domains:
@@ -721,7 +756,7 @@ def load_prompt_plan(
     context_rows = plan.get("contexts")
     if not isinstance(context_rows, list) or not context_rows:
         raise RuntimeMatrixError("prompt plan contexts must be a non-empty array")
-    valid_contexts = PLAN_CONTEXTS if plan_schema == 3 else CONTEXTS
+    valid_contexts = ALL_PLAN_CONTEXTS if plan_schema == 3 else CONTEXTS
     if len(context_rows) > len(valid_contexts):
         raise RuntimeMatrixError("prompt plan defines too many contexts")
     cells: dict[str, dict[str, Any]] = {}
@@ -849,6 +884,28 @@ def load_prompt_plan(
     if set(fixtures) != allocated:
         unused = sorted(set(fixtures) - allocated)
         raise RuntimeMatrixError("prompt plan has unused fixtures: " + ", ".join(unused))
+    ttft_cells = [cells.get(f"{phase}-code-c1") for phase in TTFT_CONTEXTS]
+    if any(cell is not None for cell in ttft_cells):
+        if not all(isinstance(cell, dict) for cell in ttft_cells):
+            raise RuntimeMatrixError(
+                "prompt plan must contain both 64K TTFT cache phases"
+            )
+        cold, warm = ttft_cells
+        assert isinstance(cold, dict) and isinstance(warm, dict)
+        cold_fixture = cold["fixtures"][0]
+        warm_fixture = warm["fixtures"][0]
+        if (
+            cold["target_prompt_tokens"] != 64_000
+            or warm["target_prompt_tokens"] != 64_000
+            or cold["max_tokens"] != 1
+            or warm["max_tokens"] != 1
+            or cold_fixture["sha256"] != warm_fixture["sha256"]
+            or cold_fixture["expected_prompt_tokens"]
+            != warm_fixture["expected_prompt_tokens"]
+        ):
+            raise RuntimeMatrixError(
+                "64K TTFT cache phases must repeat one exact one-token prompt"
+            )
     public_plan = {
         "schema_version": plan_schema,
         "prompt_suite": prompt_suite,
@@ -891,7 +948,7 @@ def select_cells(
             raise RuntimeMatrixError(
                 f"prompt plan does not define selected context: {context}"
             )
-        if context == "short" and not any(
+        if context in {"short", *TTFT_CONTEXTS} and not any(
             name.startswith(prefix) and name.endswith(f"-c{concurrency}")
             for name in cells
         ):
@@ -1105,6 +1162,87 @@ def public_benchmark_result(
         **telemetry,
     }
     return result
+
+
+def ttft_cache_benchmark_result(
+    rows: list[dict[str, Any]],
+    cells_by_name: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Summarize one exact 64K prompt followed by its immediate reload."""
+    phase_rows = {
+        row["cell"]: row
+        for row in rows
+        if row.get("cell") in {"ttftcold-code-c1", "ttftwarm-code-c1"}
+    }
+    if not phase_rows:
+        return None
+    if set(phase_rows) != {"ttftcold-code-c1", "ttftwarm-code-c1"}:
+        raise RuntimeMatrixError(
+            "64K TTFT cache benchmark must include both cold and warm phases"
+        )
+    cold_row = phase_rows["ttftcold-code-c1"]
+    warm_row = phase_rows["ttftwarm-code-c1"]
+    cold_cell = cells_by_name["ttftcold-code-c1"]
+    warm_cell = cells_by_name["ttftwarm-code-c1"]
+    cold_fixture = cold_cell["fixtures"][0]
+    warm_fixture = warm_cell["fixtures"][0]
+    if cold_fixture["sha256"] != warm_fixture["sha256"]:
+        raise RuntimeMatrixError("64K TTFT cache prompts are not byte-identical")
+
+    cold_summary = cold_row["summary"]
+    warm_summary = warm_row["summary"]
+    cold_prompt = cold_summary.get("prompt_tokens")
+    warm_prompt = warm_summary.get("prompt_tokens")
+    if (
+        not isinstance(cold_prompt, list)
+        or len(cold_prompt) != 1
+        or not isinstance(warm_prompt, list)
+        or len(warm_prompt) != 1
+        or cold_prompt[0] != warm_prompt[0]
+    ):
+        raise RuntimeMatrixError(
+            "64K TTFT cache phases did not observe the same rendered prompt"
+        )
+    cold_ttft_ms = cold_summary.get("ttft_ms", {}).get("mean")
+    warm_ttft_ms = warm_summary.get("ttft_ms", {}).get("mean")
+    cold_cached = cold_summary.get("cached_prompt_tokens", {}).get("max")
+    warm_cached = warm_summary.get("cached_prompt_tokens", {}).get("max")
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        for value in (cold_ttft_ms, warm_ttft_ms, cold_cached, warm_cached)
+    ):
+        raise RuntimeMatrixError("64K TTFT cache result is missing required metrics")
+    cold_ttft_seconds = float(cold_ttft_ms) / 1000.0
+    warm_ttft_seconds = float(warm_ttft_ms) / 1000.0
+    cold_cached_tokens = int(cold_cached)
+    warm_cached_tokens = int(warm_cached)
+    if (
+        cold_ttft_seconds <= 0
+        or warm_ttft_seconds <= 0
+        or float(cold_cached) != cold_cached_tokens
+        or float(warm_cached) != warm_cached_tokens
+        or warm_cached_tokens <= cold_cached_tokens
+    ):
+        raise RuntimeMatrixError(
+            "64K TTFT reload did not report a larger exact cache hit"
+        )
+    return {
+        "workload": "pp64000,tg1,c1",
+        "prompt_domain": "code",
+        "prompt_suite": cold_cell["prompt_suite"],
+        "prompt_sha256": cold_fixture["sha256"],
+        "actual_prompt_tokens": cold_prompt[0],
+        "cold_ttft_seconds": cold_ttft_seconds,
+        "warm_ttft_seconds": warm_ttft_seconds,
+        "cold_cached_prompt_tokens": cold_cached_tokens,
+        "warm_cached_prompt_tokens": warm_cached_tokens,
+        "ttft_speedup_ratio": cold_ttft_seconds / warm_ttft_seconds,
+        "ttft_reduction_percent": (
+            (cold_ttft_seconds - warm_ttft_seconds)
+            * 100.0
+            / cold_ttft_seconds
+        ),
+    }
 
 
 def attach_sealed_comparison(
@@ -1759,7 +1897,18 @@ def run_isolated_matrix(
             )["samples"],
         )
         for row in rows
+        if row["cell"] not in {"ttftcold-code-c1", "ttftwarm-code-c1"}
     ]
+    ttft_cache_result = ttft_cache_benchmark_result(rows, cells_by_name)
+    if ttft_cache_result is not None and (
+        not shared_matrix
+        or benchmark_contract is None
+        or benchmark_contract.get("schema_version")
+        != TTFT_CACHE_BENCHMARK_SCHEMA_VERSION
+    ):
+        raise RuntimeMatrixError(
+            "64K TTFT cache evidence requires shared benchmark contract schema 7"
+        )
     assert arguments.installation_id is not None
     assert arguments.benchmark_timestamp_unix_ns is not None
     assert arguments.benchmark_contract_sha256 is not None
@@ -1802,10 +1951,18 @@ def run_isolated_matrix(
         benchmark_record.validate_subject(subject)
     except benchmark_record.BenchmarkRecordError as error:
         raise RuntimeMatrixError(str(error)) from error
-    public_results_sha = benchmark_record.results_sha256(public_results)
+    public_results_sha = (
+        benchmark_record.ttft_cache_results_sha256(
+            public_results, ttft_cache_result
+        )
+        if ttft_cache_result is not None
+        else benchmark_record.results_sha256(public_results)
+    )
     public_record = {
         "schema_version": (
-            benchmark_record.SHARED_SCHEMA_VERSION
+            benchmark_record.TTFT_CACHE_SCHEMA_VERSION
+            if ttft_cache_result is not None
+            else benchmark_record.SHARED_SCHEMA_VERSION
             if shared_matrix
             else benchmark_record.SCHEMA_VERSION
         ),
@@ -1830,6 +1987,8 @@ def run_isolated_matrix(
                 "shared benchmark record requires its complete benchmark contract"
             )
         public_record["benchmark_contract"] = benchmark_contract
+    if ttft_cache_result is not None:
+        public_record["ttft_cache"] = ttft_cache_result
     try:
         benchmark_record.validate_record(public_record)
     except benchmark_record.BenchmarkRecordError as error:
@@ -1880,6 +2039,7 @@ def run_isolated_matrix(
         "prefix_state": "shared" if shared_matrix else "per-cell",
         "stream_prefix": "shared-body" if shared_stream_prefix else "distinct",
         "samples_per_cell": 1,
+        "ttft_cache": ttft_cache_result,
         "cells": rows,
         "qualification_passed": True,
     }
@@ -2107,6 +2267,11 @@ def main() -> int:
                 print_summary(summary)
     except BaseException as error:
         failure = error
+    # A safety monitor can stop the container while a streaming request is
+    # active.  That request then reports a secondary short-output or transport
+    # failure.  Preserve the monitor's exact safety cause as the primary
+    # qualification failure before checking the resulting container state.
+    failure = prefer_monitor_failure(failure, monitor.errors)
     after_inspection = common.docker_inspect(container)
     common.write_json_atomic(output / "container-after.json", after_inspection)
     if failure is not None:

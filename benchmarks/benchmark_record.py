@@ -23,6 +23,7 @@ from core.runtime_packs import (  # noqa: E402
     SHARED_BENCHMARK_SCHEMA_VERSION,
     SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
     SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
+    TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
     validate_benchmark_contract,
 )
 
@@ -31,6 +32,7 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 WORKLOAD_RE = re.compile(r"pp[1-9][0-9]*,tg[1-9][0-9]*,c[1-9][0-9]*")
 SCHEMA_VERSION = 4
 SHARED_SCHEMA_VERSION = 5
+TTFT_CACHE_SCHEMA_VERSION = 6
 SUBJECT_FIELDS = {
     "candidate_id",
     "runtime_version",
@@ -78,6 +80,20 @@ RECORD_FIELDS = {
     "results",
 }
 SHARED_RECORD_FIELDS = RECORD_FIELDS | {"benchmark_contract"}
+TTFT_CACHE_RECORD_FIELDS = SHARED_RECORD_FIELDS | {"ttft_cache"}
+TTFT_CACHE_FIELDS = {
+    "workload",
+    "prompt_domain",
+    "prompt_suite",
+    "prompt_sha256",
+    "actual_prompt_tokens",
+    "cold_ttft_seconds",
+    "warm_ttft_seconds",
+    "cold_cached_prompt_tokens",
+    "warm_cached_prompt_tokens",
+    "ttft_speedup_ratio",
+    "ttft_reduction_percent",
+}
 TELEMETRY_COLUMNS = [
     "elapsed_seconds",
     "gpu_usage_percent",
@@ -185,6 +201,86 @@ def results_sha256(results: Any) -> str:
     if not isinstance(results, list) or not results:
         raise BenchmarkRecordError("benchmark record results must be non-empty")
     return hashlib.sha256(canonical_bytes(results)).hexdigest()
+
+
+def ttft_cache_results_sha256(results: Any, ttft_cache: Any) -> str:
+    """Bind ordinary matrix rows and the dedicated cold/warm TTFT result."""
+    if not isinstance(results, list) or not results:
+        raise BenchmarkRecordError("benchmark record results must be non-empty")
+    if not isinstance(ttft_cache, dict):
+        raise BenchmarkRecordError("benchmark record ttft_cache must be an object")
+    return hashlib.sha256(
+        canonical_bytes({"results": results, "ttft_cache": ttft_cache})
+    ).hexdigest()
+
+
+def validate_ttft_cache_result(value: Any) -> dict[str, Any]:
+    where = "ttft_cache"
+    if not isinstance(value, dict) or set(value) != TTFT_CACHE_FIELDS:
+        raise BenchmarkRecordError(
+            f"{where} must contain exactly " + ", ".join(sorted(TTFT_CACHE_FIELDS))
+        )
+    if value.get("workload") != "pp64000,tg1,c1":
+        raise BenchmarkRecordError(f"{where}.workload must be pp64000,tg1,c1")
+    if value.get("prompt_domain") != "code":
+        raise BenchmarkRecordError(f"{where}.prompt_domain must be code")
+    if value.get("prompt_suite") != "letsinfer-code-prose-v1":
+        raise BenchmarkRecordError(f"{where}.prompt_suite is unsupported")
+    prompt_sha = value.get("prompt_sha256")
+    if not isinstance(prompt_sha, str) or not SHA256_RE.fullmatch(prompt_sha):
+        raise BenchmarkRecordError(f"{where}.prompt_sha256 must be a SHA-256")
+    prompt_tokens = value.get("actual_prompt_tokens")
+    if (
+        not isinstance(prompt_tokens, int)
+        or isinstance(prompt_tokens, bool)
+        or prompt_tokens <= 0
+    ):
+        raise BenchmarkRecordError(
+            f"{where}.actual_prompt_tokens must be a positive integer"
+        )
+    cold_ttft = _number(value.get("cold_ttft_seconds"), f"{where}.cold_ttft_seconds")
+    warm_ttft = _number(value.get("warm_ttft_seconds"), f"{where}.warm_ttft_seconds")
+    cached_values: list[int] = []
+    for field in ("cold_cached_prompt_tokens", "warm_cached_prompt_tokens"):
+        cached = value.get(field)
+        if (
+            not isinstance(cached, int)
+            or isinstance(cached, bool)
+            or cached < 0
+            or cached > prompt_tokens
+        ):
+            raise BenchmarkRecordError(
+                f"{where}.{field} must be an integer from zero through actual_prompt_tokens"
+            )
+        cached_values.append(cached)
+    if cached_values[1] <= cached_values[0]:
+        raise BenchmarkRecordError(
+            f"{where}.warm_cached_prompt_tokens must exceed the cold observation"
+        )
+    speedup = _number(value.get("ttft_speedup_ratio"), f"{where}.ttft_speedup_ratio")
+    reduction = value.get("ttft_reduction_percent")
+    if (
+        isinstance(reduction, bool)
+        or not isinstance(reduction, (int, float))
+        or not math.isfinite(float(reduction))
+    ):
+        raise BenchmarkRecordError(
+            f"{where}.ttft_reduction_percent must be finite"
+        )
+    assert cold_ttft is not None and warm_ttft is not None and speedup is not None
+    expected_speedup = cold_ttft / warm_ttft
+    expected_reduction = (cold_ttft - warm_ttft) * 100.0 / cold_ttft
+    if not math.isclose(speedup, expected_speedup, rel_tol=1e-9, abs_tol=1e-12):
+        raise BenchmarkRecordError(
+            f"{where}.ttft_speedup_ratio does not match cold and warm TTFT"
+        )
+    if not math.isclose(
+        float(reduction), expected_reduction, rel_tol=1e-9, abs_tol=1e-9
+    ):
+        raise BenchmarkRecordError(
+            f"{where}.ttft_reduction_percent does not match cold and warm TTFT"
+        )
+    return value
 
 
 def _number(value: Any, field: str, *, nullable: bool = False) -> float | None:
@@ -436,7 +532,9 @@ def _validate_telemetry(result: dict[str, Any], where: str) -> None:
 def validate_record(value: Any) -> dict[str, Any]:
     schema_version = value.get("schema_version") if isinstance(value, dict) else None
     expected_fields = (
-        SHARED_RECORD_FIELDS
+        TTFT_CACHE_RECORD_FIELDS
+        if schema_version == TTFT_CACHE_SCHEMA_VERSION
+        else SHARED_RECORD_FIELDS
         if schema_version == SHARED_SCHEMA_VERSION
         else RECORD_FIELDS
     )
@@ -447,13 +545,14 @@ def validate_record(value: Any) -> dict[str, Any]:
         )
     if (
         type(value.get("schema_version")) is not int
-        or value.get("schema_version") not in {SCHEMA_VERSION, SHARED_SCHEMA_VERSION}
+        or value.get("schema_version")
+        not in {SCHEMA_VERSION, SHARED_SCHEMA_VERSION, TTFT_CACHE_SCHEMA_VERSION}
     ):
         raise BenchmarkRecordError(
             f"benchmark record schema_version must be {SCHEMA_VERSION} or "
-            f"{SHARED_SCHEMA_VERSION}"
+            f"{SHARED_SCHEMA_VERSION} or {TTFT_CACHE_SCHEMA_VERSION}"
         )
-    if schema_version == SHARED_SCHEMA_VERSION:
+    if schema_version in {SHARED_SCHEMA_VERSION, TTFT_CACHE_SCHEMA_VERSION}:
         contract = value.get("benchmark_contract")
         if not isinstance(contract, dict):
             raise BenchmarkRecordError("benchmark_contract must be an object")
@@ -468,9 +567,17 @@ def validate_record(value: Any) -> dict[str, Any]:
             PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
             SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
             SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+            TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
         }:
             raise BenchmarkRecordError(
-                "benchmark_contract must use shared-matrix schema 3, 4, 5, or 6"
+                "benchmark_contract must use shared-matrix schema 3, 4, 5, 6, or 7"
+            )
+        if (
+            schema_version == TTFT_CACHE_SCHEMA_VERSION
+            and contract.get("schema_version") != TTFT_CACHE_BENCHMARK_SCHEMA_VERSION
+        ):
+            raise BenchmarkRecordError(
+                "TTFT-cache benchmark records require benchmark contract schema 7"
             )
         contract_sha = hashlib.sha256(canonical_bytes(contract)).hexdigest()
         if value.get("benchmark_contract_sha256") != contract_sha:
@@ -486,9 +593,16 @@ def validate_record(value: Any) -> dict[str, Any]:
     ):
         raise BenchmarkRecordError("timestamp must be the Unix-second form of timestamp_unix_ns")
     results = value.get("results")
-    actual_results_sha = results_sha256(results)
+    ttft_cache = value.get("ttft_cache")
+    actual_results_sha = (
+        ttft_cache_results_sha256(results, ttft_cache)
+        if schema_version == TTFT_CACHE_SCHEMA_VERSION
+        else results_sha256(results)
+    )
     if value.get("results_sha256") != actual_results_sha:
         raise BenchmarkRecordError("benchmark record results_sha256 does not match results")
+    if schema_version == TTFT_CACHE_SCHEMA_VERSION:
+        validate_ttft_cache_result(ttft_cache)
     seen: set[tuple[str, str]] = set()
     for index, result in enumerate(results):
         where = f"results[{index}]"

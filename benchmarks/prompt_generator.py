@@ -29,6 +29,7 @@ from core.runtime_packs import (  # noqa: E402
     PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
     SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
     SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
+    TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
     canonical_bytes,
     sha256_file,
     validate_benchmark_contract,
@@ -132,6 +133,7 @@ def _uses_shared_stream_prefix(contract: dict[str, Any]) -> bool:
             PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
             SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
             SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+            TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
         }
         and isinstance(execution, dict)
         and execution.get("stream_prefix") == "shared-body"
@@ -147,6 +149,7 @@ def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if contract["schema_version"] in {
         SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+        TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
     }:
         short = contract["short"]
         for concurrency in short.get("concurrencies", [1]):
@@ -161,6 +164,19 @@ def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
                     "concurrency": concurrency,
                     "max_tokens": short["request"]["output_tokens"],
                 }
+    if contract["schema_version"] == TTFT_CACHE_BENCHMARK_SCHEMA_VERSION:
+        ttft_cache = contract["ttft_cache"]
+        for phase in ("ttftcold", "ttftwarm"):
+            name = f"{phase}-code-c1"
+            cells[name] = {
+                "name": name,
+                "context": phase,
+                "prompt_domain": ttft_cache["prompt_domain"],
+                "prompt_suite": BENCHMARK_SUITE,
+                "target_prompt_tokens": ttft_cache["prompt_tokens"],
+                "concurrency": 1,
+                "max_tokens": ttft_cache["request"]["output_tokens"],
+            }
     for case in contract["cases"]:
         for concurrency in case["concurrencies"]:
             for domain in domains:
@@ -215,6 +231,7 @@ def materialize(
         in {
             SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
             SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+            TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
         }
         else 2
     )
@@ -222,6 +239,7 @@ def materialize(
     if contract["schema_version"] in {
         SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+        TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
     }:
         short = contract["short"]
         materialization_cases.append(
@@ -235,6 +253,7 @@ def materialize(
                 "request": short["request"],
                 "templates": SHORT_TEMPLATES,
                 "short": True,
+                "ttft_cache": False,
             }
         )
     materialization_cases.extend(
@@ -244,15 +263,34 @@ def materialize(
             "request": request,
             "templates": templates,
             "short": False,
+            "ttft_cache": False,
         }
         for case in contract["cases"]
     )
+    if contract["schema_version"] == TTFT_CACHE_BENCHMARK_SCHEMA_VERSION:
+        ttft_cache = contract["ttft_cache"]
+        materialization_cases.extend(
+            {
+                "case": {
+                    "id": phase,
+                    "prompt_tokens": ttft_cache["prompt_tokens"],
+                    "concurrencies": [1],
+                },
+                "domains": [ttft_cache["prompt_domain"]],
+                "request": ttft_cache["request"],
+                "templates": PREFIX_SHARED_TEMPLATES,
+                "short": False,
+                "ttft_cache": True,
+            }
+            for phase in ("ttftcold", "ttftwarm")
+        )
     template_hashes = {
         domain: sha256_file(templates[domain]) for domain in domains
     }
     if contract["schema_version"] in {
         SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+        TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
     }:
         template_hashes = {
             **{
@@ -268,6 +306,7 @@ def materialize(
         case_request = materialization_case["request"]
         case_templates = materialization_case["templates"]
         short_case = materialization_case["short"]
+        ttft_cache_case = materialization_case["ttft_cache"]
         cell_map: dict[str, list[str]] = {}
         selected_for_case = [
             all_cells[name]
@@ -291,15 +330,21 @@ def materialize(
             maximum = max(row["concurrency"] for row in domain_cells)
             for slot in range(maximum):
                 fixture_id = f"{case['id']}-{domain}-s{slot:02d}"
+                content_fixture_id = (
+                    f"ttft64k-{domain}-s{slot:02d}"
+                    if ttft_cache_case
+                    else fixture_id
+                )
+                seed_context = "ttft64k" if ttft_cache_case else case["id"]
                 seed_material = (
-                    f"{BENCHMARK_SUITE}\0{case['id']}\0{slot}".encode("utf-8")
+                    f"{BENCHMARK_SUITE}\0{seed_context}\0{slot}".encode("utf-8")
                 )
                 marker = (
                     "LETSINFER-"
                     + hashlib.sha256(seed_material).hexdigest()[:24].upper()
                 )
                 body_seed_material = (
-                    f"{BENCHMARK_SUITE}\0{case['id']}\0shared-body".encode("utf-8")
+                    f"{BENCHMARK_SUITE}\0{seed_context}\0shared-body".encode("utf-8")
                     if prefix_shared
                     else seed_material
                 )
@@ -311,7 +356,7 @@ def materialize(
                     if short_case
                     else _render(
                         template,
-                        fixture_id=fixture_id,
+                        fixture_id=content_fixture_id,
                         marker=marker,
                         slot=slot,
                         body=_source_text(body_seed, case["prompt_tokens"]),
