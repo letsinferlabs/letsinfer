@@ -372,15 +372,23 @@ class EngineGroupOrchestrator:
         action: str,
     ) -> tuple[list[TaskAssignment], list[tuple[TaskAssignment, BaseException]]]:
         """Invoke one runtime-declared phase concurrently and await every task."""
-        completed: list[TaskAssignment] = []
+        completed = [
+            assignment
+            for assignment in assignments
+            if action == "remove"
+            and self.states[assignment.member_id]["state"] == "removed"
+        ]
+        pending = [assignment for assignment in assignments if assignment not in completed]
         failures: list[tuple[TaskAssignment, BaseException]] = []
+        if not pending:
+            return completed, failures
         with ThreadPoolExecutor(
-            max_workers=len(assignments),
+            max_workers=len(pending),
             thread_name_prefix=f"letsinfer-group-{action}",
         ) as executor:
             futures = {
                 executor.submit(self._invoke, assignment, action): assignment
-                for assignment in assignments
+                for assignment in pending
             }
             for future in as_completed(futures):
                 assignment = futures[future]

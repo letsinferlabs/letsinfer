@@ -27,15 +27,24 @@ def _within(path: pathlib.Path, parent: pathlib.Path) -> bool:
     return True
 
 
-def _remove_managed_launcher(path: pathlib.Path, store: pathlib.Path) -> bool:
+def _managed_launcher_present(path: pathlib.Path, store: pathlib.Path) -> bool:
     if not path.exists() and not path.is_symlink():
         return False
     if not path.is_symlink():
         raise CoreUninstallError(f"refusing to remove non-symlink launcher: {path}")
     if not _within(path, store):
         raise CoreUninstallError(f"launcher does not target this installation: {path}")
-    path.unlink()
     return True
+
+
+def _optional_managed_launcher_present(
+    path: pathlib.Path, store: pathlib.Path
+) -> bool:
+    """Return true only for an alternate launcher owned by this core store."""
+
+    if not path.exists() and not path.is_symlink():
+        return False
+    return path.is_symlink() and _within(path, store)
 
 
 def remove(
@@ -70,11 +79,39 @@ def remove(
             f"refusing to remove unsupported launcher directory: {launcher_directory}"
         )
 
+    primary_candidates = {launcher_directory / name for name in LAUNCHERS}
+    user_launcher_directory = (
+        home.parent.parent / "bin"
+        if home.name == "letsinfer"
+        and home.parent.name == "share"
+        and home.parent.parent.name == ".local"
+        else None
+    )
+    alternate_candidates = (
+        {
+            user_launcher_directory / name
+            for name in LAUNCHERS
+        }
+        if user_launcher_directory is not None
+        and user_launcher_directory != launcher_directory
+        else set()
+    )
+    managed_launchers = [
+        path
+        for path in sorted(primary_candidates)
+        if _managed_launcher_present(path, store)
+    ]
+    managed_launchers.extend(
+        path
+        for path in sorted(alternate_candidates)
+        if _optional_managed_launcher_present(path, store)
+    )
+    # Validate every launcher before mutating any of them.  A malformed second
+    # launcher must not leave the primary CLI already removed.
     removed_launchers: list[str] = []
-    candidates = {launcher_directory / name for name in LAUNCHERS}
-    for path in sorted(candidates):
-        if _remove_managed_launcher(path, store):
-            removed_launchers.append(str(path))
+    for path in managed_launchers:
+        path.unlink()
+        removed_launchers.append(str(path))
 
     shutil.rmtree(store)
     return {

@@ -147,9 +147,11 @@ from .site.state import (
     data_root as site_data_root,
     identity_json,
     identity_path as site_identity_path,
+    has_active_engine_groups_for_cleanup,
     member_certificate_path as site_member_certificate_path,
     member_proof,
     prepare_member_identity,
+    read_exposure_for_cleanup,
     read_identity as read_site_identity,
     setup_site,
 )
@@ -7939,7 +7941,7 @@ def _engine_group_lifecycle(
             (row, placements[row["placement_id"]])
             for row in store.engine_groups()
             if row["state"] != "removed"
-            and row["desired_state"] != "removed"
+            and (action == "remove" or row["desired_state"] != "removed")
             and row["placement_id"] in placements
             and (model is None or placements[row["placement_id"]]["model"] == model)
         ]
@@ -7967,7 +7969,10 @@ def _engine_group_lifecycle(
                 elif action == "recover":
                     result = orchestrator.recover(acknowledge_trips=True)
                 elif action == "remove":
-                    if row["state"] not in {"staged", "stopped"}:
+                    if (
+                        row["desired_state"] != "removed"
+                        and row["state"] not in {"staged", "stopped"}
+                    ):
                         stopped = orchestrator.stop()
                         _sync_group_placement(store, stopped)
                     result = orchestrator.remove()
@@ -8019,11 +8024,17 @@ def _remove_all_engine_groups() -> list[str]:
             active = [
                 row
                 for row in store.engine_groups()
-                if row["state"] != "removed" and row["desired_state"] != "removed"
+                if row["state"] != "removed"
+                or row["desired_state"] != "removed"
             ]
             if not active:
                 return removed
             row = active[0]
+            if row["state"] == "removed":
+                raise LetsInferError(
+                    "engine-group removal is incomplete; restore member connectivity "
+                    "and retry removal before uninstalling"
+                )
             placement = next(
                 item
                 for item in store.placements()
@@ -10938,10 +10949,12 @@ def _remove_macos_services() -> None:
 
 
 def _remove_public_exposure() -> None:
-    if not site_identity_path().is_file():
-        return
-    with _site_store() as store:
-        exposure = store.exposure()
+    try:
+        identity = read_site_identity()
+        with SiteStore(identity=identity) as store:
+            exposure = store.exposure()
+    except SiteError:
+        exposure = read_exposure_for_cleanup()
     if exposure is None or exposure["state"] != "enabled":
         return
     if exposure["provider"] != "tailscale-funnel":
@@ -11053,6 +11066,14 @@ def uninstall(arguments: argparse.Namespace) -> int:
         enabled=_human_presenter() is not None,
     )
     with cleanup, ui.protect_stdout(cleanup):
+        site_identity_valid = False
+        if site_identity_path().is_file():
+            try:
+                read_site_identity()
+            except SiteError:
+                pass
+            else:
+                site_identity_valid = True
         runtime_images = _installed_runtime_image_references()
         try:
             active_benchmark = benchmark_jobs.active_state()
@@ -11067,8 +11088,13 @@ def uninstall(arguments: argparse.Namespace) -> int:
                 raise LetsInferError("active benchmark did not stop; uninstall aborted")
 
         _remove_public_exposure()
-        if site_identity_path().is_file() and config is not None:
+        if site_identity_valid:
             _remove_all_engine_groups()
+        elif has_active_engine_groups_for_cleanup():
+            raise LetsInferError(
+                "cannot safely uninstall while an unreadable node identity owns active "
+                "engine groups; restore the node identity and stop those groups first"
+            )
         _retire_qualification_candidate(remove_container=True)
         system = platform.system()
         if system == "Linux":
