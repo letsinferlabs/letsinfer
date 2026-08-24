@@ -139,20 +139,29 @@ letsinfer benchmark verify stop
 
 Verification accepts only an open `letsinferlabs/runtimes` pull request that
 has passed the `benchmark-ready` source and supply-chain gate. It runs the
-current recommended runtime and the exact proposed bytes with the same sealed
-contract, restores your previous runtime, then posts the complete signed
-evidence through your authenticated GitHub identity. Ctrl-C detaches; `status`
-reattaches and `stop` cancels and restores.
+current recommended runtime and the exact trusted-finalizer artifact with the
+same sealed contract. It never downloads or packages PR source. For a changed
+Engine it validates the bundled OCI layout, proves every compressed layer and
+rootfs diff ID, converts it to a temporary Docker-load archive, and removes the
+temporary archive plus only the image it introduced. It restores your previous
+runtime and local Engine state. Before execution it also verifies GitHub build
+provenance for every bundle file against the trusted main-branch finalizer.
+It then posts the complete signed evidence through your authenticated GitHub
+identity. Ctrl-C detaches; `status` reattaches and `stop` cancels and restores.
 
-If GitHub CLI is missing, the interactive command shows the supported package
-manager command and asks before running it. If authentication is missing, it
+GitHub CLI 2.97.0 or newer is required so attestation verification includes the
+upstream signer-matching security fix. If GitHub CLI is missing, the interactive
+command shows the supported package manager command and asks before running it.
+If authentication is missing, it
 starts GitHub CLI's official browser/device-code flow. Let's Infer never reads
 or stores the GitHub token and never exposes it to candidate code.
 
 Runtime and PR authors may submit useful informational results, but their runs
-do not count toward the three independent verifier threshold. One GitHub user
-and one pseudonymous device identity can contribute at most one active vote to
-an execution subject.
+do not count toward the two independent verifier threshold. One GitHub user
+and one pseudonymous device identity can contribute at most one slot to an
+execution subject, regardless of reruns. A blocking correctness or safety
+failure remains terminal for that subject. Performance differences are shown
+for review but do not add a disagreement state or require more reviewers.
 
 ## Core and runtime updates
 
@@ -185,6 +194,10 @@ letsinfer serve <candidate-id> --qualification-mode \
 
 Local candidates are unqualified. Qualification mode never promotes a
 candidate automatically or makes it boot-persistent.
+
+Schema checks, README generation, Engine builds, OCI planning, and `/shipit`
+live in the runtimes repository's contributor tooling and skills. They are not
+a second public `letsinfer runtime ...` command namespace.
 
 ## Local data and removal
 

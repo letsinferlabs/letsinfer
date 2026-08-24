@@ -14,6 +14,11 @@ You do not maintain a second execution
 manifest. After verification and installation, core generates its private
 `runtime-execution.json` view automatically.
 
+The candidate `README.md` begins with the canonical Let's Infer link,
+installer command, and `letsinfer install <logical_model>` command. Prepend
+that block to an existing README without replacing its content; the runtimes
+repository's `tools/readme_onboarding.py` owns the exact template.
+
 ## Required schema
 
 Only runtime schema 5 is accepted. The top-level fields are:
@@ -237,6 +242,11 @@ Keep candidate-specific kernels, patches, engine source, image recipes,
 adapters, tests, and qualification helpers beside `runtime.json`. Generic CLI,
 gateway, Watchdog, benchmark runners, prompts, and node orchestration belong to
 core and must not be copied into your candidate.
+
+Engine source is required only when the proposal changes or introduces that
+Engine. Existing-Engine runtimes preserve the exact OCI manifest and
+configuration pins without copying upstream source. Never commit generated
+image layers, model weights, build caches, or private benchmark evidence.
 
 The root runtimes `manifest.json` is generated from candidates. Do not edit it
 as a second source of truth.

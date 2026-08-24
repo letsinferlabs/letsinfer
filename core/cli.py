@@ -690,7 +690,11 @@ def read_json(path: pathlib.Path) -> dict[str, Any]:
 
 
 def runtime_execution_manifest(
-    runtime: dict[str, Any], *, qualified: bool, blocked_by: str = "runtime-unqualified"
+    runtime: dict[str, Any],
+    *,
+    qualified: bool,
+    blocked_by: str = "runtime-unqualified",
+    image_override: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Derive the private core execution view from authoritative runtime.json.
 
@@ -735,7 +739,11 @@ def runtime_execution_manifest(
             "acquisition_image": model["acquisition"]["image"],
         },
         "artifacts": artifacts,
-        "image": {"distribution": "registry-digest", **engine["oci"]},
+        "image": (
+            {"distribution": "registry-digest", **engine["oci"]}
+            if image_override is None
+            else dict(image_override)
+        ),
         "container": {**runtime["container"], "model_cache": "/models"},
         "watchdog": {
             "listen": "0.0.0.0",
@@ -7236,6 +7244,7 @@ def prepare_runtime_install(
     requested_target: str | None = None,
     expected_version: str | None = None,
     expected_target_contract_sha256: str | None = None,
+    image_override: Mapping[str, str] | None = None,
 ) -> tuple[pathlib.Path, dict[str, Any], pathlib.Path, dict[str, Any]]:
     try:
         with materialize(source) as incoming:
@@ -7244,7 +7253,9 @@ def prepare_runtime_install(
     except RuntimePackError as error:
         raise LetsInferError(str(error)) from error
     manifest_path = pack.runtime_path
-    manifest = runtime_execution_manifest(pack.runtime, qualified=qualified)
+    manifest = runtime_execution_manifest(
+        pack.runtime, qualified=qualified, image_override=image_override
+    )
     engine = adapter_for(manifest).name
     manifest_target = target_contract(manifest)
     target_id = manifest_target["id"]
@@ -13023,6 +13034,7 @@ def _prepare_verification_runtime(
     expected_version: str | None = None,
     requested_target: str | None = None,
     expected_target_contract_sha256: str | None = None,
+    image_override: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     """Resolve and validate all candidate bytes without changing selection."""
 
@@ -13034,6 +13046,7 @@ def _prepare_verification_runtime(
         requested_target=requested_target,
         expected_version=expected_version,
         expected_target_contract_sha256=expected_target_contract_sha256,
+        image_override=image_override,
     )
     verify_runtime_sources(manifest, release_root)
     verify_host_target(manifest)
@@ -13116,6 +13129,14 @@ def _recover_interrupted_verification(state: Mapping[str, Any]) -> None:
 
     path = _restoration_receipt_path(state)
     if not path.is_file() or path.is_symlink():
+        try:
+            benchmark_verification.cleanup_local_engine(
+                pathlib.Path(str(state["output_directory"]))
+            )
+        except benchmark_verification.VerificationError as error:
+            raise LetsInferError(
+                f"cannot clean interrupted verifier Engine: {error}"
+            ) from error
         benchmark_jobs.mark(
             str(state["job_id"]),
             "failed",
@@ -13159,6 +13180,12 @@ def _recover_interrupted_verification(state: Mapping[str, Any]) -> None:
             replacement=None,
             restored=True,
         )
+    try:
+        benchmark_verification.cleanup_local_engine(
+            pathlib.Path(str(state["output_directory"]))
+        )
+    except benchmark_verification.VerificationError as error:
+        raise LetsInferError(f"cannot clean interrupted verifier Engine: {error}") from error
     benchmark_jobs.mark(
         str(state["job_id"]),
         "failed",
@@ -13247,6 +13274,7 @@ def _run_verification_worker(arguments: argparse.Namespace) -> int:
     candidate_execution_started = False
     failure_phase = "preflight"
     runtime_author_ids: set[int] = set()
+    verifier_bundle: benchmark_verification.VerifierBundle | None = None
 
     def cancel(_signal: int, _frame: Any) -> None:
         raise _BenchmarkCancelled("verification cancellation requested")
@@ -13271,23 +13299,18 @@ def _run_verification_worker(arguments: argparse.Namespace) -> int:
         if candidate != metadata.get("candidate"):
             raise LetsInferError("pull-request candidate changed during verification")
 
-        _verification_progress(job_id, "source", "Downloading the exact pull-request head")
-        failure_phase = "source"
-        checkout = benchmark_verification.fetch_pull_request(
-            pr, output / "candidate-source", gh=gh
+        _verification_progress(job_id, "artifact", "Downloading the exact verifier bundle")
+        failure_phase = "artifact"
+        verifier_bundle = benchmark_verification.download_verifier_bundle(
+            pr, candidate, output / "verifier-artifact", gh=gh
         )
-        candidate_root = checkout / candidate
-        runtime_path = candidate_root / "runtime.json"
-        if not runtime_path.is_file() or runtime_path.is_symlink():
-            raise LetsInferError("pull-request candidate runtime.json is unavailable")
-        runtime = read_json(runtime_path)
-        release_path = candidate_root / "release.json"
-        if not release_path.is_file() or release_path.is_symlink():
-            raise LetsInferError("pull-request candidate release.json is unavailable")
-        release = read_json(release_path)
-        authors = release.get("authors")
-        if not isinstance(authors, list) or not authors:
-            raise LetsInferError("pull-request runtime authors are unavailable")
+        pack_path = verifier_bundle.runtime_pack
+        try:
+            with materialize(pack_path) as bundled_pack:
+                runtime = dict(bundled_pack.runtime)
+        except RuntimePackError as pack_error:
+            raise LetsInferError(str(pack_error)) from pack_error
+        authors = verifier_bundle.document["runtime_authors"]
         for author in authors:
             author_id = author.get("github_id") if isinstance(author, dict) else None
             if (
@@ -13304,21 +13327,19 @@ def _run_verification_worker(arguments: argparse.Namespace) -> int:
             raise LetsInferError(
                 "a pull-request runtime cannot grant its own qualification"
             )
-        adapter = candidate_root / "adapter" / "engine-adapter"
-        if adapter.is_symlink() or not adapter.is_file():
-            raise LetsInferError("pull-request Engine adapter is unavailable")
-        # Do not execute PR-controlled adapter code in the verifier's host
-        # credential context. The immutable runtime/Engine container performs
-        # protocol readiness later without GitHub credentials mounted.
-        pack_path = output / f"{candidate}.letsinfer"
+        subject = verifier_bundle.subject
         try:
-            pack = build_archive(candidate_root, pack_path)
-        except RuntimePackError as pack_error:
-            raise LetsInferError(str(pack_error)) from pack_error
-        subject = benchmark_verification.execution_subject(
-            runtime,
-            pack_sha256=sha256_file(pack_path),
-            pack_bytes=pack_path.stat().st_size,
+            benchmark_verification.load_local_engine(verifier_bundle, output)
+        except benchmark_verification.VerificationError as bundle_error:
+            raise LetsInferError(str(bundle_error)) from bundle_error
+        image_override = (
+            None
+            if verifier_bundle.engine_config_digest is None
+            else {
+                "distribution": "local-image-id",
+                "reference": verifier_bundle.engine_config_digest,
+                "immutable_id": verifier_bundle.engine_config_digest,
+            }
         )
         _verification_progress(job_id, "preflight", "Resolving baseline and dependencies")
         failure_phase = "preflight"
@@ -13344,6 +13365,7 @@ def _run_verification_worker(arguments: argparse.Namespace) -> int:
                 str(pack_path),
                 policy="community-verification",
                 requested_runtime=candidate,
+                image_override=image_override,
             )
         )
         if candidate_manifest["model"]["alias"] != logical_model:
@@ -13430,7 +13452,6 @@ def _run_verification_worker(arguments: argparse.Namespace) -> int:
         }
         atomic_json(output / "submission.json", receipt)
         _mark_benchmark_job(job_id, "completed")
-        return 0
     except _BenchmarkCancelled as caught:
         error = caught
         cancelled = True
@@ -13448,6 +13469,10 @@ def _run_verification_worker(arguments: argparse.Namespace) -> int:
                 _retire_qualification_candidate(remove_container=True)
             except BaseException as restore_error:
                 restore_errors.append(f"qualification slot: {restore_error}")
+        try:
+            benchmark_verification.cleanup_local_engine(output)
+        except BaseException as restore_error:
+            restore_errors.append(f"verifier Engine image: {restore_error}")
         if (
             not restore_errors
             and logical_model is not None
@@ -13482,6 +13507,8 @@ def _run_verification_worker(arguments: argparse.Namespace) -> int:
                 "resident_runtime_digest": baseline_current.get("digest"),
                 "qualification_slot_retired": not qualification_service_config_path().exists(),
             }
+    if error is None:
+        return 0
     if cancelled:
         _mark_benchmark_job(job_id, "cancelled")
         return 0

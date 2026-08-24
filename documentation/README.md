@@ -39,6 +39,7 @@ runtime, model artifacts, engine, lifecycle, safety, and telemetry.
 ## Contributing
 
 - [Testing and pull-request gates](contributing/testing.md)
+- [Developing and publishing runtimes](contributing/runtimes.md)
 
 The public contract is runtime schema 5, runtime artifact schema 5, catalog
 schema 6, revocation-ledger schema 1, and Engine protocol 2. Unsupported
