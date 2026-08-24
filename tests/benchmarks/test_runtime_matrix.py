@@ -250,6 +250,51 @@ class RuntimeMatrixTests(unittest.TestCase):
         self.assertEqual(len(selected), 12)
         self.assertTrue(all(cell["prompt_domain"] == "code" for cell in selected))
 
+    def test_schema_five_selects_short_code_and_prose_then_twelve_long_cells(self) -> None:
+        arguments = types.SimpleNamespace(
+            c1=False,
+            c2=False,
+            c4=False,
+            c8=False,
+            c16=False,
+            context_short=False,
+            context_32k=False,
+            context_64k=False,
+            context_128k=False,
+            context_256k=False,
+        )
+        declared = {
+            name: cell
+            for name, cell in self.cells.items()
+            if cell["prompt_domain"] == "code"
+            and name.endswith(("-c1", "-c2", "-c4"))
+        }
+        for domain in runtime_matrix.prompt_generator.DOMAINS:
+            name = f"short-{domain}-c1"
+            declared[name] = {
+                **self.cells[f"32k-{domain}-c1"],
+                "name": name,
+                "target_prompt_tokens": 256,
+                "max_tokens": 512,
+            }
+
+        concurrencies, contexts = runtime_matrix.selected_axes(arguments, declared)
+        selected = runtime_matrix.select_cells(
+            declared, concurrencies, contexts, context_first=True
+        )
+
+        self.assertEqual(contexts, ["short", "32k", "64k", "128k", "256k"])
+        self.assertEqual(
+            [cell["name"] for cell in selected],
+            ["short-code-c1", "short-prose-c1"]
+            + [
+                f"{context}-code-c{concurrency}"
+                for context in runtime_matrix.CONTEXTS
+                for concurrency in (1, 2, 4)
+            ],
+        )
+        self.assertEqual(len(selected), 14)
+
     def test_selectors_form_cross_product_with_c1_first(self) -> None:
         arguments = types.SimpleNamespace(
             c1=True,
@@ -361,6 +406,69 @@ class RuntimeMatrixTests(unittest.TestCase):
             _, cells = runtime_matrix.load_prompt_plan(path, manifest)
 
         self.assertEqual(list(cells), ["64k-code-c1"])
+
+    def test_schema_three_prompt_plan_binds_short_and_long_requests(self) -> None:
+        contract = {
+            "schema_version": 5,
+            "suite": "letsinfer-code-prose-v1",
+            "generator": {"id": "letsinfer-code-prose", "version": 5},
+            "domains": ["code"],
+            "execution": {
+                "isolation": "fresh-matrix",
+                "prefix_state": "shared",
+                "samples_per_cell": 1,
+                "stream_prefix": "shared-body",
+            },
+            "short": {
+                "domains": ["code", "prose"],
+                "prompt_tokens": 256,
+                "request": {
+                    "output_tokens": 512,
+                    "min_completion_tokens": 512,
+                    "require_natural_stop": False,
+                    "temperature": 0,
+                    "seed": 42042,
+                },
+            },
+            "tokenizer": {
+                "capability": "engine-rendered-chat-count-v1",
+                "model_sha256": "1" * 64,
+                "engine_image_sha256": "2" * 64,
+                "render_contract": "openai-chat-user-v1",
+            },
+            "request": {
+                "output_tokens": 128,
+                "min_completion_tokens": 128,
+                "require_natural_stop": False,
+                "temperature": 0,
+                "seed": 42042,
+            },
+            "sample_interval_seconds": 5,
+            "cases": [
+                {"id": "32k", "prompt_tokens": 32768, "concurrencies": [1]}
+            ],
+        }
+        manifest = {
+            "model": {"id": "fixture-model", "artifact": "model"},
+            "artifacts": [{"name": "model", "revision": "a" * 40}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = runtime_matrix.prompt_generator.materialize(
+                contract,
+                pathlib.Path(directory) / "inputs",
+                len,
+                model_id="fixture-model",
+                model_revision="a" * 40,
+            )
+            plan, cells = runtime_matrix.load_prompt_plan(plan_path, manifest)
+
+        self.assertEqual(plan["schema_version"], 3)
+        self.assertEqual(cells["short-code-c1"]["max_tokens"], 512)
+        self.assertEqual(cells["short-prose-c1"]["min_completion_tokens"], 512)
+        self.assertEqual(cells["32k-code-c1"]["max_tokens"], 128)
+        self.assertEqual(
+            [row["name"] for row in plan["contexts"]], ["short", "32k"]
+        )
 
     def test_partial_plan_rejects_unmaterialized_selection(self) -> None:
         with self.assertRaisesRegex(
@@ -605,6 +713,39 @@ class RuntimeMatrixTests(unittest.TestCase):
             sorted(cells),
             ["32k-code-c1", "32k-code-c2", "32k-code-c4"],
         )
+
+    def test_contract_cells_add_short_code_and_prose_with_own_request(self) -> None:
+        cells = runtime_matrix.contract_cells(
+            {
+                "schema_version": 5,
+                "domains": ["code"],
+                "short": {
+                    "domains": ["code", "prose"],
+                    "prompt_tokens": 256,
+                    "request": {"output_tokens": 512},
+                },
+                "request": {"output_tokens": 128},
+                "cases": [
+                    {
+                        "id": "32k",
+                        "prompt_tokens": 32768,
+                        "concurrencies": [1, 2, 4],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(
+            list(cells),
+            [
+                "short-code-c1",
+                "short-prose-c1",
+                "32k-code-c1",
+                "32k-code-c2",
+                "32k-code-c4",
+            ],
+        )
+        self.assertEqual(cells["short-code-c1"]["max_tokens"], 512)
+        self.assertEqual(cells["32k-code-c1"]["max_tokens"], 128)
 
     def test_expected_duration_scales_with_selected_prompt_volume(self) -> None:
         short = [{"fixtures": [{"expected_prompt_tokens": 32_768}]}]
