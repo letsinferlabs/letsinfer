@@ -61,6 +61,7 @@ SHARED_BENCHMARK_SCHEMA_VERSION = 3
 PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION = 4
 SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION = 5
 SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION = 6
+TTFT_CACHE_BENCHMARK_SCHEMA_VERSION = 7
 BENCHMARK_SUITE = "letsinfer-code-prose-v1"
 BENCHMARK_GENERATOR = "letsinfer-code-prose"
 BENCHMARK_GENERATOR_VERSION = 2
@@ -68,6 +69,7 @@ SHARED_BENCHMARK_GENERATOR_VERSION = 3
 PREFIX_SHARED_BENCHMARK_GENERATOR_VERSION = 4
 SHORT_WORKLOAD_BENCHMARK_GENERATOR_VERSION = 5
 SHORT_CONCURRENCY_BENCHMARK_GENERATOR_VERSION = 6
+TTFT_CACHE_BENCHMARK_GENERATOR_VERSION = 7
 BENCHMARK_TOKENIZER_CAPABILITY = "engine-rendered-chat-count-v1"
 BENCHMARK_RENDER_CONTRACT = "openai-chat-user-v1"
 SELECTION_SCHEMA_VERSION = 3
@@ -414,6 +416,8 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
     }:
         required = common_fields | {"domains", "execution", "short"}
+    elif schema_version == TTFT_CACHE_BENCHMARK_SCHEMA_VERSION:
+        required = common_fields | {"domains", "execution", "short", "ttft_cache"}
     else:
         required = common_fields
     if not isinstance(value, dict) or set(value) != required:
@@ -429,6 +433,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
             SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
             SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+            TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
         }
     ):
         raise RuntimePackError(f"{where}.schema_version is unsupported")
@@ -450,6 +455,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION: (
             SHORT_CONCURRENCY_BENCHMARK_GENERATOR_VERSION
         ),
+        TTFT_CACHE_BENCHMARK_SCHEMA_VERSION: TTFT_CACHE_BENCHMARK_GENERATOR_VERSION,
     }[value["schema_version"]]
     if (
         generator.get("id") != BENCHMARK_GENERATOR
@@ -463,6 +469,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
         SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+        TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
     }:
         domains = value.get("domains")
         if (
@@ -479,6 +486,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
             SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
             SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+            TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
         }:
             execution_fields.add("stream_prefix")
         if not isinstance(execution, dict) or set(execution) != execution_fields:
@@ -504,6 +512,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
                 PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
                 SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
                 SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+                TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
             }
             and execution.get("stream_prefix") != "shared-body"
         ):
@@ -539,6 +548,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
     if value["schema_version"] in {
         SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+        TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
     }:
         short = value.get("short")
         short_fields = {
@@ -546,7 +556,10 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             "prompt_tokens",
             "request",
         }
-        if value["schema_version"] == SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION:
+        if value["schema_version"] in {
+            SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+            TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+        }:
             short_fields.add("concurrencies")
         if not isinstance(short, dict) or set(short) != short_fields:
             raise RuntimePackError(
@@ -566,11 +579,52 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             raise RuntimePackError(f"{where}.short.prompt_tokens must be positive")
         _validate_benchmark_request(short.get("request"), f"{where}.short.request")
         if (
-            value["schema_version"] == SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION
+            value["schema_version"]
+            in {
+                SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+                TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+            }
             and short.get("concurrencies") != [1, 2, 4]
         ):
             raise RuntimePackError(
                 f"{where}.short.concurrencies must be exactly 1, 2, and 4"
+            )
+
+    if value["schema_version"] == TTFT_CACHE_BENCHMARK_SCHEMA_VERSION:
+        ttft_cache = value.get("ttft_cache")
+        if not isinstance(ttft_cache, dict) or set(ttft_cache) != {
+            "prompt_tokens",
+            "prompt_domain",
+            "repetitions",
+            "request",
+        }:
+            raise RuntimePackError(
+                f"{where}.ttft_cache must contain exactly prompt_tokens, "
+                "prompt_domain, repetitions, and request"
+            )
+        if ttft_cache.get("prompt_tokens") != 64_000:
+            raise RuntimePackError(
+                f"{where}.ttft_cache.prompt_tokens must be exactly 64000"
+            )
+        if ttft_cache.get("prompt_domain") != "code":
+            raise RuntimePackError(
+                f"{where}.ttft_cache.prompt_domain must be code"
+            )
+        if ttft_cache.get("repetitions") != 2:
+            raise RuntimePackError(
+                f"{where}.ttft_cache.repetitions must be exactly 2"
+            )
+        ttft_request = _validate_benchmark_request(
+            ttft_cache.get("request"), f"{where}.ttft_cache.request"
+        )
+        if (
+            ttft_request["output_tokens"] != 1
+            or ttft_request["min_completion_tokens"] != 1
+            or ttft_request["require_natural_stop"] is not False
+            or float(ttft_request["temperature"]) != 0.0
+        ):
+            raise RuntimePackError(
+                f"{where}.ttft_cache.request must request exactly one deterministic token"
             )
 
     interval = value.get("sample_interval_seconds")

@@ -736,6 +736,59 @@ class RuntimePackTests(unittest.TestCase):
         ):
             runtime_packs.validate_benchmark_contract(changed)
 
+    def test_ttft_cache_contract_requires_exact_64k_repeat(self) -> None:
+        value = self._benchmark()
+        value["schema_version"] = runtime_packs.TTFT_CACHE_BENCHMARK_SCHEMA_VERSION
+        value["generator"]["version"] = (  # type: ignore[index]
+            runtime_packs.TTFT_CACHE_BENCHMARK_GENERATOR_VERSION
+        )
+        value["domains"] = ["code"]
+        value["execution"] = {
+            "isolation": "fresh-matrix",
+            "prefix_state": "shared",
+            "samples_per_cell": 1,
+            "stream_prefix": "shared-body",
+        }
+        value["short"] = {
+            "domains": ["code", "prose"],
+            "prompt_tokens": 256,
+            "concurrencies": [1, 2, 4],
+            "request": {
+                "output_tokens": 512,
+                "min_completion_tokens": 512,
+                "require_natural_stop": False,
+                "temperature": 0,
+                "seed": 42042,
+            },
+        }
+        value["ttft_cache"] = {
+            "prompt_tokens": 64_000,
+            "prompt_domain": "code",
+            "repetitions": 2,
+            "request": {
+                "output_tokens": 1,
+                "min_completion_tokens": 1,
+                "require_natural_stop": False,
+                "temperature": 0,
+                "seed": 42042,
+            },
+        }
+        self.assertIs(runtime_packs.validate_benchmark_contract(value), value)
+
+        changed = json.loads(json.dumps(value))
+        changed["ttft_cache"]["prompt_tokens"] = 65_536
+        with self.assertRaisesRegex(
+            runtime_packs.RuntimePackError, "must be exactly 64000"
+        ):
+            runtime_packs.validate_benchmark_contract(changed)
+
+        changed = json.loads(json.dumps(value))
+        changed["ttft_cache"]["request"]["output_tokens"] = 2
+        with self.assertRaisesRegex(
+            runtime_packs.RuntimePackError, "exactly one deterministic token"
+        ):
+            runtime_packs.validate_benchmark_contract(changed)
+
     def test_artifact_tampering_and_symlinks_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

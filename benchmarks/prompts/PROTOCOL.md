@@ -46,7 +46,9 @@ Materialization rules:
    reuse the declared shared prefix. Generator v5/schema 5 first runs the fixed
    short-code and short-prose C1 cells with their own sealed request, then runs
    the schema-4-style declared context matrix. Generator v6/schema 6 runs each
-   fixed short domain at C1, C2, and C4 before that long matrix.
+   fixed short domain at C1, C2, and C4 before that long matrix. Generator
+   v7/schema 7 then runs one unique 64K code prompt cold and immediately
+   reloads its exact bytes with a one-token response budget.
 
 Generated prompt files are ignored evidence. They are never committed to core
 or packaged in a runtime.
