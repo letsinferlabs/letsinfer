@@ -5480,6 +5480,66 @@ def resolve_service_placement(
     return service_placement_identity(identity, placement, manifest_sha256)
 
 
+def resolve_benchmark_service_placement(
+    manifest: dict[str, Any], manifest_sha256: str
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Resolve a qualification slot and the resident groups that own its GPUs."""
+    identity, graph = _fresh_site_topology()
+    contract = target_contract(manifest)
+    try:
+        placement = graph.resolve(
+            contract, coordinator_id=identity.coordinator_id
+        )
+    except TopologyError:
+        try:
+            unallocated = TopologyGraph(
+                list(graph.members.values()),
+                allocated_devices={member_id: () for member_id in graph.members},
+            )
+            placement = unallocated.resolve(
+                contract, coordinator_id=identity.coordinator_id
+            )
+        except TopologyError as unallocated_error:
+            raise LetsInferError(
+                f"cannot resolve runtime placement: {unallocated_error}"
+            ) from unallocated_error
+    if placement.strategy != "single" or len(placement.member_ids) != 1:
+        raise LetsInferError(
+            "this target requires the engine-group installation path"
+        )
+    selected_devices = {
+        (member_id, device_uuid)
+        for member_id in placement.member_ids
+        for device_uuid in placement.device_uuids[member_id]
+    }
+    with _site_store() as store:
+        allocations = store.device_allocations(active_only=True)
+        groups = {row["group_id"]: row for row in store.engine_groups()}
+    resident_group_ids = tuple(
+        sorted(
+            {
+                str(row["group_id"])
+                for row in allocations
+                if (str(row["member_id"]), str(row["device_uuid"]))
+                in selected_devices
+            }
+        )
+    )
+    for group_id in resident_group_ids:
+        row = groups.get(group_id)
+        if row is None or (
+            (row["state"], row["desired_state"])
+            not in {("running", "running"), ("stopped", "stopped")}
+        ):
+            raise LetsInferError(
+                f"benchmark cannot isolate engine group {group_id} in its current state"
+            )
+    return (
+        service_placement_identity(identity, placement, manifest_sha256),
+        resident_group_ids,
+    )
+
+
 def resolve_manifest_placement(
     manifest: Mapping[str, Any],
 ) -> tuple[Any, TopologyGraph, Any]:
@@ -12094,6 +12154,53 @@ def _stop_engine_group_by_id(group_id: str) -> None:
         _sync_group_placement(store, stopped)
 
 
+def _start_engine_group_by_id(group_id: str) -> None:
+    """Recover one exact stopped group without affecting replica siblings."""
+    with _site_store() as store:
+        row = next(
+            (item for item in store.engine_groups() if item["group_id"] == group_id),
+            None,
+        )
+        if row is None or row["state"] == "removed":
+            raise LetsInferError("engine group disappeared before it could be restored")
+        if row["state"] == "running" and row["desired_state"] == "running":
+            return
+        if row["state"] != "stopped" or row["desired_state"] != "stopped":
+            raise LetsInferError(
+                "engine group entered an unsafe state before restoration"
+            )
+        orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
+        started = orchestrator.recover(acknowledge_trips=False)
+        _sync_group_placement(store, started)
+
+
+def _benchmark_engine_group_intents(
+    group_ids: Sequence[str],
+) -> dict[str, bool]:
+    """Return whether each exact conflicting group must be restored running."""
+    wanted = tuple(dict.fromkeys(group_ids))
+    if len(wanted) != len(group_ids) or any(
+        not re.fullmatch(r"[0-9a-f]{32}", group_id) for group_id in wanted
+    ):
+        raise LetsInferError("benchmark resident engine-group identity is invalid")
+    if not wanted:
+        return {}
+    with _site_store() as store:
+        rows = {row["group_id"]: row for row in store.engine_groups()}
+    intents: dict[str, bool] = {}
+    for group_id in wanted:
+        row = rows.get(group_id)
+        if row is None or (
+            (row["state"], row["desired_state"])
+            not in {("running", "running"), ("stopped", "stopped")}
+        ):
+            raise LetsInferError(
+                f"benchmark cannot isolate engine group {group_id} in its current state"
+            )
+        intents[group_id] = row["desired_state"] == "running"
+    return intents
+
+
 def _active_group_id_for_release(
     source: str,
     member_ids: Sequence[str],
@@ -13014,6 +13121,32 @@ def _benchmark_clean(*, assume_yes: bool) -> int:
 def _benchmark_stop_timeout_seconds() -> int:
     """Allow a cancelled benchmark to reload the runtime it displaced."""
 
+    try:
+        state = benchmark_jobs.read_state()
+    except benchmark_jobs.BenchmarkJobError:
+        state = None
+    metadata = state.get("metadata") if isinstance(state, dict) else None
+    resident_groups = (
+        metadata.get("resident_group_ids")
+        if isinstance(metadata, dict)
+        else None
+    )
+    if (
+        isinstance(resident_groups, list)
+        and resident_groups
+        and all(
+            isinstance(group_id, str)
+            and re.fullmatch(r"[0-9a-f]{32}", group_id)
+            for group_id in resident_groups
+        )
+    ):
+        # A resident Engine can legitimately take several minutes to reload.
+        # This wait ends as soon as restoration completes; it is not a fixed
+        # delay.  Keep the worker alive long enough to restore the exact group
+        # even when cancellation lands before the temporary candidate writes
+        # its qualification service configuration.
+        return 3_600
+
     path = qualification_service_config_path()
     if not path.is_file():
         return 30
@@ -13032,6 +13165,7 @@ def _benchmark_self_command(
     arguments: argparse.Namespace,
     executable: pathlib.Path,
     output: pathlib.Path,
+    resident_group_ids: Sequence[str] = (),
 ) -> list[str]:
     command = [str(executable), "benchmark", arguments.runtime]
     values = (
@@ -13056,6 +13190,8 @@ def _benchmark_self_command(
     for context in ("32k", "64k", "128k", "256k"):
         if getattr(arguments, f"context_{context}"):
             command.append(f"--{context}")
+    for group_id in resident_group_ids:
+        command.extend(["--resident-group", group_id])
     return command
 
 
@@ -13919,6 +14055,10 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         raise LetsInferError("--json is available only for benchmark status")
     if arguments.list and arguments.detach:
         raise LetsInferError("--detach cannot be combined with --list")
+    supplied_resident_groups = tuple(getattr(arguments, "resident_group", ()) or ())
+    if supplied_resident_groups and not arguments.job_worker:
+        raise LetsInferError("--resident-group is an internal benchmark-worker option")
+    nested_verification = bool(getattr(arguments, "nested_verification", False))
     manifest_path, manifest = resolve_model(arguments.runtime)
     root = runtime_source_root(manifest_path)
     verify_runtime_sources(manifest, root)
@@ -14003,15 +14143,35 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
     for context in ("32k", "64k", "128k", "256k"):
         if getattr(arguments, f"context_{context}"):
             command.append(f"--{context}")
+    benchmark_resident_group_ids: tuple[str, ...] = ()
     if arguments.list:
         command.append("--list")
     else:
         config_path = default_service_config_path()
         if config_path.is_file():
             config = read_service_config(config_path)
+            if supplied_resident_groups:
+                raise LetsInferError(
+                    "benchmark worker received resident groups for a legacy service"
+                )
         else:
             config = _qualification_core_plane_config()
-            placement = resolve_service_placement(manifest, sha256_file(manifest_path))
+            if nested_verification:
+                placement = resolve_service_placement(
+                    manifest, sha256_file(manifest_path)
+                )
+            else:
+                placement, benchmark_resident_group_ids = (
+                    resolve_benchmark_service_placement(
+                        manifest, sha256_file(manifest_path)
+                    )
+                )
+                if arguments.job_worker and (
+                    supplied_resident_groups != benchmark_resident_group_ids
+                ):
+                    raise LetsInferError(
+                        "benchmark resident engine groups changed before worker start"
+                    )
             config.update(
                 {
                     "engine_port": 18000,
@@ -14089,9 +14249,6 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
     elif arguments.job_worker:
         if not isinstance(arguments.job_id, str) or not arguments.job_id:
             raise LetsInferError("benchmark worker has no job identity")
-        nested_verification = bool(
-            getattr(arguments, "nested_verification", False)
-        )
         if not nested_verification:
             _mark_benchmark_job(arguments.job_id, "running")
         previous_term = signal.getsignal(signal.SIGTERM)
@@ -14107,6 +14264,7 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
             _run_benchmark_with_service_isolation(
                 command,
                 protection_config=config,
+                resident_group_ids=benchmark_resident_group_ids,
                 cleanup_command=[
                     str(letsinfer_bin),
                     "stop",
@@ -14135,12 +14293,24 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                 signal.signal(signal.SIGINT, previous_int)
     else:
         assert output is not None
-        worker_command = _benchmark_self_command(arguments, letsinfer_bin, output)
+        if benchmark_resident_group_ids:
+            _gateway_is_idle()
+        worker_command = _benchmark_self_command(
+            arguments,
+            letsinfer_bin,
+            output,
+            benchmark_resident_group_ids,
+        )
         try:
             state = benchmark_jobs.start(
                 worker_command,
                 runtime=arguments.runtime,
                 output_directory=str(output),
+                metadata=(
+                    {"resident_group_ids": list(benchmark_resident_group_ids)}
+                    if benchmark_resident_group_ids
+                    else None
+                ),
             )
         except benchmark_jobs.BenchmarkJobError as error:
             raise LetsInferError(str(error)) from error
@@ -14178,6 +14348,7 @@ def _run_benchmark_with_service_isolation(
     command: Sequence[str],
     *,
     protection_config: dict[str, Any] | None = None,
+    resident_group_ids: Sequence[str] = (),
     cleanup_command: Sequence[str] | None = None,
 ) -> None:
     """Suspend an active engine while a benchmark owns the inference host."""
@@ -14219,12 +14390,21 @@ def _run_benchmark_with_service_isolation(
             raise LetsInferError(
                 f"refusing benchmark while {name} state is {state!r}"
             )
+    resident_group_intents = _benchmark_engine_group_intents(
+        resident_group_ids
+    )
+    if any(resident_group_intents.values()):
+        # Recheck immediately in the worker.  The parent check avoids starting
+        # a doomed job, while this check closes most of the detach/start race
+        # before resident inference is deliberately suspended.
+        _gateway_is_idle()
 
     benchmark_error: BaseException | None = None
     restore_errors: list[str] = []
     benchmark_trip_latched = False
     recovery_stopped = False
     engine_stopped = False
+    stopped_groups: list[str] = []
     try:
         if recovery_state == "active":
             run_passthrough(
@@ -14241,6 +14421,10 @@ def _run_benchmark_with_service_isolation(
                 ["systemctl", "--user", "stop", ENGINE_SERVICE_NAME]
             )
             engine_stopped = True
+        for group_id, was_running in resident_group_intents.items():
+            if was_running:
+                stopped_groups.append(group_id)
+                _stop_engine_group_by_id(group_id)
         run_passthrough(command, failure_label="benchmark runner")
     except BaseException as error:
         benchmark_error = error
@@ -14279,6 +14463,14 @@ def _run_benchmark_with_service_isolation(
                     restore_errors.append(
                         f"retire temporary qualification candidate: {error}"
                     )
+        if not benchmark_trip_latched:
+            for group_id in reversed(stopped_groups):
+                try:
+                    _start_engine_group_by_id(group_id)
+                except BaseException as error:
+                    restore_errors.append(
+                        f"restore engine group {group_id}: {error}"
+                    )
         if engine_stopped and not benchmark_trip_latched:
             try:
                 run_passthrough(
@@ -14305,8 +14497,8 @@ def _run_benchmark_with_service_isolation(
         )
     if benchmark_trip_latched:
         message = (
-            "benchmark triggered Watchdog protection; the engine and recovery timer "
-            "remain stopped until explicit letsinfer recover"
+            "benchmark triggered Watchdog protection; resident inference and the "
+            "recovery timer remain stopped until explicit letsinfer recover"
         )
         if benchmark_error is not None:
             raise LetsInferError(f"{benchmark_error}; {message}") from benchmark_error
@@ -18076,6 +18268,9 @@ def parser() -> argparse.ArgumentParser:
     )
     benchmarking.add_argument("--job-worker", action="store_true", help=argparse.SUPPRESS)
     benchmarking.add_argument("--job-id", help=argparse.SUPPRESS)
+    benchmarking.add_argument(
+        "--resident-group", action="append", default=[], help=argparse.SUPPRESS
+    )
     benchmarking.set_defaults(action=benchmark_runtime, action_id="benchmark")
 
     installing = subcommands.add_parser(
