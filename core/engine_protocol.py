@@ -23,6 +23,7 @@ ENGINE_API_PROTOCOL = "openai-v1"
 ENGINE_HEALTH_PATH = "/health"
 ENGINE_MODELS_PATH = "/v1/models"
 ENGINE_TELEMETRY_PATH = "/v1/letsinfer/telemetry"
+ENGINE_PROGRESS_PATH = "/v1/letsinfer/progress"
 ENGINE_TOKEN_COUNT_PATH = "/v1/letsinfer/token-count"
 ENVIRONMENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 ARTIFACT_NAME_RE = re.compile(r"[a-z][a-z0-9._-]{0,62}")

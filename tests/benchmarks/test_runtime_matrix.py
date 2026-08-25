@@ -275,7 +275,7 @@ class RuntimeMatrixTests(unittest.TestCase):
                 runtime_matrix._COMPLETED_CELLS = ["32k-c1"]
                 runtime_matrix._CURRENT_CELL = "64k-c1"
                 runtime_matrix._write_benchmark_progress(
-                    "workload:64k-c1:loading",
+                    "workload:64k-c1:loading-model",
                     "Loading runtime for 64k-c1",
                     "running",
                 )
@@ -286,6 +286,7 @@ class RuntimeMatrixTests(unittest.TestCase):
                     value["selected_cells"],
                     ["32k-c1", "64k-c1", "128k-c1"],
                 )
+                self.assertEqual(value["preparation"]["state"], "loading-model")
             finally:
                 (
                     runtime_matrix._PROGRESS_FILE,
@@ -295,6 +296,22 @@ class RuntimeMatrixTests(unittest.TestCase):
                     runtime_matrix._COMPLETED_CELLS,
                     runtime_matrix._CURRENT_CELL,
                 ) = prior
+
+    def test_child_failure_prefers_actionable_stdout_over_stderr_warning(self) -> None:
+        result = types.SimpleNamespace(
+            returncode=1,
+            stdout="ERROR: Engine container was OOM-killed during startup\n",
+            stderr="WARNING runtime-unqualified\n",
+        )
+        with (
+            mock.patch.object(runtime_matrix.common, "run_command", return_value=result),
+            self.assertRaisesRegex(
+                runtime_matrix.RuntimeMatrixError,
+                "Engine container was OOM-killed during startup",
+            ) as raised,
+        ):
+            runtime_matrix._command_output(["letsinfer", "serve"], "launching")
+        self.assertNotIn("runtime-unqualified", str(raised.exception))
 
     def _control_bundle(
         self, parent: pathlib.Path, manifest: dict
