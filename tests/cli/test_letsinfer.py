@@ -19,6 +19,11 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_node_agent_memory_envelope_supports_runtime_staging(self) -> None:
+        unit = cli.render_node_service(pathlib.Path("/opt/letsinfer"))
+        self.assertIn("MemoryHigh=134217728\n", unit)
+        self.assertIn("MemoryMax=201326592\n", unit)
+
     def test_startup_oom_has_a_concise_engine_error(self) -> None:
         inspection = {
             "State": {
