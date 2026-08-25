@@ -31,6 +31,22 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
+    def test_failed_command_preserves_stderr_warning_and_stdout_error(self) -> None:
+        result = types.SimpleNamespace(
+            returncode=1,
+            stderr="qualification warning\n",
+            stdout="FATAL: actual startup failure\n",
+        )
+        with (
+            mock.patch.object(runtime_matrix.common, "run_command", return_value=result),
+            self.assertRaisesRegex(
+                runtime_matrix.RuntimeMatrixError,
+                "(?s)launch failed \\(exit 1\\): qualification warning.*"
+                "FATAL: actual startup failure",
+            ),
+        ):
+            runtime_matrix._command_output(["letsinfer", "serve"], "launch")
+
     def test_concurrent_public_decode_uses_the_stream_p50(self) -> None:
         cell = {
             "target_prompt_tokens": 260_000,

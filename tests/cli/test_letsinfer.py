@@ -10,6 +10,7 @@ import hashlib
 import io
 import pathlib
 import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -21,6 +22,42 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_engine_group_lifecycle_lock_serializes_threads(self) -> None:
+        first_acquired = threading.Event()
+        release_first = threading.Event()
+        second_attempted = threading.Event()
+        second_acquired = threading.Event()
+
+        def first() -> None:
+            with cli._engine_group_lifecycle_lock():
+                first_acquired.set()
+                release_first.wait(2)
+
+        def second() -> None:
+            second_attempted.set()
+            with cli._engine_group_lifecycle_lock():
+                second_acquired.set()
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            cli,
+            "default_engine_group_root",
+            return_value=pathlib.Path(directory) / "groups",
+        ):
+            first_thread = threading.Thread(target=first)
+            second_thread = threading.Thread(target=second)
+            first_thread.start()
+            self.assertTrue(first_acquired.wait(1))
+            second_thread.start()
+            self.assertTrue(second_attempted.wait(1))
+            self.assertFalse(second_acquired.wait(0.05))
+            release_first.set()
+            first_thread.join(2)
+            second_thread.join(2)
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertTrue(second_acquired.is_set())
+
     def test_benchmark_placement_borrows_only_overlapping_group_devices(self) -> None:
         member_id = "a" * 32
         group_id = "b" * 32
@@ -125,6 +162,44 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         self.assertEqual(groups, ())
         topology.assert_not_called()
 
+    def test_qualification_reuses_only_a_stopped_resident_group_slot(self) -> None:
+        group_id = "a" * 32
+        placement = {"placement_id": "b" * 32}
+        with (
+            mock.patch.object(
+                cli,
+                "resolve_benchmark_service_placement",
+                return_value=(placement, (group_id,)),
+            ),
+            mock.patch.object(
+                cli,
+                "_benchmark_engine_group_intents",
+                return_value={group_id: False},
+            ),
+        ):
+            self.assertIs(
+                cli._resolve_qualification_service_placement({}, "c" * 64),
+                placement,
+            )
+
+        with (
+            mock.patch.object(
+                cli,
+                "resolve_benchmark_service_placement",
+                return_value=(placement, (group_id,)),
+            ),
+            mock.patch.object(
+                cli,
+                "_benchmark_engine_group_intents",
+                return_value={group_id: True},
+            ),
+            self.assertRaisesRegex(
+                cli.LetsInferError,
+                "requires conflicting resident engine groups to be stopped",
+            ),
+        ):
+            cli._resolve_qualification_service_placement({}, "c" * 64)
+
     def test_benchmark_isolation_restores_running_group_on_success_and_failure(
         self,
     ) -> None:
@@ -184,6 +259,82 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                             ["matrix"], resident_group_ids=(group_id,)
                         )
                 self.assertEqual(events, ["idle", "stop", "benchmark", "start"])
+
+    def test_stopped_engine_group_restoration_uses_start(self) -> None:
+        group_id = "a" * 32
+        row = {
+            "group_id": group_id,
+            "state": "stopped",
+            "desired_state": "stopped",
+        }
+        store = mock.Mock()
+        store.engine_groups.return_value = [row]
+        store_context = mock.MagicMock()
+        store_context.__enter__.return_value = store
+        orchestrator = mock.Mock()
+        started = {"group_id": group_id, "state": "running"}
+        orchestrator.start.return_value = started
+        with (
+            mock.patch.object(
+                cli,
+                "_engine_group_lifecycle_lock",
+                return_value=contextlib.nullcontext(),
+            ),
+            mock.patch.object(cli, "_site_store", return_value=store_context),
+            mock.patch.object(
+                cli,
+                "_restore_engine_group_orchestrator",
+                return_value=(orchestrator, {}),
+            ),
+            mock.patch.object(cli, "_sync_group_placement") as sync,
+        ):
+            cli._start_engine_group_by_id(group_id)
+
+        orchestrator.start.assert_called_once_with()
+        orchestrator.recover.assert_not_called()
+        sync.assert_called_once_with(store, started)
+
+    def test_benchmark_failure_retains_original_error_when_restore_fails(self) -> None:
+        group_id = "a" * 32
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(
+                    cli,
+                    "qualification_service_config_path",
+                    return_value=pathlib.Path(directory) / "missing.json",
+                ),
+                mock.patch.object(cli, "protection_trip_latched", return_value=False),
+                mock.patch.object(
+                    cli,
+                    "_unit_enabled_active",
+                    return_value=("disabled", "inactive"),
+                ),
+                mock.patch.object(
+                    cli,
+                    "_benchmark_engine_group_intents",
+                    return_value={group_id: True},
+                ),
+                mock.patch.object(cli, "_gateway_is_idle"),
+                mock.patch.object(cli, "_stop_engine_group_by_id"),
+                mock.patch.object(
+                    cli,
+                    "_start_engine_group_by_id",
+                    side_effect=cli.LetsInferError("fixture restore failed"),
+                ),
+                mock.patch.object(
+                    cli,
+                    "run_passthrough",
+                    side_effect=cli.LetsInferError("fixture benchmark failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    cli.LetsInferError,
+                    "benchmark failed: fixture benchmark failed; service restoration "
+                    "was incomplete: restore engine group .*: fixture restore failed",
+                ):
+                    cli._run_benchmark_with_service_isolation(
+                        ["matrix"], resident_group_ids=(group_id,)
+                    )
 
     def test_benchmark_isolation_restores_group_when_stop_fails(self) -> None:
         group_id = "a" * 32
@@ -666,7 +817,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     cli,
-                    "resolve_service_placement",
+                    "_resolve_qualification_service_placement",
                     return_value={
                         "placement_id": "6" * 32,
                         "placement_strategy": "single",
