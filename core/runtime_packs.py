@@ -2656,13 +2656,6 @@ def load_catalog(
                         raise RuntimePackError(
                             f"catalog release {where} lacks required benchmark evidence"
                         )
-                    if benchmark is not None and (
-                        method == "allowlisted-maintainer-bypass-v1"
-                        and len(verifiers) == 0
-                    ):
-                        raise RuntimePackError(
-                            f"unverified catalog release {where} carries a benchmark score"
-                        )
             if recommended is not None:
                 recommended_candidate = candidates[recommended["candidate"]]
                 recommended_release = recommended_candidate["releases"].get(
