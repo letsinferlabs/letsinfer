@@ -495,8 +495,6 @@ def dashboard_lines(
     safety_detail = (
         "intentional stop · no trip"
         if lifecycle_state == "stopped"
-        else str(_mapping(protection.get("incident")).get("reason") or "")
-        if protection.get("trip_latched") is True
         else ""
     )
     guard_symbol = (

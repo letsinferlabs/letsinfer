@@ -48,17 +48,10 @@ typedef struct watchdog_safety_input {
     uint64_t swap_used_bytes;
     uint64_t psi_some_delta_us;
     uint64_t psi_full_delta_us;
-    uint64_t memory_current_bytes;
-    uint64_t memory_high_bytes;
-    uint64_t memory_max_bytes;
-    uint64_t memory_swap_current_bytes;
-    uint64_t memory_swap_max_bytes;
-    uint64_t cgroup_high_delta;
     uint64_t cgroup_oom_delta;
     uint64_t cgroup_oom_kill_delta;
     uint64_t cgroup_oom_group_kill_delta;
     uint64_t cgroup_max_delta;
-    uint32_t cgroup_processes;
 } watchdog_safety_input;
 
 typedef struct watchdog_safety_decision {
@@ -96,7 +89,6 @@ typedef struct watchdog_safety_runtime {
     char state_path[WATCHDOG_SAFETY_PATH_MAX];
     char ack_path[WATCHDOG_SAFETY_PATH_MAX];
     char trip_path[WATCHDOG_SAFETY_PATH_MAX];
-    char incident_path[WATCHDOG_SAFETY_PATH_MAX];
     char event_path[WATCHDOG_SAFETY_PATH_MAX];
     char cgroup_path[WATCHDOG_SAFETY_PATH_MAX];
     int event_fd;
@@ -108,7 +100,6 @@ typedef struct watchdog_safety_runtime {
     uint64_t baseline_oom_kill;
     uint64_t baseline_oom_group_kill;
     uint64_t baseline_max;
-    uint64_t baseline_high;
     uint32_t state_failures;
     bool has_pressure_baseline;
     bool has_cgroup_baseline;
