@@ -8230,6 +8230,23 @@ def install_engine_group(
     return 0
 
 
+def _validated_engine_group_document(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the immutable plan identity stored beside one engine group."""
+    document = validate_group_document(dict(row["plan"]))
+    if (
+        row.get("group_id") != document["group_id"]
+        or row.get("runtime_digest") != document["runtime_digest"]
+        or row.get("manifest_sha256") != document["manifest_sha256"]
+        or row.get("topology_sha256") != document["topology_sha256"]
+        or row.get("plan_sha256")
+        != hashlib.sha256(canonical_bytes(document)).hexdigest()
+        or not REGISTRY_DIGEST_RE.fullmatch(str(row.get("source", "")))
+        or row.get("source") != document["release"]["source"]
+    ):
+        raise LetsInferError("durable engine-group identity is inconsistent")
+    return document
+
+
 def _restore_engine_group_orchestrator(
     store: SiteStore,
     row: Mapping[str, Any],
@@ -8241,18 +8258,7 @@ def _restore_engine_group_orchestrator(
 ) -> tuple[EngineGroupOrchestrator, dict[str, Any]]:
     """Rebuild a controller only from immutable objects and durable group state."""
     try:
-        document = validate_group_document(dict(row["plan"]))
-        if (
-            row.get("group_id") != document["group_id"]
-            or row.get("runtime_digest") != document["runtime_digest"]
-            or row.get("manifest_sha256") != document["manifest_sha256"]
-            or row.get("topology_sha256") != document["topology_sha256"]
-            or row.get("plan_sha256")
-            != hashlib.sha256(canonical_bytes(document)).hexdigest()
-            or not REGISTRY_DIGEST_RE.fullmatch(str(row.get("source", "")))
-            or row.get("source") != document["release"]["source"]
-        ):
-            raise LetsInferError("durable engine-group identity is inconsistent")
+        document = _validated_engine_group_document(row)
         runtime_root = default_runtime_home() / ".objects" / document["runtime_digest"]
         runtime = verify_descriptor(runtime_root)
         if runtime.digest != document["runtime_digest"]:
@@ -9105,6 +9111,82 @@ def _selected_install_node_ids(
     return (identity.member_id,)
 
 
+def _remove_terminal_engine_group_without_runtime(
+    store: SiteStore,
+    row: Mapping[str, Any],
+    allocations: Sequence[Mapping[str, Any]],
+) -> None:
+    """Forget only a proven-inactive failed group whose immutable pack is gone."""
+    document = _validated_engine_group_document(row)
+    placement = next(
+        (
+            item
+            for item in store.placements()
+            if item["placement_id"] == row["placement_id"]
+        ),
+        None,
+    )
+    member_states = row.get("members")
+    resources = document["resources"]
+    members_by_id = (
+        {
+            item.get("member_id"): item
+            for item in member_states
+            if isinstance(item, Mapping)
+        }
+        if isinstance(member_states, list)
+        else {}
+    )
+    terminal_members = (
+        len(members_by_id) == len(resources)
+        and all(
+            resource["node_id"] in members_by_id
+            and members_by_id[resource["node_id"]].get("task_id")
+            == resource["task_id"]
+            and members_by_id[resource["node_id"]].get("state")
+            in {"failed", "removed", "stopped", "unreachable"}
+            for resource in resources
+        )
+    )
+    if (
+        placement is None
+        or row.get("state") != "failed"
+        or row.get("desired_state") not in {"stopped", "removed"}
+        or placement.get("state") not in {"failed", "stopped"}
+        or any(
+            isinstance(endpoint, Mapping) and endpoint.get("healthy") is not False
+            for endpoint in placement.get("endpoints", [])
+        )
+        or any(allocation.get("state") != "released" for allocation in allocations)
+        or not terminal_members
+    ):
+        raise LetsInferError(
+            "engine-group runtime object is missing while durable state may still be active"
+        )
+    removed_members = [
+        {
+            "member_id": resource["node_id"],
+            "task_id": resource["task_id"],
+            "state": "removed",
+            "operation_id": None,
+            "error": None,
+        }
+        for resource in resources
+    ]
+    removed = store.set_engine_group(
+        document,
+        placement_id=str(row["placement_id"]),
+        source=str(row["source"]),
+        engine_credential_sha256=str(row["engine_credential_sha256"]),
+        desired_state="removed",
+        state="removed",
+        members=removed_members,
+        action="group.remove",
+    )
+    store.set_group_allocation_state(document["group_id"], "released")
+    _sync_group_placement(store, removed)
+
+
 def _remove_engine_groups_by_id(group_ids: Sequence[str]) -> None:
     """Drain and remove exact groups before an explicitly approved replacement."""
     wanted = tuple(dict.fromkeys(group_ids))
@@ -9126,8 +9208,22 @@ def _remove_engine_groups_by_id(group_ids: Sequence[str]) -> None:
             row = rows[group_id]
             if row["state"] == "removed" or row["desired_state"] == "removed":
                 continue
-            orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
             allocations = allocations_by_group.get(group_id, [])
+            runtime_root = default_runtime_home() / ".objects" / str(
+                row["runtime_digest"]
+            )
+            if runtime_root.is_symlink() or (
+                runtime_root.exists() and not runtime_root.is_dir()
+            ):
+                raise LetsInferError(
+                    f"engine-group runtime storage is unsafe: {runtime_root}"
+                )
+            if not runtime_root.is_dir():
+                _remove_terminal_engine_group_without_runtime(
+                    store, row, allocations
+                )
+                continue
+            orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
             allocations_released = bool(allocations) and all(
                 allocation["state"] == "released" for allocation in allocations
             )

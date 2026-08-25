@@ -13,7 +13,7 @@ def release_identity(
 ) -> dict[str, object]:
     return {
         "logical_model": "fixture-model",
-        "candidate_id": "fixture-runtime",
+        "candidate_id": "fixture--example--model--fixture-target",
         "version": "1.2.3-rc.1",
         "source": "registry.example/runtime@sha256:" + "7" * 64,
         "runtime_digest": runtime_digest,
