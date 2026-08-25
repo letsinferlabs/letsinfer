@@ -101,6 +101,10 @@ The worker writes a validated `benchmark.json`. Each result row includes:
 - a fixed-schema Watchdog telemetry timeline; and
 - immutable runtime, installation, contract, and result identities.
 
+For C1, `decode_tps` is the single stream's decode rate. For concurrent cells,
+it is the p50 stream rate; aggregate throughput remains the batch-wide rate.
+The immutable private evidence retains every per-stream value and distribution.
+
 Schema-5 `benchmark.json` records produced by schema-3 through schema-7 shared
 contracts also
 embed the complete declarative benchmark contract. Its canonical SHA-256 must
