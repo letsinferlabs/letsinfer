@@ -9,6 +9,7 @@ import base64
 import contextlib
 import datetime as dt
 import errno
+import fcntl
 import functools
 import getpass
 import hashlib
@@ -638,6 +639,49 @@ def default_gateway_group_telemetry_path() -> pathlib.Path:
 
 def default_engine_group_root() -> pathlib.Path:
     return site_data_root() / "engine-groups"
+
+
+_ENGINE_GROUP_LIFECYCLE_THREAD_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def _engine_group_lifecycle_lock() -> Iterable[None]:
+    """Serialize explicit group lifecycle against background reconciliation."""
+    with _ENGINE_GROUP_LIFECYCLE_THREAD_LOCK:
+        root = default_engine_group_root()
+        ensure_private_directory(root)
+        path = root / ".lifecycle.lock"
+        descriptor = os.open(
+            path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            details = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or details.st_uid != os.getuid()
+                or stat.S_IMODE(details.st_mode) != 0o600
+            ):
+                raise LetsInferError(
+                    "engine-group lifecycle lock must be private and user-owned"
+                )
+            with os.fdopen(descriptor, "r+", encoding="utf-8") as handle:
+                descriptor = -1
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                yield
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _serialized_engine_group_lifecycle(function: Any) -> Any:
+    @functools.wraps(function)
+    def serialized(*args: Any, **kwargs: Any) -> Any:
+        with _engine_group_lifecycle_lock():
+            return function(*args, **kwargs)
+
+    return serialized
 
 
 def default_watchdog_cert_path() -> pathlib.Path:
@@ -5660,6 +5704,23 @@ def update_service_placement(
         raise LetsInferError(f"cannot update service placement: {error}") from error
 
 
+def _resolve_qualification_service_placement(
+    manifest: dict[str, Any], manifest_sha256: str
+) -> dict[str, Any]:
+    """Reuse a benchmark slot only after every conflicting group is stopped."""
+    placement, resident_group_ids = resolve_benchmark_service_placement(
+        manifest, manifest_sha256
+    )
+    intents = _benchmark_engine_group_intents(resident_group_ids)
+    running = sorted(group_id for group_id, value in intents.items() if value)
+    if running:
+        raise LetsInferError(
+            "qualification requires conflicting resident engine groups to be "
+            "stopped first: " + ",".join(running)
+        )
+    return placement
+
+
 def _qualification_config(
     *,
     manifest_path: pathlib.Path,
@@ -5688,7 +5749,13 @@ def _qualification_config(
         manifest_path,
         manifest,
     )
-    placement = resolve_service_placement(manifest, manifest_sha256)
+    placement = (
+        resolve_service_placement(manifest, manifest_sha256)
+        if resident_path.is_file()
+        else _resolve_qualification_service_placement(
+            manifest, manifest_sha256
+        )
+    )
     candidate = dict(resident)
     for key in ("runtime_name", "runtime_version", "runtime_digest", "runtime_policy"):
         candidate.pop(key, None)
@@ -8737,6 +8804,7 @@ def _engine_group_status(model: str | None) -> list[dict[str, Any]]:
     return values
 
 
+@_serialized_engine_group_lifecycle
 def reconcile_engine_groups_once() -> dict[str, Any]:
     """Refresh durable health without changing a group's desired lifecycle."""
     summary: dict[str, list[str]] = {"healthy": [], "degraded": [], "failed": []}
@@ -12149,6 +12217,7 @@ def _cleanup_failed_group_release(
         _remove_engine_groups_by_id(candidates)
 
 
+@_serialized_engine_group_lifecycle
 def _stop_engine_group_by_id(group_id: str) -> None:
     """Stop one exact group without affecting its replica siblings."""
     with _site_store() as store:
@@ -12165,6 +12234,7 @@ def _stop_engine_group_by_id(group_id: str) -> None:
         _sync_group_placement(store, stopped)
 
 
+@_serialized_engine_group_lifecycle
 def _start_engine_group_by_id(group_id: str) -> None:
     """Recover one exact stopped group without affecting replica siblings."""
     with _site_store() as store:
@@ -12181,7 +12251,7 @@ def _start_engine_group_by_id(group_id: str) -> None:
                 "engine group entered an unsafe state before restoration"
             )
         orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
-        started = orchestrator.recover(acknowledge_trips=False)
+        started = orchestrator.start()
         _sync_group_placement(store, started)
 
 
@@ -14501,7 +14571,8 @@ def _run_benchmark_with_service_isolation(
         detail = "; ".join(restore_errors)
         if benchmark_error is not None:
             raise LetsInferError(
-                f"benchmark failed and service restoration was incomplete: {detail}"
+                f"benchmark failed: {benchmark_error}; "
+                f"service restoration was incomplete: {detail}"
             ) from benchmark_error
         raise LetsInferError(
             f"benchmark completed but service restoration was incomplete: {detail}"
