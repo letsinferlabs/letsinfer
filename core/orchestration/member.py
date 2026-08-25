@@ -441,9 +441,10 @@ class MemberJobStore:
         if row is None:
             return None
         result = dict(row)
+        result_json = result.pop("result_json")
         result["result"] = (
-            json.loads(result.pop("result_json"))
-            if result["result_json"] is not None
+            json.loads(result_json)
+            if result_json is not None
             else None
         )
         return result

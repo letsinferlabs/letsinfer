@@ -215,6 +215,7 @@ class MemberJobTests(unittest.TestCase):
                 time.sleep(0.01)
 
             self.assertEqual(status["state"], "failed")
+            self.assertNotIn("result_json", status)
             self.assertEqual(
                 status["error"],
                 "RuntimeError: adapter failed; api_key=[REDACTED]",
