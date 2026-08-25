@@ -151,6 +151,32 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         self.assertEqual([call.args[2] for call in protect.call_args_list], ["pending", "starting", "armed"])
         self.assertEqual(command.call_args.kwargs["group_context"]["task_id"], "task-1")
 
+    def test_main_node_endpoint_owner_advertises_its_loopback_listener(self) -> None:
+        task = {**self.task, "endpoint_owner": True}
+        config = {**self.config, "task": task}
+        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        with (
+            mock.patch.object(
+                cli,
+                "read_site_identity",
+                return_value=mock.Mock(role="main", member_id=self.member_id),
+            ),
+            mock.patch.object(cli, "certificate_sha256", return_value="7" * 64),
+        ):
+            local = executor._safe_result(config, "running")
+        self.assertEqual(local["endpoint"], "https://127.0.0.1:18000")
+
+        with (
+            mock.patch.object(
+                cli,
+                "read_site_identity",
+                return_value=mock.Mock(role="child", member_id=self.member_id),
+            ),
+            mock.patch.object(cli, "certificate_sha256", return_value="7" * 64),
+        ):
+            remote = executor._safe_result(config, "running")
+        self.assertEqual(remote["endpoint"], "https://member.local:18000")
+
     def test_stop_disarms_before_removing_the_exact_managed_container(self) -> None:
         executor = cli.LocalEngineGroupExecutor(self.member_id)
         with (
