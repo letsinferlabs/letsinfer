@@ -31,6 +31,106 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
+    def test_concurrent_public_decode_uses_the_stream_p50(self) -> None:
+        cell = {
+            "target_prompt_tokens": 260_000,
+            "max_tokens": 128,
+            "prompt_domain": "code",
+            "prompt_suite": "letsinfer-code-prose-v1",
+            "prompt_set_sha256": "a" * 64,
+        }
+        summary = {
+            "prompt_tokens": [254_400] * 4,
+            "concurrency": 4,
+            "decode_tokens_per_second": {
+                "mean": 87_201.337,
+                "p50": 54.918,
+            },
+            "ttft_ms": {"p50": 6_991.0, "p95": 7_700.0},
+            "cached_prompt_tokens": {"max": 254_400.0},
+            "aggregate_completion_tokens_per_second": 38.199,
+            "measurement_started_unix_ms": 10_000,
+        }
+
+        with mock.patch.object(
+            runtime_matrix.benchmark_record,
+            "watchdog_summary",
+            return_value={},
+        ):
+            result = runtime_matrix.public_benchmark_result(cell, summary, [])
+
+        self.assertEqual(result["decode_tps"], 54.918)
+        self.assertEqual(result["ttft_statistic"], "p50")
+
+    def test_short_workload_waits_for_a_watchdog_boundary_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            cell_output = root / "cell"
+            cell_output.mkdir()
+            runtime_matrix.common.write_json_atomic(
+                cell_output / "results.json",
+                {
+                    "qualification_passed": True,
+                    "selected_cells": ["ttftwarm-code-c1"],
+                    "container_before": {"id": "shared-container"},
+                    "summaries": [
+                        {
+                            "measurement_started_unix_ms": 10_000,
+                            "measurement_ended_unix_ms": 10_390,
+                        }
+                    ],
+                },
+            )
+            arguments = types.SimpleNamespace(
+                watchdog_port=9768,
+                watchdog_ca_file=root / "ca.crt",
+                watchdog_controller_cert_file=root / "controller.crt",
+                watchdog_controller_key_file=root / "controller.key",
+                timeout=30,
+            )
+            telemetry = [{"sequence": 1, "unix_ms": 11_000}]
+
+            with (
+                mock.patch.object(
+                    runtime_matrix.time,
+                    "time_ns",
+                    return_value=12_500_000_000,
+                ),
+                mock.patch.object(runtime_matrix.time, "sleep") as sleep,
+                mock.patch.object(
+                    runtime_matrix.watchdog_client,
+                    "query_range",
+                    return_value=telemetry,
+                ) as query,
+            ):
+                result = runtime_matrix._collect_cell_evidence(
+                    arguments,
+                    {"name": "ttftwarm-code-c1"},
+                    cell_output,
+                    root / "store",
+                    root / "launch",
+                    set(),
+                    shared_matrix=True,
+                )
+
+            sleep.assert_not_called()
+            query.assert_called_once_with(
+                start_unix_ms=10_000,
+                end_unix_ms=12_000,
+                port=9768,
+                ca_file=root / "ca.crt",
+                controller_cert_file=root / "controller.crt",
+                controller_key_file=root / "controller.key",
+                timeout=30,
+            )
+            evidence = json.loads(
+                pathlib.Path(result["watchdog_telemetry"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(evidence["measurement_ended_unix_ms"], 10_390)
+            self.assertEqual(
+                evidence["telemetry_observation_ended_unix_ms"], 12_000
+            )
+
     def test_one_token_summary_has_no_decode_rate(self) -> None:
         summary = {
             "cell": "ttftcold-code-c1",
@@ -1081,7 +1181,10 @@ class RuntimeMatrixTests(unittest.TestCase):
                                 "cell": cell,
                                 "concurrency": concurrency,
                                 "prompt_tokens": [32_711] * concurrency,
-                                "decode_tokens_per_second": {"mean": 24.5},
+                                "decode_tokens_per_second": {
+                                    "mean": 24.5,
+                                    "p50": 24.5,
+                                },
                                 "ttft_ms": {
                                     "mean": 32_000.0,
                                     "p50": 32_000.0,
@@ -1380,7 +1483,10 @@ class RuntimeMatrixTests(unittest.TestCase):
                                 "prompt_tokens": [
                                     32_711 if domain == "code" else 32_719
                                 ],
-                                "decode_tokens_per_second": {"mean": 24.5},
+                                "decode_tokens_per_second": {
+                                    "mean": 24.5,
+                                    "p50": 24.5,
+                                },
                                 "ttft_ms": {
                                     "mean": 32_000.0,
                                     "p50": 32_000.0,
