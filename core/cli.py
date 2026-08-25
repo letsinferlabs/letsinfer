@@ -7938,7 +7938,22 @@ def _sync_group_placement(
         item["member_id"]: item["state"] for item in group["member_states"]
     }
     group_running = group["state"] == "running"
-    updated = dict(placement)
+    updated = {
+        key: placement[key]
+        for key in (
+            "placement_id",
+            "service_id",
+            "model",
+            "runtime",
+            "target",
+            "strategy",
+            "state",
+            "topology_sha256",
+            "members",
+            "endpoints",
+            "capacity",
+        )
+    }
     if group_running:
         updated["state"] = "running"
     elif group["desired_state"] in {"stopped", "removed"} and group["state"] in {
@@ -8666,6 +8681,11 @@ def _remove_engine_groups_by_id(group_ids: Sequence[str]) -> None:
         return
     with _site_store() as store:
         rows = {row["group_id"]: row for row in store.engine_groups()}
+        allocations_by_group: dict[str, list[dict[str, Any]]] = {}
+        for allocation in store.device_allocations():
+            allocations_by_group.setdefault(
+                str(allocation["group_id"]), []
+            ).append(dict(allocation))
         missing = [group_id for group_id in wanted if group_id not in rows]
         if missing:
             raise LetsInferError(
@@ -8676,7 +8696,14 @@ def _remove_engine_groups_by_id(group_ids: Sequence[str]) -> None:
             if row["state"] == "removed" or row["desired_state"] == "removed":
                 continue
             orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
-            if row["state"] not in {"staged", "stopped"}:
+            allocations = allocations_by_group.get(group_id, [])
+            allocations_released = bool(allocations) and all(
+                allocation["state"] == "released" for allocation in allocations
+            )
+            if (
+                row["state"] not in {"staged", "stopped"}
+                and not allocations_released
+            ):
                 stopped = orchestrator.stop()
                 _sync_group_placement(store, stopped)
             removed = orchestrator.remove()
@@ -8732,23 +8759,6 @@ def _install_catalog_nodes(
             for row in resident
             if row["placement_id"] in placements
         }
-        if (
-            resident
-            and resident_models == {arguments.model}
-            and getattr(arguments, "runtime", None) is None
-        ):
-            if presenter is not None:
-                plan_rows.append(
-                    {
-                        "node": display_name,
-                        "state": "Serving",
-                        "detail": f"Already serving {arguments.model}",
-                        "_semantic": command_ui.Semantic.SUCCESS,
-                    }
-                )
-            else:
-                print(f"OK {display_name}  already serving {arguments.model}")
-            continue
         try:
             release, choice, _node_graph = _catalog_release_for_node(
                 catalog,
@@ -8822,9 +8832,12 @@ def _install_catalog_nodes(
     if replacements and not getattr(arguments, "replace_existing", False):
         if not sys.stdin.isatty():
             raise LetsInferError(
-                "installation would replace running groups; retry with --replace-existing"
+                "installation would replace installed runtime groups; retry with "
+                "--replace-existing"
             )
-        if not ui.confirm("Replace the listed running model groups?"):
+        if not ui.confirm(
+            "An existing runtime must be removed first. Replace it now?"
+        ):
             raise LetsInferError("installation cancelled before replacement")
     activity = _command_activity(arguments, action_id="install")
     with activity, ui.protect_stdout(activity):
@@ -9687,7 +9700,13 @@ def status(arguments: argparse.Namespace) -> int:
     ):
         def snapshot() -> dict[str, Any]:
             values = vars(arguments).copy()
-            values.update({"json": True, "_single_snapshot": True})
+            values.update(
+                {
+                    "json": True,
+                    "_single_snapshot": True,
+                    "_live_snapshot": True,
+                }
+            )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 code = status(argparse.Namespace(**values))
@@ -9708,6 +9727,7 @@ def status(arguments: argparse.Namespace) -> int:
         return ui.live_runtime_status(snapshot)
     model_value = getattr(arguments, "model", None)
     model = model_value if isinstance(model_value, str) else None
+    live_groups: list[dict[str, Any]] = []
     if model is not None and (arguments.name is not None or arguments.config is not None):
         raise LetsInferError("a model cannot be combined with --name or --config")
     if arguments.name is None and arguments.config is None and site_identity_path().exists():
@@ -9715,21 +9735,25 @@ def status(arguments: argparse.Namespace) -> int:
         if identity.role == "main":
             groups = _engine_group_status(model)
             if groups:
-                if arguments.json:
-                    print(json.dumps({"engine_groups": groups}, sort_keys=True))
+                if getattr(arguments, "_live_snapshot", False):
+                    live_groups = groups
                 else:
-                    for group in groups:
-                        print(
-                            f"GROUP {group['group_id']} model={group['model']} "
-                            f"strategy={group['strategy']} state={group['state']} "
-                            f"desired={group['desired_state']}"
-                        )
-                        for member in group["members"]:
+                    if arguments.json:
+                        print(json.dumps({"engine_groups": groups}, sort_keys=True))
+                    else:
+                        for group in groups:
                             print(
-                                f"  MEMBER {member['member_id']} role={member['role']} "
-                                f"state={member['state']}"
+                                f"GROUP {group['group_id']} model={group['model']} "
+                                f"strategy={group['strategy']} state={group['state']} "
+                                f"desired={group['desired_state']}"
                             )
-                return 0
+                            for member in group["members"]:
+                                print(
+                                    f"  MEMBER {member['member_id']} "
+                                    f"task={member['task_id']} "
+                                    f"state={member['state']}"
+                                )
+                    return 0
         elif model is not None:
             raise LetsInferError(
                 "node-wide engine-group status is available from the main node"
@@ -9838,6 +9862,8 @@ def status(arguments: argparse.Namespace) -> int:
                 else None
             ),
         }
+        if live_groups:
+            payload["engine_groups"] = live_groups
         payload["lifecycle"] = runtime_lifecycle(payload)
         if arguments.json:
             print(json.dumps(payload, indent=2, sort_keys=True))

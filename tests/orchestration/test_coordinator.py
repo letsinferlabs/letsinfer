@@ -240,6 +240,62 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         self.assertEqual(second_removals, [("remove", "task-2")])
         self.assertEqual(removed["state"], "removed")
 
+    def test_remove_treats_member_absence_as_idempotent_success(self) -> None:
+        submit = mock.Mock(side_effect=AssertionError("remove job must not be submitted"))
+        orchestrator = self.orchestrator(
+            submit,
+            statuses=lambda _member, _group_id: {
+                "protocol": PROTOCOL,
+                "group": None,
+                "protection_trip_latched": False,
+            },
+        )
+        self.store.set_group_allocation_state(self.plan.group_id, "released")
+
+        removed = orchestrator.remove()
+
+        self.assertEqual(removed["state"], "removed")
+        self.assertTrue(
+            all(
+                member["state"] == "removed"
+                for member in removed["member_states"]
+            )
+        )
+        self.assertEqual(
+            {row["state"] for row in self.store.device_allocations()},
+            {"released"},
+        )
+        submit.assert_not_called()
+
+    def test_remove_fails_closed_on_invalid_absent_member_status(self) -> None:
+        orchestrator = self.orchestrator(
+            mock.Mock(),
+            statuses=lambda _member, _group_id: {
+                "protocol": PROTOCOL,
+                "group": None,
+            },
+        )
+
+        with self.assertRaisesRegex(GroupOrchestrationError, "removal failed"):
+            orchestrator.remove()
+
+        self.assertEqual(self.store.engine_groups()[0]["state"], "failed")
+
+    def test_remove_fails_closed_on_absent_member_with_protection_trip(self) -> None:
+        orchestrator = self.orchestrator(
+            mock.Mock(),
+            statuses=lambda _member, _group_id: {
+                "protocol": PROTOCOL,
+                "group": None,
+                "protection_trip_latched": True,
+            },
+        )
+
+        with self.assertRaisesRegex(GroupOrchestrationError, "removal failed"):
+            orchestrator.remove()
+
+        self.assertEqual(self.store.engine_groups()[0]["state"], "failed")
+
     def test_reconcile_fails_distributed_group_when_one_member_is_missing(self) -> None:
         orchestrator = self.orchestrator(
             lambda _member, job, _credential: {
