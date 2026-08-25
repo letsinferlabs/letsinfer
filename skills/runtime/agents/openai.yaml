@@ -1,4 +1,0 @@
-interface:
-  display_name: "Create Let's Infer Runtime"
-  short_description: "Build and qualify a Let's Infer runtime pack"
-  default_prompt: "Use $runtime to create a production-ready Let's Infer runtime for this model and engine."

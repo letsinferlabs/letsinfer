@@ -153,12 +153,20 @@ model- and engine-agnostic.
 
 ## Contributing
 
-Runtime authors should start with the [runtime skill](skills/runtime/SKILL.md).
-It routes radical or new Engine work through the
-[Engine-authoring skill](skills/engine-authoring/SKILL.md), and qualification
-through the [benchmark skill](skills/benchmark/SKILL.md). Maintainers use the
-[runtime-review skill](skills/runtime-review/SKILL.md) for `/shipit`. Run the
-core tests with:
+Install the official, portable
+[Let’s Infer agent skills](https://github.com/letsinferlabs/skills) with:
+
+```bash
+npx skills add letsinferlabs/skills
+```
+
+Runtime authors use
+[`letsinfer-runtime-authoring`](https://github.com/letsinferlabs/skills/blob/main/skills/letsinfer-runtime-authoring/SKILL.md),
+radical or new Engine work uses
+[`letsinfer-engine-authoring`](https://github.com/letsinferlabs/skills/blob/main/skills/letsinfer-engine-authoring/SKILL.md),
+and qualification uses
+[`letsinfer-benchmark`](https://github.com/letsinferlabs/skills/blob/main/skills/letsinfer-benchmark/SKILL.md).
+Run the core tests with:
 
 ```bash
 python3 -m tools.core_regression

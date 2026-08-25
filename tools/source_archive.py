@@ -28,7 +28,6 @@ PUBLIC_DIRECTORIES = (
     "cache",
     "core",
     "documentation",
-    "skills",
     "tests",
     "tools",
     "watchdog",

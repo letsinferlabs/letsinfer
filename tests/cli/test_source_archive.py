@@ -174,6 +174,15 @@ class SourceArchiveTests(unittest.TestCase):
             with self.assertRaisesRegex(SourceArchiveError, "outside the allowlist"):
                 verify_archive(archive)
 
+    def test_verifier_rejects_the_retired_in_tree_skills_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = pathlib.Path(temporary) / "source.tar.gz"
+            self._write_custom_archive(
+                archive, "skills/legacy/SKILL.md", b"legacy\n"
+            )
+            with self.assertRaisesRegex(SourceArchiveError, "outside the allowlist"):
+                verify_archive(archive)
+
     def test_verifier_rejects_boolean_schema_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             archive = pathlib.Path(temporary) / "source.tar.gz"
