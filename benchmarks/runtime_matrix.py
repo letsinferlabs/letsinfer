@@ -353,7 +353,9 @@ def _command_output(command: list[str], what: str) -> str:
         )
         if len(detail) > 16_384:
             detail = "…" + detail[-16_383:]
-        raise RuntimeMatrixError(f"{what} failed: {detail}")
+        raise RuntimeMatrixError(
+            f"{what} failed (exit {result.returncode}): {detail or 'no output'}"
+        )
     return result.stdout
 
 

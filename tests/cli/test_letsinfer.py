@@ -125,6 +125,44 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         self.assertEqual(groups, ())
         topology.assert_not_called()
 
+    def test_qualification_reuses_only_a_stopped_resident_group_slot(self) -> None:
+        group_id = "a" * 32
+        placement = {"placement_id": "b" * 32}
+        with (
+            mock.patch.object(
+                cli,
+                "resolve_benchmark_service_placement",
+                return_value=(placement, (group_id,)),
+            ),
+            mock.patch.object(
+                cli,
+                "_benchmark_engine_group_intents",
+                return_value={group_id: False},
+            ),
+        ):
+            self.assertIs(
+                cli._resolve_qualification_service_placement({}, "c" * 64),
+                placement,
+            )
+
+        with (
+            mock.patch.object(
+                cli,
+                "resolve_benchmark_service_placement",
+                return_value=(placement, (group_id,)),
+            ),
+            mock.patch.object(
+                cli,
+                "_benchmark_engine_group_intents",
+                return_value={group_id: True},
+            ),
+            self.assertRaisesRegex(
+                cli.LetsInferError,
+                "requires conflicting resident engine groups to be stopped",
+            ),
+        ):
+            cli._resolve_qualification_service_placement({}, "c" * 64)
+
     def test_benchmark_isolation_restores_running_group_on_success_and_failure(
         self,
     ) -> None:
@@ -737,7 +775,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     cli,
-                    "resolve_service_placement",
+                    "_resolve_qualification_service_placement",
                     return_value={
                         "placement_id": "6" * 32,
                         "placement_strategy": "single",

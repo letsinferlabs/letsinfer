@@ -41,7 +41,8 @@ class RuntimeMatrixTests(unittest.TestCase):
             mock.patch.object(runtime_matrix.common, "run_command", return_value=result),
             self.assertRaisesRegex(
                 runtime_matrix.RuntimeMatrixError,
-                "(?s)qualification warning.*FATAL: actual startup failure",
+                "(?s)launch failed \\(exit 1\\): qualification warning.*"
+                "FATAL: actual startup failure",
             ),
         ):
             runtime_matrix._command_output(["letsinfer", "serve"], "launch")

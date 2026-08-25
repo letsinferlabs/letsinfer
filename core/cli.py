@@ -5660,6 +5660,23 @@ def update_service_placement(
         raise LetsInferError(f"cannot update service placement: {error}") from error
 
 
+def _resolve_qualification_service_placement(
+    manifest: dict[str, Any], manifest_sha256: str
+) -> dict[str, Any]:
+    """Reuse a benchmark slot only after every conflicting group is stopped."""
+    placement, resident_group_ids = resolve_benchmark_service_placement(
+        manifest, manifest_sha256
+    )
+    intents = _benchmark_engine_group_intents(resident_group_ids)
+    running = sorted(group_id for group_id, value in intents.items() if value)
+    if running:
+        raise LetsInferError(
+            "qualification requires conflicting resident engine groups to be "
+            "stopped first: " + ",".join(running)
+        )
+    return placement
+
+
 def _qualification_config(
     *,
     manifest_path: pathlib.Path,
@@ -5688,7 +5705,13 @@ def _qualification_config(
         manifest_path,
         manifest,
     )
-    placement = resolve_service_placement(manifest, manifest_sha256)
+    placement = (
+        resolve_service_placement(manifest, manifest_sha256)
+        if resident_path.is_file()
+        else _resolve_qualification_service_placement(
+            manifest, manifest_sha256
+        )
+    )
     candidate = dict(resident)
     for key in ("runtime_name", "runtime_version", "runtime_digest", "runtime_policy"):
         candidate.pop(key, None)
