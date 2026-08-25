@@ -21,6 +21,39 @@ from .site.state import data_root
 SCHEMA_VERSION = 1
 ACTIVE_STATES = {"starting", "running", "stopping"}
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
+PREPARATION_STATES = {
+    "acquiring-inputs",
+    "preparing-cache",
+    "building-auxiliary",
+    "loading-model",
+    "warming-kernels",
+    "materializing-prompts",
+    "measuring",
+    "finalizing-evidence",
+    "restoring-service",
+}
+LIVE_RATE_FIELDS = {
+    "aggregate_tokens_per_second",
+    "decode_tokens_per_second",
+    "prefill_tokens_per_second",
+    "average_ttft_milliseconds",
+}
+LIVE_TEMPERATURE_FIELDS = {
+    "gpu_temp_deci_c",
+    "system_temp_deci_c",
+    "nvme_temp_deci_c",
+}
+LIVE_SYSTEM_FIELDS = {
+    "gpu_percent",
+    "cpu_percent",
+    "memory_percent",
+    "memory_used_mib",
+    "memory_total_mib",
+    "disk_percent",
+    "disk_read_kib_s",
+    "disk_write_kib_s",
+    "power_deci_w",
+}
 
 
 class BenchmarkJobError(RuntimeError):
@@ -106,8 +139,83 @@ def read_state() -> dict[str, Any] | None:
     return _read_json(state_path())
 
 
+def _optional_number(value: object) -> bool:
+    return value is None or (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and float(value) >= 0
+    )
+
+
+def _validate_progress(value: dict[str, Any]) -> dict[str, Any]:
+    metrics = value.get("live_metrics")
+    if metrics is not None:
+        rates = metrics.get("rates") if isinstance(metrics, dict) else None
+        temperatures = (
+            metrics.get("temperatures") if isinstance(metrics, dict) else None
+        )
+        system = metrics.get("system") if isinstance(metrics, dict) else None
+        if (
+            not isinstance(metrics, dict)
+            or set(metrics)
+            != {
+                "schema_version",
+                "sample_unix_ms",
+                "fresh",
+                "performance_cell",
+                "active_requests",
+                "queued_requests",
+                "rates",
+                "temperatures",
+                "system",
+            }
+            or metrics.get("schema_version") != 1
+            or not isinstance(metrics.get("sample_unix_ms"), int)
+            or isinstance(metrics.get("sample_unix_ms"), bool)
+            or metrics["sample_unix_ms"] <= 0
+            or not isinstance(metrics.get("fresh"), bool)
+            or (
+                metrics.get("performance_cell") is not None
+                and (
+                    not isinstance(metrics["performance_cell"], str)
+                    or not metrics["performance_cell"]
+                    or len(metrics["performance_cell"]) > 128
+                )
+            )
+            or not _optional_number(metrics.get("active_requests"))
+            or not _optional_number(metrics.get("queued_requests"))
+            or not isinstance(rates, dict)
+            or set(rates) != LIVE_RATE_FIELDS
+            or any(not _optional_number(item) for item in rates.values())
+            or not isinstance(temperatures, dict)
+            or set(temperatures) != LIVE_TEMPERATURE_FIELDS
+            or any(not _optional_number(item) for item in temperatures.values())
+            or not isinstance(system, dict)
+            or set(system) != LIVE_SYSTEM_FIELDS
+            or any(not _optional_number(item) for item in system.values())
+        ):
+            raise BenchmarkJobError("benchmark live metrics are invalid")
+    preparation = value.get("preparation")
+    if preparation is not None and (
+        not isinstance(preparation, dict)
+        or set(preparation)
+        != {"schema_version", "state", "detail", "updated_unix_ms"}
+        or preparation.get("schema_version") != 1
+        or preparation.get("state") not in PREPARATION_STATES
+        or not isinstance(preparation.get("detail"), str)
+        or not preparation["detail"]
+        or len(preparation["detail"]) > 160
+        or not isinstance(preparation.get("updated_unix_ms"), int)
+        or isinstance(preparation.get("updated_unix_ms"), bool)
+        or preparation["updated_unix_ms"] <= 0
+    ):
+        raise BenchmarkJobError("benchmark preparation progress is invalid")
+    return value
+
+
 def read_progress() -> dict[str, Any] | None:
-    return _read_json(progress_path())
+    value = _read_json(progress_path())
+    return None if value is None else _validate_progress(value)
 
 
 def _process_command(pid: int) -> str:
@@ -244,6 +352,7 @@ def update_progress(job_id: str, value: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise BenchmarkJobError("benchmark progress must be an object")
     document = {"schema_version": SCHEMA_VERSION, **value}
+    _validate_progress(document)
     encoded = json.dumps(document, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -257,6 +366,33 @@ def update_progress(job_id: str, value: dict[str, Any]) -> dict[str, Any]:
             raise BenchmarkJobError("benchmark job is no longer active")
         _write_json(progress_path(), document)
     return document
+
+
+def merge_progress(job_id: str, value: dict[str, Any]) -> dict[str, Any]:
+    """Atomically merge bounded live metadata without replacing worker phase state."""
+
+    if not isinstance(value, dict) or "schema_version" in value:
+        raise BenchmarkJobError("benchmark progress merge is invalid")
+    with _locked():
+        state = read_state()
+        if state is None or state.get("job_id") != job_id:
+            raise BenchmarkJobError("benchmark job identity changed")
+        if state.get("state") not in ACTIVE_STATES:
+            raise BenchmarkJobError("benchmark job is no longer active")
+        current = _read_json(progress_path()) or {
+            "schema_version": SCHEMA_VERSION,
+            "phase": "acquiring-inputs",
+            "message": "Acquiring and verifying runtime inputs",
+        }
+        current.update(value)
+        _validate_progress(current)
+        encoded = json.dumps(current, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        if len(encoded) > 64 << 10:
+            raise BenchmarkJobError("benchmark progress exceeds 64 KiB")
+        _write_json(progress_path(), current)
+        return current
 
 
 def mark(job_id: str, state_name: str, *, error: str | None = None) -> dict[str, Any]:

@@ -86,6 +86,7 @@ static void accumulate(watchdog_rollup *rollup, const watchdog_sample *sample) {
     add_clock(&rollup->vram_clock, sample->vram_clock_mhz);
     add_clock(&rollup->system_ram_clock, sample->system_ram_clock_mhz);
     add_unsigned(&rollup->active_requests, sample->active_requests);
+    add_unsigned(&rollup->connected_clients, sample->connected_clients);
     add_unsigned(&rollup->queued_requests, sample->queued_requests);
 }
 
@@ -128,6 +129,7 @@ static bool complete(const watchdog_rollup *rollup, watchdog_sample *output) {
     output->vram_clock_mhz = average_clock(&rollup->vram_clock);
     output->system_ram_clock_mhz = average_clock(&rollup->system_ram_clock);
     output->active_requests = average_u32(&rollup->active_requests);
+    output->connected_clients = average_u32(&rollup->connected_clients);
     output->queued_requests = average_u32(&rollup->queued_requests);
     output->requests_received = rollup->latest.requests_received;
     output->requests_admitted = rollup->latest.requests_admitted;

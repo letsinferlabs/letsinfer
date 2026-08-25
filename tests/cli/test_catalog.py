@@ -235,7 +235,9 @@ class CatalogTests(unittest.TestCase):
             path.write_bytes(runtime_packs.canonical_bytes(document))
             self.assertEqual(runtime_packs.load_catalog(str(path)), document)
 
-    def test_unscored_maintainer_bypass_is_explicit_only(self) -> None:
+    def test_maintainer_bypass_requires_marked_author_score_for_recommendation(
+        self,
+    ) -> None:
         document = catalog()
         target = document["models"]["qwen3.8-27b"]["targets"]["dgx-spark"]
         release = target["candidates"][CANDIDATE]["releases"]["0.1.0-rc.12"]
@@ -298,7 +300,6 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(runtime_packs.RuntimePackError, "unscored"):
                 runtime_packs.load_catalog(str(path))
 
-            target["recommended"] = None
             release["benchmark"] = {
                 "id": "9" * 64,
                 "suite": "letsinfer-code-prose-v1",
@@ -306,7 +307,24 @@ class CatalogTests(unittest.TestCase):
             }
             path.write_bytes(runtime_packs.canonical_bytes(document))
             with self.assertRaisesRegex(
-                runtime_packs.RuntimePackError, "carries a benchmark score"
+                runtime_packs.RuntimePackError, "consensus qualification"
+            ):
+                runtime_packs.load_catalog(str(path))
+
+            release["verification"]["benchmark_source"] = "author-benchmark-v1"
+            path.write_bytes(runtime_packs.canonical_bytes(document))
+            loaded = runtime_packs.load_catalog(str(path))
+            self.assertEqual(
+                runtime_packs.catalog_release(
+                    loaded, "qwen3.8-27b", None, target="dgx-spark"
+                )[-2:],
+                ("0.1.0-rc.12", release["source"]),
+            )
+
+            release["verification"]["benchmark_source"] = "untrusted"
+            path.write_bytes(runtime_packs.canonical_bytes(document))
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "consensus qualification"
             ):
                 runtime_packs.load_catalog(str(path))
 

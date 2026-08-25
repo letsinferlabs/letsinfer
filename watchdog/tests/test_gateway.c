@@ -14,8 +14,9 @@ void test_gateway_metrics_are_strict_and_complete(void) {
     const int descriptor = mkstemp(path);
     TEST_ASSERT(descriptor >= 0);
     const char *body =
-        "version=1\n"
+        "version=2\n"
         "active_requests=2\n"
+        "connected_clients=4\n"
         "queued_requests=3\n"
         "requests_received=11\n"
         "requests_admitted=10\n"
@@ -39,6 +40,7 @@ void test_gateway_metrics_are_strict_and_complete(void) {
     const uint64_t now_ms = (uint64_t)time(NULL) * 1000u;
     TEST_ASSERT(watchdog_gateway_metrics_read(path, now_ms, &metrics) == 0);
     TEST_ASSERT(metrics.active_requests == 2u);
+    TEST_ASSERT(metrics.connected_clients == 4u);
     TEST_ASSERT(metrics.queued_requests == 3u);
     TEST_ASSERT(metrics.requests_received == 11u);
     TEST_ASSERT(metrics.output_tokens == 200u);

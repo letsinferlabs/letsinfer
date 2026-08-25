@@ -5,7 +5,7 @@
 #include <string.h>
 
 #define WATCHDOG_RECORD_MAGIC UINT32_C(0x3152494c)
-#define WATCHDOG_RECORD_VERSION UINT16_C(1)
+#define WATCHDOG_RECORD_VERSION UINT16_C(2)
 
 static void put_u16(uint8_t *target, uint16_t value) {
     target[0] = (uint8_t)value;
@@ -123,7 +123,8 @@ bool watchdog_record_encode(
     put_u64(output + 252, sample->prefix_cache_hits);
     put_u64(output + 260, sample->usage_records_dropped);
     put_u64(output + 268, sample->usage_write_errors);
-    put_u32(output + 276, watchdog_crc32(output, 276));
+    put_u32(output + 276, sample->connected_clients);
+    put_u32(output + 280, watchdog_crc32(output, 280));
     return true;
 }
 
@@ -135,7 +136,7 @@ bool watchdog_record_decode(
         || get_u32(input + 0) != WATCHDOG_RECORD_MAGIC
         || get_u16(input + 4) != WATCHDOG_RECORD_VERSION
         || get_u16(input + 6) != WATCHDOG_RECORD_BYTES
-        || get_u32(input + 276) != watchdog_crc32(input, 276)
+        || get_u32(input + 280) != watchdog_crc32(input, 280)
         || input[32] > WATCHDOG_MAX_CPU_CORES) {
         return false;
     }
@@ -190,5 +191,6 @@ bool watchdog_record_decode(
     sample->prefix_cache_hits = get_u64(input + 252);
     sample->usage_records_dropped = get_u64(input + 260);
     sample->usage_write_errors = get_u64(input + 268);
+    sample->connected_clients = get_u32(input + 276);
     return true;
 }

@@ -86,6 +86,27 @@ def prefer_monitor_failure(
 def _write_benchmark_progress(phase: str, message: str, state: str) -> None:
     if _PROGRESS_FILE is None:
         return
+    preserved: dict[str, Any] = {}
+    try:
+        current = common.read_json_object(_PROGRESS_FILE, "benchmark progress")
+    except (OSError, common.QualificationError):
+        current = {}
+    for key in ("live_metrics",):
+        if isinstance(current.get(key), dict):
+            preserved[key] = current[key]
+    preparation_state = (
+        "restoring-service"
+        if phase == "restoring-service"
+        else "finalizing-evidence"
+        if phase in {"finalizing-evidence", "completed"}
+        else "measuring"
+        if phase.endswith(":measuring")
+        else "materializing-prompts"
+        if phase == "materializing-prompts"
+        else "loading-model"
+        if phase == "loading-model" or phase.endswith(":loading-model")
+        else "acquiring-inputs"
+    )
     common.write_json_atomic(
         _PROGRESS_FILE,
         {
@@ -101,6 +122,13 @@ def _write_benchmark_progress(phase: str, message: str, state: str) -> None:
             "selected_cells": list(_SELECTED_CELLS),
             "completed_cells": list(_COMPLETED_CELLS),
             "current_cell": _CURRENT_CELL,
+            "preparation": {
+                "schema_version": 1,
+                "state": preparation_state,
+                "detail": message[:160],
+                "updated_unix_ms": int(time.time() * 1000),
+            },
+            **preserved,
         },
     )
 
@@ -343,8 +371,20 @@ def parse_arguments() -> argparse.Namespace:
 def _command_output(command: list[str], what: str) -> str:
     result = common.run_command(command)
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        raise RuntimeMatrixError(f"{what} failed: {detail}")
+        streams = (result.stdout or "", result.stderr or "")
+        lines = [line.strip() for stream in streams for line in stream.splitlines() if line.strip()]
+        errors = [line.removeprefix("ERROR:").strip() for line in lines if line.startswith("ERROR:")]
+        # A qualification launch may emit a non-fatal warning on stderr before
+        # the CLI renders its actionable failure on stdout.  Preserve both
+        # channels unless the CLI emitted an explicit actionable error.
+        detail = errors[-1] if errors else "\n".join(
+            value.strip() for value in (result.stderr, result.stdout) if value.strip()
+        )
+        if len(detail) > 16_384:
+            detail = "…" + detail[-16_383:]
+        raise RuntimeMatrixError(
+            f"{what} failed (exit {result.returncode}): {detail or 'no output'}"
+        )
     return result.stdout
 
 
@@ -1656,11 +1696,11 @@ def run_isolated_matrix(
     _CURRENT_CELL = None
     benchmark_state(
         f"Benchmarking {model_name} · {len(selected)} workload(s)",
-        phase="starting",
+        phase="acquiring-inputs",
     )
     benchmark_state(
         f"Expected {expected_low}–{expected_high} min · elapsed time follows live",
-        phase="starting",
+        phase="acquiring-inputs",
     )
 
     if benchmark_contract is not None:
@@ -1692,7 +1732,7 @@ def run_isolated_matrix(
             with benchmark_activity(
                 "Preparing prompts · loading tokenizer runtime",
                 done="Tokenizer runtime ready",
-                phase="preparing-prompts",
+                phase="loading-model",
             ):
                 launch_output = _command_output(
                     _serve_command(
@@ -1827,7 +1867,7 @@ def run_isolated_matrix(
                 with benchmark_activity(
                     f"Loading runtime for {name}",
                     done=f"Runtime ready for {name}",
-                    phase=f"workload:{name}:loading",
+                    phase=f"workload:{name}:loading-model",
                 ):
                     launch_output = _command_output(
                         _serve_command(
@@ -1905,6 +1945,10 @@ def run_isolated_matrix(
             phase=f"workload:{name}:completed",
         )
 
+    benchmark_state(
+        "Finalizing and validating benchmark evidence",
+        phase="finalizing-evidence",
+    )
     cells_by_name = {cell["name"]: cell for cell in selected}
     public_results = [
         public_benchmark_result(

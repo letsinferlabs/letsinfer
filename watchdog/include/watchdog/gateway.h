@@ -5,6 +5,7 @@
 
 typedef struct watchdog_gateway_metrics {
     uint32_t active_requests;
+    uint32_t connected_clients;
     uint32_t queued_requests;
     uint64_t requests_received;
     uint64_t requests_admitted;

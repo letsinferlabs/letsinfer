@@ -265,6 +265,7 @@ class GatewayMetrics:
     output_tokens: int = 0
     cached_tokens: int = 0
     active_requests: int = 0
+    connected_clients: int = 0
     queued_requests: int = 0
     queue_milliseconds: int = 0
     ttft_milliseconds: int = 0
@@ -872,7 +873,7 @@ class MetricsPublisher:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.path.parent.is_symlink():
             raise GatewayError("gateway telemetry directory cannot be a symlink")
-        body = "version=1\n" + "".join(
+        body = "version=2\n" + "".join(
             f"{key}={value}\n" for key, value in sorted(self.snapshot().items())
         )
         temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.{secrets.token_hex(4)}")
@@ -1071,9 +1072,11 @@ class GatewayServer(http.server.ThreadingHTTPServer):
         if not self.connection_slots.acquire(blocking=False):
             request.close()
             return
+        self.metrics.update(connected_clients=1)
         try:
             super().process_request(request, client_address)
         except BaseException:
+            self.metrics.update(connected_clients=-1)
             self.connection_slots.release()
             raise
 
@@ -1081,6 +1084,7 @@ class GatewayServer(http.server.ThreadingHTTPServer):
         try:
             super().process_request_thread(request, client_address)
         finally:
+            self.metrics.update(connected_clients=-1)
             self.connection_slots.release()
 
     def server_close(self) -> None:

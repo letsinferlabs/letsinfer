@@ -31,6 +31,22 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
+    def test_failed_command_preserves_stderr_warning_and_stdout_error(self) -> None:
+        result = types.SimpleNamespace(
+            returncode=1,
+            stderr="qualification warning\n",
+            stdout="FATAL: actual startup failure\n",
+        )
+        with (
+            mock.patch.object(runtime_matrix.common, "run_command", return_value=result),
+            self.assertRaisesRegex(
+                runtime_matrix.RuntimeMatrixError,
+                "(?s)launch failed \\(exit 1\\): qualification warning.*"
+                "FATAL: actual startup failure",
+            ),
+        ):
+            runtime_matrix._command_output(["letsinfer", "serve"], "launch")
+
     def test_concurrent_public_decode_uses_the_stream_p50(self) -> None:
         cell = {
             "target_prompt_tokens": 260_000,
@@ -259,7 +275,7 @@ class RuntimeMatrixTests(unittest.TestCase):
                 runtime_matrix._COMPLETED_CELLS = ["32k-c1"]
                 runtime_matrix._CURRENT_CELL = "64k-c1"
                 runtime_matrix._write_benchmark_progress(
-                    "workload:64k-c1:loading",
+                    "workload:64k-c1:loading-model",
                     "Loading runtime for 64k-c1",
                     "running",
                 )
@@ -270,6 +286,7 @@ class RuntimeMatrixTests(unittest.TestCase):
                     value["selected_cells"],
                     ["32k-c1", "64k-c1", "128k-c1"],
                 )
+                self.assertEqual(value["preparation"]["state"], "loading-model")
             finally:
                 (
                     runtime_matrix._PROGRESS_FILE,
@@ -279,6 +296,22 @@ class RuntimeMatrixTests(unittest.TestCase):
                     runtime_matrix._COMPLETED_CELLS,
                     runtime_matrix._CURRENT_CELL,
                 ) = prior
+
+    def test_child_failure_prefers_actionable_stdout_over_stderr_warning(self) -> None:
+        result = types.SimpleNamespace(
+            returncode=1,
+            stdout="ERROR: Engine container was OOM-killed during startup\n",
+            stderr="WARNING runtime-unqualified\n",
+        )
+        with (
+            mock.patch.object(runtime_matrix.common, "run_command", return_value=result),
+            self.assertRaisesRegex(
+                runtime_matrix.RuntimeMatrixError,
+                "Engine container was OOM-killed during startup",
+            ) as raised,
+        ):
+            runtime_matrix._command_output(["letsinfer", "serve"], "launching")
+        self.assertNotIn("runtime-unqualified", str(raised.exception))
 
     def _control_bundle(
         self, parent: pathlib.Path, manifest: dict

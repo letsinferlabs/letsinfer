@@ -53,6 +53,47 @@ def _context(value: object) -> str:
     return f"{tokens} context"
 
 
+def _compact(value: float, *, decimals: int = 1) -> str:
+    rendered = f"{value:.{decimals}f}"
+    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
+
+
+def _scaled_decimal(value: object, prefixes: tuple[str, ...] = ("", "K", "M", "G")) -> str:
+    amount = _number(value)
+    if amount < 0:
+        return "—"
+    index = 0
+    while amount >= 1000 and index < len(prefixes) - 1:
+        amount /= 1000
+        index += 1
+    decimals = 0 if amount >= 100 else 1 if amount >= 10 else 2
+    return f"{_compact(amount, decimals=decimals)}{prefixes[index]}"
+
+
+def _binary_rate_kib(value: object) -> str:
+    """Render an underlying KiB/s gauge without changing bytes into bits."""
+
+    amount = _number(value)
+    if amount < 0:
+        return "—"
+    units = ("KiB/s", "MiB/s", "GiB/s", "TiB/s")
+    index = 0
+    while amount >= 1024 and index < len(units) - 1:
+        amount /= 1024
+        index += 1
+    decimals = 0 if amount >= 100 else 1 if amount >= 10 else 2
+    return f"{_compact(amount, decimals=decimals)} {units[index]}"
+
+
+def _mib_size(value: object) -> str:
+    amount = _number(value)
+    if amount < 0:
+        return "—"
+    if amount >= 1024:
+        return f"{_compact(amount / 1024, decimals=1)} GiB"
+    return f"{_compact(amount, decimals=0)} MiB"
+
+
 def _bytes_gib(value: object) -> str:
     amount = _number(value)
     return "—" if amount < 0 else f"{amount / 1024**3:.1f} GiB"
@@ -64,8 +105,7 @@ def _mib(value: object) -> str:
 
 
 def _rate(value: object) -> str:
-    amount = _number(value)
-    return "—" if amount < 0 else f"{amount:.1f}"
+    return _scaled_decimal(value)
 
 
 def _percent(value: object) -> str:
@@ -80,7 +120,11 @@ def _temperature(value: object) -> str:
 
 def _clock(value: object) -> str:
     amount = _number(value)
-    return "—" if amount < 0 else f"{amount / 1000:.2f} GHz"
+    if amount < 0:
+        return "—"
+    if amount < 1000:
+        return f"{_compact(amount, decimals=0)} MHz"
+    return f"{_compact(amount / 1000, decimals=2)} GHz"
 
 
 def _temperature_detail(
@@ -130,15 +174,69 @@ def _row(
     *,
     color: str | None = None,
     dim_detail: bool = True,
+    bold_detail: bool = False,
     width: int,
 ) -> str:
     label_text = terminal.paint(label.ljust(13), ui.DIM)
-    value_text = terminal.paint(value.ljust(14), *(filter(None, (ui.BOLD, color))))
-    clipped_detail = terminal.clip(detail, max(1, width - 29))
+    value_padding = " " * max(1 if detail else 0, 14 - len(value))
+    value_text = terminal.paint(value + value_padding, *(filter(None, (ui.BOLD, color))))
+    clipped_detail = terminal.clip(detail, max(1, width - 13 - len(value) - len(value_padding)))
     detail_text = (
-        terminal.paint(clipped_detail, ui.DIM) if dim_detail else clipped_detail
+        terminal.paint(
+            clipped_detail,
+            *(filter(None, (ui.BOLD if bold_detail else None, ui.DIM))),
+        )
+        if dim_detail
+        else clipped_detail
     )
     return f"{label_text}{value_text}{detail_text}".rstrip()
+
+
+def _trend(
+    terminal: ui.Terminal,
+    values: Iterable[float],
+    *,
+    fresh: bool,
+) -> str:
+    points = list(values)
+    if not fresh or len(points) < 2 or points[-1] == points[-2]:
+        return "  "
+    rising = points[-1] > points[-2]
+    symbol = "↑" if terminal.unicode and rising else "↓" if terminal.unicode else "+" if rising else "-"
+    return terminal.paint(symbol, ui.BOLD, ui.RED if rising else ui.GREEN) + " "
+
+
+def _metric_row(
+    terminal: ui.Terminal,
+    label: str,
+    primary: str,
+    secondary: str,
+    chart: str,
+    trend: str,
+    *,
+    width: int,
+) -> str:
+    label_text = terminal.paint(label.ljust(13), ui.DIM)
+    chart_width = len(ANSI.sub("", chart))
+    trend_width = len(ANSI.sub("", trend))
+    metric_width = max(1, width - 13 - chart_width - trend_width)
+    clipped_primary = terminal.clip(primary, metric_width)
+    remaining = metric_width - len(ANSI.sub("", clipped_primary))
+    clipped_secondary = (
+        terminal.clip(" " + secondary, remaining)
+        if secondary and remaining > 1
+        else ""
+    )
+    used = len(ANSI.sub("", clipped_primary)) + len(ANSI.sub("", clipped_secondary))
+    padding = " " * max(0, metric_width - used)
+    return (
+        label_text
+        + terminal.paint(clipped_primary, ui.BOLD)
+        + terminal.paint(clipped_secondary, ui.BOLD, ui.DIM)
+        + padding
+        + trend
+        + chart
+    ).rstrip()
 
 
 def _health_row(
@@ -238,10 +336,8 @@ def dashboard_lines(
     version = str(container.get("runtime_version") or "unknown version")
     active = _integer(telemetry.get("active_requests"))
     queued = _integer(telemetry.get("queued_requests"))
-    maximum = _integer(capacity.get("max_connections")) or _integer(
-        capacity.get("max_active_requests")
-    )
-    allocated = _integer(capacity.get("max_active_requests"))
+    maximum = _integer(capacity.get("max_active_requests"))
+    connected_clients = _integer(telemetry.get("connected_clients"))
     api_process_ready = (
         service.get("gateway_active") == "active"
         and service.get("gateway_health") is True
@@ -314,8 +410,18 @@ def dashboard_lines(
         )
     )
     if runtime_installed:
-        lines.append(_row(terminal, "Model", model, _context(capacity.get("max_context_tokens")), width=width))
+        lines.append(
+            _row(
+                terminal,
+                "Model",
+                model,
+                _context(capacity.get("max_context_tokens")),
+                bold_detail=True,
+                width=width,
+            )
+        )
         lines.append(_row(terminal, "Engine", engine, width=width))
+        lines.append(_row(terminal, "Target", target, width=width))
         runtime_metadata_ready = service.get("runtime_metadata_ready") is not False
         lines.append(
             _row(
@@ -421,15 +527,30 @@ def dashboard_lines(
             )
         )
 
-    def route(name: str, status: str, detail: str, color: str) -> str:
-        status_width = 15 if not runtime_installed else 11
+    def route(name: str, status: str, color: str) -> str:
         return (
             f"{terminal.paint('●', ui.BOLD, color)}  {terminal.paint(name.ljust(10), ui.BOLD)}"
-            f"{terminal.paint(status.ljust(status_width), ui.BOLD, color)}{terminal.paint(detail, ui.DIM)}"
+            f"{terminal.paint(status, ui.BOLD, color)}"
         ).rstrip()
 
     if gateway_expected:
-        lines.extend(("", "Request path", terminal.paint("○  CLIENT", ui.DIM), terminal.paint("│", ui.DIM)))
+        client_state = (
+            "—"
+            if connected_clients is None
+            else f"{connected_clients} connected"
+        )
+        lines.extend(
+            (
+                "",
+                "Request path",
+                route(
+                    "CLIENT",
+                    client_state,
+                    ui.GREEN if connected_clients is not None else ui.YELLOW,
+                ),
+                terminal.paint("│", ui.DIM),
+            )
+        )
         gateway_state = (
             "API Ready"
             if api_process_ready and route_ready
@@ -444,7 +565,7 @@ def dashboard_lines(
             if gateway_state == "STARTING"
             else ui.RED
         )
-        lines.append(route("GATEWAY", gateway_state, endpoint, gateway_color))
+        lines.append(route("GATEWAY", gateway_state, gateway_color))
         lines.extend(
             (
                 terminal.paint("│", ui.DIM),
@@ -457,9 +578,6 @@ def dashboard_lines(
                     else "NOT INSTALLED"
                     if not runtime_installed
                     else "STOPPED",
-                    "letsinfer install <model>"
-                    if not runtime_installed
-                    else f"{model} · {engine}",
                     ui.GREEN
                     if runtime_ready
                     else ui.CYAN
@@ -472,7 +590,6 @@ def dashboard_lines(
                 route(
                     "DEVICE" if not runtime_installed else "TARGET",
                     "READY" if control_ready else "WAITING",
-                    hardware if not runtime_installed else target,
                     ui.GREEN if control_ready else ui.YELLOW,
                 ),
             )
@@ -480,39 +597,6 @@ def dashboard_lines(
 
     active_value = active if active is not None else None
     queued_value = queued if queued is not None else None
-    scheduler_capacity = str(maximum) if maximum is not None else "—"
-    if runtime_installed:
-        lines.extend(
-            (
-                "",
-                f"Scheduler  {terminal.paint(f'{scheduler_capacity} max · dynamic admission', ui.DIM)}",
-            )
-        )
-        lines.append(
-            _row(
-                terminal,
-                "Active",
-                "—" if active_value is None else f"{active_value} requests",
-                width=width,
-            )
-        )
-        lines.append(
-            _row(
-                terminal,
-                "Queue",
-                "—" if queued_value is None else f"{queued_value} waiting",
-                width=width,
-            )
-        )
-        lines.append(
-            _row(
-                terminal,
-                "Allocated",
-                f"{allocated or 0} / {maximum or '—'}",
-                width=width,
-            )
-        )
-
     aggregate_rate = (
         rates.get("aggregate_tokens_per_second")
         if rates.get("aggregate_tokens_per_second") is not None
@@ -540,9 +624,9 @@ def dashboard_lines(
     )
     lines.extend(("", "Performance" if runtime_installed else "Monitoring"))
     if runtime_installed:
-        lines.append(_row(terminal, "Tokens", f"{_rate(aggregate_rate)} tok/s", f"{_rate(decode_rate)} decode · {_rate(prefill_rate)} prefill", width=width))
-        lines.append(_row(terminal, "Latency", "—" if ttft < 0 else f"{ttft / 1000:.2f}s TTFT", "— prefix hit" if prefix < 0 else f"{prefix * 100:.0f}% prefix hit", width=width))
-        lines.append(_row(terminal, "Context", f"— / {_context(capacity.get('max_context_tokens')).removesuffix(' context')}", "live usage unavailable", width=width))
+        lines.append(_row(terminal, "Tokens", f"{_rate(aggregate_rate)} tok/s", f"{_rate(decode_rate)} decode · {_rate(prefill_rate)} prefill", bold_detail=True, width=width))
+        lines.append(_row(terminal, "Latency", "—" if ttft < 0 else f"{_compact(ttft / 1000, decimals=2)} s TTFT", "— prefix hit" if prefix < 0 else f"{prefix * 100:.0f}% prefix hit", bold_detail=True, width=width))
+        lines.append(_row(terminal, "Context", f"— / {_context(capacity.get('max_context_tokens')).removesuffix(' context')}", "live usage unavailable", bold_detail=True, width=width))
         lines.append(
             _row(
                 terminal,
@@ -551,6 +635,18 @@ def dashboard_lines(
                     "—"
                     if active_value is None or queued_value is None
                     else f"{active_value} active · {queued_value} queued"
+                ),
+                width=width,
+            )
+        )
+        lines.append(
+            _row(
+                terminal,
+                "Allocation",
+                (
+                    "—"
+                    if active_value is None or maximum is None
+                    else f"{active_value} / {maximum}"
                 ),
                 width=width,
             )
@@ -570,47 +666,62 @@ def dashboard_lines(
     memory_used = _number(system.get("memory_used_mib"))
     memory_total = _number(system.get("memory_total_mib"))
     memory_value = _percent(system.get("memory_percent"))
+    memory_detail = ""
     if min(memory_used, memory_total) >= 0:
-        memory_value += f" {memory_used / 1024:.0f}/{memory_total / 1024:.0f}G"
+        memory_detail = f"{_mib_size(memory_used)} / {_mib_size(memory_total)}"
     gpu_value = _percent(system.get("gpu_percent"))
     gpu_clock = _number(system.get("gpu_clock_mhz"))
-    if gpu_clock >= 0:
-        gpu_value += f" {gpu_clock / 1000:.2f}G"
+    gpu_detail = _clock(gpu_clock) if gpu_clock >= 0 else ""
     cpu_value = _percent(system.get("cpu_percent"))
     cpu_clock = _number(system.get("cpu_clock_mhz"))
-    if cpu_clock >= 0:
-        cpu_value += f" {cpu_clock / 1000:.2f}G"
+    cpu_detail = _clock(cpu_clock) if cpu_clock >= 0 else ""
     nvme_value = _percent(system.get("disk_percent"))
     disk_read = _number(system.get("disk_read_kib_s"))
     disk_write = _number(system.get("disk_write_kib_s"))
+    nvme_detail = ""
     if min(disk_read, disk_write) >= 0:
-        nvme_value += f" R{disk_read:.0f}/W{disk_write:.0f}"
+        nvme_detail = f"↑{_binary_rate_kib(disk_read)} ↓{_binary_rate_kib(disk_write)}"
     power_watts = _number(system.get("power_deci_w"))
-    power_value = "—" if power_watts < 0 else f"{power_watts / 10:.0f} W"
+    power_value = (
+        "—"
+        if power_watts < 0
+        else (
+            f"{_compact(power_watts / 10 / 1000, decimals=2)} kW"
+            if power_watts / 10 >= 1000
+            else f"{_compact(power_watts / 10, decimals=0)} W"
+        )
+    )
     rx = _number(system.get("network_rx_kib_s"))
     tx = _number(system.get("network_tx_kib_s"))
     network_value = (
         "—"
         if min(rx, tx) < 0
-        else f"{rx + tx:.0f}K/s ↓{rx:.0f} ↑{tx:.0f}"
+        else _binary_rate_kib(rx + tx)
+    )
+    network_detail = (
+        ""
+        if min(rx, tx) < 0
+        else f"↓{_binary_rate_kib(rx)} ↑{_binary_rate_kib(tx)}"
     )
 
     system_rows = (
-        ("GPU", "gpu", gpu_value, 100.0),
-        ("Unified mem", "memory", memory_value, 100.0),
-        ("CPU", "cpu", cpu_value, 100.0),
-        ("NVMe", "nvme", nvme_value, 100.0),
-        ("Power", "power", power_value, None),
-        ("Network", "network", network_value, None),
+        ("GPU", "gpu", gpu_value, gpu_detail, 100.0, True),
+        ("Unified mem", "memory", memory_value, memory_detail, 100.0, True),
+        ("CPU", "cpu", cpu_value, cpu_detail, 100.0, True),
+        ("NVMe", "nvme", nvme_value, nvme_detail, 100.0, True),
+        ("Power", "power", power_value, "", None, True),
+        ("Network", "network", network_value, network_detail, None, False),
     )
     lines.extend(("", f"System  {terminal.paint('last 5 min · 1 sec', ui.DIM)}"))
-    for index, (label, key, value, scale_maximum) in enumerate(system_rows):
+    fresh_sample = telemetry_display_state == "live"
+    for index, (label, key, value, detail, scale_maximum, show_trend) in enumerate(system_rows):
         values = history.get(key, [])
         lines.append(
-            _row(
+            _metric_row(
                 terminal,
                 label,
                 value,
+                detail,
                 _sparkline(
                     terminal,
                     values,
@@ -618,7 +729,7 @@ def dashboard_lines(
                     color=ui.HISTORY_CHART_COLORS[index],
                     scale_maximum=scale_maximum,
                 ),
-                dim_detail=False,
+                _trend(terminal, values, fresh=fresh_sample) if show_trend else "  ",
                 width=width,
             )
         )

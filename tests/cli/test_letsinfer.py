@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import contextlib
+import errno
+import hashlib
 import io
 import json
 import pathlib
 import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -20,6 +23,496 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_engine_group_lifecycle_lock_serializes_threads(self) -> None:
+        first_acquired = threading.Event()
+        release_first = threading.Event()
+        second_attempted = threading.Event()
+        second_acquired = threading.Event()
+
+        def first() -> None:
+            with cli._engine_group_lifecycle_lock():
+                first_acquired.set()
+                release_first.wait(2)
+
+        def second() -> None:
+            second_attempted.set()
+            with cli._engine_group_lifecycle_lock():
+                second_acquired.set()
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            cli,
+            "default_engine_group_root",
+            return_value=pathlib.Path(directory) / "groups",
+        ):
+            first_thread = threading.Thread(target=first)
+            second_thread = threading.Thread(target=second)
+            first_thread.start()
+            self.assertTrue(first_acquired.wait(1))
+            second_thread.start()
+            self.assertTrue(second_attempted.wait(1))
+            self.assertFalse(second_acquired.wait(0.05))
+            release_first.set()
+            first_thread.join(2)
+            second_thread.join(2)
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertTrue(second_acquired.is_set())
+
+    def test_benchmark_placement_borrows_only_overlapping_group_devices(self) -> None:
+        member_id = "a" * 32
+        group_id = "b" * 32
+        identity = types.SimpleNamespace(
+            site_id="c" * 32,
+            coordinator_id=member_id,
+        )
+        graph = mock.Mock()
+        graph.members = {member_id: {"member_id": member_id}}
+        graph.resolve.side_effect = cli.TopologyError("device is allocated")
+        placement = types.SimpleNamespace(
+            strategy="single",
+            member_ids=(member_id,),
+            device_uuids={member_id: ("GPU-0",)},
+            topology_sha256="d" * 64,
+        )
+        unallocated = mock.Mock()
+        unallocated.resolve.return_value = placement
+        store = mock.Mock()
+        store.device_allocations.return_value = [
+            {
+                "group_id": group_id,
+                "member_id": member_id,
+                "device_uuid": "GPU-0",
+            },
+            {
+                "group_id": "e" * 32,
+                "member_id": member_id,
+                "device_uuid": "GPU-1",
+            },
+        ]
+        store.engine_groups.return_value = [
+            {
+                "group_id": group_id,
+                "state": "running",
+                "desired_state": "running",
+            }
+        ]
+        store_context = mock.MagicMock()
+        store_context.__enter__.return_value = store
+        manifest = cli.runtime_execution_manifest(
+            runtime_candidate(), qualified=False
+        )
+        with (
+            mock.patch.object(
+                cli, "_fresh_site_topology", return_value=(identity, graph)
+            ),
+            mock.patch.object(cli, "TopologyGraph", return_value=unallocated) as topology,
+            mock.patch.object(cli, "_site_store", return_value=store_context),
+        ):
+            resolved, groups = cli.resolve_benchmark_service_placement(
+                manifest, "f" * 64
+            )
+
+        self.assertEqual(groups, (group_id,))
+        graph.resolve.assert_called_once()
+        self.assertEqual(resolved["placement_members"], [member_id])
+        self.assertEqual(
+            topology.call_args.kwargs["allocated_devices"], {member_id: ()}
+        )
+
+    def test_benchmark_placement_prefers_an_unallocated_device(self) -> None:
+        member_id = "a" * 32
+        identity = types.SimpleNamespace(
+            site_id="b" * 32,
+            coordinator_id=member_id,
+        )
+        placement = types.SimpleNamespace(
+            strategy="single",
+            member_ids=(member_id,),
+            device_uuids={member_id: ("GPU-1",)},
+            topology_sha256="c" * 64,
+        )
+        graph = mock.Mock()
+        graph.members = {member_id: {"member_id": member_id}}
+        graph.resolve.return_value = placement
+        store = mock.Mock()
+        store.device_allocations.return_value = [
+            {
+                "group_id": "d" * 32,
+                "member_id": member_id,
+                "device_uuid": "GPU-0",
+            }
+        ]
+        store.engine_groups.return_value = []
+        store_context = mock.MagicMock()
+        store_context.__enter__.return_value = store
+        manifest = cli.runtime_execution_manifest(
+            runtime_candidate(), qualified=False
+        )
+        with (
+            mock.patch.object(
+                cli, "_fresh_site_topology", return_value=(identity, graph)
+            ),
+            mock.patch.object(cli, "TopologyGraph") as topology,
+            mock.patch.object(cli, "_site_store", return_value=store_context),
+        ):
+            _resolved, groups = cli.resolve_benchmark_service_placement(
+                manifest, "e" * 64
+            )
+
+        self.assertEqual(groups, ())
+        topology.assert_not_called()
+
+    def test_qualification_reuses_only_a_stopped_resident_group_slot(self) -> None:
+        group_id = "a" * 32
+        placement = {"placement_id": "b" * 32}
+        with (
+            mock.patch.object(
+                cli,
+                "resolve_benchmark_service_placement",
+                return_value=(placement, (group_id,)),
+            ),
+            mock.patch.object(
+                cli,
+                "_benchmark_engine_group_intents",
+                return_value={group_id: False},
+            ),
+        ):
+            self.assertIs(
+                cli._resolve_qualification_service_placement({}, "c" * 64),
+                placement,
+            )
+
+        with (
+            mock.patch.object(
+                cli,
+                "resolve_benchmark_service_placement",
+                return_value=(placement, (group_id,)),
+            ),
+            mock.patch.object(
+                cli,
+                "_benchmark_engine_group_intents",
+                return_value={group_id: True},
+            ),
+            self.assertRaisesRegex(
+                cli.LetsInferError,
+                "requires conflicting resident engine groups to be stopped",
+            ),
+        ):
+            cli._resolve_qualification_service_placement({}, "c" * 64)
+
+    def test_benchmark_isolation_restores_running_group_on_success_and_failure(
+        self,
+    ) -> None:
+        group_id = "a" * 32
+        for failure in (False, True):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                events: list[str] = []
+
+                def benchmark(command: list[str], **_: object) -> None:
+                    events.append("benchmark")
+                    if failure:
+                        raise cli.LetsInferError("fixture benchmark failed")
+
+                with (
+                    mock.patch.object(
+                        cli,
+                        "qualification_service_config_path",
+                        return_value=pathlib.Path(directory) / "missing.json",
+                    ),
+                    mock.patch.object(cli, "protection_trip_latched", return_value=False),
+                    mock.patch.object(
+                        cli,
+                        "_unit_enabled_active",
+                        return_value=("disabled", "inactive"),
+                    ),
+                    mock.patch.object(
+                        cli,
+                        "_benchmark_engine_group_intents",
+                        return_value={group_id: True},
+                    ),
+                    mock.patch.object(
+                        cli,
+                        "_stop_engine_group_by_id",
+                        side_effect=lambda _group_id: events.append("stop"),
+                    ),
+                    mock.patch.object(
+                        cli,
+                        "_start_engine_group_by_id",
+                        side_effect=lambda _group_id: events.append("start"),
+                    ),
+                    mock.patch.object(
+                        cli,
+                        "_gateway_is_idle",
+                        side_effect=lambda: events.append("idle"),
+                    ),
+                    mock.patch.object(cli, "run_passthrough", side_effect=benchmark),
+                ):
+                    if failure:
+                        with self.assertRaisesRegex(
+                            cli.LetsInferError, "fixture benchmark failed"
+                        ):
+                            cli._run_benchmark_with_service_isolation(
+                                ["matrix"], resident_group_ids=(group_id,)
+                            )
+                    else:
+                        cli._run_benchmark_with_service_isolation(
+                            ["matrix"], resident_group_ids=(group_id,)
+                        )
+                self.assertEqual(events, ["idle", "stop", "benchmark", "start"])
+
+    def test_stopped_engine_group_restoration_uses_start(self) -> None:
+        group_id = "a" * 32
+        row = {
+            "group_id": group_id,
+            "state": "stopped",
+            "desired_state": "stopped",
+        }
+        store = mock.Mock()
+        store.engine_groups.return_value = [row]
+        store_context = mock.MagicMock()
+        store_context.__enter__.return_value = store
+        orchestrator = mock.Mock()
+        started = {"group_id": group_id, "state": "running"}
+        orchestrator.start.return_value = started
+        with (
+            mock.patch.object(
+                cli,
+                "_engine_group_lifecycle_lock",
+                return_value=contextlib.nullcontext(),
+            ),
+            mock.patch.object(cli, "_site_store", return_value=store_context),
+            mock.patch.object(
+                cli,
+                "_restore_engine_group_orchestrator",
+                return_value=(orchestrator, {}),
+            ),
+            mock.patch.object(cli, "_sync_group_placement") as sync,
+        ):
+            cli._start_engine_group_by_id(group_id)
+
+        orchestrator.start.assert_called_once_with()
+        orchestrator.recover.assert_not_called()
+        sync.assert_called_once_with(store, started)
+
+    def test_benchmark_failure_retains_original_error_when_restore_fails(self) -> None:
+        group_id = "a" * 32
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(
+                    cli,
+                    "qualification_service_config_path",
+                    return_value=pathlib.Path(directory) / "missing.json",
+                ),
+                mock.patch.object(cli, "protection_trip_latched", return_value=False),
+                mock.patch.object(
+                    cli,
+                    "_unit_enabled_active",
+                    return_value=("disabled", "inactive"),
+                ),
+                mock.patch.object(
+                    cli,
+                    "_benchmark_engine_group_intents",
+                    return_value={group_id: True},
+                ),
+                mock.patch.object(cli, "_gateway_is_idle"),
+                mock.patch.object(cli, "_stop_engine_group_by_id"),
+                mock.patch.object(
+                    cli,
+                    "_start_engine_group_by_id",
+                    side_effect=cli.LetsInferError("fixture restore failed"),
+                ),
+                mock.patch.object(
+                    cli,
+                    "run_passthrough",
+                    side_effect=cli.LetsInferError("fixture benchmark failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    cli.LetsInferError,
+                    "benchmark failed: fixture benchmark failed; service restoration "
+                    "was incomplete: restore engine group .*: fixture restore failed",
+                ):
+                    cli._run_benchmark_with_service_isolation(
+                        ["matrix"], resident_group_ids=(group_id,)
+                    )
+
+    def test_benchmark_isolation_restores_group_when_stop_fails(self) -> None:
+        group_id = "a" * 32
+        events: list[str] = []
+        with tempfile.TemporaryDirectory() as directory:
+            def fail_stop(_group_id: str) -> None:
+                events.append("stop")
+                raise cli.LetsInferError("fixture stop failed")
+
+            with (
+                mock.patch.object(
+                    cli,
+                    "qualification_service_config_path",
+                    return_value=pathlib.Path(directory) / "missing.json",
+                ),
+                mock.patch.object(cli, "protection_trip_latched", return_value=False),
+                mock.patch.object(
+                    cli,
+                    "_unit_enabled_active",
+                    return_value=("disabled", "inactive"),
+                ),
+                mock.patch.object(
+                    cli,
+                    "_benchmark_engine_group_intents",
+                    return_value={group_id: True},
+                ),
+                mock.patch.object(
+                    cli,
+                    "_gateway_is_idle",
+                    side_effect=lambda: events.append("idle"),
+                ),
+                mock.patch.object(
+                    cli,
+                    "_stop_engine_group_by_id",
+                    side_effect=fail_stop,
+                ),
+                mock.patch.object(
+                    cli,
+                    "_start_engine_group_by_id",
+                    side_effect=lambda _group_id: events.append("start"),
+                ),
+            ):
+                with self.assertRaisesRegex(cli.LetsInferError, "fixture stop failed"):
+                    cli._run_benchmark_with_service_isolation(
+                        ["matrix"], resident_group_ids=(group_id,)
+                    )
+        self.assertEqual(events, ["idle", "stop", "start"])
+
+    def test_benchmark_stop_allows_resident_group_restoration(self) -> None:
+        with mock.patch.object(
+            cli.benchmark_jobs,
+            "read_state",
+            return_value={
+                "metadata": {"resident_group_ids": ["a" * 32]},
+            },
+        ):
+            self.assertEqual(cli._benchmark_stop_timeout_seconds(), 3_600)
+
+    def test_detached_benchmark_binds_resident_groups_into_worker_command(self) -> None:
+        arguments = cli.parser().parse_args(["benchmark", "model", "--c1"])
+        command = cli._benchmark_self_command(
+            arguments,
+            pathlib.Path("/core/bin/letsinfer"),
+            pathlib.Path("/evidence"),
+            ("a" * 32,),
+        )
+        self.assertEqual(command[-2:], ["--resident-group", "a" * 32])
+
+    def test_control_bundle_install_accepts_concurrent_exact_publisher(self) -> None:
+        manifest = {"release": "fixture-release"}
+        adapter = types.SimpleNamespace(name="fixture-engine")
+        with tempfile.TemporaryDirectory() as directory:
+            parent = pathlib.Path(directory)
+
+            def collide(source: pathlib.Path, destination: pathlib.Path) -> None:
+                self.assertTrue(source.name.startswith("."))
+                destination.mkdir(mode=0o700)
+                (destination / "runtime-execution.json").write_bytes(
+                    cli.canonical_bytes(manifest)
+                )
+                raise OSError(errno.ENOTEMPTY, "Directory not empty")
+
+            with (
+                mock.patch.object(
+                    cli,
+                    "_core_release",
+                    return_value=([], {"schema_version": 1}, "a" * 64),
+                ),
+                mock.patch.object(
+                    cli,
+                    "validate_control_bundle",
+                    side_effect=lambda _root, path, _sha, **_kwargs: (path, manifest),
+                ) as validate,
+                mock.patch.object(cli, "adapter_for", return_value=adapter),
+                mock.patch.object(
+                    pathlib.Path,
+                    "replace",
+                    autospec=True,
+                    side_effect=collide,
+                ),
+            ):
+                root, runtime_manifest = cli.install_control_bundle(
+                    pathlib.Path("/runtime-execution.json"),
+                    manifest,
+                    control_parent=parent,
+                )
+
+            self.assertTrue(root.is_dir())
+            self.assertEqual(runtime_manifest, root / "runtime-execution.json")
+            self.assertEqual(validate.call_count, 2)
+            self.assertFalse(any(parent.glob(".*.install-*")))
+
+    def test_control_bundle_validation_uses_its_recorded_source_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = pathlib.Path(directory)
+            source_content = b"historical source\n"
+            source_manifest = {
+                "schema_version": 1,
+                "product": "letsinfer",
+                "files": [
+                    {
+                        "path": "legacy/removed.py",
+                        "bytes": len(source_content),
+                        "mode": 0o644,
+                        "sha256": hashlib.sha256(source_content).hexdigest(),
+                    }
+                ],
+            }
+            source_manifest_data = cli.canonical_bytes(source_manifest)
+            runtime_manifest_data = b"{}\n"
+            runtime_manifest_sha = hashlib.sha256(runtime_manifest_data).hexdigest()
+            core_identity = hashlib.sha256(source_manifest_data).hexdigest()
+            bundle_identity = cli._control_bundle_identity(
+                core_identity, runtime_manifest_sha
+            )
+            root = parent / bundle_identity
+            legacy = root / "legacy"
+            legacy.mkdir(parents=True, mode=0o700)
+            root.chmod(0o700)
+            legacy.chmod(0o700)
+            source = legacy / "removed.py"
+            source.write_bytes(source_content)
+            source.chmod(0o400)
+            core_manifest = root / cli.CORE_SOURCE_MANIFEST
+            core_manifest.write_bytes(source_manifest_data)
+            core_manifest.chmod(0o400)
+            runtime_manifest = root / "runtime-execution.json"
+            runtime_manifest.write_bytes(runtime_manifest_data)
+            runtime_manifest.chmod(0o400)
+
+            with (
+                mock.patch.object(cli, "validate_manifest"),
+                mock.patch.object(cli, "verify_runtime_sources"),
+                mock.patch.object(
+                    cli,
+                    "_core_release",
+                    side_effect=AssertionError(
+                        "control validation must not apply the current source policy"
+                    ),
+                ),
+            ):
+                installed_path, installed = cli.validate_control_bundle(
+                    root, runtime_manifest, runtime_manifest_sha
+                )
+                self.assertEqual(installed_path, runtime_manifest.resolve())
+                self.assertEqual(installed, {})
+
+                unexpected = root / "unexpected.py"
+                unexpected.write_text("unexpected\n", encoding="utf-8")
+                unexpected.chmod(0o400)
+                with self.assertRaisesRegex(
+                    cli.LetsInferError, "source file set mismatch"
+                ):
+                    cli.validate_control_bundle(
+                        root, runtime_manifest, runtime_manifest_sha
+                    )
+
     def test_node_agent_memory_envelope_supports_runtime_staging(self) -> None:
         unit = cli.render_node_service(pathlib.Path("/opt/letsinfer"))
         self.assertIn("MemoryMin=134217728\n", unit)
@@ -492,7 +985,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     cli,
-                    "resolve_service_placement",
+                    "_resolve_qualification_service_placement",
                     return_value={
                         "placement_id": "6" * 32,
                         "placement_strategy": "single",

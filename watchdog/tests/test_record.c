@@ -24,6 +24,7 @@ static watchdog_sample fixture(void) {
     sample.vram_clock_mhz = 9500;
     sample.system_ram_clock_mhz = 4266;
     sample.active_requests = 4;
+    sample.connected_clients = 6;
     sample.queued_requests = 5;
     sample.requests_received = 100;
     sample.requests_completed = 90;
@@ -51,6 +52,7 @@ void test_record_round_trip(void) {
     TEST_ASSERT(output.vram_clock_mhz == 9500);
     TEST_ASSERT(output.system_ram_clock_mhz == 4266);
     TEST_ASSERT(output.active_requests == 4);
+    TEST_ASSERT(output.connected_clients == 6);
     TEST_ASSERT(output.queued_requests == 5);
     TEST_ASSERT(output.requests_received == 100);
     TEST_ASSERT(output.requests_completed == 90);

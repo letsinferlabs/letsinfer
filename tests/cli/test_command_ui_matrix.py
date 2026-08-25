@@ -917,11 +917,162 @@ class ChildFailurePresentationTests(unittest.TestCase):
 
 
 class BenchmarkSurfaceTests(unittest.TestCase):
-    def test_dashboard_preserves_full_evidence_path_and_update_context(self) -> None:
+    def test_live_metric_snapshot_binds_performance_to_the_current_fresh_cell(self) -> None:
+        now_ms = 1_700_000_000_000
+        progress = {
+            "phase": "workload:32k-code-c1:measuring",
+            "updated_unix_ns": (now_ms - 100) * 1_000_000,
+            "current_cell": "32k-code-c1",
+        }
+        telemetry = {
+            "updated_unix_ms": now_ms,
+            "fresh": True,
+            "sample_unix_ms": now_ms,
+            "active_requests": 1,
+            "queued_requests": 0,
+            "rates": {
+                "aggregate_tokens_per_second": 58.9,
+                "decode_tokens_per_second": 27.1,
+                "prefill_tokens_per_second": 219.4,
+                "average_ttft_milliseconds": 420.0,
+            },
+            "system": {
+                "gpu_percent": 80,
+                "cpu_percent": 20,
+                "memory_percent": 70,
+                "memory_used_mib": 1000,
+                "memory_total_mib": 2000,
+                "disk_percent": 10,
+                "disk_read_kib_s": 12,
+                "disk_write_kib_s": 34,
+                "power_deci_w": 500,
+                "gpu_temp_deci_c": 390,
+                "system_temp_deci_c": 430,
+                "nvme_temp_deci_c": 380,
+            },
+        }
+        identity = type("Identity", (), {"member_id": "1" * 32})()
+        with (
+            mock.patch.object(cli.time, "time", return_value=now_ms / 1000),
+            mock.patch.object(cli, "read_site_identity", return_value=identity),
+            mock.patch.object(
+                cli, "_local_controller_telemetry", return_value=telemetry
+            ),
+        ):
+            metrics = cli._benchmark_live_metrics(progress, {})
+        self.assertEqual(metrics["performance_cell"], "32k-code-c1")
+        self.assertEqual(metrics["rates"]["decode_tokens_per_second"], 27.1)
+        self.assertEqual(metrics["temperatures"]["gpu_temp_deci_c"], 390)
+
+        progress["updated_unix_ns"] = (now_ms + 1) * 1_000_000
+        with (
+            mock.patch.object(cli.time, "time", return_value=now_ms / 1000),
+            mock.patch.object(cli, "read_site_identity", return_value=identity),
+            mock.patch.object(
+                cli, "_local_controller_telemetry", return_value=telemetry
+            ),
+        ):
+            reset = cli._benchmark_live_metrics(progress, {})
+        self.assertIsNone(reset["performance_cell"])
+        self.assertIsNone(reset["rates"]["decode_tokens_per_second"])
+        self.assertEqual(reset["temperatures"]["gpu_temp_deci_c"], 390)
+
+    def test_engine_progress_is_authenticated_bounded_and_model_neutral(self) -> None:
+        now_ms = 1_700_000_000_000
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self, _limit):
+                return json.dumps(
+                    {
+                        "schema_version": 1,
+                        "state": "warming-kernels",
+                        "detail": "Capturing execution graphs",
+                        "updated_unix_ms": now_ms,
+                    }
+                ).encode()
+
+        with (
+            mock.patch.object(cli.time, "time", return_value=now_ms / 1000),
+            mock.patch.object(cli, "expanded_path", side_effect=pathlib.Path),
+            mock.patch.object(cli, "read_api_key", return_value="secret"),
+            mock.patch.object(cli, "_tls_context", return_value=mock.sentinel.tls),
+            mock.patch.object(cli.urllib.request, "urlopen", return_value=Response()) as opened,
+        ):
+            value = cli._engine_preparation_snapshot(
+                {
+                    "engine_port": 18000,
+                    "tls_cert_file": "cert",
+                    "engine_api_key_file": "key",
+                }
+            )
+        self.assertEqual(value["state"], "warming-kernels")
+        request = opened.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer secret")
+        self.assertTrue(request.full_url.endswith("/v1/letsinfer/progress"))
+
+    def test_live_progress_publisher_merges_metrics_without_parsing_logs(self) -> None:
+        progress = {
+            "phase": "workload:32k-code-c1:measuring",
+            "current_cell": "32k-code-c1",
+        }
+        metrics = {"schema_version": 1}
+        publisher = cli._BenchmarkLiveProgress("job", {}, interval=0.1)
+        with (
+            mock.patch.object(cli.benchmark_jobs, "read_progress", return_value=progress),
+            mock.patch.object(cli, "_benchmark_live_metrics", return_value=metrics),
+            mock.patch.object(cli, "_engine_preparation_snapshot", return_value=None),
+            mock.patch.object(cli.benchmark_jobs, "merge_progress") as merge,
+            mock.patch.object(publisher.stop_event, "wait", return_value=True),
+        ):
+            publisher._run()
+        merge.assert_called_once_with("job", {"live_metrics": metrics})
+
+    def test_machine_status_retains_evidence_and_live_progress_contract(self) -> None:
+        state = {
+            "schema_version": 1,
+            "state": "running",
+            "job_id": "job",
+            "runtime": "runtime",
+            "output_directory": OPAQUE,
+            "started_unix_ns": 1,
+        }
+        progress = {
+            "schema_version": 1,
+            "phase": "workload:32k-code-c1:measuring",
+            "message": "Measuring 32k-code-c1",
+            "preparation": {
+                "schema_version": 1,
+                "state": "measuring",
+                "detail": "Measuring the current workload",
+                "updated_unix_ms": 1,
+            },
+        }
+        output = io.StringIO()
+        with (
+            mock.patch.object(cli.benchmark_jobs, "read_state", return_value=state),
+            mock.patch.object(cli.benchmark_jobs, "read_progress", return_value=progress),
+            mock.patch.object(cli.benchmark_jobs, "is_alive", return_value=True),
+            mock.patch.object(cli.time, "time_ns", return_value=1_000_000_001),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(cli._benchmark_job_snapshot(machine=True), 0)
+        value = json.loads(output.getvalue())
+        self.assertEqual(value["job"]["output_directory"], OPAQUE)
+        self.assertEqual(value["progress"]["preparation"]["state"], "measuring")
+
+    def test_dashboard_hides_evidence_and_shows_live_performance(self) -> None:
         stream = FakeStream(tty=True)
         terminal = ui.Terminal(
             stream,
-            environ={"TERM": "xterm", "NO_COLOR": "1", "COLUMNS": "32"},
+            environ={"TERM": "xterm", "COLUMNS": "80"},
         )
         update = type(
             "Update",
@@ -934,16 +1085,99 @@ class BenchmarkSurfaceTests(unittest.TestCase):
         )()
         rendered = cli._benchmark_dashboard(
             {"state": "running", "runtime": "runtime", "output_directory": OPAQUE},
-            {"message": "Wait", "phase": "start"},
+            {
+                "message": "Measuring 32k-code-c1",
+                "phase": "workload:32k-code-c1:measuring",
+                "selected_cells": ["32k-code-c1", "64k-code-c1"],
+                "completed_cells": [],
+                "current_cell": "32k-code-c1",
+                "preparation": {
+                    "state": "measuring",
+                    "detail": "Measuring the current workload",
+                },
+                "live_metrics": {
+                    "fresh": True,
+                    "performance_cell": "32k-code-c1",
+                    "active_requests": 1,
+                    "queued_requests": 0,
+                    "rates": {
+                        "aggregate_tokens_per_second": 58.9,
+                        "decode_tokens_per_second": 27.1,
+                        "prefill_tokens_per_second": 219.4,
+                        "average_ttft_milliseconds": 420.0,
+                    },
+                    "temperatures": {
+                        "gpu_temp_deci_c": 390,
+                        "system_temp_deci_c": 430,
+                        "nvme_temp_deci_c": 380,
+                    },
+                    "system": {
+                        "gpu_percent": 80,
+                        "cpu_percent": 20,
+                        "memory_percent": 70,
+                        "memory_used_mib": 1000,
+                        "memory_total_mib": 2000,
+                        "disk_percent": 10,
+                        "disk_read_kib_s": 12,
+                        "disk_write_kib_s": 34,
+                        "power_deci_w": 500,
+                    },
+                },
+            },
             1.0,
             terminal,
             "*",
             (update,),
         )
-        self.assertEqual(rendered.count("Q"), len(OPAQUE))
-        self.assertNotIn("…", rendered)
+        plain = ui.ANSI.sub("", rendered)
+        self.assertNotIn(OPAQUE, rendered)
+        self.assertNotIn("EVIDENCE", plain)
         self.assertIn("UPDATE AVAILABLE", rendered)
         self.assertIn("Core 1.2.3", rendered)
+        self.assertLess(plain.index("PERFORMANCE"), plain.rindex("32k-code-c1"))
+        self.assertIn("58.9 tok/s", plain)
+        self.assertIn("27.1 decode · 219 prefill", plain)
+        self.assertIn("0.42 s", plain)
+        self.assertIn("GPU 39°C · CPU 43°C · NVMe 38°C", plain)
+        self.assertIn("1 active · 0 queued", plain)
+        self.assertIn(
+            ui.DIM
+            + "  Ctrl-C detaches; `letsinfer benchmark stop` cancels."
+            + ui.RESET,
+            rendered,
+        )
+
+    def test_dashboard_resets_performance_when_the_metric_cell_is_stale(self) -> None:
+        terminal = ui.Terminal(
+            FakeStream(tty=True),
+            environ={"TERM": "xterm", "NO_COLOR": "1", "COLUMNS": "52"},
+        )
+        rendered = cli._benchmark_dashboard(
+            {"state": "running", "runtime": "runtime"},
+            {
+                "message": "Loading 64k-code-c1",
+                "phase": "workload:64k-code-c1:loading-model",
+                "selected_cells": ["64k-code-c1"],
+                "completed_cells": [],
+                "current_cell": "64k-code-c1",
+                "live_metrics": {
+                    "fresh": True,
+                    "performance_cell": "32k-code-c1",
+                    "active_requests": 1,
+                    "queued_requests": 0,
+                    "rates": {"aggregate_tokens_per_second": 99},
+                    "temperatures": {"gpu_temp_deci_c": 400},
+                    "system": {},
+                },
+            },
+            1.0,
+            terminal,
+            "*",
+        )
+        self.assertNotIn("99 tok/s", rendered)
+        self.assertIn("Tokens       — tok/s", rendered)
+        self.assertIn("GPU 40°C", rendered)
+        self.assertNotIn(OPAQUE, rendered)
 
 
 if __name__ == "__main__":
