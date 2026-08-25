@@ -15710,6 +15710,14 @@ class LocalEngineGroupExecutor:
         task = config["task"]
         group = config["_group"]
         host = _engine_group_member_host(group, config["member_id"])
+        if task["endpoint_owner"]:
+            identity = read_site_identity()
+            if identity.role == "main" and identity.member_id == config["member_id"]:
+                # The Engine protocol intentionally binds its authenticated listener
+                # to loopback. When the endpoint owner is the main node itself, the
+                # gateway is local too, so advertise the reachable loopback SAN
+                # instead of the node's LAN control address.
+                host = "127.0.0.1"
         certificate_path = pathlib.Path(config["tls_certificate_file"])
         try:
             certificate_pem = certificate_path.read_text(encoding="ascii")
