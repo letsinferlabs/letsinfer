@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import io
 import pathlib
@@ -250,6 +251,50 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             ("a" * 32,),
         )
         self.assertEqual(command[-2:], ["--resident-group", "a" * 32])
+
+    def test_control_bundle_install_accepts_concurrent_exact_publisher(self) -> None:
+        manifest = {"release": "fixture-release"}
+        adapter = types.SimpleNamespace(name="fixture-engine")
+        with tempfile.TemporaryDirectory() as directory:
+            parent = pathlib.Path(directory)
+
+            def collide(source: pathlib.Path, destination: pathlib.Path) -> None:
+                self.assertTrue(source.name.startswith("."))
+                destination.mkdir(mode=0o700)
+                (destination / "runtime-execution.json").write_bytes(
+                    cli.canonical_bytes(manifest)
+                )
+                raise OSError(errno.ENOTEMPTY, "Directory not empty")
+
+            with (
+                mock.patch.object(
+                    cli,
+                    "_core_release",
+                    return_value=([], {"schema_version": 1}, "a" * 64),
+                ),
+                mock.patch.object(
+                    cli,
+                    "validate_control_bundle",
+                    side_effect=lambda _root, path, _sha, **_kwargs: (path, manifest),
+                ) as validate,
+                mock.patch.object(cli, "adapter_for", return_value=adapter),
+                mock.patch.object(
+                    pathlib.Path,
+                    "replace",
+                    autospec=True,
+                    side_effect=collide,
+                ),
+            ):
+                root, runtime_manifest = cli.install_control_bundle(
+                    pathlib.Path("/runtime-execution.json"),
+                    manifest,
+                    control_parent=parent,
+                )
+
+            self.assertTrue(root.is_dir())
+            self.assertEqual(runtime_manifest, root / "runtime-execution.json")
+            self.assertEqual(validate.call_count, 2)
+            self.assertFalse(any(parent.glob(".*.install-*")))
 
     def test_control_bundle_validation_uses_its_recorded_source_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

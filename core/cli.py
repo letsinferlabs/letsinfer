@@ -8,6 +8,7 @@ import argparse
 import base64
 import contextlib
 import datetime as dt
+import errno
 import functools
 import getpass
 import hashlib
@@ -2540,10 +2541,20 @@ def install_control_bundle(
         )
         try:
             staging.replace(destination)
-        except FileExistsError:
-            validate_control_bundle(
+        except OSError as error:
+            if error.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                raise
+            _, installed = validate_control_bundle(
                 destination, destination_manifest, manifest_sha
             )
+            if (
+                installed["release"] != manifest["release"]
+                or adapter_for(installed).name != adapter_for(manifest).name
+            ):
+                raise LetsInferError(
+                    "concurrently installed control bundle has inconsistent "
+                    "release identity"
+                )
             shutil.rmtree(staging)
         _fsync_path(parent)
     except BaseException:
