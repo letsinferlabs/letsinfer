@@ -157,6 +157,7 @@ static size_t encode_telemetry(
     write_uint(&writer, 40, sample->prefix_cache_hits);
     write_uint(&writer, 41, sample->usage_records_dropped);
     write_uint(&writer, 42, sample->usage_write_errors);
+    write_uint(&writer, 43, sample->connected_clients);
     return writer.failed ? 0 : writer.length;
 }
 

@@ -35,8 +35,8 @@ from .state import (
 PROTOCOL = "letsinfer-node-telemetry-v1"
 TELEMETRY_SCHEMA_VERSION = 2
 RECORD_MAGIC = 0x3152494C
-RECORD_VERSION = 1
-RECORD_BYTES = 280
+RECORD_VERSION = 2
+RECORD_BYTES = 284
 RAW_RING_CAPACITY = 86_400
 MAX_SAMPLE_AGE_SECONDS = 5
 MAX_MEMBERS = 64
@@ -215,6 +215,7 @@ def decode_watchdog_protocol_sample(payload: bytes, *, member_id: str) -> dict[s
         "inference": {
             "gateway_available": bool(flags & (1 << 3)),
             "active_requests": uint(values, 25),
+            "connected_clients": uint(values, 43),
             "queued_requests": uint(values, 26),
             **counters,
         },
@@ -341,7 +342,7 @@ def decode_watchdog_record(record: bytes, *, member_id: str) -> dict[str, Any]:
         or _u32(record, 0) != RECORD_MAGIC
         or struct.unpack_from("<H", record, 4)[0] != RECORD_VERSION
         or struct.unpack_from("<H", record, 6)[0] != RECORD_BYTES
-        or _u32(record, 276) != zlib.crc32(record[:276])
+        or _u32(record, 280) != zlib.crc32(record[:280])
     ):
         raise TelemetryError("Watchdog telemetry record is corrupt or unsupported")
     core_count = record[32]
@@ -388,6 +389,7 @@ def decode_watchdog_record(record: bytes, *, member_id: str) -> dict[str, Any]:
         "inference": {
             "gateway_available": bool(flags & (1 << 3)),
             "active_requests": _u32(record, 140),
+            "connected_clients": _u32(record, 276),
             "queued_requests": _u32(record, 144),
             **counters,
         },
@@ -463,7 +465,13 @@ def validate_sample(value: Any) -> dict[str, Any]:
     }:
         _bounded_integer(system[field], f"member telemetry system.{field}", minimum=-32768, maximum=2**32 - 1)
     inference = value.get("inference")
-    inference_fields = {"gateway_available", "active_requests", "queued_requests", *COUNTER_FIELDS}
+    inference_fields = {
+        "gateway_available",
+        "active_requests",
+        "connected_clients",
+        "queued_requests",
+        *COUNTER_FIELDS,
+    }
     if not isinstance(inference, dict) or set(inference) != inference_fields or not isinstance(inference["gateway_available"], bool):
         raise TelemetryError("member telemetry inference fields are invalid")
     for field in inference_fields - {"gateway_available"}:
@@ -709,6 +717,7 @@ class TelemetryAggregator:
         rows: list[dict[str, Any]] = []
         totals = {field: 0 for field in COUNTER_FIELDS}
         active_requests = 0
+        connected_clients = 0
         queued_requests = 0
         fresh_windows: list[Mapping[str, int]] = []
         for member_id in sorted(self.members):
@@ -723,6 +732,7 @@ class TelemetryAggregator:
                 totals[field] += amount
             if not stale:
                 active_requests += inference["active_requests"]
+                connected_clients += inference["connected_clients"]
                 queued_requests += inference["queued_requests"]
                 window = self.windows.get(member_id)
                 if window is not None:
@@ -745,6 +755,7 @@ class TelemetryAggregator:
             "members": rows,
             "aggregate": {
                 "active_requests": active_requests,
+                "connected_clients": connected_clients,
                 "queued_requests": queued_requests,
                 **totals,
                 "rates": self._rates(fresh_windows),

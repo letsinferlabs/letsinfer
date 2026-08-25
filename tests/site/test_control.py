@@ -62,7 +62,8 @@ def telemetry_sample(member_id: str) -> dict:
         "vram_clock_mhz": -1, "system_ram_clock_mhz": -1,
     }
     inference = {
-        "gateway_available": True, "active_requests": 1, "queued_requests": 0,
+        "gateway_available": True, "active_requests": 1,
+        "connected_clients": 1, "queued_requests": 0,
         **{field: 1 for field in telemetry.COUNTER_FIELDS},
     }
     return {

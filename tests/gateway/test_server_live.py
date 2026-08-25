@@ -209,6 +209,30 @@ class LiveGatewayTests(unittest.TestCase):
         self.gateway_worker.start()
         self.assertEqual(self.gateway.server_port, port)
 
+    def test_connected_client_gauge_tracks_open_gateway_connections(self) -> None:
+        connection = socket.create_connection(
+            ("127.0.0.1", self.gateway.server_port), timeout=2
+        )
+        try:
+            deadline = time.monotonic() + 2
+            while (
+                self.gateway.metrics.snapshot()["connected_clients"] != 1
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            self.assertEqual(
+                self.gateway.metrics.snapshot()["connected_clients"], 1
+            )
+        finally:
+            connection.close()
+        deadline = time.monotonic() + 2
+        while (
+            self.gateway.metrics.snapshot()["connected_clients"] != 0
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        self.assertEqual(self.gateway.metrics.snapshot()["connected_clients"], 0)
+
     def _placements(self, backends: list[_Backend]) -> list[dict]:
         members = [f"{index + 1:032x}" for index in range(len(backends))]
         placements = []
