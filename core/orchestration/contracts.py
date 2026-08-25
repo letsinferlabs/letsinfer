@@ -176,15 +176,18 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
         raise OrchestrationError("engine-group release qualification is invalid")
     benchmark = value.get("benchmark")
     if (
-        not isinstance(benchmark, dict)
-        or set(benchmark) != {"id", "evidence"}
-        or not isinstance(benchmark.get("id"), str)
-        or not SHA256_RE.fullmatch(benchmark["id"])
-        or (
-            benchmark.get("evidence") is not None
-            and (
-                not isinstance(benchmark["evidence"], str)
-                or not OCI_DIGEST_RE.fullmatch(benchmark["evidence"])
+        benchmark is not None
+        and (
+            not isinstance(benchmark, dict)
+            or set(benchmark) != {"id", "evidence"}
+            or not isinstance(benchmark.get("id"), str)
+            or not SHA256_RE.fullmatch(benchmark["id"])
+            or (
+                benchmark.get("evidence") is not None
+                and (
+                    not isinstance(benchmark["evidence"], str)
+                    or not OCI_DIGEST_RE.fullmatch(benchmark["evidence"])
+                )
             )
         )
     ):

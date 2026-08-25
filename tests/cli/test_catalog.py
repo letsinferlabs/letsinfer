@@ -167,6 +167,149 @@ class CatalogTests(unittest.TestCase):
                 manifest_sha256="7" * 64,
             )
 
+    def test_group_release_accepts_a_signed_unscored_runtime(self) -> None:
+        release = catalog()["models"]["qwen3.8-27b"]["targets"]["dgx-spark"][
+            "candidates"
+        ][CANDIDATE]["releases"]["0.1.0-rc.12"]
+        release["benchmark"] = None
+        runtime = {
+            "logical_model": "qwen3.8-27b",
+            "engine": {
+                "id": release["engine"],
+                "oci": {"reference": release["engine_oci"]},
+            },
+            "model": {"uri": release["model_uri"]},
+            "artifacts": [
+                {
+                    "name": "model",
+                    "uri": release["model_uri"],
+                    "revision": "4" * 40,
+                }
+            ],
+            "benchmark": {"contract": {"schema_version": 7}},
+        }
+        identity = cli._group_release_identity(
+            catalog_release_value=release,
+            candidate_id=CANDIDATE,
+            version="0.1.0-rc.12",
+            source=release["source"],
+            target_id="dgx-spark",
+            target_sha256="6" * 64,
+            runtime=runtime_packs.RuntimePack(
+                pathlib.Path("/runtime"), {}, runtime, "5" * 64
+            ),
+            manifest_sha256="7" * 64,
+        )
+        self.assertIsNone(identity["benchmark"])
+        self.assertIs(validate_release_identity(identity), identity)
+
+    def test_catalog_accepts_current_two_verifier_consensus(self) -> None:
+        document = catalog()
+        release = document["models"]["qwen3.8-27b"]["targets"]["dgx-spark"][
+            "candidates"
+        ][CANDIDATE]["releases"]["0.1.0-rc.12"]
+        release["provenance"] = {
+            "repository": "letsinferlabs/runtimes",
+            "pull_request": 17,
+            "pull_request_url": "https://github.com/letsinferlabs/runtimes/pull/17",
+            "proposal_head_sha": "5" * 40,
+            "execution_sha256": "6" * 64,
+            "qualified_commit_sha": "7" * 40,
+            "consensus_sha256": "8" * 64,
+        }
+        release["verification"] = {
+            "method": "community-two-independent-v1",
+            "consensus_path": f"{CANDIDATE}/benchmark.consensus.json",
+            "consensus_sha256": "8" * 64,
+            "verifiers": [
+                {
+                    "github_login": f"Verifier{number}",
+                    "github_id": 100 + number,
+                    "github_type": "User",
+                }
+                for number in range(2)
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "catalog.json"
+            path.write_bytes(runtime_packs.canonical_bytes(document))
+            self.assertEqual(runtime_packs.load_catalog(str(path)), document)
+
+    def test_unscored_maintainer_bypass_is_explicit_only(self) -> None:
+        document = catalog()
+        target = document["models"]["qwen3.8-27b"]["targets"]["dgx-spark"]
+        release = target["candidates"][CANDIDATE]["releases"]["0.1.0-rc.12"]
+        release["benchmark"] = None
+        release["provenance"] = {
+            "repository": "letsinferlabs/runtimes",
+            "pull_request": 17,
+            "pull_request_url": "https://github.com/letsinferlabs/runtimes/pull/17",
+            "proposal_head_sha": "5" * 40,
+            "execution_sha256": "6" * 64,
+            "qualified_commit_sha": "7" * 40,
+            "consensus_sha256": "8" * 64,
+        }
+        release["verification"] = {
+            "method": "allowlisted-maintainer-bypass-v1",
+            "consensus_path": f"{CANDIDATE}/benchmark.consensus.json",
+            "consensus_sha256": "8" * 64,
+            "verifiers": [],
+            "waiver": {
+                "schema_version": 1,
+                "policy": "allowlisted-maintainer-bypass-v1",
+                "actor": {
+                    "github_login": "Maintainer",
+                    "github_id": 100,
+                    "github_type": "User",
+                },
+                "reason": "Sole-maintainer release authorization",
+                "comment_id": 123,
+                "comment_url": (
+                    "https://github.com/letsinferlabs/runtimes/pull/17"
+                    "#issuecomment-123"
+                ),
+                "issued_at": "2026-08-25T02:00:00Z",
+            },
+        }
+        target["recommended"] = None
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "catalog.json"
+            path.write_bytes(runtime_packs.canonical_bytes(document))
+            loaded = runtime_packs.load_catalog(str(path))
+            self.assertEqual(
+                runtime_packs.catalog_release(
+                    loaded,
+                    "qwen3.8-27b",
+                    CANDIDATE,
+                    target="dgx-spark",
+                )[-2:],
+                ("0.1.0-rc.12", release["source"]),
+            )
+            with self.assertRaisesRegex(runtime_packs.RuntimePackError, "no qualified"):
+                runtime_packs.catalog_release(
+                    loaded, "qwen3.8-27b", None, target="dgx-spark"
+                )
+
+            target["recommended"] = {
+                "candidate": CANDIDATE,
+                "version": "0.1.0-rc.12",
+            }
+            path.write_bytes(runtime_packs.canonical_bytes(document))
+            with self.assertRaisesRegex(runtime_packs.RuntimePackError, "unscored"):
+                runtime_packs.load_catalog(str(path))
+
+            target["recommended"] = None
+            release["benchmark"] = {
+                "id": "9" * 64,
+                "suite": "letsinfer-code-prose-v1",
+                "score": 1.0,
+            }
+            path.write_bytes(runtime_packs.canonical_bytes(document))
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "carries a benchmark score"
+            ):
+                runtime_packs.load_catalog(str(path))
+
     def test_catalog_accepts_only_a_fully_bound_runtime_contract_migration(self) -> None:
         document = catalog()
         target = document["models"]["qwen3.8-27b"]["targets"]["dgx-spark"]
@@ -435,6 +578,41 @@ class CatalogTests(unittest.TestCase):
             cli.list_available_runtimes(arguments)
         self.assertIn("VERIFIED", output.getvalue())
         self.assertRegex(output.getvalue(), r"\s3\s+recommended")
+
+    def test_list_json_preserves_unscored_maintainer_release(self) -> None:
+        document = catalog()
+        target = document["models"]["qwen3.8-27b"]["targets"]["dgx-spark"]
+        target["recommended"] = None
+        release = target["candidates"][CANDIDATE]["releases"]["0.1.0-rc.12"]
+        release["benchmark"] = None
+        release["verification"] = {
+            "method": "allowlisted-maintainer-bypass-v1",
+            "consensus_path": f"{CANDIDATE}/benchmark.consensus.json",
+            "consensus_sha256": "8" * 64,
+            "verifiers": [],
+            "waiver": {},
+        }
+        snapshot = CatalogSnapshot(document, "catalog.json", "5" * 64, 100, False)
+        arguments = argparse.Namespace(
+            catalog="catalog.json",
+            refresh=False,
+            all_targets=True,
+            model=None,
+            versions=False,
+            json=True,
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(cli.CatalogManager, "load", return_value=snapshot),
+            mock.patch.object(cli, "selections", return_value=[]),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(cli.list_available_runtimes(arguments), 0)
+        rows = json.loads(output.getvalue())["runtimes"]
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["benchmark_id"])
+        self.assertIsNone(rows[0]["benchmark_score"])
+        self.assertFalse(rows[0]["recommended"])
 
 
 if __name__ == "__main__":

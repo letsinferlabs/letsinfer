@@ -1,6 +1,6 @@
 ---
 name: runtime-review
-description: Review and publish a Let's Infer runtime pull request as an authorized repository maintainer, including exact PR artifacts, two-verifier qualification, Engine reuse or promotion, and /shipit. Do not use for ordinary runtime authoring.
+description: Review and publish a Let's Infer runtime pull request as an authorized repository maintainer, including exact PR artifacts, ordinary two-verifier qualification, the allowlisted maintainer override, Engine reuse or promotion, and /shipit. Do not use for ordinary runtime authoring.
 ---
 
 # Review and ship a Let's Infer runtime
@@ -30,7 +30,7 @@ one slot, regardless of reruns. Authors are informational. Performance
 differences are reported but do not create disagreement mechanics or increase
 quorum. Any accepted blocking failure is terminal for the subject.
 
-The configured maintainer bypass is intentionally narrow:
+An explicitly allowlisted maintainer may bypass the independent verifier quorum:
 
 ```text
 /shipit --bypass-verifiers
@@ -39,16 +39,19 @@ Reason: <required non-empty explanation>
 
 Trusted code must find the actor's immutable numeric GitHub ID in
 `LETSINFER_VERIFIER_BYPASS_GITHUB_IDS` and independently confirm live
-`maintain` or `admin` permission. It still requires one complete successful
-independent run for the current subject and no accepted blocking failure. It
-waives only the second verifier; it never waives source review, required
-checks, protocol, determinism, licensing, SBOM, public pull verification, or
-blocking evidence. Record the actor ID, command, reason, subject, time, and
-waived requirement in bot-owned consensus and the publication receipt.
+`maintain` or `admin` permission. The command is the maintainer's release
+authorization, so this path does not require an independent benchmark result
+or a second non-author maintainer approval. Accepted correctness, safety, and
+restoration failures remain blocking. It never waives failed checks, source
+and license audits, protocol, determinism, SBOM, attestations, digest matching,
+public pull verification, or exact-head protection. Record the actor ID,
+command, reason, subject, time, and bypassed quorum in bot-owned consensus and
+the publication receipt. If there is no measured evidence, publish the release
+without a score and keep it ineligible for automatic recommendation.
 
 ## Process `/shipit`
 
-Bind the command to the current PR head, current reviews and checks,
+Bind the command to the current PR head, current blocking review state and checks,
 `benchmark-ready`, exact subject, accepted evidence, and only trusted bot-owned
 metadata commits after the executable proposal. Recheck authorization through
 the GitHub API at execution time.

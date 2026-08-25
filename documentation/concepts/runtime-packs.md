@@ -101,8 +101,8 @@ pass their declared gates. Evidence does not transfer across a changed Engine
 OCI, model revision, or runtime pack.
 
 The generated root `manifest.json` is an append-only versioned release index.
-It retains every qualified candidate version, authors, license, immutable
-runtime OCI, benchmark score, structured verifier list, and consensus digest.
+It retains every published candidate version, authors, license, immutable
+runtime OCI, optional benchmark score, structured verifier list, and consensus digest.
 Complete accepted evidence remains in canonical bot comments and the generated
 `benchmark.consensus.json`; it is not duplicated into an evidence OCI. Release
 automation selects one qualified recommendation for each logical model and
@@ -160,9 +160,13 @@ subject; performance variance does not change quorum. The verification bot
 owns `benchmark.consensus.json`, qualification provenance, and the catalog
 projection. An authorized maintainer then uses `/shipit` to promote the exact
 reviewed Engine and runtime objects, anonymously reverify both, and merge the
-checked head. A configured maintainer may waive only the second verifier after
-one independent pass and no blocking failure; live maintainer permission and a
-trusted numeric-ID allowlist are both required. Runtime source cannot mark itself
-qualified. A post-release invalidation enters the separate signed revocation
-ledger; it does not rewrite the immutable release or add a status field to the
-manifest.
+checked head. An explicitly allowlisted maintainer may use
+`/shipit --bypass-verifiers` with a recorded reason to bypass the independent
+verifier quorum. The command itself is the maintainer's release authorization;
+it does not require a second maintainer. Accepted blocking evidence and every
+source, attestation, digest, public-pull, and exact-head gate remain enforced.
+A release with no measured evidence is unscored, available only through
+explicit runtime selection, and ineligible for recommendation. Runtime source
+cannot mark itself qualified. A post-release invalidation enters the separate
+signed revocation ledger; it does not rewrite the immutable release or add a
+status field to the manifest.
