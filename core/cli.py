@@ -12181,7 +12181,7 @@ def _start_engine_group_by_id(group_id: str) -> None:
                 "engine group entered an unsafe state before restoration"
             )
         orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
-        started = orchestrator.recover(acknowledge_trips=False)
+        started = orchestrator.start()
         _sync_group_placement(store, started)
 
 
@@ -14501,7 +14501,8 @@ def _run_benchmark_with_service_isolation(
         detail = "; ".join(restore_errors)
         if benchmark_error is not None:
             raise LetsInferError(
-                f"benchmark failed and service restoration was incomplete: {detail}"
+                f"benchmark failed: {benchmark_error}; "
+                f"service restoration was incomplete: {detail}"
             ) from benchmark_error
         raise LetsInferError(
             f"benchmark completed but service restoration was incomplete: {detail}"
