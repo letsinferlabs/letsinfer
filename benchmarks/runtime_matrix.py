@@ -1363,9 +1363,11 @@ def verified_source_identity(
 def print_summary(summary: dict[str, Any]) -> None:
     decode = summary["decode_tokens_per_second"]
     ttft = summary["ttft_ms"]
+    decode_mean = decode["mean"]
+    mean_tps = "n/a" if decode_mean is None else f"{decode_mean:.6f}"
     message = (
         f"DONE {summary['cell']} prompt={summary['prompt_tokens']} "
-        f"mean_tps={decode['mean']:.6f} aggregate_tps="
+        f"mean_tps={mean_tps} aggregate_tps="
         f"{summary['aggregate_completion_tokens_per_second']:.6f} "
         f"ttft_p50={ttft['p50'] / 1000.0:.3f}s "
         f"ttft_p95={ttft['p95'] / 1000.0:.3f}s"

@@ -31,6 +31,24 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
+    def test_one_token_summary_has_no_decode_rate(self) -> None:
+        summary = {
+            "cell": "ttftcold-code-c1",
+            "prompt_tokens": [63_900],
+            "decode_tokens_per_second": {"mean": None},
+            "aggregate_completion_tokens_per_second": 0.016,
+            "ttft_ms": {"p50": 60_000.0, "p95": 60_000.0},
+        }
+
+        with mock.patch("builtins.print") as output:
+            runtime_matrix.print_summary(summary)
+
+        output.assert_called_once_with(
+            "DONE ttftcold-code-c1 prompt=[63900] mean_tps=n/a "
+            "aggregate_tps=0.016000 ttft_p50=60.000s ttft_p95=60.000s",
+            flush=True,
+        )
+
     def test_monitor_safety_stop_replaces_secondary_stream_failure(self) -> None:
         secondary = runtime_matrix.RuntimeMatrixError(
             "fixture completion token count 75 is below 128"
