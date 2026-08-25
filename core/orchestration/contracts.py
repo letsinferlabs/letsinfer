@@ -21,6 +21,10 @@ SCHEMA_VERSION = 3
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+CANDIDATE_ID_RE = re.compile(
+    r"^[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*--"
+    r"[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*$"
+)
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
 OCI_DIGEST_RE = re.compile(
     r"^[a-z0-9][a-z0-9._/-]*(?::[a-zA-Z0-9._-]+)?@sha256:[0-9a-f]{64}$"
@@ -124,9 +128,16 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
     }
     if not isinstance(value, dict) or set(value) != required:
         raise OrchestrationError("engine-group release identity is incomplete")
-    for key in ("logical_model", "candidate_id", "target_id"):
+    for key in ("logical_model", "target_id"):
         if not isinstance(value.get(key), str) or not SAFE_NAME_RE.fullmatch(value[key]):
             raise OrchestrationError(f"engine-group release {key} is invalid")
+    candidate_id = value.get("candidate_id")
+    if (
+        not isinstance(candidate_id, str)
+        or len(candidate_id.encode("utf-8")) > 512
+        or CANDIDATE_ID_RE.fullmatch(candidate_id) is None
+    ):
+        raise OrchestrationError("engine-group release candidate_id is invalid")
     if not isinstance(value.get("version"), str) or not VERSION_RE.fullmatch(value["version"]):
         raise OrchestrationError("engine-group release version is invalid")
     for key in ("source", "engine_oci"):
