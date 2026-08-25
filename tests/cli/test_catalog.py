@@ -298,17 +298,19 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(runtime_packs.RuntimePackError, "unscored"):
                 runtime_packs.load_catalog(str(path))
 
-            target["recommended"] = None
             release["benchmark"] = {
                 "id": "9" * 64,
                 "suite": "letsinfer-code-prose-v1",
                 "score": 1.0,
             }
             path.write_bytes(runtime_packs.canonical_bytes(document))
-            with self.assertRaisesRegex(
-                runtime_packs.RuntimePackError, "carries a benchmark score"
-            ):
-                runtime_packs.load_catalog(str(path))
+            loaded = runtime_packs.load_catalog(str(path))
+            self.assertEqual(
+                runtime_packs.catalog_release(
+                    loaded, "qwen3.8-27b", None, target="dgx-spark"
+                )[-2:],
+                ("0.1.0-rc.12", release["source"]),
+            )
 
     def test_catalog_accepts_only_a_fully_bound_runtime_contract_migration(self) -> None:
         document = catalog()
