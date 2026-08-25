@@ -77,6 +77,7 @@ letsinfer inspect qwen3.8-27b
 letsinfer verify qwen3.8-27b
 letsinfer doctor
 letsinfer logs
+letsinfer logs --group GROUP_ID
 ```
 
 Interactive `status` refreshes until you press Ctrl-C. Its API, runtime,
@@ -85,6 +86,9 @@ same normalized state plane used by other consumers.
 
 `letsinfer list` is discovery from the signed public catalog. `letsinfer
 runtimes` shows only immutable packs already installed on your machine.
+`letsinfer logs` follows the only local engine group automatically. When a node
+hosts more than one group, select the exact group shown by `letsinfer status`
+with `--group`.
 
 Lifecycle commands:
 
@@ -172,7 +176,9 @@ letsinfer upgrade qwen3.8-27b
 letsinfer rollback qwen3.8-27b
 ```
 
-`update check` refreshes core and active-runtime availability. Every
+`update check` refreshes core and every distinct installed engine-group release.
+Replica groups on the same exact release are deduplicated, while mixed targets
+or versions remain visible independently. Every
 interactive command can show the cached update notice without blocking on the
 network.
 

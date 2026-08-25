@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import io
 import json
 import pathlib
@@ -12,7 +14,6 @@ import tempfile
 import threading
 import types
 import unittest
-import contextlib
 from unittest import mock
 
 from core import cli, runtime_packs, ui
@@ -190,6 +191,174 @@ class UpdateManagerTests(unittest.TestCase):
         self.assertRegex(first, r"^[0-9a-f]{64}$")
         self.assertEqual(first, second)
 
+    def test_update_components_use_engine_group_releases_without_service_json(self):
+        identity_path = pathlib.Path(self.temporary.name) / "site.json"
+        identity_path.write_text("{}\n", encoding="utf-8")
+        placement_id = "a" * 32
+        release = {
+            "logical_model": "qwen3.8-27b",
+            "candidate_id": CANDIDATE,
+            "target_id": "dgx-spark",
+            "target_contract_sha256": TARGET_DIGEST,
+            "version": "0.1.0-rc.10",
+            "runtime_digest": RUNTIME_DIGEST,
+            "source": (
+                "ghcr.io/letsinferlabs/runtime-artifacts/qwen@sha256:"
+                + RUNTIME_DIGEST
+            ),
+        }
+        store = mock.MagicMock()
+        store.placements.return_value = [
+            {
+                "placement_id": placement_id,
+                "model": release["logical_model"],
+            }
+        ]
+        store.engine_groups.return_value = [
+            {
+                "placement_id": placement_id,
+                "state": "running",
+                "desired_state": "running",
+                "plan": {"release": release},
+            },
+            {
+                "placement_id": placement_id,
+                "state": "stopped",
+                "desired_state": "stopped",
+                "plan": {"release": release},
+            },
+        ]
+        store_context = mock.MagicMock()
+        store_context.__enter__.return_value = store
+        missing = pathlib.Path(self.temporary.name) / "missing-service.json"
+        with (
+            mock.patch.object(cli, "site_identity_path", return_value=identity_path),
+            mock.patch.object(
+                cli,
+                "read_site_identity",
+                return_value=types.SimpleNamespace(role="main"),
+            ),
+            mock.patch.object(cli, "SiteStore", return_value=store_context),
+            mock.patch.object(cli, "_core_update_identity", return_value="core-a"),
+            mock.patch.object(
+                cli, "qualification_service_config_path", return_value=missing
+            ),
+            mock.patch.object(cli, "default_service_config_path", return_value=missing),
+            mock.patch.object(cli, "read_service_config") as legacy_config,
+        ):
+            installed = cli._update_components()
+
+        legacy_config.assert_not_called()
+        self.assertEqual(len(installed), 2)
+        runtime = installed[1]
+        self.assertEqual(runtime.subject, release["logical_model"])
+        self.assertEqual(runtime.model, release["logical_model"])
+        self.assertEqual(runtime.runtime, release["candidate_id"])
+        self.assertEqual(runtime.installed_identity, release["runtime_digest"])
+        self.assertEqual(runtime.installed_source, release["source"])
+
+    def test_update_components_keep_mixed_group_releases_distinct(self):
+        identity_path = pathlib.Path(self.temporary.name) / "site.json"
+        identity_path.write_text("{}\n", encoding="utf-8")
+        model = "qwen3.8-27b"
+        releases = []
+        groups = []
+        placements = []
+        for index, version in enumerate(("0.1.0-rc.9", "0.1.0-rc.10"), start=1):
+            digest = str(index) * 64
+            placement_id = str(index + 2) * 32
+            release = {
+                "logical_model": model,
+                "candidate_id": CANDIDATE,
+                "target_id": "dgx-spark",
+                "target_contract_sha256": TARGET_DIGEST,
+                "version": version,
+                "runtime_digest": digest,
+                "source": "registry.example/runtime@sha256:" + digest,
+            }
+            releases.append(release)
+            placements.append({"placement_id": placement_id, "model": model})
+            groups.append(
+                {
+                    "placement_id": placement_id,
+                    "state": "running",
+                    "desired_state": "running",
+                    "plan": {"release": release},
+                }
+            )
+        store = mock.MagicMock()
+        store.placements.return_value = placements
+        store.engine_groups.return_value = groups
+        store_context = mock.MagicMock()
+        store_context.__enter__.return_value = store
+        missing = pathlib.Path(self.temporary.name) / "missing-service.json"
+        with (
+            mock.patch.object(cli, "site_identity_path", return_value=identity_path),
+            mock.patch.object(
+                cli,
+                "read_site_identity",
+                return_value=types.SimpleNamespace(role="main"),
+            ),
+            mock.patch.object(cli, "SiteStore", return_value=store_context),
+            mock.patch.object(cli, "_core_update_identity", return_value="core-a"),
+            mock.patch.object(
+                cli, "qualification_service_config_path", return_value=missing
+            ),
+            mock.patch.object(cli, "default_service_config_path", return_value=missing),
+        ):
+            runtimes = cli._update_components()[1:]
+
+        self.assertEqual(len(runtimes), 2)
+        self.assertEqual(len({runtime.subject for runtime in runtimes}), 2)
+        self.assertEqual({runtime.apply_subject for runtime in runtimes}, {model})
+        self.assertTrue(all(runtime.display_subject.startswith(model) for runtime in runtimes))
+
+    def test_child_update_components_use_the_local_group_plan(self):
+        identity_path = pathlib.Path(self.temporary.name) / "site.json"
+        identity_path.write_text("{}\n", encoding="utf-8")
+        group_root = pathlib.Path(self.temporary.name) / "groups" / ("a" * 32)
+        group_root.mkdir(parents=True)
+        group_file = group_root / "group.json"
+        group_file.write_text(
+            json.dumps({"padding": "x" * 64}) + "\n", encoding="utf-8"
+        )
+        group_file.chmod(0o600)
+        release = {
+            "logical_model": "qwen3.8-27b",
+            "candidate_id": CANDIDATE,
+            "target_id": "dgx-spark",
+            "target_contract_sha256": TARGET_DIGEST,
+            "version": "0.1.0-rc.10",
+            "runtime_digest": RUNTIME_DIGEST,
+            "source": "registry.example/runtime@sha256:" + RUNTIME_DIGEST,
+        }
+        missing = pathlib.Path(self.temporary.name) / "missing-service.json"
+        with (
+            mock.patch.object(cli, "site_identity_path", return_value=identity_path),
+            mock.patch.object(
+                cli,
+                "read_site_identity",
+                return_value=types.SimpleNamespace(role="child"),
+            ),
+            mock.patch.object(
+                cli,
+                "default_engine_group_root",
+                return_value=group_root.parent,
+            ),
+            mock.patch.object(
+                cli, "validate_group_document", return_value={"release": release}
+            ),
+            mock.patch.object(cli, "_core_update_identity", return_value="core-a"),
+            mock.patch.object(
+                cli, "qualification_service_config_path", return_value=missing
+            ),
+            mock.patch.object(cli, "default_service_config_path", return_value=missing),
+        ):
+            installed = cli._update_components()
+
+        self.assertEqual(installed[1].model, release["logical_model"])
+        self.assertEqual(installed[1].installed_identity, release["runtime_digest"])
+
     def test_version_order_covers_rc_and_stable(self):
         self.assertLess(compare_versions("0.11.0-rc.9", "0.11.0-rc.10"), 0)
         self.assertLess(compare_versions("0.11.0-rc.30", "0.11.0"), 0)
@@ -284,6 +453,22 @@ class UpdateManagerTests(unittest.TestCase):
         )
         self.assertEqual(manager.cached(), snapshot)
         self.assertEqual(self.database.stat().st_mode & 0o777, 0o600)
+
+    def test_cached_records_restore_runtime_display_and_apply_subjects(self):
+        core, runtime = components()
+        runtime = dataclasses.replace(
+            runtime,
+            subject="runtime-component-id",
+            display_subject="Qwen · DGX Spark",
+            apply_subject="qwen3.8-27b",
+        )
+        manager = self.manager(installed=(core, runtime))
+        refreshed = manager.refresh()
+        cached = manager.cached()
+        self.assertEqual(cached, refreshed)
+        record = next(item for item in cached.records if item.kind == "runtime")
+        self.assertEqual(record.label, "Qwen · DGX Spark")
+        self.assertEqual(record.apply, "qwen3.8-27b")
 
     def test_cached_never_creates_storage_or_calls_network(self):
         manager = self.manager()

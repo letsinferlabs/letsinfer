@@ -261,11 +261,11 @@ def update_labels(records: Iterable[object]) -> list[str]:
     for record in records:
         if isinstance(record, Mapping):
             kind = record.get("kind", "")
-            subject = record.get("subject", "")
+            subject = record.get("display_subject") or record.get("subject", "")
             version = record.get("version") or record.get("available_version", "")
         else:
             kind = getattr(record, "kind", "")
-            subject = getattr(record, "subject", "")
+            subject = getattr(record, "label", getattr(record, "subject", ""))
             version = getattr(record, "available_version", "")
         label = "Core" if kind == "core" else subject
         if isinstance(label, str) and label and isinstance(version, str) and version:
