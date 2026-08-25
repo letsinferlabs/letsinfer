@@ -9,6 +9,7 @@ import base64
 import contextlib
 import datetime as dt
 import errno
+import fcntl
 import functools
 import getpass
 import hashlib
@@ -638,6 +639,49 @@ def default_gateway_group_telemetry_path() -> pathlib.Path:
 
 def default_engine_group_root() -> pathlib.Path:
     return site_data_root() / "engine-groups"
+
+
+_ENGINE_GROUP_LIFECYCLE_THREAD_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def _engine_group_lifecycle_lock() -> Iterable[None]:
+    """Serialize explicit group lifecycle against background reconciliation."""
+    with _ENGINE_GROUP_LIFECYCLE_THREAD_LOCK:
+        root = default_engine_group_root()
+        ensure_private_directory(root)
+        path = root / ".lifecycle.lock"
+        descriptor = os.open(
+            path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            details = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or details.st_uid != os.getuid()
+                or stat.S_IMODE(details.st_mode) != 0o600
+            ):
+                raise LetsInferError(
+                    "engine-group lifecycle lock must be private and user-owned"
+                )
+            with os.fdopen(descriptor, "r+", encoding="utf-8") as handle:
+                descriptor = -1
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                yield
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _serialized_engine_group_lifecycle(function: Any) -> Any:
+    @functools.wraps(function)
+    def serialized(*args: Any, **kwargs: Any) -> Any:
+        with _engine_group_lifecycle_lock():
+            return function(*args, **kwargs)
+
+    return serialized
 
 
 def default_watchdog_cert_path() -> pathlib.Path:
@@ -8760,6 +8804,7 @@ def _engine_group_status(model: str | None) -> list[dict[str, Any]]:
     return values
 
 
+@_serialized_engine_group_lifecycle
 def reconcile_engine_groups_once() -> dict[str, Any]:
     """Refresh durable health without changing a group's desired lifecycle."""
     summary: dict[str, list[str]] = {"healthy": [], "degraded": [], "failed": []}
@@ -12172,6 +12217,7 @@ def _cleanup_failed_group_release(
         _remove_engine_groups_by_id(candidates)
 
 
+@_serialized_engine_group_lifecycle
 def _stop_engine_group_by_id(group_id: str) -> None:
     """Stop one exact group without affecting its replica siblings."""
     with _site_store() as store:
@@ -12188,6 +12234,7 @@ def _stop_engine_group_by_id(group_id: str) -> None:
         _sync_group_placement(store, stopped)
 
 
+@_serialized_engine_group_lifecycle
 def _start_engine_group_by_id(group_id: str) -> None:
     """Recover one exact stopped group without affecting replica siblings."""
     with _site_store() as store:

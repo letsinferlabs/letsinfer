@@ -10,6 +10,7 @@ import hashlib
 import io
 import pathlib
 import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -21,6 +22,42 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_engine_group_lifecycle_lock_serializes_threads(self) -> None:
+        first_acquired = threading.Event()
+        release_first = threading.Event()
+        second_attempted = threading.Event()
+        second_acquired = threading.Event()
+
+        def first() -> None:
+            with cli._engine_group_lifecycle_lock():
+                first_acquired.set()
+                release_first.wait(2)
+
+        def second() -> None:
+            second_attempted.set()
+            with cli._engine_group_lifecycle_lock():
+                second_acquired.set()
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            cli,
+            "default_engine_group_root",
+            return_value=pathlib.Path(directory) / "groups",
+        ):
+            first_thread = threading.Thread(target=first)
+            second_thread = threading.Thread(target=second)
+            first_thread.start()
+            self.assertTrue(first_acquired.wait(1))
+            second_thread.start()
+            self.assertTrue(second_attempted.wait(1))
+            self.assertFalse(second_acquired.wait(0.05))
+            release_first.set()
+            first_thread.join(2)
+            second_thread.join(2)
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertTrue(second_acquired.is_set())
+
     def test_benchmark_placement_borrows_only_overlapping_group_devices(self) -> None:
         member_id = "a" * 32
         group_id = "b" * 32
@@ -238,6 +275,11 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         started = {"group_id": group_id, "state": "running"}
         orchestrator.start.return_value = started
         with (
+            mock.patch.object(
+                cli,
+                "_engine_group_lifecycle_lock",
+                return_value=contextlib.nullcontext(),
+            ),
             mock.patch.object(cli, "_site_store", return_value=store_context),
             mock.patch.object(
                 cli,
