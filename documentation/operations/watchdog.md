@@ -10,25 +10,23 @@ protector.
 The launcher binds Watchdog to the exact engine PID, process start time, boot
 ID, container ID, and cgroup. Watchdog holds a Linux pidfd, records and flushes
 flight data before containment, and cannot drift to a replacement process.
-OOM/limit events. The Engine container and every helper started inside it share
-one hard memory/swap boundary, an earlier soft pressure boundary, and a higher
-OOM score than the host control plane.
+It monitors Spark's unified-memory availability, swap, memory PSI, and cgroup
+OOM/limit events.
 
-Core owns the warning, graceful-reserve, critical-pressure, swap, PSI, and
-containment thresholds. Runtime manifests may require more launch or steady-
-state headroom, but they cannot reduce Core's 16 GiB host reserve. Before launch
-Core also proves that the Engine's hard limit fits below total host memory minus
-the effective reserve. This applies identically to qualification and installed
-service launches, so a runtime helper or privileged `docker exec` remains inside
-the Engine boundary even though that use is unsupported.
-
-The gateway queues new work at the warning floor. Watchdog stops the Engine if
-available memory crosses the lower graceful floor, or warning-floor pressure is
-combined with swap growth, full PSI, or Engine cgroup allocation pressure. The
-emergency floor triggers immediate kill containment without waiting for a
-kernel OOM. An observed cgroup OOM kill remains terminal. These conditions do
-not treat high utilization by itself as failure: the Engine can use its full
-declared budget while the host reserve remains intact. Repeated loss or corruption of
+Every runtime manifest must declare its target-specific warning,
+graceful-reserve, critical-pressure, swap, PSI, and containment thresholds. Core
+requires the warning floor to cover the runtime admission reserve and requires
+strictly ordered warning, graceful, and emergency floors; it does not infer a
+missing runtime threshold. The native executable likewise has no threshold
+defaults and refuses to start unless all manifest-derived memory, swap, PSI,
+state-failure, and containment values are supplied. Warning, graceful-reserve,
+swap, PSI, host-headroom, and non-fatal cgroup allocation-limit observations
+are telemetry inputs to the shared state plane; they do not stop a healthy
+engine or override its declared scheduler capacity, including below the
+critical host-memory floor. The gateway admits up to the active runtime's
+`max_active_requests` and queues excess work identically for every engine
+adapter. Watchdog contains the engine only after an observed kernel cgroup OOM
+kill or an unexpected protected-process exit. Repeated loss or corruption of
 the private protection
 descriptor emits one degraded guard event while Watchdog continues monitoring
 the already-bound pidfd and cgroup; metadata loss alone neither stops nor trips
@@ -36,12 +34,7 @@ a healthy runtime. Every deliberate process exit—including stop, restart,
 candidate replacement, benchmark isolation, core rebind, and uninstall—is
 gated on an acknowledged disarmed generation. A missing descriptor is rebuilt
 as a fresh disarmed generation and acknowledged before the exit proceeds.
-A trip and its full last-incident snapshot are synchronously persisted before
-containment. The snapshot includes boot/process/cgroup identity, host memory,
-swap and PSI, cgroup memory limits and event deltas, process count, and
-active/queued requests. It survives Watchdog and host restart; acknowledging a
-trip preserves the last incident for `letsinfer status` and `letsinfer doctor`.
-Automatic recovery
+A trip is durably latched. Automatic recovery
 handles ordinary crashes and unhealthy containers but refuses an OOM or safety
 trip until an operator inspects it and runs `letsinfer recover`. `start` and
 `restart` never clear a trip. `recover` explicitly clears the safety latch and
@@ -51,14 +44,14 @@ a trip is actually latched.
 `letsinfer.service` owns Watchdog, `letsinfer-engine.service` owns the transient
 guarded launch, and `letsinfer-recovery.timer` repairs ordinary engine failures.
 Docker auto-restart remains disabled so there is one recovery authority.
-The resident binary and its memory/PSI containment policy belong to Core. The
-selected runtime contributes measured resource requirements but cannot weaken
-that policy.
+The resident binary belongs to core, while its active memory/PSI containment
+thresholds come from the selected immutable runtime. Core updates preserve
+those exact thresholds for compatible runtimes; they never replace them with a
+generic model-independent memory floor while inference is restored.
 
-Watchdog has a protected 24 MiB memory floor/soft threshold, a strict 30 MiB
-cgroup limit, and no swap. The node agent and gateway have equivalent bounded
-MemoryMin/MemoryLow envelopes. The Engine and transient Python launcher are
-outside that resident budget. Telemetry uses bounded CRC-protected rings and a bounded mutual-TLS
+Watchdog has a 24 MiB soft memory threshold, a strict 30 MiB cgroup limit, and
+no swap. The engine and transient Python launcher are outside that resident
+budget. Telemetry uses bounded CRC-protected rings and a bounded mutual-TLS
 protobuf endpoint; slow controllers receive an explicit gap rather than unbounded
 buffering.
 
@@ -85,10 +78,6 @@ complete a valid request at least every 30 seconds. A live subscription
 refreshes that activity deadline on each successful telemetry write; healthy
 listeners therefore stay connected while stalled, half-open, and partial-frame
 peers still expire without retaining a bounded slot indefinitely.
-
-Host/cgroup safety checks run every 100 ms; the telemetry/history contract
-remains one sample per second. This lets the emergency reserve act without
-changing public history resolution or generating unbounded records.
 
 Every one-second sample also carries the complete engine-neutral inference
 counter contract: active/queued requests; received, admitted, completed,

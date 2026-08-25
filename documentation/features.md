@@ -82,8 +82,7 @@ name. Its safety inputs include:
 - process identity, health, exit state, and OOM events;
 - available and committed unified memory;
 - cgroup memory, swap, and pressure-stall information;
-- Core-owned warning, reserve, emergency, and cgroup boundaries that runtimes
-  may increase but cannot weaken; and
+- runtime-declared warning and stop thresholds; and
 - GPU, CPU, NVMe, thermal, power, and network telemetry.
 
 Normal pressure reduces admission and queues new work. A terminal condition
