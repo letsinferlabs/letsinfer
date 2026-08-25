@@ -2509,6 +2509,13 @@ def load_catalog(
                             "maintainer-waiver-one-independent-v1": 1,
                         }.get(method)
                         verifiers = verification.get("verifiers")
+                        author_benchmark = bool(
+                            method == "allowlisted-maintainer-bypass-v1"
+                            and verifiers == []
+                            and benchmark is not None
+                        )
+                        if author_benchmark:
+                            expected_fields.add("benchmark_source")
                         if (
                             set(verification) != expected_fields
                             or set(provenance)
@@ -2539,6 +2546,11 @@ def load_catalog(
                             or (
                                 method == "allowlisted-maintainer-bypass-v1"
                                 and len(verifiers) > 2
+                            )
+                            or (
+                                author_benchmark
+                                and verification.get("benchmark_source")
+                                != "author-benchmark-v1"
                             )
                         ):
                             raise RuntimePackError(
