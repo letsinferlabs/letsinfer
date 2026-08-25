@@ -31,9 +31,10 @@ void test_safety_decision_precedence(void) {
     watchdog_safety_decision result = watchdog_safety_decide(&limits, &input);
     TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
 
-    input.available_bytes = 0u;
+    input.available_bytes = UINT64_C(7) << 30u;
     result = watchdog_safety_decide(&limits, &input);
-    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_KILL);
+    TEST_ASSERT(strcmp(result.reason, "host_memory_emergency") == 0);
 
     input.available_bytes = UINT64_C(14) << 30u;
     input.cgroup_oom_group_kill_delta = 1u;
@@ -48,52 +49,58 @@ void test_safety_decision_precedence(void) {
 
     input.available_bytes = UINT64_C(11) << 30u;
     input.psi_some_delta_us = 0u;
+    result = watchdog_safety_decide(&limits, &input);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_STOP);
+    TEST_ASSERT(strcmp(result.reason, "host_memory_below_graceful_floor") == 0);
+
+    input.available_bytes = UINT64_C(15) << 30u;
     input.psi_full_delta_us = 50000u;
     result = watchdog_safety_decide(&limits, &input);
-    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_STOP);
+    TEST_ASSERT(strcmp(result.reason, "host_memory_full_psi") == 0);
 
-    input.available_bytes = UINT64_C(80) << 30u;
     input.psi_full_delta_us = 0u;
     input.psi_some_delta_us = 0u;
     input.swap_used_bytes = UINT64_C(1) << 30u;
     result = watchdog_safety_decide(&limits, &input);
-    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_STOP);
+    TEST_ASSERT(strcmp(result.reason, "host_swap_growth") == 0);
 
     input.available_bytes = (UINT64_C(8) << 30u) + 1u;
     input.swap_used_bytes = UINT64_C(8) << 30u;
     input.psi_some_delta_us = 1000000u;
     input.psi_full_delta_us = 1000000u;
     result = watchdog_safety_decide(&limits, &input);
-    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_STOP);
 
+    input.available_bytes = UINT64_C(80) << 30u;
     input.swap_used_bytes = 0u;
     input.psi_some_delta_us = 0u;
     input.psi_full_delta_us = 0u;
-    input.available_bytes = UINT64_C(80) << 30u;
     input.cgroup_max_delta = 1u;
     result = watchdog_safety_decide(&limits, &input);
     TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
 
-    input.cgroup_max_delta = 0u;
+    input.available_bytes = UINT64_C(15) << 30u;
+    input.psi_some_delta_us = limits.psi_some_us;
     input.cgroup_oom_delta = 1u;
     result = watchdog_safety_decide(&limits, &input);
-    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_STOP);
+    TEST_ASSERT(strcmp(result.reason, "engine_memory_pressure") == 0);
 
     input.cgroup_oom_delta = 0u;
+    input.memory_max_bytes = UINT64_C(100) << 30u;
+    input.memory_current_bytes = UINT64_C(96) << 30u;
+    result = watchdog_safety_decide(&limits, &input);
+    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_STOP);
+    TEST_ASSERT(strcmp(result.reason, "engine_memory_pressure") == 0);
+
+    input.cgroup_max_delta = 0u;
+    input.psi_some_delta_us = 0u;
     input.cgroup_oom_kill_delta = 1u;
     result = watchdog_safety_decide(&limits, &input);
     TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_KILL);
     TEST_ASSERT(strcmp(result.reason, "cgroup_oom_kill") == 0);
-
-    input.cgroup_oom_kill_delta = 0u;
-    input.available_bytes = 0u;
-    input.swap_used_bytes = UINT64_MAX;
-    input.psi_some_delta_us = UINT64_MAX;
-    input.psi_full_delta_us = UINT64_MAX;
-    input.cgroup_oom_delta = UINT64_MAX;
-    input.cgroup_max_delta = UINT64_MAX;
-    result = watchdog_safety_decide(&limits, &input);
-    TEST_ASSERT(result.action == WATCHDOG_SAFETY_ACTION_NONE);
 }
 
 void test_safety_thresholds_and_descriptor(void) {
@@ -186,9 +193,11 @@ void test_safety_process_exit_latches_trip(void) {
     TEST_ASSERT(chmod(root, 0700) == 0);
     char state[512];
     char trip[512];
+    char incident[512];
     char events[512];
     TEST_ASSERT(snprintf(state, sizeof(state), "%s/protected-engine.state", root) > 0);
     TEST_ASSERT(snprintf(trip, sizeof(trip), "%s/protection-trip.json", root) > 0);
+    TEST_ASSERT(snprintf(incident, sizeof(incident), "%s/last-incident.json", root) > 0);
     TEST_ASSERT(snprintf(events, sizeof(events), "%s/safety-events.ndjson", root) > 0);
 
     watchdog_safety_config config = {
@@ -243,9 +252,12 @@ void test_safety_process_exit_latches_trip(void) {
     payload[length] = '\0';
     TEST_ASSERT(strstr(payload, "\"action\": \"stop\"") != NULL);
     TEST_ASSERT(strstr(payload, "\"reason\": \"protected_process_exited\"") != NULL);
+    TEST_ASSERT(strstr(payload, "\"schema_version\": 2") != NULL);
+    TEST_ASSERT(access(incident, R_OK) == 0);
 
     watchdog_safety_close(&runtime);
     TEST_ASSERT(unlink(trip) == 0);
+    TEST_ASSERT(unlink(incident) == 0);
     TEST_ASSERT(unlink(events) == 0);
     TEST_ASSERT(rmdir(root) == 0);
 }

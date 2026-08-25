@@ -167,6 +167,14 @@ the measured maximum connections, active requests, and context. Use `cache`
 for the selected provider and
 replay contract; its implementation stays inside the Engine OCI.
 
+`container.min_available_gib` and `runtime_min_available_gib` are runtime
+requirements, not permission to consume the rest of the host. Core computes
+the effective reserve as the maximum of its immutable control-plane floor, the
+runtime requirement, and target-derived headroom. It rejects an Engine
+`memory_bytes` limit that cannot fit below total host memory minus that reserve.
+The limit, no-swap policy, soft pressure boundary, and Engine OOM preference
+apply to the complete container process tree, including runtime helpers.
+
 ## Parallel execution
 
 An independent `single` target omits `orchestration`. A `parallel` target

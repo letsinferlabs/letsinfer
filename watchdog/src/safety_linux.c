@@ -95,6 +95,22 @@ static int write_atomic(const char *path, const char *payload) {
     int result = fsync(fd);
     if (close(fd) != 0) result = -1;
     if (result == 0 && rename(temporary, path) != 0) result = -1;
+    if (result == 0) {
+        char parent[WATCHDOG_SAFETY_PATH_MAX];
+        if (copy_text(parent, sizeof(parent), path) != 0) {
+            result = -1;
+        } else {
+            char *separator = strrchr(parent, '/');
+            if (separator == NULL || separator == parent) {
+                result = -1;
+            } else {
+                *separator = '\0';
+                const int directory = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+                if (directory < 0 || fsync(directory) != 0) result = -1;
+                if (directory >= 0 && close(directory) != 0) result = -1;
+            }
+        }
+    }
     if (result != 0) unlink(temporary);
     return result;
 }
@@ -396,7 +412,53 @@ static void read_pressure(watchdog_safety_runtime *runtime, watchdog_safety_inpu
     runtime->has_pressure_baseline = true;
 }
 
-static int read_cgroup_events(watchdog_safety_runtime *runtime, watchdog_safety_input *input) {
+static int read_cgroup_number(
+    const watchdog_safety_runtime *runtime,
+    const char *name,
+    uint64_t *value
+) {
+    char path[WATCHDOG_SAFETY_PATH_MAX];
+    const int length = snprintf(path, sizeof(path), "%s/%s", runtime->cgroup_path, name);
+    if (length <= 0 || (size_t)length >= sizeof(path)) return -1;
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    char source[64];
+    const ssize_t count = read(fd, source, sizeof(source) - 1u);
+    close(fd);
+    if (count <= 0) return -1;
+    source[count] = '\0';
+    if (strncmp(source, "max", 3u) == 0) {
+        *value = UINT64_MAX;
+        return 0;
+    }
+    char *end = NULL;
+    errno = 0;
+    const unsigned long long parsed = strtoull(source, &end, 10);
+    if (errno != 0 || end == source) return -1;
+    *value = (uint64_t)parsed;
+    return 0;
+}
+
+static uint32_t cgroup_process_count(const watchdog_safety_runtime *runtime) {
+    char path[WATCHDOG_SAFETY_PATH_MAX];
+    const int length = snprintf(path, sizeof(path), "%s/cgroup.procs", runtime->cgroup_path);
+    if (length <= 0 || (size_t)length >= sizeof(path)) return 0u;
+    FILE *stream = fopen(path, "re");
+    if (stream == NULL) return 0u;
+    uint32_t processes = 0u;
+    int pid = 0;
+    while (processes < UINT32_MAX && fscanf(stream, "%d", &pid) == 1) ++processes;
+    fclose(stream);
+    return processes;
+}
+
+static int read_cgroup_memory(watchdog_safety_runtime *runtime, watchdog_safety_input *input) {
+    if (read_cgroup_number(runtime, "memory.current", &input->memory_current_bytes) != 0
+        || read_cgroup_number(runtime, "memory.high", &input->memory_high_bytes) != 0
+        || read_cgroup_number(runtime, "memory.max", &input->memory_max_bytes) != 0
+        || read_cgroup_number(runtime, "memory.swap.current", &input->memory_swap_current_bytes) != 0
+        || read_cgroup_number(runtime, "memory.swap.max", &input->memory_swap_max_bytes) != 0) return -1;
+    input->cgroup_processes = cgroup_process_count(runtime);
     char path[WATCHDOG_SAFETY_PATH_MAX];
     const int length = snprintf(path, sizeof(path), "%s/memory.events", runtime->cgroup_path);
     if (length <= 0 || (size_t)length >= sizeof(path)) return -1;
@@ -408,10 +470,12 @@ static int read_cgroup_events(watchdog_safety_runtime *runtime, watchdog_safety_
     if (count <= 0) return -1;
     source[count] = '\0';
 
+    uint64_t high = 0u;
     uint64_t oom = 0u;
     uint64_t oom_kill = 0u;
     uint64_t oom_group_kill = 0u;
     uint64_t maximum = 0u;
+    bool saw_high = false;
     bool saw_oom = false;
     bool saw_oom_kill = false;
     bool saw_max = false;
@@ -421,7 +485,10 @@ static int read_cgroup_events(watchdog_safety_runtime *runtime, watchdog_safety_
         if (separator == NULL) continue;
         *separator = '\0';
         const uint64_t value = strtoull(separator + 1u, NULL, 10);
-        if (strcmp(line, "oom") == 0) {
+        if (strcmp(line, "high") == 0) {
+            high = value;
+            saw_high = true;
+        } else if (strcmp(line, "oom") == 0) {
             oom = value;
             saw_oom = true;
         } else if (strcmp(line, "oom_kill") == 0) {
@@ -434,14 +501,16 @@ static int read_cgroup_events(watchdog_safety_runtime *runtime, watchdog_safety_
             saw_max = true;
         }
     }
-    if (!saw_oom || !saw_oom_kill || !saw_max) return -1;
+    if (!saw_high || !saw_oom || !saw_oom_kill || !saw_max) return -1;
     if (runtime->has_cgroup_baseline) {
+        input->cgroup_high_delta = high >= runtime->baseline_high ? high - runtime->baseline_high : 0u;
         input->cgroup_oom_delta = oom >= runtime->baseline_oom ? oom - runtime->baseline_oom : 0u;
         input->cgroup_oom_kill_delta = oom_kill >= runtime->baseline_oom_kill ? oom_kill - runtime->baseline_oom_kill : 0u;
         input->cgroup_oom_group_kill_delta = oom_group_kill >= runtime->baseline_oom_group_kill
             ? oom_group_kill - runtime->baseline_oom_group_kill : 0u;
         input->cgroup_max_delta = maximum >= runtime->baseline_max ? maximum - runtime->baseline_max : 0u;
     }
+    runtime->baseline_high = high;
     runtime->baseline_oom = oom;
     runtime->baseline_oom_kill = oom_kill;
     runtime->baseline_oom_group_kill = oom_group_kill;
@@ -454,25 +523,57 @@ static int write_trip(
     watchdog_safety_runtime *runtime,
     watchdog_safety_action action,
     const char *reason,
-    const watchdog_safety_input *input
+    const watchdog_safety_input *input,
+    const watchdog_sample *sample
 ) {
-    char payload[1024];
+    char payload[4096];
     const int length = snprintf(
         payload,
         sizeof(payload),
-        "{\n  \"schema_version\": 1,\n  \"timestamp_unix_ms\": %llu,\n"
-        "  \"generation\": \"%s\",\n  \"container_id\": \"%s\",\n"
+        "{\n  \"schema_version\": 2,\n  \"incident_id\": \"%s\",\n"
+        "  \"timestamp_unix_ms\": %llu,\n  \"boot_id\": \"%s\",\n"
+        "  \"generation\": \"%s\",\n  \"container_name\": \"%s\",\n"
+        "  \"container_id\": \"%s\",\n  \"cgroup\": \"%s\",\n"
         "  \"action\": \"%s\",\n  \"reason\": \"%s\",\n"
-        "  \"available_bytes\": %llu,\n  \"swap_used_bytes\": %llu\n}\n",
-        (unsigned long long)clock_ms(CLOCK_REALTIME),
+        "  \"available_bytes\": %llu,\n  \"swap_used_bytes\": %llu,\n"
+        "  \"psi_some_delta_us\": %llu,\n  \"psi_full_delta_us\": %llu,\n"
+        "  \"memory_current_bytes\": %llu,\n  \"memory_high_bytes\": %llu,\n"
+        "  \"memory_max_bytes\": %llu,\n  \"memory_swap_current_bytes\": %llu,\n"
+        "  \"memory_swap_max_bytes\": %llu,\n  \"cgroup_processes\": %u,\n"
+        "  \"cgroup_high_delta\": %llu,\n  \"cgroup_max_delta\": %llu,\n"
+        "  \"cgroup_oom_delta\": %llu,\n  \"cgroup_oom_kill_delta\": %llu,\n"
+        "  \"cgroup_oom_group_kill_delta\": %llu,\n  \"active_requests\": %u,\n"
+        "  \"queued_requests\": %u\n}\n",
         runtime->target.generation,
+        (unsigned long long)clock_ms(CLOCK_REALTIME),
+        runtime->target.boot_id,
+        runtime->target.generation,
+        runtime->target.container_name,
         runtime->target.container_id,
+        runtime->target.cgroup_path,
         action == WATCHDOG_SAFETY_ACTION_KILL ? "kill" : "stop",
         reason,
         (unsigned long long)input->available_bytes,
-        (unsigned long long)input->swap_used_bytes
+        (unsigned long long)input->swap_used_bytes,
+        (unsigned long long)input->psi_some_delta_us,
+        (unsigned long long)input->psi_full_delta_us,
+        (unsigned long long)input->memory_current_bytes,
+        (unsigned long long)input->memory_high_bytes,
+        (unsigned long long)input->memory_max_bytes,
+        (unsigned long long)input->memory_swap_current_bytes,
+        (unsigned long long)input->memory_swap_max_bytes,
+        input->cgroup_processes,
+        (unsigned long long)input->cgroup_high_delta,
+        (unsigned long long)input->cgroup_max_delta,
+        (unsigned long long)input->cgroup_oom_delta,
+        (unsigned long long)input->cgroup_oom_kill_delta,
+        (unsigned long long)input->cgroup_oom_group_kill_delta,
+        sample == NULL ? 0u : sample->active_requests,
+        sample == NULL ? 0u : sample->queued_requests
     );
-    return length > 0 && (size_t)length < sizeof(payload) ? write_atomic(runtime->trip_path, payload) : -1;
+    if (length <= 0 || (size_t)length >= sizeof(payload)) return -1;
+    (void)write_atomic(runtime->incident_path, payload);
+    return write_atomic(runtime->trip_path, payload);
 }
 
 static int load_descriptor(watchdog_safety_runtime *runtime, watchdog_safety_result *result) {
@@ -550,6 +651,7 @@ int watchdog_safety_open(watchdog_safety_runtime *runtime, const watchdog_safety
     if (copy_text(runtime->state_path, sizeof(runtime->state_path), config->state_path) != 0
         || make_peer_path(runtime->ack_path, config->state_path, "protected-engine.ack") != 0
         || make_peer_path(runtime->trip_path, config->state_path, "protection-trip.json") != 0
+        || make_peer_path(runtime->incident_path, config->state_path, "last-incident.json") != 0
         || make_peer_path(runtime->event_path, config->state_path, "safety-events.ndjson") != 0) return -1;
     runtime->config.state_path = runtime->state_path;
     const int event_fd = open(
@@ -575,7 +677,6 @@ int watchdog_safety_tick(
     void *flush_context,
     watchdog_safety_result *result
 ) {
-    (void)sample;
     if (runtime == NULL || result == NULL) return -1;
     memset(result, 0, sizeof(*result));
     if (load_descriptor(runtime, result) != 0 || result->has_event) return result->has_event ? 0 : -1;
@@ -593,7 +694,8 @@ int watchdog_safety_tick(
                 runtime,
                 WATCHDOG_SAFETY_ACTION_STOP,
                 "protected_process_exited",
-                &input
+                &input,
+                sample
             ) != 0) return -1;
         runtime->tripped = true;
         return emit_event(
@@ -630,7 +732,7 @@ int watchdog_safety_tick(
     memset(&input, 0, sizeof(input));
     if (read_memory(&input) != 0) return -1;
     read_pressure(runtime, &input);
-    if (read_cgroup_events(runtime, &input) != 0) return -1;
+    if (read_cgroup_memory(runtime, &input) != 0) return -1;
     watchdog_safety_decision decision = watchdog_safety_decide(&runtime->config.thresholds, &input);
     if (input.available_bytes <= runtime->config.thresholds.warning_available_bytes
         && !runtime->warned && decision.action == WATCHDOG_SAFETY_ACTION_NONE) {
@@ -642,17 +744,27 @@ int watchdog_safety_tick(
             1u,
             "host_memory_warning",
             "{\"container_id\":\"%s\",\"available_bytes\":%llu,"
-            "\"swap_used_bytes\":%llu}",
+            "\"swap_used_bytes\":%llu,\"psi_some_delta_us\":%llu,"
+            "\"psi_full_delta_us\":%llu,\"memory_current_bytes\":%llu,"
+            "\"memory_high_bytes\":%llu,\"memory_max_bytes\":%llu,"
+            "\"cgroup_high_delta\":%llu,\"cgroup_processes\":%u}",
             runtime->target.container_id,
             (unsigned long long)input.available_bytes,
-            (unsigned long long)input.swap_used_bytes
+            (unsigned long long)input.swap_used_bytes,
+            (unsigned long long)input.psi_some_delta_us,
+            (unsigned long long)input.psi_full_delta_us,
+            (unsigned long long)input.memory_current_bytes,
+            (unsigned long long)input.memory_high_bytes,
+            (unsigned long long)input.memory_max_bytes,
+            (unsigned long long)input.cgroup_high_delta,
+            input.cgroup_processes
         );
     }
     if (input.available_bytes > runtime->config.thresholds.warning_available_bytes) runtime->warned = false;
     if (decision.action == WATCHDOG_SAFETY_ACTION_NONE) return 0;
 
     if (flush_storage != NULL && flush_storage(flush_context) != 0) return -1;
-    if (write_trip(runtime, decision.action, decision.reason, &input) != 0) return -1;
+    if (write_trip(runtime, decision.action, decision.reason, &input, sample) != 0) return -1;
     int containment = signal_pidfd(
         runtime->pid_fd,
         decision.action == WATCHDOG_SAFETY_ACTION_KILL ? SIGKILL : SIGTERM
@@ -688,7 +800,11 @@ int watchdog_safety_tick(
         "\"swap_used_bytes\":%llu,\"psi_some_delta_us\":%llu,"
         "\"psi_full_delta_us\":%llu,\"cgroup_oom_delta\":%llu,"
         "\"cgroup_oom_kill_delta\":%llu,\"cgroup_oom_group_kill_delta\":%llu,"
-        "\"cgroup_max_delta\":%llu,"
+        "\"cgroup_high_delta\":%llu,\"cgroup_max_delta\":%llu,"
+        "\"memory_current_bytes\":%llu,\"memory_high_bytes\":%llu,"
+        "\"memory_max_bytes\":%llu,\"memory_swap_current_bytes\":%llu,"
+        "\"memory_swap_max_bytes\":%llu,\"cgroup_processes\":%u,"
+        "\"active_requests\":%u,\"queued_requests\":%u,"
         "\"containment_ok\":%s}",
         runtime->target.generation,
         runtime->target.container_id,
@@ -700,7 +816,16 @@ int watchdog_safety_tick(
         (unsigned long long)input.cgroup_oom_delta,
         (unsigned long long)input.cgroup_oom_kill_delta,
         (unsigned long long)input.cgroup_oom_group_kill_delta,
+        (unsigned long long)input.cgroup_high_delta,
         (unsigned long long)input.cgroup_max_delta,
+        (unsigned long long)input.memory_current_bytes,
+        (unsigned long long)input.memory_high_bytes,
+        (unsigned long long)input.memory_max_bytes,
+        (unsigned long long)input.memory_swap_current_bytes,
+        (unsigned long long)input.memory_swap_max_bytes,
+        input.cgroup_processes,
+        sample == NULL ? 0u : sample->active_requests,
+        sample == NULL ? 0u : sample->queued_requests,
         containment == 0 ? "true" : "false"
     );
 }
