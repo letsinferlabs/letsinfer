@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 from core import cli
+from tests.orchestration.helpers import release_identity
 
 
 class _Store:
@@ -39,6 +40,7 @@ class _Store:
         self.group = {
             "group_id": self.group_id,
             "placement_id": self.placement_id,
+            "runtime_digest": "6" * 64,
             "state": "running",
             "desired_state": "running",
             "members": [],
@@ -470,20 +472,154 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         }
         orchestrator = mock.Mock()
         orchestrator.remove.return_value = removed
-        with (
-            mock.patch.object(cli, "_site_store", return_value=store),
-            mock.patch.object(
-                cli,
-                "_restore_engine_group_orchestrator",
-                return_value=(orchestrator, {}),
-            ),
-            mock.patch.object(cli, "_sync_group_placement") as sync,
-        ):
-            cli._remove_engine_groups_by_id([store.group_id])
+        with tempfile.TemporaryDirectory() as directory:
+            runtime_home = pathlib.Path(directory)
+            (runtime_home / ".objects" / store.group["runtime_digest"]).mkdir(
+                parents=True
+            )
+            with (
+                mock.patch.object(cli, "_site_store", return_value=store),
+                mock.patch.object(
+                    cli,
+                    "default_runtime_home",
+                    return_value=runtime_home,
+                ),
+                mock.patch.object(
+                    cli,
+                    "_restore_engine_group_orchestrator",
+                    return_value=(orchestrator, {}),
+                ),
+                mock.patch.object(cli, "_sync_group_placement") as sync,
+            ):
+                cli._remove_engine_groups_by_id([store.group_id])
 
         orchestrator.stop.assert_not_called()
         orchestrator.remove.assert_called_once_with()
         sync.assert_called_once_with(store, removed)
+
+    def test_replacement_forgets_failed_group_after_runtime_object_was_pruned(self) -> None:
+        member_id = "5" * 32
+        plan = cli.build_single_group_plan(
+            member_id=member_id,
+            member_address="member.local",
+            device_uuids=["GPU-fixture"],
+            topology_sha256="4" * 64,
+            manifest_sha256="5" * 64,
+            runtime_digest="6" * 64,
+            service_id="3" * 32,
+            release=release_identity(),
+            port_base=18000,
+        )
+        document = plan.document()
+        row = {
+            "group_id": plan.group_id,
+            "placement_id": plan.group_id,
+            "source": document["release"]["source"],
+            "runtime_digest": document["runtime_digest"],
+            "manifest_sha256": document["manifest_sha256"],
+            "topology_sha256": document["topology_sha256"],
+            "engine_credential_sha256": "d" * 64,
+            "plan": document,
+            "plan_sha256": hashlib.sha256(cli.canonical_bytes(document)).hexdigest(),
+            "desired_state": "stopped",
+            "state": "failed",
+            "members": [{
+                "member_id": member_id,
+                "task_id": "task-0",
+                "state": "failed",
+                "operation_id": "e" * 32,
+                "error": "GroupOrchestrationError",
+            }],
+        }
+        placement = {
+            "placement_id": plan.group_id,
+            "service_id": document["service_id"],
+            "model": "fixture-model",
+            "runtime": "fixture-runtime",
+            "target": "fixture-target",
+            "strategy": "single",
+            "state": "failed",
+            "topology_sha256": document["topology_sha256"],
+            "members": [member_id],
+            "endpoints": [],
+            "capacity": {},
+        }
+        allocation = {
+            "group_id": plan.group_id,
+            "member_id": member_id,
+            "device_uuid": "GPU-fixture",
+            "state": "released",
+        }
+        store = mock.MagicMock()
+        store.__enter__.return_value = store
+        store.engine_groups.return_value = [row]
+        store.device_allocations.return_value = [allocation]
+        store.placements.return_value = [placement]
+
+        def persist(group, **changes):
+            return {
+                **group,
+                "placement_id": changes["placement_id"],
+                "desired_state": changes["desired_state"],
+                "state": changes["state"],
+                "member_states": changes["members"],
+            }
+
+        store.set_engine_group.side_effect = persist
+        with tempfile.TemporaryDirectory() as directory, (
+            mock.patch.object(cli, "_site_store", return_value=store)
+        ), mock.patch.object(
+            cli, "default_runtime_home", return_value=pathlib.Path(directory)
+        ), mock.patch.object(cli, "_restore_engine_group_orchestrator") as restore:
+            cli._remove_engine_groups_by_id([plan.group_id])
+
+        restore.assert_not_called()
+        self.assertEqual(
+            store.set_engine_group.call_args.kwargs["desired_state"], "removed"
+        )
+        self.assertEqual(store.set_engine_group.call_args.kwargs["state"], "removed")
+        store.set_group_allocation_state.assert_called_once_with(
+            plan.group_id, "released"
+        )
+        self.assertEqual(store.set_placement.call_args.args[0]["state"], "stopped")
+
+    def test_missing_runtime_object_never_forgets_potentially_active_group(self) -> None:
+        member_id = "5" * 32
+        document = {
+            "group_id": "1" * 32,
+            "resources": [{"node_id": member_id, "task_id": "task-0"}],
+        }
+        row = {
+            "placement_id": "2" * 32,
+            "source": "registry.example/runtime@sha256:" + "7" * 64,
+            "engine_credential_sha256": "d" * 64,
+            "desired_state": "running",
+            "state": "running",
+            "members": [{
+                "member_id": member_id,
+                "task_id": "task-0",
+                "state": "running",
+                "operation_id": None,
+                "error": None,
+            }],
+        }
+        store = mock.MagicMock()
+        store.placements.return_value = [{
+            "placement_id": row["placement_id"],
+            "state": "running",
+            "endpoints": [{"healthy": True}],
+        }]
+        with mock.patch.object(
+            cli, "_validated_engine_group_document", return_value=document
+        ):
+            with self.assertRaisesRegex(cli.LetsInferError, "may still be active"):
+                cli._remove_terminal_engine_group_without_runtime(
+                    store,
+                    row,
+                    [{"state": "active"}],
+                )
+
+        store.set_engine_group.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from core.orchestration import (
     validate_orchestration_contract,
     validate_target_binding,
 )
+from core.orchestration.contracts import validate_release_identity
 from tests.orchestration.helpers import (
     parallel_connections,
     parallel_contract,
@@ -21,6 +22,17 @@ from tests.orchestration.helpers import (
 class OrchestrationContractTests(unittest.TestCase):
     def parallel(self) -> dict[str, object]:
         return parallel_contract()
+
+    def test_release_accepts_canonical_long_runtime_candidate_id(self) -> None:
+        release = release_identity()
+        release["candidate_id"] = (
+            "sglang--nvidia--nvidia-nemotron-3.5-lightning-30b-a3b-nvfp4"
+            "--dgx-spark"
+        )
+        self.assertEqual(
+            validate_release_identity(release)["candidate_id"],
+            release["candidate_id"],
+        )
 
     def test_replication_is_core_owned_and_single_targets_have_no_contract(self) -> None:
         self.assertIsNone(validate_target_binding(None, {"strategy": "single"}))
