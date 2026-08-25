@@ -15,6 +15,7 @@ import sqlite3
 import stat
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
@@ -42,6 +43,11 @@ ACTION_RESULT_STATE = {
     "remove": "removed",
 }
 SENSITIVE_RESULT_PARTS = {"secret", "password", "token", "private", "credential"}
+LABELED_SECRET_RE = re.compile(
+    r"(?i)\b(api[_-]?key|authorization|cookie|credential|password|secret|token)"
+    r"(\s*[:=]\s*)(?:bearer\s+)?([^\s,;]+)"
+)
+MAX_ERROR_CHARS = 512
 
 
 class MemberJobError(RuntimeError):
@@ -89,6 +95,30 @@ def _contains_sensitive_key(value: Any) -> bool:
     if isinstance(value, list):
         return any(_contains_sensitive_key(item) for item in value)
     return False
+
+
+def _safe_error(error: BaseException) -> str:
+    """Persist one bounded diagnostic without credential values or controls."""
+
+    name = type(error).__name__
+    raw = LABELED_SECRET_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+        str(error),
+    )
+    neutral = "".join(
+        character
+        if character in {"\n", "\t"}
+        or unicodedata.category(character) not in {"Cc", "Cf"}
+        else "?"
+        for character in raw
+    )
+    detail = " ".join(neutral.split())
+    if not detail:
+        return name
+    available = MAX_ERROR_CHARS - len(name) - 2
+    if len(detail) > available:
+        detail = detail[: max(0, available - 2)].rstrip() + " …"
+    return f"{name}: {detail}"
 
 
 def validate_group_job(
@@ -365,7 +395,7 @@ class MemberJobStore:
         return safe_result
 
     def fail(self, job: Mapping[str, Any], error: BaseException) -> None:
-        reason = type(error).__name__
+        reason = _safe_error(error)
         with self.transaction():
             self.connection.execute(
                 "UPDATE jobs SET state='failed',error=?,finished_at_unix=? "

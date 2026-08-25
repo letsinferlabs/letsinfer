@@ -8744,23 +8744,6 @@ def _install_catalog_nodes(
             for row in resident
             if row["placement_id"] in placements
         }
-        if (
-            resident
-            and resident_models == {arguments.model}
-            and getattr(arguments, "runtime", None) is None
-        ):
-            if presenter is not None:
-                plan_rows.append(
-                    {
-                        "node": display_name,
-                        "state": "Serving",
-                        "detail": f"Already serving {arguments.model}",
-                        "_semantic": command_ui.Semantic.SUCCESS,
-                    }
-                )
-            else:
-                print(f"OK {display_name}  already serving {arguments.model}")
-            continue
         try:
             release, choice, _node_graph = _catalog_release_for_node(
                 catalog,
@@ -8834,9 +8817,12 @@ def _install_catalog_nodes(
     if replacements and not getattr(arguments, "replace_existing", False):
         if not sys.stdin.isatty():
             raise LetsInferError(
-                "installation would replace running groups; retry with --replace-existing"
+                "installation would replace installed runtime groups; retry with "
+                "--replace-existing"
             )
-        if not ui.confirm("Replace the listed running model groups?"):
+        if not ui.confirm(
+            "An existing runtime must be removed first. Replace it now?"
+        ):
             raise LetsInferError("installation cancelled before replacement")
     activity = _command_activity(arguments, action_id="install")
     with activity, ui.protect_stdout(activity):

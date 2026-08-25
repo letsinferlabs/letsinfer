@@ -194,6 +194,33 @@ class MemberJobTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(status["result"], {"state": "stage"})
 
+    def test_async_failure_retains_bounded_redacted_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = pathlib.Path(directory) / "jobs.sqlite3"
+
+            def fail(_job, _credential):
+                raise RuntimeError("adapter failed; api_key=do-not-store")
+
+            agent = MemberAgent(
+                member_id=self.member_id,
+                store_path=database,
+                handler=fail,
+            )
+            agent.submit(self.job(), engine_credential=self.credential)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                status = agent.job_status("2" * 32)["job"]
+                if status["state"] == "failed":
+                    break
+                time.sleep(0.01)
+
+            self.assertEqual(status["state"], "failed")
+            self.assertEqual(
+                status["error"],
+                "RuntimeError: adapter failed; api_key=[REDACTED]",
+            )
+            self.assertNotIn(b"do-not-store", database.read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()
