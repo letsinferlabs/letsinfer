@@ -228,6 +228,7 @@ class TerminalTests(unittest.TestCase):
             "protection": {"armed": True, "trip_latched": False},
             "telemetry": {
                 "active_requests": 2,
+                "connected_clients": 3,
                 "queued_requests": 1,
                 "rates": {
                     "output_tokens_per_second": 58.9,
@@ -252,20 +253,24 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("homeai.local:8000/v1", rendered)
         self.assertIn("19.0 / 30 MiB", rendered)
         self.assertIn("Request path", rendered)
-        self.assertIn("Scheduler", rendered)
+        self.assertNotIn("Scheduler", rendered)
         self.assertIn("Performance", rendered)
         self.assertIn("58.9 tok/s", rendered)
+        self.assertIn("CLIENT    3 connected", ui.ANSI.sub("", rendered))
+        self.assertIn("Allocation", rendered)
         self.assertIn("\033[", rendered)
         plain = ui.ANSI.sub("", rendered)
-        scheduler = plain.partition("Scheduler")[2].partition("Performance")[0]
-        self.assertNotIn("█", scheduler)
-        self.assertNotIn("· ·", scheduler)
+        self.assertIn("deepseek-v4-flash 557K context", plain)
+        request_path = plain.partition("Request path")[2].partition("Performance")[0]
+        self.assertNotIn("homeai.local", request_path)
+        self.assertNotIn("deepseek-v4-flash", request_path)
+        self.assertNotIn("dgx-spark", request_path)
         header = next(line for line in plain.splitlines() if "LET'S INFER" in line)
         self.assertRegex(header, r"Home\s+✓\s+Uptime —\s+ϟ\s+LET'S INFER")
         self.assertGreater(header.index("LET'S INFER"), header.index("Uptime"))
         summary = rendered.partition("Request path")[0]
         self.assertNotIn("LIVE", summary)
-        self.assertNotIn("dgx-spark", summary)
+        self.assertIn("dgx-spark", summary)
         self.assertNotIn("runtime pack", summary)
         self.assertNotIn("candidate control plane active", summary)
         self.assertNotIn("candidate guarded", summary)
@@ -463,6 +468,90 @@ class TerminalTests(unittest.TestCase):
         temperature = rendered.partition("Temperature")[2]
         self.assertNotIn("2.46G", temperature)
         self.assertNotIn("R10/W20", temperature)
+
+    def test_status_scales_units_and_mutes_bold_secondary_values(self) -> None:
+        stream = FakeStream(tty=True)
+        terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
+        rendered = "\n".join(
+            status_ui.dashboard_lines(
+                {
+                    "telemetry": {
+                        "fresh": True,
+                        "system": {
+                            "gpu_percent": 6,
+                            "gpu_clock_mhz": 900,
+                            "memory_percent": 8,
+                            "memory_used_mib": 9 * 1024,
+                            "memory_total_mib": 122 * 1024,
+                            "cpu_percent": 7,
+                            "cpu_clock_mhz": 2460,
+                            "disk_percent": 16,
+                            "disk_read_kib_s": 10,
+                            "disk_write_kib_s": 2048,
+                            "power_deci_w": 50,
+                            "network_rx_kib_s": 1024,
+                            "network_tx_kib_s": 1024,
+                        },
+                    }
+                },
+                terminal,
+            )
+        )
+        plain = ui.ANSI.sub("", rendered)
+        self.assertIn("6% 900 MHz", plain)
+        self.assertIn("7% 2.46 GHz", plain)
+        self.assertIn("8% 9 GiB / 122 GiB", plain)
+        self.assertIn("↑10 KiB/s ↓2 MiB/s", plain)
+        self.assertIn("2 MiB/s", plain)
+        self.assertIn(ui.BOLD + ui.DIM + " 900 MHz" + ui.RESET, rendered)
+        self.assertIn(ui.BOLD + ui.DIM + " 2.46 GHz" + ui.RESET, rendered)
+
+    def test_status_system_trends_compare_consecutive_fresh_samples(self) -> None:
+        stream = FakeStream(tty=True)
+        terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
+        payload = {
+            "telemetry": {
+                "fresh": True,
+                "system": {
+                    "gpu_percent": 20,
+                    "memory_percent": 20,
+                    "cpu_percent": 20,
+                    "disk_percent": 20,
+                    "power_deci_w": 200,
+                },
+            }
+        }
+        rendered = "\n".join(
+            status_ui.dashboard_lines(
+                payload,
+                terminal,
+                session_history={
+                    "gpu": [10, 20],
+                    "memory": [30, 20],
+                    "cpu": [20, 20],
+                    "nvme": [10, 20],
+                    "power": [30, 20],
+                },
+            )
+        )
+        system = rendered.partition("System")[2].partition("Temperature")[0]
+        self.assertEqual(system.count(ui.BOLD + ui.RED + "↑" + ui.RESET), 2)
+        self.assertEqual(system.count(ui.BOLD + ui.GREEN + "↓" + ui.RESET), 2)
+        cpu_line = next(line for line in system.splitlines() if "CPU" in line)
+        self.assertNotIn("↑", ui.ANSI.sub("", cpu_line))
+        self.assertNotIn("↓", ui.ANSI.sub("", cpu_line))
+
+        payload["telemetry"]["display_state"] = "reconnecting"
+        stale = "\n".join(
+            status_ui.dashboard_lines(
+                payload,
+                terminal,
+                session_history={"gpu": [10, 20]},
+            )
+        )
+        stale_system = ui.ANSI.sub("", stale).partition("System")[2].partition("Temperature")[0]
+        self.assertNotIn("↑", stale_system)
+        self.assertNotIn("↓", stale_system)
 
     def test_status_temperature_history_uses_a_fixed_120_degree_scale(self) -> None:
         stream = FakeStream(tty=True)
@@ -806,6 +895,75 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("\033[?1049l", rendered)
         self.assertNotIn("\033[H\033[J", rendered)
         self.assertIn("fixture-model", rendered)
+
+    def test_live_runtime_status_refreshes_request_performance_and_allocation(self) -> None:
+        stream = FakeStream(tty=True)
+        base = {
+            "service": {
+                "active": "active",
+                "engine_active": "active",
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+                "gateway_model_identity": True,
+            },
+            "container": {
+                "state": "running",
+                "healthy": True,
+                "model_identity": True,
+                "model": "fixture-model",
+                "engine": "sglang",
+                "target": "dgx-spark",
+                "runtime_version": "1.0.0",
+                "capacity": {
+                    "max_active_requests": 128,
+                    "max_context_tokens": 4096,
+                },
+            },
+            "protection": {"armed": True, "trip_latched": False},
+            "lifecycle": {"state": "ready", "runtime_ready": True},
+        }
+        payloads = [
+            {
+                **base,
+                "telemetry": {
+                    "fresh": True,
+                    "sample_sequence": 1,
+                    "active_requests": 0,
+                    "connected_clients": 0,
+                    "queued_requests": 0,
+                    "rates": {"aggregate_tokens_per_second": 1.0},
+                },
+            },
+            {
+                **base,
+                "telemetry": {
+                    "fresh": True,
+                    "sample_sequence": 2,
+                    "active_requests": 1,
+                    "connected_clients": 1,
+                    "queued_requests": 0,
+                    "rates": {
+                        "aggregate_tokens_per_second": 25.0,
+                        "decode_tokens_per_second": 20.0,
+                        "prefill_tokens_per_second": 100.0,
+                    },
+                },
+            },
+        ]
+        with (
+            mock.patch.object(ui.sys, "stdout", stream),
+            mock.patch.object(
+                ui.time, "sleep", side_effect=[None, KeyboardInterrupt]
+            ),
+        ):
+            self.assertEqual(ui.live_runtime_status(lambda: payloads.pop(0)), 0)
+        plain = ui.ANSI.sub("", stream.getvalue())
+        self.assertIn("1 tok/s", plain)
+        self.assertIn("25 tok/s", plain)
+        self.assertIn("Allocation   1 / 128", plain)
+        self.assertIn("CLIENT    1 connected", plain)
 
     def test_live_runtime_status_refreshes_without_an_installed_runtime(self) -> None:
         stream = FakeStream(tty=True)

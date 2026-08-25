@@ -34,7 +34,7 @@ MEMBER = "1" * 32
 
 def record(*, sequence: int = 7, unix_ms: int = 1_700_000_000_000, counters: int = 10) -> bytes:
     value = bytearray(RECORD_BYTES)
-    struct.pack_into("<IHHQQQ", value, 0, 0x3152494C, 1, RECORD_BYTES, sequence, unix_ms, 1234)
+    struct.pack_into("<IHHQQQ", value, 0, 0x3152494C, 2, RECORD_BYTES, sequence, unix_ms, 1234)
     value[32:40] = bytes((2, 1 << 3, 50, 60, 70, 80, 90, 1))
     value[40:42] = bytes((40, 60))
     value[72:78] = bytes((60, 50, 0, 0, 0, 0))
@@ -45,7 +45,8 @@ def record(*, sequence: int = 7, unix_ms: int = 1_700_000_000_000, counters: int
     struct.pack_into("<II", value, 140, 2, 3)
     for offset in range(148, 276, 8):
         struct.pack_into("<Q", value, offset, counters)
-    struct.pack_into("<I", value, 276, zlib.crc32(value[:276]))
+    struct.pack_into("<I", value, 276, 4)
+    struct.pack_into("<I", value, 280, zlib.crc32(value[:280]))
     return bytes(value)
 
 
@@ -70,7 +71,7 @@ def protocol_payload(
         (5, 50), (7, 70), (8, 80), (10, sint(400)), (11, sint(-32768)),
         (12, 125), (13, 100), (14, 200), (15, 300), (16, 400),
         (17, 10), (18, 20), (19, 30), (20, 40), (21, 9), (22, 1),
-        (23, 3200), (24, 4266), (25, active), (26, 0),
+        (23, 3200), (24, 4266), (25, active), (26, 0), (43, 2),
     ]
     payload = b"".join(_protobuf_uint(field, value) for field, value in values)
     payload += _protobuf_message(6, b"\x28\x3c") + _protobuf_message(9, gpu)
@@ -154,6 +155,7 @@ class TelemetryTests(unittest.TestCase):
             "GET", "/control/v1/telemetry?history=0"
         )
         self.assertEqual(aggregate["active_requests"], 1)
+        self.assertEqual(aggregate["connected_clients"], 2)
         self.assertEqual(aggregate["rates"]["output_tokens_per_second"], 11.0)
         self.assertTrue(aggregate["fresh"])
         self.assertEqual(aggregate["sample_member_id"], MEMBER)
@@ -165,6 +167,7 @@ class TelemetryTests(unittest.TestCase):
             protocol_payload(active=1, output_tokens=12), member_id=MEMBER
         )
         self.assertEqual(sample["inference"]["active_requests"], 1)
+        self.assertEqual(sample["inference"]["connected_clients"], 2)
         self.assertEqual(sample["inference"]["output_tokens"], 12)
         self.assertEqual(sample["system"]["nvme_temp_deci_c"], -1)
 
@@ -251,6 +254,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample["system"]["nvme_temp_deci_c"], -1)
         self.assertEqual(sample["system"]["vram_clock_mhz"], -1)
         self.assertEqual(sample["inference"]["active_requests"], 2)
+        self.assertEqual(sample["inference"]["connected_clients"], 4)
         self.assertEqual(sample["inference"][COUNTER_FIELDS[-1]], 10)
         damaged = bytearray(record())
         damaged[50] ^= 1
