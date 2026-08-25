@@ -1,4 +1,0 @@
-interface:
-  display_name: "Benchmark Let's Infer Runtime"
-  short_description: "Run reproducible Let's Infer qualification"
-  default_prompt: "Use $benchmark to benchmark this Let's Infer runtime against its exact baselines."
