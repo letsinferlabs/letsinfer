@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import json
 import pathlib
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -71,6 +73,66 @@ class _Store:
 
 
 class EngineGroupLifecycleTests(unittest.TestCase):
+    def test_live_snapshot_keeps_metrics_when_engine_group_exists(self) -> None:
+        group = {
+            "group_id": "1" * 32,
+            "model": "example-model",
+            "strategy": "single",
+            "state": "failed",
+            "desired_state": "stopped",
+            "members": [],
+        }
+        telemetry = {"fresh": True, "system": {"gpu": {"utilization": 42}}}
+        output = io.StringIO()
+        arguments = argparse.Namespace(
+            json=True,
+            model=None,
+            name=None,
+            config=None,
+            _single_snapshot=True,
+            _live_snapshot=True,
+        )
+        identity = types.SimpleNamespace(role="main", member_id="5" * 32)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with (
+                mock.patch.object(cli, "site_identity_path") as identity_path,
+                mock.patch.object(cli, "read_site_identity", return_value=identity),
+                mock.patch.object(cli, "_engine_group_status", return_value=[group]),
+                mock.patch.object(
+                    cli, "active_service_config_path", return_value=root / "missing.json"
+                ),
+                mock.patch.object(cli, "site_config_root", return_value=root),
+                mock.patch.object(
+                    cli, "_service_state", return_value=("enabled", "active", 1024)
+                ),
+                mock.patch.object(cli, "api_status", side_effect=[200, 401, 200]),
+                mock.patch.object(
+                    cli,
+                    "identity_json",
+                    return_value={
+                        "role": "main",
+                        "machine_id": identity.member_id,
+                        "display_name": "Example",
+                    },
+                ),
+                mock.patch.object(cli, "_local_status_node", return_value={}),
+                mock.patch.object(
+                    cli, "_local_controller_telemetry", return_value=telemetry
+                ),
+                mock.patch.object(
+                    cli, "runtime_lifecycle", return_value={"state": "absent"}
+                ),
+                mock.patch("sys.stdout", output),
+            ):
+                identity_path.return_value.exists.return_value = True
+                self.assertEqual(cli.status(arguments), 1)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["services"]["node_active"], "active")
+        self.assertEqual(payload["telemetry"], telemetry)
+        self.assertEqual(payload["engine_groups"], [group])
+
     def test_plain_status_renders_runtime_task_without_retired_role(self) -> None:
         group = {
             "group_id": "1" * 32,

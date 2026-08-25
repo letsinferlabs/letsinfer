@@ -9700,7 +9700,13 @@ def status(arguments: argparse.Namespace) -> int:
     ):
         def snapshot() -> dict[str, Any]:
             values = vars(arguments).copy()
-            values.update({"json": True, "_single_snapshot": True})
+            values.update(
+                {
+                    "json": True,
+                    "_single_snapshot": True,
+                    "_live_snapshot": True,
+                }
+            )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 code = status(argparse.Namespace(**values))
@@ -9721,6 +9727,7 @@ def status(arguments: argparse.Namespace) -> int:
         return ui.live_runtime_status(snapshot)
     model_value = getattr(arguments, "model", None)
     model = model_value if isinstance(model_value, str) else None
+    live_groups: list[dict[str, Any]] = []
     if model is not None and (arguments.name is not None or arguments.config is not None):
         raise LetsInferError("a model cannot be combined with --name or --config")
     if arguments.name is None and arguments.config is None and site_identity_path().exists():
@@ -9728,21 +9735,25 @@ def status(arguments: argparse.Namespace) -> int:
         if identity.role == "main":
             groups = _engine_group_status(model)
             if groups:
-                if arguments.json:
-                    print(json.dumps({"engine_groups": groups}, sort_keys=True))
+                if getattr(arguments, "_live_snapshot", False):
+                    live_groups = groups
                 else:
-                    for group in groups:
-                        print(
-                            f"GROUP {group['group_id']} model={group['model']} "
-                            f"strategy={group['strategy']} state={group['state']} "
-                            f"desired={group['desired_state']}"
-                        )
-                        for member in group["members"]:
+                    if arguments.json:
+                        print(json.dumps({"engine_groups": groups}, sort_keys=True))
+                    else:
+                        for group in groups:
                             print(
-                                f"  MEMBER {member['member_id']} task={member['task_id']} "
-                                f"state={member['state']}"
+                                f"GROUP {group['group_id']} model={group['model']} "
+                                f"strategy={group['strategy']} state={group['state']} "
+                                f"desired={group['desired_state']}"
                             )
-                return 0
+                            for member in group["members"]:
+                                print(
+                                    f"  MEMBER {member['member_id']} "
+                                    f"task={member['task_id']} "
+                                    f"state={member['state']}"
+                                )
+                    return 0
         elif model is not None:
             raise LetsInferError(
                 "node-wide engine-group status is available from the main node"
@@ -9851,6 +9862,8 @@ def status(arguments: argparse.Namespace) -> int:
                 else None
             ),
         }
+        if live_groups:
+            payload["engine_groups"] = live_groups
         payload["lifecycle"] = runtime_lifecycle(payload)
         if arguments.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
