@@ -55,12 +55,18 @@ class Component:
     target: str | None = None
     target_contract_sha256: str | None = None
     installed_source: str | None = None
+    display_subject: str | None = None
+    apply_subject: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"core", "runtime"}:
             raise UpdateError(f"invalid update component kind: {self.kind}")
         if not self.subject or not self.installed_identity:
             raise UpdateError("update component identity is incomplete")
+        if self.display_subject is not None and not self.display_subject:
+            raise UpdateError("update component display identity is invalid")
+        if self.apply_subject is not None and not self.apply_subject:
+            raise UpdateError("update component apply identity is invalid")
         _version_parts(self.installed_version)
         if self.kind == "runtime":
             if not all((self.model, self.runtime, self.target)):
@@ -84,10 +90,20 @@ class UpdateRecord:
     checked_at_unix: int
     verified_at_unix: int | None
     error_code: str | None
+    display_subject: str | None = None
+    apply_subject: str | None = None
 
     @property
     def available(self) -> bool:
         return self.status == "available" and self.available_version is not None
+
+    @property
+    def label(self) -> str:
+        return self.display_subject or self.subject
+
+    @property
+    def apply(self) -> str:
+        return self.apply_subject or self.subject
 
 
 @dataclasses.dataclass(frozen=True)
@@ -394,7 +410,13 @@ class UpdateManager:
                 record.installed_version == component.installed_version
                 and record.installed_identity == component.installed_identity
             ):
-                records.append(record)
+                records.append(
+                    dataclasses.replace(
+                        record,
+                        display_subject=component.display_subject,
+                        apply_subject=component.apply_subject,
+                    )
+                )
         return UpdateSnapshot(tuple(records))
 
     def _acquire(self, connection: sqlite3.Connection, owner: str, now: int) -> bool:
@@ -590,6 +612,11 @@ class UpdateManager:
                         None,
                         errors.get(key, "refresh_failed"),
                     )
+                record = dataclasses.replace(
+                    record,
+                    display_subject=component.display_subject,
+                    apply_subject=component.apply_subject,
+                )
                 records.append(record)
 
             connection.execute("BEGIN IMMEDIATE")
@@ -601,7 +628,22 @@ class UpdateManager:
                            available_version, available_identity, available_source,
                            status, checked_at_unix, verified_at_unix, error_code
                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    [dataclasses.astuple(record) for record in records],
+                    [
+                        (
+                            record.kind,
+                            record.subject,
+                            record.installed_version,
+                            record.installed_identity,
+                            record.available_version,
+                            record.available_identity,
+                            record.available_source,
+                            record.status,
+                            record.checked_at_unix,
+                            record.verified_at_unix,
+                            record.error_code,
+                        )
+                        for record in records
+                    ],
                 )
                 connection.execute(
                     "DELETE FROM refresh_lease WHERE singleton = 1 AND owner = ?",

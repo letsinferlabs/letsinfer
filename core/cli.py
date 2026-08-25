@@ -525,10 +525,140 @@ def _core_update_identity() -> str:
 
 
 def _update_components() -> tuple[Component, ...]:
-    """Return core plus the one selected resident or qualification runtime."""
+    """Return core plus every distinct installed engine-group release."""
     components = [
         Component("core", "core", PRODUCT_VERSION, _core_update_identity())
     ]
+    group_releases: dict[
+        tuple[str, str, str, str, str], dict[str, str]
+    ] = {}
+    if site_identity_path().is_file():
+        try:
+            identity = read_site_identity()
+            installed_releases: list[tuple[str, Mapping[str, Any]]] = []
+            if identity.role == "main":
+                with SiteStore(identity=identity) as store:
+                    placements = {
+                        row["placement_id"]: row for row in store.placements()
+                    }
+                    groups = store.engine_groups()
+                for group in groups:
+                    if (
+                        group.get("state") == "removed"
+                        or group.get("desired_state") == "removed"
+                    ):
+                        continue
+                    placement = placements.get(group.get("placement_id"))
+                    plan = group.get("plan")
+                    release = plan.get("release") if isinstance(plan, Mapping) else None
+                    if not isinstance(placement, Mapping) or not isinstance(
+                        release, Mapping
+                    ):
+                        raise UpdateError(
+                            "installed engine group has no release identity"
+                        )
+                    installed_releases.append((str(placement.get("model", "")), release))
+            elif identity.role == "child":
+                root = default_engine_group_root()
+                if root.exists() and (root.is_symlink() or not root.is_dir()):
+                    raise UpdateError(f"engine-group storage is unsafe: {root}")
+                if root.is_dir():
+                    for candidate in sorted(root.iterdir()):
+                        path = candidate / "group.json"
+                        if (
+                            candidate.is_symlink()
+                            or not candidate.is_dir()
+                            or not path.is_file()
+                        ):
+                            continue
+                        try:
+                            group = validate_group_document(
+                                json.loads(_validate_private_file(path, minimum_bytes=64))
+                            )
+                        except (
+                            UnicodeDecodeError,
+                            json.JSONDecodeError,
+                            OrchestrationError,
+                        ) as error:
+                            raise UpdateError(
+                                f"installed engine-group plan is invalid: {path}"
+                            ) from error
+                        release = group.get("release")
+                        if not isinstance(release, Mapping):
+                            raise UpdateError(
+                                "installed engine group has no release identity"
+                            )
+                        installed_releases.append(
+                            (str(release.get("logical_model", "")), release)
+                        )
+            else:
+                raise UpdateError("configured node has an invalid role")
+        except (OSError, SiteError) as error:
+            raise UpdateError(f"cannot inspect installed engine groups: {error}") from error
+        for model, release in installed_releases:
+            values = {
+                "model": model,
+                "candidate": release.get("candidate_id"),
+                "target": release.get("target_id"),
+                "target_sha256": release.get("target_contract_sha256"),
+                "version": release.get("version"),
+                "digest": release.get("runtime_digest"),
+                "source": release.get("source"),
+            }
+            if (
+                not all(isinstance(value, str) and value for value in values.values())
+                or release.get("logical_model") != values["model"]
+                or not SHA256_RE.fullmatch(str(values["target_sha256"]))
+                or not SHA256_RE.fullmatch(str(values["digest"]))
+                or not REGISTRY_DIGEST_RE.fullmatch(str(values["source"]))
+            ):
+                raise UpdateError("installed engine-group release identity is invalid")
+            key = (
+                str(values["model"]),
+                str(values["target"]),
+                str(values["candidate"]),
+                str(values["version"]),
+                str(values["digest"]),
+            )
+            group_releases[key] = {
+                field: str(value) for field, value in values.items()
+            }
+    if group_releases:
+        variants_per_model: dict[str, int] = {}
+        for model, _target, _candidate, _version, _digest in group_releases:
+            variants_per_model[model] = variants_per_model.get(model, 0) + 1
+        for key, release in sorted(group_releases.items()):
+            model, target, candidate, version, digest = key
+            multiple = variants_per_model[model] > 1
+            subject = (
+                f"{model}@{target}@{candidate}@sha256:{digest}"
+                if multiple
+                else model
+            )
+            components.append(
+                Component(
+                    "runtime",
+                    subject,
+                    version,
+                    digest,
+                    policy=f"runtime:{candidate}",
+                    model=model,
+                    runtime=candidate,
+                    target=target,
+                    target_contract_sha256=release["target_sha256"],
+                    installed_source=release["source"],
+                    display_subject=(
+                        f"{model} · {target} · {candidate}@{version}"
+                        if multiple
+                        else model
+                    ),
+                    apply_subject=model,
+                )
+            )
+        return tuple(components)
+
+    # Retain the pre-group service/qualification projection only for an older
+    # installed layout. Current qualified installations never create it.
     config_path = (
         qualification_service_config_path()
         if qualification_service_config_path().is_file()
@@ -555,6 +685,8 @@ def _update_components() -> tuple[Component, ...]:
                 target=receipt["target"],
                 target_contract_sha256=receipt["target_contract_sha256"],
                 installed_source=receipt["source"],
+                display_subject=receipt["logical_model"],
+                apply_subject=receipt["logical_model"],
             )
         )
     except (LetsInferError, RuntimePackError, UpdateError, StopIteration):
@@ -3698,6 +3830,34 @@ def _controller_pairing_tls_context(
     return tls
 
 
+def _controller_management_config(explicit: str | None) -> dict[str, Any]:
+    """Resolve controller state from the core plane, independent of runtimes."""
+    if explicit is not None:
+        return read_service_config(expanded_path(explicit))
+    try:
+        identity = read_site_identity()
+    except (OSError, SiteError) as error:
+        raise LetsInferError(
+            f"controller management requires a configured node: {error}"
+        ) from error
+    if identity.role != "main":
+        raise LetsInferError("controller management is available only on the main node")
+    return {
+        "installation_id": identity.installation_id,
+        "watchdog_listen": "0.0.0.0",
+        "watchdog_port": WATCHDOG_TELEMETRY_PORT,
+        "watchdog_cert_file": str(default_watchdog_cert_path()),
+        "watchdog_key_file": str(default_watchdog_key_path()),
+        "watchdog_controller_ca_file": str(default_watchdog_controller_ca_path()),
+        "watchdog_controller_ca_key_file": str(
+            default_watchdog_controller_ca_key_path()
+        ),
+        "watchdog_controller_allowlist_file": str(
+            default_controller_allowlist_path()
+        ),
+    }
+
+
 def pair_controller(arguments: argparse.Namespace) -> int:
     if not CONTROLLER_PAIRING_MIN_TIMEOUT_SECONDS <= arguments.timeout <= CONTROLLER_PAIRING_TIMEOUT_SECONDS:
         raise LetsInferError(
@@ -3705,8 +3865,7 @@ def pair_controller(arguments: argparse.Namespace) -> int:
             f"{CONTROLLER_PAIRING_MIN_TIMEOUT_SECONDS} and "
             f"{CONTROLLER_PAIRING_TIMEOUT_SECONDS} seconds"
         )
-    config_path = expanded_path(arguments.config or default_service_config_path())
-    config = read_service_config(config_path)
+    config = _controller_management_config(arguments.config)
     for key in (
         "installation_id", "watchdog_controller_allowlist_file",
         "watchdog_controller_ca_key_file",
@@ -3829,7 +3988,7 @@ def pair_controller(arguments: argparse.Namespace) -> int:
 
 
 def controllers(arguments: argparse.Namespace) -> int:
-    config = read_service_config(expanded_path(arguments.config or default_service_config_path()))
+    config = _controller_management_config(arguments.config)
     for key in (
         "installation_id", "watchdog_controller_allowlist_file",
     ):
@@ -9989,7 +10148,7 @@ def status(arguments: argparse.Namespace) -> int:
             value["updates"] = [
                 {
                     "kind": record.kind,
-                    "subject": record.subject,
+                    "subject": record.label,
                     "version": record.available_version,
                 }
                 for record in _update_manager().cached().available
@@ -10387,16 +10546,112 @@ def _managed_inspection(name: str) -> dict[str, Any]:
     return inspection
 
 
+def _local_engine_group_log_targets(
+    group_id: str | None,
+) -> list[tuple[str, str]]:
+    """Return validated local group/container identities without mutating state."""
+    if group_id is not None and not re.fullmatch(r"[0-9a-f]{32}", group_id):
+        raise LetsInferError("engine-group identity is invalid")
+    root = default_engine_group_root()
+    if not root.exists():
+        return []
+    if root.is_symlink() or not root.is_dir():
+        raise LetsInferError(f"engine-group storage is unsafe: {root}")
+    root_details = root.stat()
+    if (
+        root_details.st_uid != os.getuid()
+        or stat.S_IMODE(root_details.st_mode) & 0o077
+    ):
+        raise LetsInferError(
+            f"engine-group storage must be private and user-owned: {root}"
+        )
+    candidates = [root / group_id] if group_id is not None else sorted(root.iterdir())
+    targets: list[tuple[str, str]] = []
+    for candidate in candidates:
+        if not candidate.is_dir() or candidate.is_symlink():
+            continue
+        candidate_details = candidate.stat()
+        if (
+            candidate_details.st_uid != os.getuid()
+            or stat.S_IMODE(candidate_details.st_mode) & 0o077
+        ):
+            raise LetsInferError(
+                f"engine-group directory must be private and user-owned: {candidate}"
+            )
+        candidate_group_id = candidate.name
+        if not re.fullmatch(r"[0-9a-f]{32}", candidate_group_id):
+            continue
+        path = candidate / "config.json"
+        if not path.is_file():
+            continue
+        try:
+            config = json.loads(_validate_private_file(path, minimum_bytes=64))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise LetsInferError(
+                f"engine-group configuration is invalid JSON: {path}"
+            ) from error
+        task = config.get("task") if isinstance(config, Mapping) else None
+        expected_name = f"letsinfer-group-{candidate_group_id}"
+        if (
+            not isinstance(config, Mapping)
+            or config.get("schema_version") != 1
+            or config.get("group_id") != candidate_group_id
+            or not re.fullmatch(r"[0-9a-f]{32}", str(config.get("member_id", "")))
+            or not isinstance(task, Mapping)
+            or not isinstance(task.get("task_id"), str)
+            or config.get("container_name") != expected_name
+        ):
+            raise LetsInferError(f"engine-group logging identity is invalid: {path}")
+        inspection = _managed_inspection(expected_name)
+        labels = inspection.get("Config", {}).get("Labels") or {}
+        if (
+            labels.get(GROUP_ID_LABEL) != candidate_group_id
+            or labels.get(GROUP_NODE_LABEL) != config["member_id"]
+            or labels.get(GROUP_TASK_LABEL) != task["task_id"]
+        ):
+            raise LetsInferError(
+                f"managed container {expected_name} does not match its engine group"
+            )
+        targets.append((candidate_group_id, expected_name))
+    return targets
+
+
 def logs(arguments: argparse.Namespace) -> int:
-    config_path = absolute_user_path(
-        arguments.config or default_service_config_path()
-    )
-    config = read_service_config(config_path)
-    _managed_inspection(config["name"])
+    group_id = getattr(arguments, "group", None)
+    if arguments.config is not None and group_id is not None:
+        raise LetsInferError("--config cannot be combined with --group")
+    name: str | None = None
+    if arguments.config is not None:
+        config = read_service_config(absolute_user_path(arguments.config))
+        name = config["name"]
+        _managed_inspection(name)
+    else:
+        qualification_path = qualification_service_config_path()
+        if qualification_path.is_file() and group_id is None:
+            qualification = read_service_config(qualification_path)
+            name = qualification["name"]
+            _managed_inspection(name)
+        else:
+            targets = _local_engine_group_log_targets(group_id)
+            if len(targets) > 1:
+                raise LetsInferError(
+                    "multiple local engine groups exist; specify --group GROUP_ID"
+                )
+            if targets:
+                _selected_group, name = targets[0]
+            else:
+                legacy_path = default_service_config_path()
+                if legacy_path.is_file() and group_id is None:
+                    legacy = read_service_config(legacy_path)
+                    name = legacy["name"]
+                    _managed_inspection(name)
+    if name is None:
+        detail = f" {group_id}" if group_id is not None else ""
+        raise LetsInferError(f"no local engine group{detail} is available")
     command = ["docker", "logs", "--timestamps", "--tail", str(arguments.tail)]
     if arguments.follow:
         command.append("--follow")
-    command.append(config["name"])
+    command.append(name)
     run_passthrough(command, visible=True)
     return 0
 
@@ -15035,7 +15290,7 @@ def check_updates(arguments: argparse.Namespace) -> int:
                     "components": [
                         {
                             "kind": record.kind,
-                            "subject": record.subject,
+                            "subject": record.label,
                             "installed_version": record.installed_version,
                             "available_version": record.available_version,
                             "available_identity": record.available_identity,
@@ -15055,7 +15310,7 @@ def check_updates(arguments: argparse.Namespace) -> int:
         presenter = _human_presenter()
         rendered = []
         for record in snapshot.records:
-            label = "Core" if record.kind == "core" else record.subject
+            label = "Core" if record.kind == "core" else record.label
             if record.available:
                 state = "Available"
                 semantic = command_ui.Semantic.WARNING
@@ -15102,7 +15357,7 @@ def check_updates(arguments: argparse.Namespace) -> int:
                 command = (
                     f"letsinfer update --version {record.available_version}"
                     if record.kind == "core"
-                    else f"letsinfer upgrade {record.subject}"
+                    else f"letsinfer upgrade {record.apply}"
                 )
                 presenter.verbatim(command, label="Apply", copyable=True)
         else:
@@ -15110,7 +15365,7 @@ def check_updates(arguments: argparse.Namespace) -> int:
             if snapshot.busy:
                 terminal.status("Another update check is already running; showing verified state")
             for record in snapshot.records:
-                label = "Core" if record.kind == "core" else record.subject
+                label = "Core" if record.kind == "core" else record.label
                 if record.available:
                     terminal.warning(
                         f"{label} {record.available_version} available "
@@ -15131,7 +15386,7 @@ def check_updates(arguments: argparse.Namespace) -> int:
                             f"Apply with `letsinfer update --version {record.available_version}`"
                         )
                     else:
-                        terminal.status(f"Apply with `letsinfer upgrade {record.subject}`")
+                        terminal.status(f"Apply with `letsinfer upgrade {record.apply}`")
     return int(
         (snapshot.busy and not snapshot.records)
         or any(
@@ -18815,6 +19070,7 @@ def parser() -> argparse.ArgumentParser:
 
     logging = subcommands.add_parser("logs", help="show managed server logs")
     logging.add_argument("--config")
+    logging.add_argument("--group", help="select one exact local engine group")
     logging.add_argument("--tail", type=int, default=200)
     logging.add_argument("--follow", action="store_true")
     logging.set_defaults(action=logs, action_id="logs")

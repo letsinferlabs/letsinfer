@@ -8,6 +8,7 @@ import contextlib
 import errno
 import hashlib
 import io
+import json
 import pathlib
 import tempfile
 import threading
@@ -22,6 +23,166 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_controller_management_uses_core_plane_without_legacy_service(self) -> None:
+        identity = types.SimpleNamespace(
+            role="main",
+            installation_id="a" * 64,
+        )
+        paths = {
+            "watchdog_cert_file": pathlib.Path("/config/watchdog/server.crt"),
+            "watchdog_key_file": pathlib.Path("/secrets/watchdog/server.key"),
+            "watchdog_controller_ca_file": pathlib.Path("/config/watchdog/ca.crt"),
+            "watchdog_controller_ca_key_file": pathlib.Path(
+                "/secrets/watchdog/ca.key"
+            ),
+            "watchdog_controller_allowlist_file": pathlib.Path(
+                "/config/watchdog/controllers.allow"
+            ),
+        }
+        with (
+            mock.patch.object(cli, "read_site_identity", return_value=identity),
+            mock.patch.object(
+                cli, "default_watchdog_cert_path", return_value=paths["watchdog_cert_file"]
+            ),
+            mock.patch.object(
+                cli, "default_watchdog_key_path", return_value=paths["watchdog_key_file"]
+            ),
+            mock.patch.object(
+                cli,
+                "default_watchdog_controller_ca_path",
+                return_value=paths["watchdog_controller_ca_file"],
+            ),
+            mock.patch.object(
+                cli,
+                "default_watchdog_controller_ca_key_path",
+                return_value=paths["watchdog_controller_ca_key_file"],
+            ),
+            mock.patch.object(
+                cli,
+                "default_controller_allowlist_path",
+                return_value=paths["watchdog_controller_allowlist_file"],
+            ),
+            mock.patch.object(cli, "read_service_config") as legacy_config,
+        ):
+            config = cli._controller_management_config(None)
+
+        legacy_config.assert_not_called()
+        self.assertEqual(config["installation_id"], identity.installation_id)
+        self.assertEqual(config["watchdog_listen"], "0.0.0.0")
+        self.assertEqual(config["watchdog_port"], cli.WATCHDOG_TELEMETRY_PORT)
+        for key, path in paths.items():
+            self.assertEqual(config[key], str(path))
+
+    def test_logs_resolve_the_only_local_engine_group_without_legacy_service(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            group_id = "a" * 32
+            member_id = "b" * 32
+            task_id = "task-0"
+            name = f"letsinfer-group-{group_id}"
+            group_root = root / group_id
+            group_root.mkdir()
+            group_root.chmod(0o700)
+            config = {
+                "schema_version": 1,
+                "group_id": group_id,
+                "member_id": member_id,
+                "task": {"task_id": task_id},
+                "container_name": name,
+            }
+            config_path = group_root / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            config_path.chmod(0o600)
+            inspection = {
+                "Config": {
+                    "Labels": {
+                        cli.MANAGED_LABEL: "true",
+                        cli.GROUP_ID_LABEL: group_id,
+                        cli.GROUP_NODE_LABEL: member_id,
+                        cli.GROUP_TASK_LABEL: task_id,
+                    }
+                }
+            }
+            arguments = types.SimpleNamespace(
+                config=None,
+                group=None,
+                tail=7,
+                follow=False,
+            )
+            with (
+                mock.patch.object(cli, "default_engine_group_root", return_value=root),
+                mock.patch.object(
+                    cli,
+                    "qualification_service_config_path",
+                    return_value=root / "missing-qualification.json",
+                ),
+                mock.patch.object(
+                    cli,
+                    "default_service_config_path",
+                    return_value=root / "missing-service.json",
+                ),
+                mock.patch.object(cli, "container_inspect", return_value=inspection),
+                mock.patch.object(cli, "run_passthrough") as passthrough,
+            ):
+                self.assertEqual(cli.logs(arguments), 0)
+
+        passthrough.assert_called_once_with(
+            ["docker", "logs", "--timestamps", "--tail", "7", name],
+            visible=True,
+        )
+
+    def test_controller_listing_uses_the_core_plane_configuration(self) -> None:
+        identity = types.SimpleNamespace(installation_id="a" * 64)
+        config = {
+            "installation_id": identity.installation_id,
+            "watchdog_controller_allowlist_file": "/controllers.allow",
+        }
+        store = mock.MagicMock()
+        store.controllers.return_value = []
+        arguments = types.SimpleNamespace(
+            config=None,
+            operation="list",
+            controller=None,
+            json=True,
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                cli, "_controller_management_config", return_value=config
+            ) as management_config,
+            mock.patch.object(cli, "read_site_identity", return_value=identity),
+            mock.patch.object(cli, "SiteStore", return_value=store),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(cli.controllers(arguments), 0)
+
+        management_config.assert_called_once_with(None)
+        self.assertEqual(json.loads(output.getvalue())["controllers"], [])
+
+    def test_logs_require_an_exact_group_when_multiple_are_local(self) -> None:
+        arguments = types.SimpleNamespace(
+            config=None,
+            group=None,
+            tail=200,
+            follow=False,
+        )
+        with (
+            mock.patch.object(
+                cli,
+                "qualification_service_config_path",
+                return_value=pathlib.Path("/missing-qualification.json"),
+            ),
+            mock.patch.object(
+                cli,
+                "_local_engine_group_log_targets",
+                return_value=[("a" * 32, "first"), ("b" * 32, "second")],
+            ),
+            self.assertRaisesRegex(cli.LetsInferError, "specify --group"),
+        ):
+            cli.logs(arguments)
+
     def test_engine_group_lifecycle_lock_serializes_threads(self) -> None:
         first_acquired = threading.Event()
         release_first = threading.Event()
