@@ -116,6 +116,9 @@ state descriptor; Watchdog fails closed before listening when either file is
 invalid, mismatched, symlinked, non-private, or not owned by the service user.
 
 `letsinfer pair` is a transient enrollment path, not another resident service.
+It resolves the installation identity, controller CA, and Watchdog endpoint
+from the core-owned node plane, so pairing works before any model is installed
+and does not depend on a legacy single-runtime configuration.
 It uses a one-use eight-digit code, a public-key proof, and a separate
 six-digit comparison code that binds the human confirmation to the Mac's exact
 P-256 key. The setup listener is TLS 1.3, single-worker, size bounded, and

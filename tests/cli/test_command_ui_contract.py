@@ -260,7 +260,9 @@ class PresentationInventoryTests(unittest.TestCase):
             "watchdog_listen": "127.0.0.1",
         }
         with (
-            mock.patch.object(cli, "read_service_config", return_value=config),
+            mock.patch.object(
+                cli, "_controller_management_config", return_value=config
+            ) as management_config,
             mock.patch.object(cli, "_reload_controller_authorization"),
             mock.patch.object(cli, "_ControllerPairingState", return_value=state),
             mock.patch.object(cli, "_controller_pairing_tls_context"),
@@ -276,6 +278,7 @@ class PresentationInventoryTests(unittest.TestCase):
             mock.patch.object(cli.secrets, "randbelow", return_value=12345678),
         ):
             self.assertEqual(cli.pair_controller(arguments), 0)
+        management_config.assert_called_once_with(None)
         self.assertEqual(
             events,
             ["Waiting for a controller", "confirm", "Completing controller pairing"],
