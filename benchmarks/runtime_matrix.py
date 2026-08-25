@@ -374,20 +374,17 @@ def _command_output(command: list[str], what: str) -> str:
         streams = (result.stdout or "", result.stderr or "")
         lines = [line.strip() for stream in streams for line in stream.splitlines() if line.strip()]
         errors = [line.removeprefix("ERROR:").strip() for line in lines if line.startswith("ERROR:")]
-        stdout_lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
-        non_warning_stdout = [
-            line
-            for line in stdout_lines
-            if not line.upper().startswith(("WARNING", "WARN", "STATUS"))
-        ]
-        detail = (
-            errors[-1]
-            if errors
-            else non_warning_stdout[-1]
-            if non_warning_stdout
-            else (result.stderr or result.stdout).strip()
+        # A qualification launch may emit a non-fatal warning on stderr before
+        # the CLI renders its actionable failure on stdout.  Preserve both
+        # channels unless the CLI emitted an explicit actionable error.
+        detail = errors[-1] if errors else "\n".join(
+            value.strip() for value in (result.stderr, result.stdout) if value.strip()
         )
-        raise RuntimeMatrixError(f"{what} failed: {detail}")
+        if len(detail) > 16_384:
+            detail = "…" + detail[-16_383:]
+        raise RuntimeMatrixError(
+            f"{what} failed (exit {result.returncode}): {detail or 'no output'}"
+        )
     return result.stdout
 
 

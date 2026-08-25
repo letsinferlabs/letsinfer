@@ -8,6 +8,8 @@ import argparse
 import base64
 import contextlib
 import datetime as dt
+import errno
+import fcntl
 import functools
 import getpass
 import hashlib
@@ -638,6 +640,49 @@ def default_gateway_group_telemetry_path() -> pathlib.Path:
 
 def default_engine_group_root() -> pathlib.Path:
     return site_data_root() / "engine-groups"
+
+
+_ENGINE_GROUP_LIFECYCLE_THREAD_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def _engine_group_lifecycle_lock() -> Iterable[None]:
+    """Serialize explicit group lifecycle against background reconciliation."""
+    with _ENGINE_GROUP_LIFECYCLE_THREAD_LOCK:
+        root = default_engine_group_root()
+        ensure_private_directory(root)
+        path = root / ".lifecycle.lock"
+        descriptor = os.open(
+            path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            details = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or details.st_uid != os.getuid()
+                or stat.S_IMODE(details.st_mode) != 0o600
+            ):
+                raise LetsInferError(
+                    "engine-group lifecycle lock must be private and user-owned"
+                )
+            with os.fdopen(descriptor, "r+", encoding="utf-8") as handle:
+                descriptor = -1
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                yield
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _serialized_engine_group_lifecycle(function: Any) -> Any:
+    @functools.wraps(function)
+    def serialized(*args: Any, **kwargs: Any) -> Any:
+        with _engine_group_lifecycle_lock():
+            return function(*args, **kwargs)
+
+    return serialized
 
 
 def default_watchdog_cert_path() -> pathlib.Path:
@@ -2296,6 +2341,130 @@ def _control_bundle_identity(core_identity: str, manifest_identity: str) -> str:
     ).hexdigest()
 
 
+def _control_core_source_identity(
+    root: pathlib.Path, runtime_manifest: pathlib.PurePath
+) -> str:
+    """Verify an installed control source against its own immutable manifest."""
+    core_manifest_path = _contained_regular_file(root, CORE_SOURCE_MANIFEST)
+    try:
+        manifest_data = core_manifest_path.read_bytes()
+        manifest = json.loads(manifest_data)
+    except (OSError, json.JSONDecodeError) as error:
+        raise LetsInferError("control bundle core source manifest is invalid") from error
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"schema_version", "product", "files"}
+        or manifest.get("schema_version") != 1
+        or manifest.get("product") != "letsinfer"
+        or not isinstance(manifest.get("files"), list)
+        or manifest_data != canonical_bytes(manifest)
+        or len(manifest["files"]) > 10_000
+    ):
+        raise LetsInferError("control bundle core source manifest is invalid")
+
+    expected: dict[str, tuple[int, int, str]] = {}
+    total_bytes = 0
+    reserved = {CORE_SOURCE_MANIFEST, runtime_manifest.as_posix()}
+    for record in manifest["files"]:
+        if not isinstance(record, dict) or set(record) != {
+            "path",
+            "bytes",
+            "mode",
+            "sha256",
+        }:
+            raise LetsInferError("control bundle core source manifest is invalid")
+        value = record.get("path")
+        if (
+            not isinstance(value, str)
+            or not value
+            or "\\" in value
+            or "\x00" in value
+        ):
+            raise LetsInferError("control bundle core source path is invalid")
+        relative = pathlib.PurePosixPath(value)
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != value
+            or value in reserved
+            or value in expected
+        ):
+            raise LetsInferError("control bundle core source path is invalid")
+        byte_count = record.get("bytes")
+        mode = record.get("mode")
+        digest = record.get("sha256")
+        if (
+            not isinstance(byte_count, int)
+            or isinstance(byte_count, bool)
+            or byte_count < 0
+            or mode not in {0o644, 0o755}
+            or not isinstance(digest, str)
+            or not SHA256_RE.fullmatch(digest)
+        ):
+            raise LetsInferError("control bundle core source manifest is invalid")
+        total_bytes += byte_count
+        if total_bytes > 512 * 1024 * 1024:
+            raise LetsInferError("control bundle core source exceeds its size limit")
+        expected[value] = (
+            byte_count,
+            0o500 if mode & 0o111 else 0o400,
+            digest,
+        )
+
+    actual: set[str] = set()
+    try:
+        paths = sorted(root.rglob("*"))
+    except OSError as error:
+        raise LetsInferError("cannot enumerate control bundle core source") from error
+    for path in paths:
+        try:
+            details = path.lstat()
+        except OSError as error:
+            raise LetsInferError("cannot inspect control bundle core source") from error
+        relative = path.relative_to(root).as_posix()
+        if stat.S_ISLNK(details.st_mode):
+            raise LetsInferError(
+                f"control bundle core source contains a symlink: {relative}"
+            )
+        if stat.S_ISDIR(details.st_mode):
+            if details.st_uid != os.getuid() or details.st_mode & (
+                stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
+            ):
+                raise LetsInferError(
+                    f"control bundle core source directory is unsafe: {relative}"
+                )
+            continue
+        if not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid():
+            raise LetsInferError(
+                f"control bundle core source file is unsafe: {relative}"
+            )
+        actual.add(relative)
+
+    expected_paths = set(expected) | reserved
+    if actual != expected_paths:
+        raise LetsInferError("control bundle core source file set mismatch")
+    for value, (byte_count, expected_mode, digest) in expected.items():
+        path = root.joinpath(*pathlib.PurePosixPath(value).parts)
+        try:
+            details = path.stat()
+            content = path.read_bytes()
+        except OSError as error:
+            raise LetsInferError(
+                f"cannot verify control bundle core source: {value}"
+            ) from error
+        if (
+            stat.S_IMODE(details.st_mode) != expected_mode
+            or len(content) != byte_count
+            or hashlib.sha256(content).hexdigest() != digest
+        ):
+            raise LetsInferError(f"control bundle core source mismatch: {value}")
+    for value in reserved:
+        path = root.joinpath(*pathlib.PurePosixPath(value).parts)
+        if stat.S_IMODE(path.stat().st_mode) != 0o400:
+            raise LetsInferError(f"control bundle metadata mode is unsafe: {value}")
+    return hashlib.sha256(manifest_data).hexdigest()
+
+
 def validate_control_bundle(
     root: pathlib.Path,
     manifest_path: pathlib.Path,
@@ -2308,21 +2477,18 @@ def validate_control_bundle(
     details = root.stat()
     if details.st_uid != os.getuid() or stat.S_IMODE(details.st_mode) & 0o077:
         raise LetsInferError(f"control bundle root must be private and user-owned: {root}")
-    _records, generated_core_manifest, core_identity = _core_release(root)
-    core_manifest_path = _contained_regular_file(root, CORE_SOURCE_MANIFEST)
-    if read_json(core_manifest_path) != generated_core_manifest:
-        raise LetsInferError("control bundle core source manifest mismatch")
-    bundle_identity = _control_bundle_identity(
-        core_identity, expected_manifest_sha256
-    )
-    if require_hash_name and root.name != bundle_identity:
-        raise LetsInferError("control bundle directory does not match its bundle identity")
     try:
         relative_manifest = manifest_path.resolve(strict=True).relative_to(
             root.resolve(strict=True)
         )
     except (OSError, ValueError) as error:
         raise LetsInferError("control bundle manifest escapes its root") from error
+    core_identity = _control_core_source_identity(root, relative_manifest)
+    bundle_identity = _control_bundle_identity(
+        core_identity, expected_manifest_sha256
+    )
+    if require_hash_name and root.name != bundle_identity:
+        raise LetsInferError("control bundle directory does not match its bundle identity")
     contained_manifest = _contained_regular_file(root, str(relative_manifest))
     if sha256_file(contained_manifest) != expected_manifest_sha256:
         raise LetsInferError("control bundle manifest SHA-256 mismatch")
@@ -2420,10 +2586,20 @@ def install_control_bundle(
         )
         try:
             staging.replace(destination)
-        except FileExistsError:
-            validate_control_bundle(
+        except OSError as error:
+            if error.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                raise
+            _, installed = validate_control_bundle(
                 destination, destination_manifest, manifest_sha
             )
+            if (
+                installed["release"] != manifest["release"]
+                or adapter_for(installed).name != adapter_for(manifest).name
+            ):
+                raise LetsInferError(
+                    "concurrently installed control bundle has inconsistent "
+                    "release identity"
+                )
             shutil.rmtree(staging)
         _fsync_path(parent)
     except BaseException:
@@ -5360,6 +5536,66 @@ def resolve_service_placement(
     return service_placement_identity(identity, placement, manifest_sha256)
 
 
+def resolve_benchmark_service_placement(
+    manifest: dict[str, Any], manifest_sha256: str
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Resolve a qualification slot and the resident groups that own its GPUs."""
+    identity, graph = _fresh_site_topology()
+    contract = target_contract(manifest)
+    try:
+        placement = graph.resolve(
+            contract, coordinator_id=identity.coordinator_id
+        )
+    except TopologyError:
+        try:
+            unallocated = TopologyGraph(
+                list(graph.members.values()),
+                allocated_devices={member_id: () for member_id in graph.members},
+            )
+            placement = unallocated.resolve(
+                contract, coordinator_id=identity.coordinator_id
+            )
+        except TopologyError as unallocated_error:
+            raise LetsInferError(
+                f"cannot resolve runtime placement: {unallocated_error}"
+            ) from unallocated_error
+    if placement.strategy != "single" or len(placement.member_ids) != 1:
+        raise LetsInferError(
+            "this target requires the engine-group installation path"
+        )
+    selected_devices = {
+        (member_id, device_uuid)
+        for member_id in placement.member_ids
+        for device_uuid in placement.device_uuids[member_id]
+    }
+    with _site_store() as store:
+        allocations = store.device_allocations(active_only=True)
+        groups = {row["group_id"]: row for row in store.engine_groups()}
+    resident_group_ids = tuple(
+        sorted(
+            {
+                str(row["group_id"])
+                for row in allocations
+                if (str(row["member_id"]), str(row["device_uuid"]))
+                in selected_devices
+            }
+        )
+    )
+    for group_id in resident_group_ids:
+        row = groups.get(group_id)
+        if row is None or (
+            (row["state"], row["desired_state"])
+            not in {("running", "running"), ("stopped", "stopped")}
+        ):
+            raise LetsInferError(
+                f"benchmark cannot isolate engine group {group_id} in its current state"
+            )
+    return (
+        service_placement_identity(identity, placement, manifest_sha256),
+        resident_group_ids,
+    )
+
+
 def resolve_manifest_placement(
     manifest: Mapping[str, Any],
 ) -> tuple[Any, TopologyGraph, Any]:
@@ -5469,6 +5705,23 @@ def update_service_placement(
         raise LetsInferError(f"cannot update service placement: {error}") from error
 
 
+def _resolve_qualification_service_placement(
+    manifest: dict[str, Any], manifest_sha256: str
+) -> dict[str, Any]:
+    """Reuse a benchmark slot only after every conflicting group is stopped."""
+    placement, resident_group_ids = resolve_benchmark_service_placement(
+        manifest, manifest_sha256
+    )
+    intents = _benchmark_engine_group_intents(resident_group_ids)
+    running = sorted(group_id for group_id, value in intents.items() if value)
+    if running:
+        raise LetsInferError(
+            "qualification requires conflicting resident engine groups to be "
+            "stopped first: " + ",".join(running)
+        )
+    return placement
+
+
 def _qualification_config(
     *,
     manifest_path: pathlib.Path,
@@ -5497,7 +5750,13 @@ def _qualification_config(
         manifest_path,
         manifest,
     )
-    placement = resolve_service_placement(manifest, manifest_sha256)
+    placement = (
+        resolve_service_placement(manifest, manifest_sha256)
+        if resident_path.is_file()
+        else _resolve_qualification_service_placement(
+            manifest, manifest_sha256
+        )
+    )
     candidate = dict(resident)
     for key in ("runtime_name", "runtime_version", "runtime_digest", "runtime_policy"):
         candidate.pop(key, None)
@@ -8546,6 +8805,7 @@ def _engine_group_status(model: str | None) -> list[dict[str, Any]]:
     return values
 
 
+@_serialized_engine_group_lifecycle
 def reconcile_engine_groups_once() -> dict[str, Any]:
     """Refresh durable health without changing a group's desired lifecycle."""
     summary: dict[str, list[str]] = {"healthy": [], "degraded": [], "failed": []}
@@ -11958,6 +12218,7 @@ def _cleanup_failed_group_release(
         _remove_engine_groups_by_id(candidates)
 
 
+@_serialized_engine_group_lifecycle
 def _stop_engine_group_by_id(group_id: str) -> None:
     """Stop one exact group without affecting its replica siblings."""
     with _site_store() as store:
@@ -11972,6 +12233,54 @@ def _stop_engine_group_by_id(group_id: str) -> None:
         orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
         stopped = orchestrator.stop()
         _sync_group_placement(store, stopped)
+
+
+@_serialized_engine_group_lifecycle
+def _start_engine_group_by_id(group_id: str) -> None:
+    """Recover one exact stopped group without affecting replica siblings."""
+    with _site_store() as store:
+        row = next(
+            (item for item in store.engine_groups() if item["group_id"] == group_id),
+            None,
+        )
+        if row is None or row["state"] == "removed":
+            raise LetsInferError("engine group disappeared before it could be restored")
+        if row["state"] == "running" and row["desired_state"] == "running":
+            return
+        if row["state"] != "stopped" or row["desired_state"] != "stopped":
+            raise LetsInferError(
+                "engine group entered an unsafe state before restoration"
+            )
+        orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
+        started = orchestrator.start()
+        _sync_group_placement(store, started)
+
+
+def _benchmark_engine_group_intents(
+    group_ids: Sequence[str],
+) -> dict[str, bool]:
+    """Return whether each exact conflicting group must be restored running."""
+    wanted = tuple(dict.fromkeys(group_ids))
+    if len(wanted) != len(group_ids) or any(
+        not re.fullmatch(r"[0-9a-f]{32}", group_id) for group_id in wanted
+    ):
+        raise LetsInferError("benchmark resident engine-group identity is invalid")
+    if not wanted:
+        return {}
+    with _site_store() as store:
+        rows = {row["group_id"]: row for row in store.engine_groups()}
+    intents: dict[str, bool] = {}
+    for group_id in wanted:
+        row = rows.get(group_id)
+        if row is None or (
+            (row["state"], row["desired_state"])
+            not in {("running", "running"), ("stopped", "stopped")}
+        ):
+            raise LetsInferError(
+                f"benchmark cannot isolate engine group {group_id} in its current state"
+            )
+        intents[group_id] = row["desired_state"] == "running"
+    return intents
 
 
 def _active_group_id_for_release(
@@ -13196,6 +13505,32 @@ def _benchmark_clean(*, assume_yes: bool) -> int:
 def _benchmark_stop_timeout_seconds() -> int:
     """Allow a cancelled benchmark to reload the runtime it displaced."""
 
+    try:
+        state = benchmark_jobs.read_state()
+    except benchmark_jobs.BenchmarkJobError:
+        state = None
+    metadata = state.get("metadata") if isinstance(state, dict) else None
+    resident_groups = (
+        metadata.get("resident_group_ids")
+        if isinstance(metadata, dict)
+        else None
+    )
+    if (
+        isinstance(resident_groups, list)
+        and resident_groups
+        and all(
+            isinstance(group_id, str)
+            and re.fullmatch(r"[0-9a-f]{32}", group_id)
+            for group_id in resident_groups
+        )
+    ):
+        # A resident Engine can legitimately take several minutes to reload.
+        # This wait ends as soon as restoration completes; it is not a fixed
+        # delay.  Keep the worker alive long enough to restore the exact group
+        # even when cancellation lands before the temporary candidate writes
+        # its qualification service configuration.
+        return 3_600
+
     path = qualification_service_config_path()
     if not path.is_file():
         return 30
@@ -13214,6 +13549,7 @@ def _benchmark_self_command(
     arguments: argparse.Namespace,
     executable: pathlib.Path,
     output: pathlib.Path,
+    resident_group_ids: Sequence[str] = (),
 ) -> list[str]:
     command = [str(executable), "benchmark", arguments.runtime]
     values = (
@@ -13238,6 +13574,8 @@ def _benchmark_self_command(
     for context in ("32k", "64k", "128k", "256k"):
         if getattr(arguments, f"context_{context}"):
             command.append(f"--{context}")
+    for group_id in resident_group_ids:
+        command.extend(["--resident-group", group_id])
     return command
 
 
@@ -14101,6 +14439,10 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         raise LetsInferError("--json is available only for benchmark status")
     if arguments.list and arguments.detach:
         raise LetsInferError("--detach cannot be combined with --list")
+    supplied_resident_groups = tuple(getattr(arguments, "resident_group", ()) or ())
+    if supplied_resident_groups and not arguments.job_worker:
+        raise LetsInferError("--resident-group is an internal benchmark-worker option")
+    nested_verification = bool(getattr(arguments, "nested_verification", False))
     manifest_path, manifest = resolve_model(arguments.runtime)
     root = runtime_source_root(manifest_path)
     verify_runtime_sources(manifest, root)
@@ -14185,15 +14527,35 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
     for context in ("32k", "64k", "128k", "256k"):
         if getattr(arguments, f"context_{context}"):
             command.append(f"--{context}")
+    benchmark_resident_group_ids: tuple[str, ...] = ()
     if arguments.list:
         command.append("--list")
     else:
         config_path = default_service_config_path()
         if config_path.is_file():
             config = read_service_config(config_path)
+            if supplied_resident_groups:
+                raise LetsInferError(
+                    "benchmark worker received resident groups for a legacy service"
+                )
         else:
             config = _qualification_core_plane_config()
-            placement = resolve_service_placement(manifest, sha256_file(manifest_path))
+            if nested_verification:
+                placement = resolve_service_placement(
+                    manifest, sha256_file(manifest_path)
+                )
+            else:
+                placement, benchmark_resident_group_ids = (
+                    resolve_benchmark_service_placement(
+                        manifest, sha256_file(manifest_path)
+                    )
+                )
+                if arguments.job_worker and (
+                    supplied_resident_groups != benchmark_resident_group_ids
+                ):
+                    raise LetsInferError(
+                        "benchmark resident engine groups changed before worker start"
+                    )
             config.update(
                 {
                     "engine_port": 18000,
@@ -14271,9 +14633,6 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
     elif arguments.job_worker:
         if not isinstance(arguments.job_id, str) or not arguments.job_id:
             raise LetsInferError("benchmark worker has no job identity")
-        nested_verification = bool(
-            getattr(arguments, "nested_verification", False)
-        )
         if not nested_verification:
             _mark_benchmark_job(arguments.job_id, "running")
         previous_term = signal.getsignal(signal.SIGTERM)
@@ -14290,6 +14649,7 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                 _run_benchmark_with_service_isolation(
                     command,
                     protection_config=config,
+                    resident_group_ids=benchmark_resident_group_ids,
                     cleanup_command=[
                         str(letsinfer_bin),
                         "stop",
@@ -14319,12 +14679,24 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                 signal.signal(signal.SIGINT, previous_int)
     else:
         assert output is not None
-        worker_command = _benchmark_self_command(arguments, letsinfer_bin, output)
+        if benchmark_resident_group_ids:
+            _gateway_is_idle()
+        worker_command = _benchmark_self_command(
+            arguments,
+            letsinfer_bin,
+            output,
+            benchmark_resident_group_ids,
+        )
         try:
             state = benchmark_jobs.start(
                 worker_command,
                 runtime=arguments.runtime,
                 output_directory=str(output),
+                metadata=(
+                    {"resident_group_ids": list(benchmark_resident_group_ids)}
+                    if benchmark_resident_group_ids
+                    else None
+                ),
             )
         except benchmark_jobs.BenchmarkJobError as error:
             raise LetsInferError(str(error)) from error
@@ -14357,6 +14729,7 @@ def _run_benchmark_with_service_isolation(
     command: Sequence[str],
     *,
     protection_config: dict[str, Any] | None = None,
+    resident_group_ids: Sequence[str] = (),
     cleanup_command: Sequence[str] | None = None,
     progress_job_id: str | None = None,
 ) -> None:
@@ -14399,12 +14772,21 @@ def _run_benchmark_with_service_isolation(
             raise LetsInferError(
                 f"refusing benchmark while {name} state is {state!r}"
             )
+    resident_group_intents = _benchmark_engine_group_intents(
+        resident_group_ids
+    )
+    if any(resident_group_intents.values()):
+        # Recheck immediately in the worker.  The parent check avoids starting
+        # a doomed job, while this check closes most of the detach/start race
+        # before resident inference is deliberately suspended.
+        _gateway_is_idle()
 
     benchmark_error: BaseException | None = None
     restore_errors: list[str] = []
     benchmark_trip_latched = False
     recovery_stopped = False
     engine_stopped = False
+    stopped_groups: list[str] = []
     try:
         if progress_job_id is not None:
             benchmark_jobs.merge_progress(
@@ -14433,6 +14815,10 @@ def _run_benchmark_with_service_isolation(
                 ["systemctl", "--user", "stop", ENGINE_SERVICE_NAME]
             )
             engine_stopped = True
+        for group_id, was_running in resident_group_intents.items():
+            if was_running:
+                stopped_groups.append(group_id)
+                _stop_engine_group_by_id(group_id)
         run_passthrough(command, failure_label="benchmark runner")
     except BaseException as error:
         benchmark_error = error
@@ -14486,6 +14872,14 @@ def _run_benchmark_with_service_isolation(
                     restore_errors.append(
                         f"retire temporary qualification candidate: {error}"
                     )
+        if not benchmark_trip_latched:
+            for group_id in reversed(stopped_groups):
+                try:
+                    _start_engine_group_by_id(group_id)
+                except BaseException as error:
+                    restore_errors.append(
+                        f"restore engine group {group_id}: {error}"
+                    )
         if engine_stopped and not benchmark_trip_latched:
             try:
                 run_passthrough(
@@ -14505,15 +14899,16 @@ def _run_benchmark_with_service_isolation(
         detail = "; ".join(restore_errors)
         if benchmark_error is not None:
             raise LetsInferError(
-                f"benchmark failed and service restoration was incomplete: {detail}"
+                f"benchmark failed: {benchmark_error}; "
+                f"service restoration was incomplete: {detail}"
             ) from benchmark_error
         raise LetsInferError(
             f"benchmark completed but service restoration was incomplete: {detail}"
         )
     if benchmark_trip_latched:
         message = (
-            "benchmark triggered Watchdog protection; the engine and recovery timer "
-            "remain stopped until explicit letsinfer recover"
+            "benchmark triggered Watchdog protection; resident inference and the "
+            "recovery timer remain stopped until explicit letsinfer recover"
         )
         if benchmark_error is not None:
             raise LetsInferError(f"{benchmark_error}; {message}") from benchmark_error
@@ -15917,6 +16312,14 @@ class LocalEngineGroupExecutor:
         task = config["task"]
         group = config["_group"]
         host = _engine_group_member_host(group, config["member_id"])
+        if task["endpoint_owner"]:
+            identity = read_site_identity()
+            if identity.role == "main" and identity.member_id == config["member_id"]:
+                # The Engine protocol intentionally binds its authenticated listener
+                # to loopback. When the endpoint owner is the main node itself, the
+                # gateway is local too, so advertise the reachable loopback SAN
+                # instead of the node's LAN control address.
+                host = "127.0.0.1"
         certificate_path = pathlib.Path(config["tls_certificate_file"])
         try:
             certificate_pem = certificate_path.read_text(encoding="ascii")
@@ -18275,6 +18678,9 @@ def parser() -> argparse.ArgumentParser:
     )
     benchmarking.add_argument("--job-worker", action="store_true", help=argparse.SUPPRESS)
     benchmarking.add_argument("--job-id", help=argparse.SUPPRESS)
+    benchmarking.add_argument(
+        "--resident-group", action="append", default=[], help=argparse.SUPPRESS
+    )
     benchmarking.set_defaults(action=benchmark_runtime, action_id="benchmark")
 
     installing = subcommands.add_parser(
