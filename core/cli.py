@@ -8666,6 +8666,11 @@ def _remove_engine_groups_by_id(group_ids: Sequence[str]) -> None:
         return
     with _site_store() as store:
         rows = {row["group_id"]: row for row in store.engine_groups()}
+        allocations_by_group: dict[str, list[dict[str, Any]]] = {}
+        for allocation in store.device_allocations():
+            allocations_by_group.setdefault(
+                str(allocation["group_id"]), []
+            ).append(dict(allocation))
         missing = [group_id for group_id in wanted if group_id not in rows]
         if missing:
             raise LetsInferError(
@@ -8676,7 +8681,14 @@ def _remove_engine_groups_by_id(group_ids: Sequence[str]) -> None:
             if row["state"] == "removed" or row["desired_state"] == "removed":
                 continue
             orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
-            if row["state"] not in {"staged", "stopped"}:
+            allocations = allocations_by_group.get(group_id, [])
+            allocations_released = bool(allocations) and all(
+                allocation["state"] == "released" for allocation in allocations
+            )
+            if (
+                row["state"] not in {"staged", "stopped"}
+                and not allocations_released
+            ):
                 stopped = orchestrator.stop()
                 _sync_group_placement(store, stopped)
             removed = orchestrator.remove()

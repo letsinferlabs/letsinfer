@@ -37,6 +37,14 @@ class _Store:
             "desired_state": "running",
             "members": [],
         }
+        self.allocations = [
+            {
+                "group_id": self.group_id,
+                "member_id": "5" * 32,
+                "device_uuid": "GPU-fixture",
+                "state": "active",
+            }
+        ]
 
     def __enter__(self):
         return self
@@ -49,6 +57,9 @@ class _Store:
 
     def engine_groups(self):
         return [dict(self.group)]
+
+    def device_allocations(self):
+        return [dict(row) for row in self.allocations]
 
     def set_placement(self, value):
         self.placement = dict(value)
@@ -336,6 +347,35 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                 orchestrator.stop.assert_not_called()
                 orchestrator.remove.assert_called_once_with()
                 sync.assert_called_once_with(store, removed)
+
+    def test_replacement_removes_failed_group_with_released_allocation(self) -> None:
+        store = _Store()
+        store.group["desired_state"] = "stopped"
+        store.group["state"] = "failed"
+        store.allocations[0]["state"] = "released"
+        removed = {
+            "group_id": store.group_id,
+            "placement_id": store.placement_id,
+            "desired_state": "removed",
+            "state": "removed",
+            "member_states": [],
+        }
+        orchestrator = mock.Mock()
+        orchestrator.remove.return_value = removed
+        with (
+            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(
+                cli,
+                "_restore_engine_group_orchestrator",
+                return_value=(orchestrator, {}),
+            ),
+            mock.patch.object(cli, "_sync_group_placement") as sync,
+        ):
+            cli._remove_engine_groups_by_id([store.group_id])
+
+        orchestrator.stop.assert_not_called()
+        orchestrator.remove.assert_called_once_with()
+        sync.assert_called_once_with(store, removed)
 
 
 if __name__ == "__main__":
