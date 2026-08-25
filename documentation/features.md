@@ -106,7 +106,8 @@ explicit recovery.
 
 ## Core and runtimes update independently
 
-- `letsinfer update check` checks core and the selected runtime.
+- `letsinfer update check` checks core and all distinct installed engine-group
+  releases.
 - `letsinfer update` changes core without silently moving your runtime or
   model.
 - `letsinfer upgrade MODEL` installs a newer qualified runtime without changing
