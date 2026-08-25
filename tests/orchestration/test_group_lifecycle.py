@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import io
 import pathlib
 import types
 import unittest
@@ -67,6 +69,47 @@ class _Store:
 
 
 class EngineGroupLifecycleTests(unittest.TestCase):
+    def test_plain_status_renders_runtime_task_without_retired_role(self) -> None:
+        group = {
+            "group_id": "1" * 32,
+            "model": "example-model",
+            "strategy": "single",
+            "state": "failed",
+            "desired_state": "stopped",
+            "members": [
+                {
+                    "member_id": "5" * 32,
+                    "task_id": "task-0",
+                    "state": "failed",
+                }
+            ],
+        }
+        output = io.StringIO()
+        arguments = argparse.Namespace(
+            json=False,
+            model=None,
+            name=None,
+            config=None,
+            _single_snapshot=True,
+        )
+        with (
+            mock.patch.object(cli, "site_identity_path") as identity_path,
+            mock.patch.object(
+                cli,
+                "read_site_identity",
+                return_value=types.SimpleNamespace(role="main"),
+            ),
+            mock.patch.object(cli, "_engine_group_status", return_value=[group]),
+            mock.patch("sys.stdout", output),
+        ):
+            identity_path.return_value.exists.return_value = True
+            self.assertEqual(cli.status(arguments), 0)
+
+        self.assertIn(
+            f"MEMBER {'5' * 32} task=task-0 state=failed",
+            output.getvalue(),
+        )
+
     def test_restore_uses_current_control_bundle_manifest_path(self) -> None:
         member_id = "5" * 32
         runtime_digest = "6" * 64

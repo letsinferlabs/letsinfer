@@ -9738,7 +9738,7 @@ def status(arguments: argparse.Namespace) -> int:
                         )
                         for member in group["members"]:
                             print(
-                                f"  MEMBER {member['member_id']} role={member['role']} "
+                                f"  MEMBER {member['member_id']} task={member['task_id']} "
                                 f"state={member['state']}"
                             )
                 return 0
