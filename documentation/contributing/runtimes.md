@@ -9,11 +9,13 @@ registry.
 
 ## Start locally
 
-Use the repository's [runtime skill](../../skills/runtime/SKILL.md). If any
-Engine executable input changes, it routes you to the
-[Engine-authoring skill](../../skills/engine-authoring/SKILL.md). Those skills
-use versioned repository tools for README generation, schema validation,
-Engine conformance, deterministic packing, OCI planning, and local
+Install the portable [Let’s Infer agent skills](https://github.com/letsinferlabs/skills)
+with `npx skills add letsinferlabs/skills`. Use
+[`letsinfer-runtime-authoring`](https://github.com/letsinferlabs/skills/blob/main/skills/letsinfer-runtime-authoring/SKILL.md)
+for every candidate. If any Engine executable input changes, also use
+[`letsinfer-engine-authoring`](https://github.com/letsinferlabs/skills/blob/main/skills/letsinfer-engine-authoring/SKILL.md).
+The skills use versioned repository tools for README generation, schema
+validation, Engine conformance, deterministic packing, OCI planning, and local
 qualification. There is no separate `letsinfer runtime ...` development
 namespace.
 
@@ -78,24 +80,6 @@ object, anonymously verifies both digest pulls, records a publication receipt,
 and merges only that checked head. The protected catalog-signing lane later
 reverifies the public objects but does not republish them. A publication
 mismatch fails closed and never merges the PR.
-
-An explicitly allowlisted maintainer may bypass the independent verifier quorum
-with:
-
-```text
-/shipit --bypass-verifiers
-Reason: <required auditable reason>
-```
-
-The actor must currently have `maintain` or `admin` permission and their
-immutable numeric GitHub ID must be in the trusted repository variable
-`LETSINFER_VERIFIER_BYPASS_GITHUB_IDS`. The command is the maintainer's release
-authorization, so this path does not need a separate non-author maintainer
-approval. Accepted blocking evidence remains terminal. The override never
-bypasses failed checks, source/SBOM/protocol gates, attestations, digest
-matching, public pulls, or exact-head merge protection. Without measured
-evidence, the signed release is unscored and cannot become the automatic
-recommendation.
 
 The immutable Engine pin in `runtime.json` is the link between the production
 runtime and Engine. There is no last-minute engine selection or mutable tag.
