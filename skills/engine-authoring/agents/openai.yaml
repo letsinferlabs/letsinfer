@@ -1,4 +1,0 @@
-interface:
-  display_name: "Author Let's Infer Engine"
-  short_description: "Build a radical or new Engine in one runtime PR"
-  default_prompt: "Use $engine-authoring to make this changed or new inference Engine conform to Let's Infer and remain locally reproducible."

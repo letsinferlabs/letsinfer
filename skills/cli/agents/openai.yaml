@@ -1,4 +1,0 @@
-interface:
-  display_name: "Use Let's Infer CLI"
-  short_description: "Operate Let's Infer safely from the CLI"
-  default_prompt: "Use $cli to perform this Let's Infer CLI operation safely."

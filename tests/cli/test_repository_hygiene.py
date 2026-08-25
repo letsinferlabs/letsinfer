@@ -94,39 +94,28 @@ class RepositoryHygieneTests(unittest.TestCase):
             for token in forbidden:
                 self.assertNotIn(token, value, f"{path} references local-only {token}")
 
-    def test_runtime_skills_route_engine_work_and_use_the_simple_quorum(self) -> None:
-        skill_root = REPOSITORY_ROOT / "skills"
-        expected = {
-            "benchmark",
-            "cli",
-            "engine-authoring",
-            "runtime",
-            "runtime-review",
-        }
-        values = {}
-        for name in expected:
-            path = skill_root / name / "SKILL.md"
-            self.assertTrue(path.is_file(), f"missing public skill: {name}")
-            values[name] = path.read_text(encoding="utf-8")
-            self.assertIn(f"name: {name}\n", values[name])
-
-        combined = "\n".join(values.values()).lower()
-        for obsolete in (
-            "three agreeing",
-            "three independent",
-            "five independent",
-            "coefficient of variation",
-            "expanded quorum",
+    def test_public_skills_are_distributed_from_the_skills_repository(self) -> None:
+        self.assertFalse(
+            any((REPOSITORY_ROOT / "skills").rglob("SKILL.md")),
+            "Core must not duplicate the public agent-skill source",
+        )
+        readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+        runtime_docs = (
+            REPOSITORY_ROOT / "documentation/contributing/runtimes.md"
+        ).read_text(encoding="utf-8")
+        combined = readme + "\n" + runtime_docs
+        self.assertIn("https://github.com/letsinferlabs/skills", combined)
+        for name in (
+            "letsinfer-runtime-authoring",
+            "letsinfer-engine-authoring",
+            "letsinfer-benchmark",
         ):
-            self.assertNotIn(obsolete, combined)
-
-        self.assertIn("../engine-authoring/SKILL.md", values["runtime"])
-        self.assertIn("../runtime-review/SKILL.md", values["runtime"])
-        self.assertIn("two successful independent", values["benchmark"].lower())
-        review_words = " ".join(values["runtime-review"].lower().split())
-        self.assertIn("one reviewer always occupies one slot", review_words)
-        self.assertIn("https://letsinfer.ai/install.sh", values["runtime"])
-        self.assertNotIn("docker login", combined)
+            self.assertIn(
+                f"https://github.com/letsinferlabs/skills/blob/main/skills/{name}/SKILL.md",
+                combined,
+            )
+        self.assertNotIn("runtime-review", combined)
+        self.assertNotIn("bypass-verifiers", combined)
 
 
 if __name__ == "__main__":
