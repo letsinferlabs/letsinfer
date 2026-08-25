@@ -65,6 +65,8 @@ _EXPECTED_MINUTES: tuple[int, int] | None = None
 _SELECTED_CELLS: tuple[str, ...] = ()
 _COMPLETED_CELLS: list[str] = []
 _CURRENT_CELL: str | None = None
+WATCHDOG_MIN_OBSERVATION_MS = 2_000
+WATCHDOG_SETTLE_MS = 500
 
 
 class RuntimeMatrixError(common.QualificationError):
@@ -1117,9 +1119,10 @@ def public_benchmark_result(
     cached = summary.get("cached_prompt_tokens")
     if not all(isinstance(value, dict) for value in (decode, ttft, cached)):
         raise RuntimeMatrixError("matrix summary is missing public metrics")
-    decode_mean = decode.get("mean")
+    decode_statistic = "mean" if concurrency == 1 else "p50"
+    decode_value = decode.get(decode_statistic)
     cached_max = cached.get("max")
-    if not isinstance(decode_mean, (int, float)) or isinstance(decode_mean, bool):
+    if not isinstance(decode_value, (int, float)) or isinstance(decode_value, bool):
         raise RuntimeMatrixError("matrix summary has no decode throughput")
     if not isinstance(cached_max, (int, float)) or isinstance(cached_max, bool):
         raise RuntimeMatrixError("matrix summary has no cache observation")
@@ -1152,7 +1155,7 @@ def public_benchmark_result(
         "prompt_set_sha256": cell["prompt_set_sha256"],
         "actual_prompt_tokens": prompt_tokens,
         "aggregate_tps": summary["aggregate_completion_tokens_per_second"],
-        "decode_tps": decode_mean,
+        "decode_tps": decode_value,
         "ttft_seconds": float(ttft_ms) / 1000.0,
         "ttft_statistic": statistic,
         "ttft_p95_seconds": (
@@ -1539,10 +1542,22 @@ def _collect_cell_evidence(
     assert arguments.watchdog_ca_file is not None
     assert arguments.watchdog_controller_cert_file is not None
     assert arguments.watchdog_controller_key_file is not None
+    telemetry_ended = max(
+        measurement_ended,
+        measurement_started + WATCHDOG_MIN_OBSERVATION_MS,
+    )
+    if telemetry_ended > measurement_ended:
+        settle_until = telemetry_ended + WATCHDOG_SETTLE_MS
+        remaining = (settle_until - time.time_ns() // 1_000_000) / 1000.0
+        if remaining > 0:
+            maximum_wait = (
+                WATCHDOG_MIN_OBSERVATION_MS + WATCHDOG_SETTLE_MS
+            ) / 1000.0
+            time.sleep(min(remaining, maximum_wait))
     try:
         watchdog_samples = watchdog_client.query_range(
             start_unix_ms=measurement_started,
-            end_unix_ms=measurement_ended,
+            end_unix_ms=telemetry_ended,
             port=arguments.watchdog_port,
             ca_file=arguments.watchdog_ca_file,
             controller_cert_file=arguments.watchdog_controller_cert_file,
@@ -1559,6 +1574,7 @@ def _collect_cell_evidence(
             "source": "letsinfer-watchdog-raw-1-second",
             "measurement_started_unix_ms": measurement_started,
             "measurement_ended_unix_ms": measurement_ended,
+            "telemetry_observation_ended_unix_ms": telemetry_ended,
             "samples": watchdog_samples,
         },
     )
