@@ -343,7 +343,16 @@ def parse_arguments() -> argparse.Namespace:
 def _command_output(command: list[str], what: str) -> str:
     result = common.run_command(command)
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
+        # A qualification launch may emit a non-fatal warning on stderr before
+        # the CLI renders its actionable failure on stdout.  Preserve both
+        # channels so the warning cannot mask the actual startup error.
+        detail = "\n".join(
+            value.strip()
+            for value in (result.stderr, result.stdout)
+            if value.strip()
+        )
+        if len(detail) > 16_384:
+            detail = "…" + detail[-16_383:]
         raise RuntimeMatrixError(f"{what} failed: {detail}")
     return result.stdout
 
