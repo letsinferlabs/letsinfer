@@ -31,6 +31,75 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
+    def test_short_workload_waits_for_a_watchdog_boundary_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            cell_output = root / "cell"
+            cell_output.mkdir()
+            runtime_matrix.common.write_json_atomic(
+                cell_output / "results.json",
+                {
+                    "qualification_passed": True,
+                    "selected_cells": ["ttftwarm-code-c1"],
+                    "container_before": {"id": "shared-container"},
+                    "summaries": [
+                        {
+                            "measurement_started_unix_ms": 10_000,
+                            "measurement_ended_unix_ms": 10_390,
+                        }
+                    ],
+                },
+            )
+            arguments = types.SimpleNamespace(
+                watchdog_port=9768,
+                watchdog_ca_file=root / "ca.crt",
+                watchdog_controller_cert_file=root / "controller.crt",
+                watchdog_controller_key_file=root / "controller.key",
+                timeout=30,
+            )
+            telemetry = [{"sequence": 1, "unix_ms": 11_000}]
+
+            with (
+                mock.patch.object(
+                    runtime_matrix.time,
+                    "time_ns",
+                    return_value=12_500_000_000,
+                ),
+                mock.patch.object(runtime_matrix.time, "sleep") as sleep,
+                mock.patch.object(
+                    runtime_matrix.watchdog_client,
+                    "query_range",
+                    return_value=telemetry,
+                ) as query,
+            ):
+                result = runtime_matrix._collect_cell_evidence(
+                    arguments,
+                    {"name": "ttftwarm-code-c1"},
+                    cell_output,
+                    root / "store",
+                    root / "launch",
+                    set(),
+                    shared_matrix=True,
+                )
+
+            sleep.assert_not_called()
+            query.assert_called_once_with(
+                start_unix_ms=10_000,
+                end_unix_ms=12_000,
+                port=9768,
+                ca_file=root / "ca.crt",
+                controller_cert_file=root / "controller.crt",
+                controller_key_file=root / "controller.key",
+                timeout=30,
+            )
+            evidence = json.loads(
+                pathlib.Path(result["watchdog_telemetry"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(evidence["measurement_ended_unix_ms"], 10_390)
+            self.assertEqual(
+                evidence["telemetry_observation_ended_unix_ms"], 12_000
+            )
+
     def test_one_token_summary_has_no_decode_rate(self) -> None:
         summary = {
             "cell": "ttftcold-code-c1",
