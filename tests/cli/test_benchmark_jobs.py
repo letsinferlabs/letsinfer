@@ -13,6 +13,39 @@ from core import benchmark_jobs
 
 
 class BenchmarkJobTests(unittest.TestCase):
+    @staticmethod
+    def _live_metrics(cell: str | None = "32k-code-c1") -> dict:
+        return {
+            "schema_version": 1,
+            "sample_unix_ms": 1_700_000_000_000,
+            "fresh": True,
+            "performance_cell": cell,
+            "active_requests": 1,
+            "queued_requests": 0,
+            "rates": {
+                "aggregate_tokens_per_second": 58.9,
+                "decode_tokens_per_second": 27.1,
+                "prefill_tokens_per_second": 219.4,
+                "average_ttft_milliseconds": 420.0,
+            },
+            "temperatures": {
+                "gpu_temp_deci_c": 390,
+                "system_temp_deci_c": 430,
+                "nvme_temp_deci_c": 380,
+            },
+            "system": {
+                "gpu_percent": 80,
+                "cpu_percent": 20,
+                "memory_percent": 70,
+                "memory_used_mib": 1000,
+                "memory_total_mib": 2000,
+                "disk_percent": 10,
+                "disk_read_kib_s": 12,
+                "disk_write_kib_s": 34,
+                "power_deci_w": 500,
+            },
+        }
+
     def test_start_records_one_detached_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             data = pathlib.Path(temporary)
@@ -84,6 +117,55 @@ class BenchmarkJobTests(unittest.TestCase):
                 self.assertEqual(stopped["state"], "stopping")
                 kill.assert_called_once_with(987, benchmark_jobs.signal.SIGTERM)
                 self.assertEqual(benchmark_jobs.read_state()["state"], "stopping")
+
+    def test_live_metrics_merge_preserves_worker_progress_and_is_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data = pathlib.Path(temporary)
+            state = {
+                "schema_version": 1,
+                "state": "running",
+                "pid": 123,
+                "job_id": "job-live",
+                "runtime": "model",
+            }
+            with mock.patch.object(benchmark_jobs, "data_root", return_value=data):
+                benchmark_jobs._write_json(benchmark_jobs.state_path(), state)
+                benchmark_jobs.update_progress(
+                    "job-live",
+                    {
+                        "phase": "workload:32k-code-c1:measuring",
+                        "message": "Measuring 32k-code-c1",
+                        "current_cell": "32k-code-c1",
+                    },
+                )
+                merged = benchmark_jobs.merge_progress(
+                    "job-live",
+                    {
+                        "live_metrics": self._live_metrics(),
+                        "preparation": {
+                            "schema_version": 1,
+                            "state": "measuring",
+                            "detail": "Measuring the current workload",
+                            "updated_unix_ms": 1_700_000_000_000,
+                        },
+                    },
+                )
+                self.assertEqual(
+                    merged["phase"], "workload:32k-code-c1:measuring"
+                )
+                self.assertEqual(
+                    benchmark_jobs.read_progress()["live_metrics"],
+                    self._live_metrics(),
+                )
+
+                invalid = self._live_metrics()
+                invalid["temperatures"] = {"gpu_temp_deci_c": -1}
+                with self.assertRaisesRegex(
+                    benchmark_jobs.BenchmarkJobError, "live metrics"
+                ):
+                    benchmark_jobs.merge_progress(
+                        "job-live", {"live_metrics": invalid}
+                    )
 
 
 if __name__ == "__main__":

@@ -66,6 +66,7 @@ from .actions import (
 )
 from .engine_protocol import (
     ENGINE_ADAPTER,
+    ENGINE_PROGRESS_PATH,
     ENGINE_PROTOCOL_VERSION,
     EngineManifestError,
     SAFE_NAME_RE,
@@ -12536,6 +12537,184 @@ def _duration(seconds: float) -> str:
     return f"{seconds}s"
 
 
+def _live_number(value: object) -> int | float | None:
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and float(value) >= 0
+    ):
+        return value
+    return None
+
+
+def _engine_preparation_snapshot(
+    config: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Read optional authenticated Engine preparation progress without failing a job."""
+
+    if not isinstance(config, Mapping):
+        return None
+    try:
+        port = int(config["engine_port"])
+        certificate = expanded_path(str(config["tls_cert_file"]))
+        key_file = expanded_path(str(config["engine_api_key_file"]))
+        request = urllib.request.Request(
+            f"https://127.0.0.1:{port}{ENGINE_PROGRESS_PATH}",
+            headers={"Authorization": f"Bearer {read_api_key(key_file)}"},
+        )
+        with urllib.request.urlopen(
+            request,
+            timeout=0.5,
+            context=_tls_context(certificate),
+        ) as response:
+            body = response.read(4097)
+        if response.status != 200 or len(body) > 4096:
+            return None
+        value = json.loads(body)
+    except (
+        KeyError,
+        OSError,
+        ValueError,
+        UnicodeError,
+        urllib.error.URLError,
+        json.JSONDecodeError,
+    ):
+        return None
+    now_ms = int(time.time() * 1000)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "state", "detail", "updated_unix_ms"}
+        or value.get("schema_version") != 1
+        or value.get("state") not in benchmark_jobs.PREPARATION_STATES
+        or not isinstance(value.get("detail"), str)
+        or not value["detail"]
+        or len(value["detail"]) > 160
+        or not isinstance(value.get("updated_unix_ms"), int)
+        or isinstance(value.get("updated_unix_ms"), bool)
+        or not 0 <= now_ms - value["updated_unix_ms"] <= 30_000
+        or any(ord(character) < 32 and character not in "\t" for character in value["detail"])
+    ):
+        return None
+    return value
+
+
+def _benchmark_live_metrics(
+    progress: Mapping[str, Any],
+    config: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    preferred_member_id: str | None = None
+    try:
+        preferred_member_id = read_site_identity().member_id
+    except (OSError, SiteError):
+        pass
+    telemetry = _local_controller_telemetry(
+        config,
+        preferred_member_id=preferred_member_id,
+    )
+    if not isinstance(telemetry, dict):
+        return None
+    updated_ms = telemetry.get("updated_unix_ms")
+    sample_ms = telemetry.get("sample_unix_ms")
+    if (
+        not isinstance(updated_ms, int)
+        or isinstance(updated_ms, bool)
+        or updated_ms <= 0
+    ):
+        return None
+    now_ms = int(time.time() * 1000)
+    fresh = 0 <= now_ms - updated_ms <= 5_000
+    current_cell = progress.get("current_cell")
+    phase = progress.get("phase")
+    phase_updated_ns = progress.get("updated_unix_ns")
+    performance_fresh = (
+        fresh
+        and isinstance(current_cell, str)
+        and current_cell
+        and isinstance(phase, str)
+        and phase.endswith(":measuring")
+        and isinstance(phase_updated_ns, int)
+        and not isinstance(phase_updated_ns, bool)
+        and updated_ms * 1_000_000 >= phase_updated_ns
+    )
+    raw_rates = telemetry.get("rates")
+    rates = raw_rates if isinstance(raw_rates, Mapping) else {}
+    raw_system = telemetry.get("system")
+    system = raw_system if isinstance(raw_system, Mapping) else {}
+    return {
+        "schema_version": 1,
+        "sample_unix_ms": max(updated_ms, sample_ms if isinstance(sample_ms, int) else 0),
+        "fresh": fresh,
+        "performance_cell": current_cell if performance_fresh else None,
+        "active_requests": _live_number(telemetry.get("active_requests")) if performance_fresh else None,
+        "queued_requests": _live_number(telemetry.get("queued_requests")) if performance_fresh else None,
+        "rates": {
+            field: _live_number(rates.get(field)) if performance_fresh else None
+            for field in benchmark_jobs.LIVE_RATE_FIELDS
+        },
+        "temperatures": {
+            field: _live_number(system.get(field)) if fresh else None
+            for field in benchmark_jobs.LIVE_TEMPERATURE_FIELDS
+        },
+        "system": {
+            field: _live_number(system.get(field)) if fresh else None
+            for field in benchmark_jobs.LIVE_SYSTEM_FIELDS
+        },
+    }
+
+
+class _BenchmarkLiveProgress:
+    """Mirror trusted bounded telemetry into one durable benchmark progress file."""
+
+    def __init__(
+        self,
+        job_id: str,
+        config: Mapping[str, Any] | None,
+        *,
+        interval: float = 0.5,
+    ) -> None:
+        self.job_id = job_id
+        self.config = config
+        self.interval = max(0.1, interval)
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(
+            target=self._run,
+            name="letsinfer-benchmark-live-progress",
+            daemon=True,
+        )
+
+    def __enter__(self) -> _BenchmarkLiveProgress:
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.stop_event.set()
+        self.thread.join(timeout=2)
+
+    def _run(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                progress = benchmark_jobs.read_progress() or {}
+                changes: dict[str, Any] = {}
+                metrics = _benchmark_live_metrics(progress, self.config)
+                if metrics is not None:
+                    changes["live_metrics"] = metrics
+                preparation = _engine_preparation_snapshot(self.config)
+                if preparation is not None:
+                    changes["preparation"] = preparation
+                if changes:
+                    benchmark_jobs.merge_progress(self.job_id, changes)
+            except (
+                benchmark_jobs.BenchmarkJobError,
+                LetsInferError,
+                OSError,
+                ValueError,
+            ):
+                # Live presentation is best-effort and never owns benchmark safety.
+                pass
+            if self.stop_event.wait(self.interval):
+                return
+
+
 def _benchmark_dashboard(
     state: dict[str, Any],
     progress: dict[str, Any] | None,
@@ -12545,6 +12724,11 @@ def _benchmark_dashboard(
     updates: Iterable[object] = (),
 ) -> str:
     """Render one bounded live benchmark frame."""
+    from . import status_ui
+
+    def mapping(value: object) -> Mapping[str, Any]:
+        return value if isinstance(value, Mapping) else {}
+
     progress = progress if isinstance(progress, dict) else {}
     status = str(state.get("state") or "unknown").upper()
     active = state.get("state") in benchmark_jobs.ACTIVE_STATES
@@ -12580,11 +12764,25 @@ def _benchmark_dashboard(
     phase = progress.get("phase")
     if not isinstance(phase, str) or not phase:
         phase = "starting"
+    preparation = mapping(progress.get("preparation"))
+    preparation_state = str(preparation.get("state") or phase)
+    preparation_detail = str(preparation.get("detail") or "")
     lines.extend(
         [
             f"  {terminal.paint(frame, ui.GREEN if active else color)} "
             f"{terminal.paint(terminal.clip(message, terminal.width - 5), ui.BOLD)}",
-            f"  {terminal.paint(f'phase {phase}', ui.DIM)}",
+            f"  {terminal.paint(f'state {preparation_state}', ui.DIM)}"
+            + (
+                terminal.paint(
+                    " · " + terminal.clip(
+                        preparation_detail,
+                        max(1, terminal.width - len(preparation_state) - 12),
+                    ),
+                    ui.DIM,
+                )
+                if preparation_detail and preparation_detail != message
+                else ""
+            ),
         ]
     )
 
@@ -12613,6 +12811,109 @@ def _benchmark_dashboard(
                 f"  WORKLOADS  [{bar}] {done}/{len(selected)}",
             ]
         )
+        metrics = mapping(progress.get("live_metrics"))
+        metric_rates = mapping(metrics.get("rates"))
+        temperatures = mapping(metrics.get("temperatures"))
+        system = mapping(metrics.get("system"))
+        metric_cell = metrics.get("performance_cell")
+        metric_fresh = metrics.get("fresh") is True
+        performance_current = (
+            metric_fresh
+            and isinstance(current, str)
+            and current
+            and metric_cell == current
+        )
+        aggregate = (
+            metric_rates.get("aggregate_tokens_per_second")
+            if performance_current
+            else None
+        )
+        decode = (
+            metric_rates.get("decode_tokens_per_second")
+            if performance_current
+            else None
+        )
+        prefill = (
+            metric_rates.get("prefill_tokens_per_second")
+            if performance_current
+            else None
+        )
+        ttft = (
+            metric_rates.get("average_ttft_milliseconds")
+            if performance_current
+            else None
+        )
+        active_requests = metrics.get("active_requests") if performance_current else None
+        queued_requests = metrics.get("queued_requests") if performance_current else None
+
+        def live_rate(value: object) -> str:
+            return status_ui._rate(value)
+
+        def temperature(value: object) -> str:
+            return status_ui._temperature(value)
+
+        def metric_lines(label: str, value: str) -> list[str]:
+            prefix = f"  {label.ljust(13)}"
+            continuation = " " * len(prefix)
+            wrapped = terminal.wrap(value, max(1, terminal.width - len(prefix)))
+            return [prefix + wrapped[0], *(continuation + part for part in wrapped[1:])]
+
+        performance_rows = (
+            (
+                "Tokens",
+                f"{live_rate(aggregate)} tok/s   "
+                f"{live_rate(decode)} decode · {live_rate(prefill)} prefill",
+            ),
+            (
+                "TTFT",
+                "—"
+                if not isinstance(ttft, (int, float)) or isinstance(ttft, bool)
+                else f"{status_ui._compact(float(ttft) / 1000, decimals=2)} s",
+            ),
+            (
+                "Requests",
+                "—"
+                if not isinstance(active_requests, (int, float))
+                or isinstance(active_requests, bool)
+                or not isinstance(queued_requests, (int, float))
+                or isinstance(queued_requests, bool)
+                else f"{int(active_requests)} active · {int(queued_requests)} queued",
+            ),
+            (
+                "Utilization",
+                f"GPU {status_ui._percent(system.get('gpu_percent'))} · "
+                f"CPU {status_ui._percent(system.get('cpu_percent'))} · "
+                f"NVMe {status_ui._percent(system.get('disk_percent'))}",
+            ),
+            (
+                "Memory",
+                f"{status_ui._percent(system.get('memory_percent'))} · "
+                f"{status_ui._mib_size(system.get('memory_used_mib'))} / "
+                f"{status_ui._mib_size(system.get('memory_total_mib'))}",
+            ),
+            (
+                "NVMe I/O",
+                f"↑{status_ui._binary_rate_kib(system.get('disk_read_kib_s'))} "
+                f"↓{status_ui._binary_rate_kib(system.get('disk_write_kib_s'))}",
+            ),
+            (
+                "Power",
+                "—"
+                if not isinstance(system.get("power_deci_w"), (int, float))
+                or isinstance(system.get("power_deci_w"), bool)
+                else f"{status_ui._compact(float(system['power_deci_w']) / 10, decimals=1)} W",
+            ),
+            (
+                "Temperature",
+                f"GPU {temperature(temperatures.get('gpu_temp_deci_c'))} · "
+                f"CPU {temperature(temperatures.get('system_temp_deci_c'))} · "
+                f"NVMe {temperature(temperatures.get('nvme_temp_deci_c'))}",
+            ),
+        )
+        lines.extend(("", "  PERFORMANCE"))
+        for metric_label, metric_value in performance_rows:
+            lines.extend(metric_lines(metric_label, metric_value))
+        lines.append("")
         for cell in selected:
             if cell in completed_set:
                 cell_mark, cell_color, detail = (
@@ -12642,14 +12943,16 @@ def _benchmark_dashboard(
         and all(isinstance(value, int) and not isinstance(value, bool) for value in expected)
     ):
         lines.append(f"  EXPECTED  {expected[0]}–{expected[1]} min")
-    evidence = terminal.wrap(
-        str(state.get("output_directory") or "pending"),
-        max(1, terminal.width - 12),
-    )
-    lines.append(f"  EVIDENCE  {evidence[0]}")
-    lines.extend(f"            {part}" for part in evidence[1:])
     if active:
-        lines.extend(["", "  Ctrl-C detaches; `letsinfer benchmark stop` cancels."])
+        lines.extend(
+            [
+                "",
+                terminal.paint(
+                    "  Ctrl-C detaches; `letsinfer benchmark stop` cancels.",
+                    ui.DIM,
+                ),
+            ]
+        )
     elif state.get("error"):
         lines.extend(["", f"  {terminal.paint(str(state['error']), ui.RED)}"])
     return "\n".join(lines) + "\n"
@@ -13983,16 +14286,18 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
             signal.signal(signal.SIGTERM, cancel_benchmark)
             signal.signal(signal.SIGINT, cancel_benchmark)
         try:
-            _run_benchmark_with_service_isolation(
-                command,
-                protection_config=config,
-                cleanup_command=[
-                    str(letsinfer_bin),
-                    "stop",
-                    "--name",
-                    arguments.container or "letsinfer-benchmark",
-                ],
-            )
+            with _BenchmarkLiveProgress(arguments.job_id, config):
+                _run_benchmark_with_service_isolation(
+                    command,
+                    protection_config=config,
+                    cleanup_command=[
+                        str(letsinfer_bin),
+                        "stop",
+                        "--name",
+                        arguments.container or "letsinfer-benchmark",
+                    ],
+                    progress_job_id=arguments.job_id,
+                )
         except _BenchmarkCancelled:
             if not nested_verification:
                 _mark_benchmark_job(arguments.job_id, "cancelled")
@@ -14037,11 +14342,6 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                         command_ui.RecordRow("Job", state["job_id"][:8]),
                     )
                 )
-                presenter.verbatim(
-                    output,
-                    label="Evidence",
-                    copyable=True,
-                )
             else:
                 ui.Terminal(sys.stderr).status(
                     f"Benchmark started · job {state['job_id'][:8]}"
@@ -14058,6 +14358,7 @@ def _run_benchmark_with_service_isolation(
     *,
     protection_config: dict[str, Any] | None = None,
     cleanup_command: Sequence[str] | None = None,
+    progress_job_id: str | None = None,
 ) -> None:
     """Suspend an active engine while a benchmark owns the inference host."""
     if protection_config is not None and protection_trip_latched(protection_config):
@@ -14105,6 +14406,18 @@ def _run_benchmark_with_service_isolation(
     recovery_stopped = False
     engine_stopped = False
     try:
+        if progress_job_id is not None:
+            benchmark_jobs.merge_progress(
+                progress_job_id,
+                {
+                    "preparation": {
+                        "schema_version": 1,
+                        "state": "acquiring-inputs",
+                        "detail": "Acquiring and verifying runtime inputs",
+                        "updated_unix_ms": int(time.time() * 1000),
+                    }
+                },
+            )
         if recovery_state == "active":
             run_passthrough(
                 ["systemctl", "--user", "stop", RECOVERY_TIMER_NAME]
@@ -14124,6 +14437,21 @@ def _run_benchmark_with_service_isolation(
     except BaseException as error:
         benchmark_error = error
     finally:
+        if progress_job_id is not None:
+            try:
+                benchmark_jobs.merge_progress(
+                    progress_job_id,
+                    {
+                        "preparation": {
+                            "schema_version": 1,
+                            "state": "restoring-service",
+                            "detail": "Stopping benchmark resources and restoring the prior service",
+                            "updated_unix_ms": int(time.time() * 1000),
+                        }
+                    },
+                )
+            except benchmark_jobs.BenchmarkJobError:
+                pass
         benchmark_trip_latched = (
             protection_config is not None
             and protection_trip_latched(protection_config)
