@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import io
+import json
 import pathlib
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -18,6 +22,7 @@ class _Store:
         self.placement_id = "2" * 32
         self.placement = {
             "placement_id": self.placement_id,
+            "service_id": "3" * 32,
             "model": "example-model",
             "runtime": "example/runtime@1.0.0@sha256:" + "3" * 64,
             "target": "two-node",
@@ -29,6 +34,7 @@ class _Store:
                 {"member_id": "5" * 32, "url": "https://a:18000", "healthy": True}
             ],
             "capacity": {},
+            "updated_at_unix": 1,
         }
         self.group = {
             "group_id": self.group_id,
@@ -37,6 +43,14 @@ class _Store:
             "desired_state": "running",
             "members": [],
         }
+        self.allocations = [
+            {
+                "group_id": self.group_id,
+                "member_id": "5" * 32,
+                "device_uuid": "GPU-fixture",
+                "state": "active",
+            }
+        ]
 
     def __enter__(self):
         return self
@@ -50,12 +64,116 @@ class _Store:
     def engine_groups(self):
         return [dict(self.group)]
 
+    def device_allocations(self):
+        return [dict(row) for row in self.allocations]
+
     def set_placement(self, value):
         self.placement = dict(value)
         return dict(value)
 
 
 class EngineGroupLifecycleTests(unittest.TestCase):
+    def test_live_snapshot_keeps_metrics_when_engine_group_exists(self) -> None:
+        group = {
+            "group_id": "1" * 32,
+            "model": "example-model",
+            "strategy": "single",
+            "state": "failed",
+            "desired_state": "stopped",
+            "members": [],
+        }
+        telemetry = {"fresh": True, "system": {"gpu": {"utilization": 42}}}
+        output = io.StringIO()
+        arguments = argparse.Namespace(
+            json=True,
+            model=None,
+            name=None,
+            config=None,
+            _single_snapshot=True,
+            _live_snapshot=True,
+        )
+        identity = types.SimpleNamespace(role="main", member_id="5" * 32)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with (
+                mock.patch.object(cli, "site_identity_path") as identity_path,
+                mock.patch.object(cli, "read_site_identity", return_value=identity),
+                mock.patch.object(cli, "_engine_group_status", return_value=[group]),
+                mock.patch.object(
+                    cli, "active_service_config_path", return_value=root / "missing.json"
+                ),
+                mock.patch.object(cli, "site_config_root", return_value=root),
+                mock.patch.object(
+                    cli, "_service_state", return_value=("enabled", "active", 1024)
+                ),
+                mock.patch.object(cli, "api_status", side_effect=[200, 401, 200]),
+                mock.patch.object(
+                    cli,
+                    "identity_json",
+                    return_value={
+                        "role": "main",
+                        "machine_id": identity.member_id,
+                        "display_name": "Example",
+                    },
+                ),
+                mock.patch.object(cli, "_local_status_node", return_value={}),
+                mock.patch.object(
+                    cli, "_local_controller_telemetry", return_value=telemetry
+                ),
+                mock.patch.object(
+                    cli, "runtime_lifecycle", return_value={"state": "absent"}
+                ),
+                mock.patch("sys.stdout", output),
+            ):
+                identity_path.return_value.exists.return_value = True
+                self.assertEqual(cli.status(arguments), 1)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["services"]["node_active"], "active")
+        self.assertEqual(payload["telemetry"], telemetry)
+        self.assertEqual(payload["engine_groups"], [group])
+
+    def test_plain_status_renders_runtime_task_without_retired_role(self) -> None:
+        group = {
+            "group_id": "1" * 32,
+            "model": "example-model",
+            "strategy": "single",
+            "state": "failed",
+            "desired_state": "stopped",
+            "members": [
+                {
+                    "member_id": "5" * 32,
+                    "task_id": "task-0",
+                    "state": "failed",
+                }
+            ],
+        }
+        output = io.StringIO()
+        arguments = argparse.Namespace(
+            json=False,
+            model=None,
+            name=None,
+            config=None,
+            _single_snapshot=True,
+        )
+        with (
+            mock.patch.object(cli, "site_identity_path") as identity_path,
+            mock.patch.object(
+                cli,
+                "read_site_identity",
+                return_value=types.SimpleNamespace(role="main"),
+            ),
+            mock.patch.object(cli, "_engine_group_status", return_value=[group]),
+            mock.patch("sys.stdout", output),
+        ):
+            identity_path.return_value.exists.return_value = True
+            self.assertEqual(cli.status(arguments), 0)
+
+        self.assertIn(
+            f"MEMBER {'5' * 32} task=task-0 state=failed",
+            output.getvalue(),
+        )
+
     def test_restore_uses_current_control_bundle_manifest_path(self) -> None:
         member_id = "5" * 32
         runtime_digest = "6" * 64
@@ -177,6 +295,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         cli._sync_group_placement(store, group)
         self.assertEqual(store.placement["state"], "stopped")
         self.assertFalse(store.placement["endpoints"][0]["healthy"])
+        self.assertNotIn("updated_at_unix", store.placement)
 
     def test_restart_stops_then_starts_without_acknowledging_trips(self) -> None:
         store = _Store()
@@ -336,6 +455,35 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                 orchestrator.stop.assert_not_called()
                 orchestrator.remove.assert_called_once_with()
                 sync.assert_called_once_with(store, removed)
+
+    def test_replacement_removes_failed_group_with_released_allocation(self) -> None:
+        store = _Store()
+        store.group["desired_state"] = "stopped"
+        store.group["state"] = "failed"
+        store.allocations[0]["state"] = "released"
+        removed = {
+            "group_id": store.group_id,
+            "placement_id": store.placement_id,
+            "desired_state": "removed",
+            "state": "removed",
+            "member_states": [],
+        }
+        orchestrator = mock.Mock()
+        orchestrator.remove.return_value = removed
+        with (
+            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(
+                cli,
+                "_restore_engine_group_orchestrator",
+                return_value=(orchestrator, {}),
+            ),
+            mock.patch.object(cli, "_sync_group_placement") as sync,
+        ):
+            cli._remove_engine_groups_by_id([store.group_id])
+
+        orchestrator.stop.assert_not_called()
+        orchestrator.remove.assert_called_once_with()
+        sync.assert_called_once_with(store, removed)
 
 
 if __name__ == "__main__":

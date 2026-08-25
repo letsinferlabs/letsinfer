@@ -90,6 +90,84 @@ class ReplicaSelectionTests(unittest.TestCase):
         ):
             self.assertEqual(self.select(), ("a" * 32,))
 
+    def test_existing_same_model_prompts_before_replacement(self) -> None:
+        member_id = "a" * 32
+        placement_id = "1" * 32
+        placements = [
+            {
+                "placement_id": placement_id,
+                "model": "example-model",
+                "state": "running",
+            }
+        ]
+        groups = [
+            {
+                "group_id": "2" * 32,
+                "placement_id": placement_id,
+                "state": "running",
+                "desired_state": "running",
+                "plan": {"resources": [{"node_id": member_id}]},
+            }
+        ]
+        arguments = argparse.Namespace(
+            model="example-model",
+            runtime=None,
+            catalog="catalog.json",
+            node=None,
+            all_nodes=False,
+            replace_existing=False,
+        )
+        release = (
+            "dgx-spark",
+            "3" * 64,
+            "engine--owner--model--dgx-spark",
+            "1.0.0",
+            "ghcr.io/example/runtime@sha256:" + "4" * 64,
+        )
+        with (
+            mock.patch.object(
+                cli.CatalogManager,
+                "load",
+                return_value=types.SimpleNamespace(document={"schema_version": 6}),
+            ),
+            mock.patch.object(
+                cli,
+                "_fresh_site_topology",
+                return_value=(self.identity, mock.Mock()),
+            ),
+            mock.patch.object(
+                cli,
+                "_site_store",
+                return_value=_Store(placements, groups),
+            ),
+            mock.patch.object(
+                _Store,
+                "members",
+                return_value=[
+                    {
+                        "member_id": member_id,
+                        "display_name": "Home",
+                        "state": "active",
+                    }
+                ],
+                create=True,
+            ),
+            mock.patch.object(
+                cli,
+                "_catalog_release_for_node",
+                return_value=(release, mock.Mock(), mock.Mock()),
+            ),
+            mock.patch.object(cli, "_human_presenter", return_value=None),
+            mock.patch.object(cli.sys.stdin, "isatty", return_value=True),
+            mock.patch.object(cli.ui, "confirm", return_value=False) as confirm,
+            self.assertRaisesRegex(cli.LetsInferError, "cancelled"),
+        ):
+            cli._install_catalog_nodes(arguments)
+
+        confirm.assert_called_once_with(
+            "An existing runtime must be removed first. Replace it now?"
+        )
+
     def test_scale_down_removes_a_stopped_group_before_a_running_group(self) -> None:
         placements = [
             {"placement_id": "1" * 32, "model": "example-model"},

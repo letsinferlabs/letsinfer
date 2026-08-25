@@ -254,6 +254,47 @@ class EngineGroupOrchestrator:
             "stop": "stopping", "remove": "removing",
         }[action]
         state["error"] = None
+        if action == "remove":
+            status = self.fetch_status(
+                self.members[assignment.member_id], self.plan.group_id
+            )
+            group = status.get("group") if isinstance(status, Mapping) else None
+            group_state = group.get("state") if isinstance(group, Mapping) else None
+            trip = (
+                status.get("protection_trip_latched")
+                if isinstance(status, Mapping)
+                else None
+            )
+            if (
+                not isinstance(status, Mapping)
+                or status.get("protocol") != PROTOCOL
+                or not isinstance(trip, bool)
+                or (
+                    group is not None
+                    and (
+                        not isinstance(group, Mapping)
+                        or group.get("group_id") != self.plan.group_id
+                        or group_state
+                        not in {"staged", "running", "stopped", "failed", "removed"}
+                    )
+                )
+            ):
+                raise GroupOrchestrationError("member group status is invalid")
+            self.protection_trips[assignment.member_id] = trip
+            if (group is None or group_state == "removed") and trip:
+                raise GroupOrchestrationError(
+                    "refusing to finalize a removed member with a protection trip"
+                )
+            if group is None or group_state == "removed":
+                response = {
+                    "protocol": PROTOCOL,
+                    "operation_id": operation_id,
+                    "state": "succeeded",
+                    "result": {"state": "removed"},
+                }
+                self.results[assignment.member_id] = dict(response["result"])
+                state["state"] = "removed"
+                return response
         job = group_job(
             self.plan,
             assignment,

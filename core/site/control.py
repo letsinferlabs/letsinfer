@@ -964,7 +964,15 @@ def fetch_member_group_status(
         method="GET",
         path=f"/node/v1/groups/{group_id}",
     )
-    if value.get("protocol") != GROUP_JOB_PROTOCOL or set(value) != {"protocol", "group"}:
+    if (
+        value.get("protocol") != GROUP_JOB_PROTOCOL
+        or set(value) != {"protocol", "group", "protection_trip_latched"}
+        or not isinstance(value.get("protection_trip_latched"), bool)
+        or (
+            value.get("group") is not None
+            and not isinstance(value.get("group"), dict)
+        )
+    ):
         raise ControlError("member group-status response schema is invalid")
     return value
 
