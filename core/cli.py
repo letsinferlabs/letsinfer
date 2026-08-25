@@ -7827,8 +7827,20 @@ def _restore_engine_group_orchestrator(
         runtime = verify_descriptor(runtime_root)
         if runtime.digest != document["runtime_digest"]:
             raise LetsInferError("engine-group runtime object identity changed")
-        control_root = default_control_parent() / document["manifest_sha256"]
-        manifest_path = control_root / "runtime-execution.json"
+        regenerated_manifest = runtime_execution_manifest(
+            runtime.runtime,
+            qualified=document["release"]["qualification"] == "qualified",
+        )
+        if (
+            hashlib.sha256(canonical_bytes(regenerated_manifest)).hexdigest()
+            != document["manifest_sha256"]
+        ):
+            raise LetsInferError(
+                "engine-group runtime no longer reproduces its execution manifest"
+            )
+        control_root, manifest_path = install_control_bundle(
+            runtime.runtime_path, regenerated_manifest
+        )
         _, manifest = validate_control_bundle(
             control_root, manifest_path, document["manifest_sha256"]
         )
