@@ -2295,6 +2295,130 @@ def _control_bundle_identity(core_identity: str, manifest_identity: str) -> str:
     ).hexdigest()
 
 
+def _control_core_source_identity(
+    root: pathlib.Path, runtime_manifest: pathlib.PurePath
+) -> str:
+    """Verify an installed control source against its own immutable manifest."""
+    core_manifest_path = _contained_regular_file(root, CORE_SOURCE_MANIFEST)
+    try:
+        manifest_data = core_manifest_path.read_bytes()
+        manifest = json.loads(manifest_data)
+    except (OSError, json.JSONDecodeError) as error:
+        raise LetsInferError("control bundle core source manifest is invalid") from error
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"schema_version", "product", "files"}
+        or manifest.get("schema_version") != 1
+        or manifest.get("product") != "letsinfer"
+        or not isinstance(manifest.get("files"), list)
+        or manifest_data != canonical_bytes(manifest)
+        or len(manifest["files"]) > 10_000
+    ):
+        raise LetsInferError("control bundle core source manifest is invalid")
+
+    expected: dict[str, tuple[int, int, str]] = {}
+    total_bytes = 0
+    reserved = {CORE_SOURCE_MANIFEST, runtime_manifest.as_posix()}
+    for record in manifest["files"]:
+        if not isinstance(record, dict) or set(record) != {
+            "path",
+            "bytes",
+            "mode",
+            "sha256",
+        }:
+            raise LetsInferError("control bundle core source manifest is invalid")
+        value = record.get("path")
+        if (
+            not isinstance(value, str)
+            or not value
+            or "\\" in value
+            or "\x00" in value
+        ):
+            raise LetsInferError("control bundle core source path is invalid")
+        relative = pathlib.PurePosixPath(value)
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != value
+            or value in reserved
+            or value in expected
+        ):
+            raise LetsInferError("control bundle core source path is invalid")
+        byte_count = record.get("bytes")
+        mode = record.get("mode")
+        digest = record.get("sha256")
+        if (
+            not isinstance(byte_count, int)
+            or isinstance(byte_count, bool)
+            or byte_count < 0
+            or mode not in {0o644, 0o755}
+            or not isinstance(digest, str)
+            or not SHA256_RE.fullmatch(digest)
+        ):
+            raise LetsInferError("control bundle core source manifest is invalid")
+        total_bytes += byte_count
+        if total_bytes > 512 * 1024 * 1024:
+            raise LetsInferError("control bundle core source exceeds its size limit")
+        expected[value] = (
+            byte_count,
+            0o500 if mode & 0o111 else 0o400,
+            digest,
+        )
+
+    actual: set[str] = set()
+    try:
+        paths = sorted(root.rglob("*"))
+    except OSError as error:
+        raise LetsInferError("cannot enumerate control bundle core source") from error
+    for path in paths:
+        try:
+            details = path.lstat()
+        except OSError as error:
+            raise LetsInferError("cannot inspect control bundle core source") from error
+        relative = path.relative_to(root).as_posix()
+        if stat.S_ISLNK(details.st_mode):
+            raise LetsInferError(
+                f"control bundle core source contains a symlink: {relative}"
+            )
+        if stat.S_ISDIR(details.st_mode):
+            if details.st_uid != os.getuid() or details.st_mode & (
+                stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
+            ):
+                raise LetsInferError(
+                    f"control bundle core source directory is unsafe: {relative}"
+                )
+            continue
+        if not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid():
+            raise LetsInferError(
+                f"control bundle core source file is unsafe: {relative}"
+            )
+        actual.add(relative)
+
+    expected_paths = set(expected) | reserved
+    if actual != expected_paths:
+        raise LetsInferError("control bundle core source file set mismatch")
+    for value, (byte_count, expected_mode, digest) in expected.items():
+        path = root.joinpath(*pathlib.PurePosixPath(value).parts)
+        try:
+            details = path.stat()
+            content = path.read_bytes()
+        except OSError as error:
+            raise LetsInferError(
+                f"cannot verify control bundle core source: {value}"
+            ) from error
+        if (
+            stat.S_IMODE(details.st_mode) != expected_mode
+            or len(content) != byte_count
+            or hashlib.sha256(content).hexdigest() != digest
+        ):
+            raise LetsInferError(f"control bundle core source mismatch: {value}")
+    for value in reserved:
+        path = root.joinpath(*pathlib.PurePosixPath(value).parts)
+        if stat.S_IMODE(path.stat().st_mode) != 0o400:
+            raise LetsInferError(f"control bundle metadata mode is unsafe: {value}")
+    return hashlib.sha256(manifest_data).hexdigest()
+
+
 def validate_control_bundle(
     root: pathlib.Path,
     manifest_path: pathlib.Path,
@@ -2307,21 +2431,18 @@ def validate_control_bundle(
     details = root.stat()
     if details.st_uid != os.getuid() or stat.S_IMODE(details.st_mode) & 0o077:
         raise LetsInferError(f"control bundle root must be private and user-owned: {root}")
-    _records, generated_core_manifest, core_identity = _core_release(root)
-    core_manifest_path = _contained_regular_file(root, CORE_SOURCE_MANIFEST)
-    if read_json(core_manifest_path) != generated_core_manifest:
-        raise LetsInferError("control bundle core source manifest mismatch")
-    bundle_identity = _control_bundle_identity(
-        core_identity, expected_manifest_sha256
-    )
-    if require_hash_name and root.name != bundle_identity:
-        raise LetsInferError("control bundle directory does not match its bundle identity")
     try:
         relative_manifest = manifest_path.resolve(strict=True).relative_to(
             root.resolve(strict=True)
         )
     except (OSError, ValueError) as error:
         raise LetsInferError("control bundle manifest escapes its root") from error
+    core_identity = _control_core_source_identity(root, relative_manifest)
+    bundle_identity = _control_bundle_identity(
+        core_identity, expected_manifest_sha256
+    )
+    if require_hash_name and root.name != bundle_identity:
+        raise LetsInferError("control bundle directory does not match its bundle identity")
     contained_manifest = _contained_regular_file(root, str(relative_manifest))
     if sha256_file(contained_manifest) != expected_manifest_sha256:
         raise LetsInferError("control bundle manifest SHA-256 mismatch")

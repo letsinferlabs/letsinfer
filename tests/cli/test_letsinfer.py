@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import pathlib
 import tempfile
@@ -19,6 +20,71 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_control_bundle_validation_uses_its_recorded_source_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = pathlib.Path(directory)
+            source_content = b"historical source\n"
+            source_manifest = {
+                "schema_version": 1,
+                "product": "letsinfer",
+                "files": [
+                    {
+                        "path": "legacy/removed.py",
+                        "bytes": len(source_content),
+                        "mode": 0o644,
+                        "sha256": hashlib.sha256(source_content).hexdigest(),
+                    }
+                ],
+            }
+            source_manifest_data = cli.canonical_bytes(source_manifest)
+            runtime_manifest_data = b"{}\n"
+            runtime_manifest_sha = hashlib.sha256(runtime_manifest_data).hexdigest()
+            core_identity = hashlib.sha256(source_manifest_data).hexdigest()
+            bundle_identity = cli._control_bundle_identity(
+                core_identity, runtime_manifest_sha
+            )
+            root = parent / bundle_identity
+            legacy = root / "legacy"
+            legacy.mkdir(parents=True, mode=0o700)
+            root.chmod(0o700)
+            legacy.chmod(0o700)
+            source = legacy / "removed.py"
+            source.write_bytes(source_content)
+            source.chmod(0o400)
+            core_manifest = root / cli.CORE_SOURCE_MANIFEST
+            core_manifest.write_bytes(source_manifest_data)
+            core_manifest.chmod(0o400)
+            runtime_manifest = root / "runtime-execution.json"
+            runtime_manifest.write_bytes(runtime_manifest_data)
+            runtime_manifest.chmod(0o400)
+
+            with (
+                mock.patch.object(cli, "validate_manifest"),
+                mock.patch.object(cli, "verify_runtime_sources"),
+                mock.patch.object(
+                    cli,
+                    "_core_release",
+                    side_effect=AssertionError(
+                        "control validation must not apply the current source policy"
+                    ),
+                ),
+            ):
+                installed_path, installed = cli.validate_control_bundle(
+                    root, runtime_manifest, runtime_manifest_sha
+                )
+                self.assertEqual(installed_path, runtime_manifest.resolve())
+                self.assertEqual(installed, {})
+
+                unexpected = root / "unexpected.py"
+                unexpected.write_text("unexpected\n", encoding="utf-8")
+                unexpected.chmod(0o400)
+                with self.assertRaisesRegex(
+                    cli.LetsInferError, "source file set mismatch"
+                ):
+                    cli.validate_control_bundle(
+                        root, runtime_manifest, runtime_manifest_sha
+                    )
+
     def test_node_agent_memory_envelope_supports_runtime_staging(self) -> None:
         unit = cli.render_node_service(pathlib.Path("/opt/letsinfer"))
         self.assertIn("MemoryHigh=134217728\n", unit)
