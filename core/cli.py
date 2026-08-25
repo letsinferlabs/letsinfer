@@ -7938,7 +7938,22 @@ def _sync_group_placement(
         item["member_id"]: item["state"] for item in group["member_states"]
     }
     group_running = group["state"] == "running"
-    updated = dict(placement)
+    updated = {
+        key: placement[key]
+        for key in (
+            "placement_id",
+            "service_id",
+            "model",
+            "runtime",
+            "target",
+            "strategy",
+            "state",
+            "topology_sha256",
+            "members",
+            "endpoints",
+            "capacity",
+        )
+    }
     if group_running:
         updated["state"] = "running"
     elif group["desired_state"] in {"stopped", "removed"} and group["state"] in {

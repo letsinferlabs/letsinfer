@@ -20,6 +20,7 @@ class _Store:
         self.placement_id = "2" * 32
         self.placement = {
             "placement_id": self.placement_id,
+            "service_id": "3" * 32,
             "model": "example-model",
             "runtime": "example/runtime@1.0.0@sha256:" + "3" * 64,
             "target": "two-node",
@@ -31,6 +32,7 @@ class _Store:
                 {"member_id": "5" * 32, "url": "https://a:18000", "healthy": True}
             ],
             "capacity": {},
+            "updated_at_unix": 1,
         }
         self.group = {
             "group_id": self.group_id,
@@ -231,6 +233,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         cli._sync_group_placement(store, group)
         self.assertEqual(store.placement["state"], "stopped")
         self.assertFalse(store.placement["endpoints"][0]["healthy"])
+        self.assertNotIn("updated_at_unix", store.placement)
 
     def test_restart_stops_then_starts_without_acknowledging_trips(self) -> None:
         store = _Store()
