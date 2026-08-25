@@ -235,7 +235,9 @@ class CatalogTests(unittest.TestCase):
             path.write_bytes(runtime_packs.canonical_bytes(document))
             self.assertEqual(runtime_packs.load_catalog(str(path)), document)
 
-    def test_unscored_maintainer_bypass_is_explicit_only(self) -> None:
+    def test_maintainer_bypass_requires_marked_author_score_for_recommendation(
+        self,
+    ) -> None:
         document = catalog()
         target = document["models"]["qwen3.8-27b"]["targets"]["dgx-spark"]
         release = target["candidates"][CANDIDATE]["releases"]["0.1.0-rc.12"]
@@ -304,6 +306,13 @@ class CatalogTests(unittest.TestCase):
                 "score": 1.0,
             }
             path.write_bytes(runtime_packs.canonical_bytes(document))
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "consensus qualification"
+            ):
+                runtime_packs.load_catalog(str(path))
+
+            release["verification"]["benchmark_source"] = "author-benchmark-v1"
+            path.write_bytes(runtime_packs.canonical_bytes(document))
             loaded = runtime_packs.load_catalog(str(path))
             self.assertEqual(
                 runtime_packs.catalog_release(
@@ -311,6 +320,13 @@ class CatalogTests(unittest.TestCase):
                 )[-2:],
                 ("0.1.0-rc.12", release["source"]),
             )
+
+            release["verification"]["benchmark_source"] = "untrusted"
+            path.write_bytes(runtime_packs.canonical_bytes(document))
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "consensus qualification"
+            ):
+                runtime_packs.load_catalog(str(path))
 
     def test_catalog_accepts_only_a_fully_bound_runtime_contract_migration(self) -> None:
         document = catalog()
