@@ -7828,7 +7828,7 @@ def _restore_engine_group_orchestrator(
         if runtime.digest != document["runtime_digest"]:
             raise LetsInferError("engine-group runtime object identity changed")
         control_root = default_control_parent() / document["manifest_sha256"]
-        manifest_path = control_root / "releases" / runtime.release_path.name
+        manifest_path = control_root / "runtime-execution.json"
         _, manifest = validate_control_bundle(
             control_root, manifest_path, document["manifest_sha256"]
         )

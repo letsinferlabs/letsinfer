@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import pathlib
 import types
 import unittest
 from unittest import mock
@@ -54,6 +56,85 @@ class _Store:
 
 
 class EngineGroupLifecycleTests(unittest.TestCase):
+    def test_restore_uses_current_control_bundle_manifest_path(self) -> None:
+        member_id = "5" * 32
+        runtime_digest = "6" * 64
+        manifest_sha256 = "7" * 64
+        topology_sha256 = "8" * 64
+        source = "registry.example/runtime@sha256:" + "9" * 64
+        document = {
+            "group_id": "1" * 32,
+            "runtime_digest": runtime_digest,
+            "manifest_sha256": manifest_sha256,
+            "topology_sha256": topology_sha256,
+            "release": {"source": source},
+            "resources": [{
+                "node_id": member_id,
+                "address": "https://node.local:9770",
+                "device_uuids": ["GPU-0"],
+                "port_base": 18000,
+            }],
+            "strategy": "single",
+            "service_id": "3" * 32,
+        }
+        assignment = types.SimpleNamespace(member_id=member_id)
+        plan = types.SimpleNamespace(
+            assignments=(assignment,), document=lambda: document
+        )
+        restored = types.SimpleNamespace(
+            engine_credential_sha256="a" * 64,
+            states={member_id: {}},
+            persisted_state=None,
+        )
+        row = {
+            "group_id": document["group_id"],
+            "runtime_digest": runtime_digest,
+            "manifest_sha256": manifest_sha256,
+            "topology_sha256": topology_sha256,
+            "plan_sha256": hashlib.sha256(cli.canonical_bytes(document)).hexdigest(),
+            "source": source,
+            "placement_id": "2" * 32,
+            "engine_credential_sha256": "a" * 64,
+            "members": [{"member_id": member_id, "state": "failed"}],
+            "state": "failed",
+            "plan": document,
+        }
+        store = mock.Mock()
+        validate_bundle = mock.Mock(return_value=(
+            pathlib.Path("/control") / manifest_sha256 / "runtime-execution.json",
+            {"target": {"placement": {}}},
+        ))
+        runtime = types.SimpleNamespace(
+            digest=runtime_digest,
+            runtime={"orchestration": None},
+        )
+        with (
+            mock.patch.object(cli, "validate_group_document", return_value=document),
+            mock.patch.object(cli, "default_runtime_home", return_value=pathlib.Path("/runtime")),
+            mock.patch.object(cli, "verify_descriptor", return_value=runtime),
+            mock.patch.object(cli, "default_control_parent", return_value=pathlib.Path("/control")),
+            mock.patch.object(cli, "validate_control_bundle", validate_bundle),
+            mock.patch.object(cli, "validate_target_binding", return_value=None),
+            mock.patch.object(cli, "target_contract", return_value={"placement": {}}),
+            mock.patch.object(cli, "build_single_group_plan", return_value=plan),
+            mock.patch.object(
+                cli,
+                "_engine_group_member_controls",
+                return_value={member_id: {}},
+            ),
+            mock.patch.object(cli, "_engine_group_transport", return_value=(None, None, None)),
+            mock.patch.object(cli, "EngineGroupOrchestrator", return_value=restored),
+        ):
+            result, manifest = cli._restore_engine_group_orchestrator(store, row)
+
+        self.assertIs(result, restored)
+        self.assertEqual(manifest, {"target": {"placement": {}}})
+        validate_bundle.assert_called_once_with(
+            pathlib.Path("/control") / manifest_sha256,
+            pathlib.Path("/control") / manifest_sha256 / "runtime-execution.json",
+            manifest_sha256,
+        )
+
     def test_intentional_stop_marks_placement_stopped_not_failed(self) -> None:
         store = _Store()
         group = {
