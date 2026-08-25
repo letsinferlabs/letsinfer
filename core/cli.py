@@ -261,9 +261,13 @@ NODE_AGENT_MEMORY_LIMIT_BYTES = 192 * 1024 * 1024
 NODE_AGENT_TASK_LIMIT = 32
 GATEWAY_MEMORY_HIGH_BYTES = 64 * 1024 * 1024
 GATEWAY_MEMORY_LIMIT_BYTES = 96 * 1024 * 1024
+CORE_HOST_RESERVE_BYTES = 16 * 1024**3
+ENGINE_MEMORY_SOFT_MARGIN_BYTES = 2 * 1024**3
+ENGINE_OOM_SCORE_ADJUST = 500
 PROTECTION_STATE_NAME = "protected-engine.state"
 PROTECTION_ACK_NAME = "protected-engine.ack"
 PROTECTION_TRIP_NAME = "protection-trip.json"
+PROTECTION_INCIDENT_NAME = "last-incident.json"
 PROTECTION_ROOT_NAME = "protected-engines"
 WATCHDOG_PUBLIC_STATE_DIRECTORY = "service-state"
 CONTROLLER_PAIRING_PROTOCOL = "letsinfer-controller-pair-v1"
@@ -1264,6 +1268,20 @@ def compact_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def engine_memory_soft_bytes(memory_max_bytes: int) -> int:
+    if (
+        not isinstance(memory_max_bytes, int)
+        or isinstance(memory_max_bytes, bool)
+        or memory_max_bytes <= 64 * 1024**2
+    ):
+        raise LetsInferError("Engine memory limit is too small for containment")
+    return max(
+        64 * 1024**2,
+        memory_max_bytes
+        - min(ENGINE_MEMORY_SOFT_MARGIN_BYTES, memory_max_bytes // 8),
+    )
+
+
 def docker_command(
     manifest: dict[str, Any],
     *,
@@ -1286,6 +1304,7 @@ def docker_command(
     if runtime_digest is not None and not SHA256_RE.fullmatch(runtime_digest):
         raise LetsInferError("container runtime identity must be a SHA-256")
     container = manifest["container"]
+    memory_soft_bytes = engine_memory_soft_bytes(container["memory_bytes"])
     adapter = adapter_for(manifest)
     target = target_contract(manifest)
     launch = launch_for(manifest, manifest["serving"], port)
@@ -1399,6 +1418,8 @@ def docker_command(
         "no-new-privileges=true",
         "--pids-limit",
         "4096",
+        "--oom-score-adj",
+        str(ENGINE_OOM_SCORE_ADJUST),
         "--stop-timeout",
         "120",
         *(
@@ -1428,6 +1449,8 @@ def docker_command(
         ),
         "--memory",
         str(container["memory_bytes"]),
+        "--memory-reservation",
+        str(memory_soft_bytes),
         "--memory-swap",
         str(container["memory_bytes"]),
         *(
@@ -1504,12 +1527,16 @@ def parse_mem_available_bytes(text: str) -> int:
     raise LetsInferError("MemAvailable is missing from /proc/meminfo")
 
 
-def parse_mem_total_gib(text: str) -> int:
+def parse_mem_total_bytes(text: str) -> int:
     for line in text.splitlines():
         fields = line.split()
         if fields and fields[0] == "MemTotal:" and len(fields) >= 2:
-            return int(fields[1]) // 1048576
+            return int(fields[1]) * 1024
     raise LetsInferError("MemTotal is missing from /proc/meminfo")
+
+
+def parse_mem_total_gib(text: str) -> int:
+    return parse_mem_total_bytes(text) // (1024**3)
 
 
 def gpu_count() -> int:
@@ -1703,12 +1730,15 @@ def verify_host_target(manifest: dict[str, Any]) -> dict[str, Any]:
 
 def memory_snapshot(manifest: dict[str, Any]) -> dict[str, Any]:
     target = target_contract(manifest)
-    available_gib = parse_mem_available_gib(
-        pathlib.Path("/proc/meminfo").read_text(encoding="utf-8")
-    )
+    meminfo = pathlib.Path("/proc/meminfo").read_text(encoding="utf-8")
+    available_bytes = parse_mem_available_bytes(meminfo)
+    total_bytes = parse_mem_total_bytes(meminfo)
     snapshot = {
         "memory_model": target["memory"]["topology"],
-        "host_available_gib": available_gib,
+        "host_available_bytes": available_bytes,
+        "host_available_gib": available_bytes // (1024**3),
+        "host_total_bytes": total_bytes,
+        "host_total_gib": total_bytes // (1024**3),
     }
     if target["memory"]["topology"] == "discrete":
         rows = nvidia_query("memory.free", target["accelerator"]["count"])
@@ -1720,23 +1750,68 @@ def memory_snapshot(manifest: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
+def effective_memory_reserve(
+    manifest: dict[str, Any], *, phase: str
+) -> dict[str, int]:
+    """Return the non-negotiable host reserve and each contributing floor."""
+
+    if phase not in {"launch", "runtime"}:
+        raise LetsInferError(f"unsupported memory-admission phase: {phase}")
+    target = target_contract(manifest)
+    container = manifest["container"]
+    host_key = "min_available_gib" if phase == "launch" else "runtime_min_available_gib"
+    runtime_bytes = container[host_key] * 1024**3
+    target_bytes = max(
+        0,
+        target["memory"]["minimum_total_gib"] * 1024**3
+        - container["memory_bytes"],
+    )
+    core_bytes = max(
+        CORE_HOST_RESERVE_BYTES,
+        core_watchdog_contract()["protection"]["warning_available_bytes"],
+    )
+    return {
+        "core_minimum_bytes": core_bytes,
+        "runtime_minimum_bytes": runtime_bytes,
+        "target_minimum_bytes": target_bytes,
+        "effective_bytes": max(core_bytes, runtime_bytes, target_bytes),
+    }
+
+
 def require_memory_reserve(
     manifest: dict[str, Any], *, phase: str
 ) -> dict[str, Any]:
-    if phase not in {"launch", "runtime"}:
-        raise LetsInferError(f"unsupported memory-admission phase: {phase}")
-    target_contract(manifest)
+    target = target_contract(manifest)
     container = manifest["container"]
-    host_key = "min_available_gib" if phase == "launch" else "runtime_min_available_gib"
-    host_floor = container[host_key]
+    reserve = effective_memory_reserve(manifest, phase=phase)
     snapshot = memory_snapshot(manifest)
-    if snapshot["host_available_gib"] < host_floor:
+    if snapshot["host_total_bytes"] <= reserve["effective_bytes"]:
+        raise LetsInferError(
+            f"host memory cannot preserve the {reserve['effective_bytes'] // 1024**3} GiB "
+            "control-plane reserve"
+        )
+    maximum_engine_bytes = snapshot["host_total_bytes"] - reserve["effective_bytes"]
+    if container["memory_bytes"] > maximum_engine_bytes:
+        raise LetsInferError(
+            f"Engine memory limit {container['memory_bytes']} bytes exceeds the safe host "
+            f"budget {maximum_engine_bytes} bytes after the non-negotiable "
+            f"{reserve['effective_bytes'] // 1024**3} GiB control-plane reserve"
+        )
+    if snapshot["host_available_bytes"] < reserve["effective_bytes"]:
         raise LetsInferError(
             f"only {snapshot['host_available_gib']} GiB unified memory is available; "
-            f"{host_floor} GiB is required during {phase}"
+            f"the effective {reserve['effective_bytes'] // 1024**3} GiB control-plane "
+            f"reserve is required during {phase}"
         )
-    snapshot["required_host_available_gib"] = host_floor
-    if target_contract(manifest)["memory"]["topology"] == "discrete":
+    snapshot.update(
+        {
+            "required_host_available_bytes": reserve["effective_bytes"],
+            "required_host_available_gib": reserve["effective_bytes"] // 1024**3,
+            "maximum_engine_bytes": maximum_engine_bytes,
+            "reserve": reserve,
+        }
+    )
+    if target["memory"]["topology"] == "discrete":
         gpu_key = "min_gpu_free_gib" if phase == "launch" else "runtime_min_gpu_free_gib"
         gpu_floor = container[gpu_key]
         if snapshot["accelerator_available_gib"] < gpu_floor:
@@ -2139,6 +2214,40 @@ def clear_protection_trip(config: dict[str, Any]) -> bool:
     return True
 
 
+def read_protection_incident(config: Mapping[str, Any]) -> dict[str, Any] | None:
+    root = expanded_path(str(config["protection_root"]))
+    trip_path = root / PROTECTION_TRIP_NAME
+    incident_path = root / PROTECTION_INCIDENT_NAME
+    path = trip_path if trip_path.is_file() and not trip_path.is_symlink() else incident_path
+    if not path.exists():
+        return None
+    if path.is_symlink():
+        raise LetsInferError(f"Watchdog incident cannot be a symlink: {path}")
+    try:
+        details = path.stat()
+        encoded = path.read_bytes()
+        value = json.loads(encoded)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise LetsInferError(f"cannot read Watchdog incident {path}: {error}") from error
+    if (
+        not stat.S_ISREG(details.st_mode)
+        or details.st_uid != os.getuid()
+        or stat.S_IMODE(details.st_mode) & 0o077
+        or len(encoded) > 16 * 1024
+        or not isinstance(value, dict)
+        or value.get("schema_version") not in {1, 2}
+        or not isinstance(value.get("timestamp_unix_ms"), int)
+        or isinstance(value.get("timestamp_unix_ms"), bool)
+        or value["timestamp_unix_ms"] <= 0
+        or value.get("action") not in {"stop", "kill"}
+        or not isinstance(value.get("reason"), str)
+        or not value["reason"]
+        or len(value["reason"]) > 96
+    ):
+        raise LetsInferError(f"Watchdog incident is invalid: {path}")
+    return {**value, "path": str(path)}
+
+
 def protection_trip_latched(config: dict[str, Any]) -> bool:
     _, _, trip_path = protection_paths(config)
     return trip_path.is_file() and not trip_path.is_symlink()
@@ -2212,7 +2321,12 @@ def protection_status(
         "trip_latched": trip_path.is_file() and not trip_path.is_symlink(),
         "state_path": str(state_path),
         "trip_path": str(trip_path),
+        "incident": None,
     }
+    try:
+        payload["incident"] = read_protection_incident(config)
+    except LetsInferError as error:
+        payload["incident_error"] = str(error)
     try:
         state = _parse_protection_lines(state_path)
         acknowledgement = _parse_protection_lines(ack_path)
@@ -4402,6 +4516,52 @@ def require_matching_container(
         )
     if inspection.get("Image") != manifest["image"]["immutable_id"]:
         raise LetsInferError("existing container image does not match the release manifest")
+    require_container_memory_contract(inspection, manifest)
+
+
+def container_memory_contract(
+    inspection: Mapping[str, Any], manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    host = inspection.get("HostConfig")
+    container = manifest.get("container")
+    if not isinstance(host, Mapping) or not isinstance(container, Mapping):
+        raise LetsInferError("managed container memory configuration is unavailable")
+    memory_max = container.get("memory_bytes")
+    if not isinstance(memory_max, int) or isinstance(memory_max, bool):
+        raise LetsInferError("runtime Engine memory limit is invalid")
+    expected = {
+        "memory_max_bytes": memory_max,
+        "memory_soft_bytes": engine_memory_soft_bytes(memory_max),
+        "memory_swap_total_bytes": memory_max,
+        "oom_score_adjust": ENGINE_OOM_SCORE_ADJUST,
+    }
+    return {
+        **expected,
+        "actual_memory_max_bytes": host.get("Memory"),
+        "actual_memory_soft_bytes": host.get("MemoryReservation"),
+        "actual_memory_swap_total_bytes": host.get("MemorySwap"),
+        "actual_oom_score_adjust": host.get("OomScoreAdj"),
+        "oom_kill_disabled": host.get("OomKillDisable") is True,
+    }
+
+
+def require_container_memory_contract(
+    inspection: Mapping[str, Any], manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    contract = container_memory_contract(inspection, manifest)
+    if (
+        contract["actual_memory_max_bytes"] != contract["memory_max_bytes"]
+        or contract["actual_memory_soft_bytes"] != contract["memory_soft_bytes"]
+        or contract["actual_memory_swap_total_bytes"]
+        != contract["memory_swap_total_bytes"]
+        or contract["actual_oom_score_adjust"] != contract["oom_score_adjust"]
+        or contract["oom_kill_disabled"]
+    ):
+        raise LetsInferError(
+            "managed Engine container does not preserve the required memory/cgroup "
+            "containment contract"
+        )
+    return contract
 
 
 def require_systemd_restart_authority(inspection: Mapping[str, Any]) -> None:
@@ -6082,9 +6242,12 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 MemoryAccounting=yes
+MemoryMin={GATEWAY_MEMORY_HIGH_BYTES}
+MemoryLow={GATEWAY_MEMORY_HIGH_BYTES}
 MemoryHigh={GATEWAY_MEMORY_HIGH_BYTES}
 MemoryMax={GATEWAY_MEMORY_LIMIT_BYTES}
 MemorySwapMax=0
+OOMPolicy=continue
 Restart=always
 RestartSec=2
 UMask=0077
@@ -6271,9 +6434,12 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 MemoryAccounting=yes
+MemoryMin={NODE_AGENT_MEMORY_HIGH_BYTES}
+MemoryLow={NODE_AGENT_MEMORY_HIGH_BYTES}
 MemoryHigh={NODE_AGENT_MEMORY_HIGH_BYTES}
 MemoryMax={NODE_AGENT_MEMORY_LIMIT_BYTES}
 MemorySwapMax=0
+OOMPolicy=continue
 Restart=always
 RestartSec=2
 UMask=0077
@@ -6412,18 +6578,21 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 MemoryAccounting=yes
+MemoryMin={watchdog['memory_high_bytes']}
+MemoryLow={watchdog['memory_high_bytes']}
 MemoryHigh={watchdog['memory_high_bytes']}
 MemoryMax={watchdog['memory_max_bytes']}
 MemorySwapMax=0
+OOMPolicy=continue
 Restart=always
 RestartSec=5
 UMask=0077
 TasksMax=8
 LimitNOFILE=64
-Nice=10
-CPUWeight=1
-IOWeight=1
-IOSchedulingClass=idle
+Nice=0
+CPUWeight=100
+IOWeight=100
+IOSchedulingClass=best-effort
 NoNewPrivileges=yes
 # A user unit must remain in the host user namespace so it can signal the
 # same-UID container init through its bound pidfd. Filesystem namespace
@@ -9904,6 +10073,7 @@ def status(arguments: argparse.Namespace) -> int:
     engine_api_key_required = False
     engine_identity = False
     engine_tls = False
+    memory_containment: dict[str, Any] | None = None
     if inspection is not None:
         container_state = inspection.get("State", {}).get("Status", "unknown")
         labels = inspection.get("Config", {}).get("Labels") or {}
@@ -9938,6 +10108,13 @@ def status(arguments: argparse.Namespace) -> int:
                 unauthenticated_status == 401
                 and authenticated_status in {400, 422}
             )
+            if configured_manifest is not None:
+                try:
+                    memory_containment = container_memory_contract(
+                        inspection, configured_manifest
+                    )
+                except LetsInferError:
+                    pass
 
     engine_enabled, engine_active, _ = _service_state(ENGINE_SERVICE_NAME)
     node_enabled, node_active, node_memory_bytes = _service_state(NODE_SERVICE_NAME)
@@ -10061,6 +10238,7 @@ def status(arguments: argparse.Namespace) -> int:
                 else None
             ),
             "restart_policy": restart_policy,
+            "memory_containment": memory_containment,
         },
         "protection": protection_status(config, inspection) if config else None,
         "config": str(config_path) if config else None,
@@ -10107,6 +10285,13 @@ def status(arguments: argparse.Namespace) -> int:
                 f"armed={str(protection['armed']).lower()} "
                 f"trip_latched={str(protection['trip_latched']).lower()}"
             )
+            incident = protection.get("incident")
+            if isinstance(incident, dict):
+                print(
+                    f"incident={incident.get('incident_id') or incident.get('generation')} "
+                    f"action={incident.get('action')} reason={incident.get('reason')} "
+                    f"cgroup={incident.get('cgroup') or 'unknown'}"
+                )
             print(f"endpoint={local_inference_endpoint(config['gateway_port'])}")
     return 0 if payload["lifecycle"]["state"] in {
         "ready",
@@ -10832,6 +11017,15 @@ def doctor(arguments: argparse.Namespace) -> int:
             model_mount is not None and model_mount.get("RW") is False,
             compact_json(model_mount or {}),
         )
+        try:
+            memory_contract = require_container_memory_contract(inspection, manifest)
+            record(
+                "engine-memory-containment",
+                True,
+                compact_json(memory_contract),
+            )
+        except LetsInferError as error:
+            record("engine-memory-containment", False, str(error))
 
     protection = protection_status(config, inspection)
     record(
@@ -10844,6 +11038,29 @@ def doctor(arguments: argparse.Namespace) -> int:
         not protection["trip_latched"],
         str(protection["trip_path"]),
     )
+    incident = protection.get("incident")
+    if isinstance(incident, dict):
+        record(
+            "watchdog-last-incident",
+            False,
+            compact_json(
+                {
+                    key: incident.get(key)
+                    for key in (
+                        "incident_id",
+                        "timestamp_unix_ms",
+                        "action",
+                        "reason",
+                        "cgroup",
+                        "available_bytes",
+                        "memory_current_bytes",
+                        "memory_max_bytes",
+                        "cgroup_oom_kill_delta",
+                    )
+                }
+            ),
+            required=False,
+        )
 
     key_path = expanded_path(config["gateway_api_key_file"])
     health_status = api_status(config["gateway_port"], "/health", None)

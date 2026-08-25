@@ -294,7 +294,11 @@ class TerminalTests(unittest.TestCase):
                     "docker_health": "healthy",
                     "model_identity": True,
                 },
-                "protection": {"armed": False, "trip_latched": True},
+                "protection": {
+                    "armed": False,
+                    "trip_latched": True,
+                    "incident": {"reason": "host_memory_emergency"},
+                },
             },
             stream=stream,
             environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
@@ -302,6 +306,7 @@ class TerminalTests(unittest.TestCase):
         rendered = stream.getvalue()
         self.assertIn("FAILED", rendered)
         self.assertIn("Blocked", rendered)
+        self.assertIn("host_memory_emergency", rendered)
         self.assertNotIn("\033[", rendered)
 
     def test_runtime_status_keeps_verified_update_context_in_live_panel(self) -> None:

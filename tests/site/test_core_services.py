@@ -32,6 +32,29 @@ def member_identity() -> SiteIdentity:
 
 
 class CoreServiceTests(unittest.TestCase):
+    def test_watchdog_unit_keeps_control_plane_scheduling_and_memory_headroom(self) -> None:
+        root = pathlib.Path("/private/watchdog")
+        config = {
+            "watchdog_binary_path": str(root / "letsinfer-watchdog"),
+            "watchdog_data_root": str(root / "data"),
+            "watchdog_listen": "127.0.0.1",
+            "watchdog_port": 9768,
+            "watchdog_cert_file": str(root / "server.crt"),
+            "watchdog_key_file": str(root / "server.key"),
+            "watchdog_controller_ca_file": str(root / "ca.crt"),
+            "watchdog_controller_allowlist_file": str(root / "controllers.allow"),
+            "watchdog_public_state_file": str(root / "site.state"),
+            "gateway_telemetry_file": str(root / "gateway.state"),
+        }
+        contract = cli.core_watchdog_contract()
+        unit = cli.render_user_service(config, {"watchdog": contract})
+        self.assertIn(f"MemoryMin={contract['memory_high_bytes']}\n", unit)
+        self.assertIn(f"MemoryLow={contract['memory_high_bytes']}\n", unit)
+        self.assertIn("OOMPolicy=continue\n", unit)
+        self.assertIn("Nice=0\n", unit)
+        self.assertIn("CPUWeight=100\n", unit)
+        self.assertNotIn("Nice=10\n", unit)
+
     def test_gateway_unit_is_lan_http_without_client_certificate_flags(self) -> None:
         config = {
             "gateway_listen": "0.0.0.0",
@@ -46,6 +69,9 @@ class CoreServiceTests(unittest.TestCase):
             pathlib.Path("/immutable/core"),
         )
         self.assertIn("gateway --listen 0.0.0.0 --port 8000", unit)
+        self.assertIn(f"MemoryMin={cli.GATEWAY_MEMORY_HIGH_BYTES}\n", unit)
+        self.assertIn(f"MemoryLow={cli.GATEWAY_MEMORY_HIGH_BYTES}\n", unit)
+        self.assertIn("OOMPolicy=continue\n", unit)
         self.assertNotIn(" --cert ", unit)
         self.assertNotIn(" --key ", unit)
 

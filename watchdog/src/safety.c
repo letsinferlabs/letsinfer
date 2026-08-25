@@ -29,21 +29,41 @@ watchdog_safety_decision watchdog_safety_decide(
     if (watchdog_safety_validate_thresholds(thresholds) != 0 || input == NULL) {
         return decision;
     }
+    if (input->available_bytes <= thresholds->emergency_available_bytes) {
+        return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_KILL, "host_memory_emergency"};
+    }
     if (input->cgroup_oom_kill_delta != 0
         || input->cgroup_oom_group_kill_delta != 0) {
         return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_KILL, "cgroup_oom_kill"};
     }
     /*
-     * Available-memory, swap, PSI, and non-fatal cgroup allocation failures
-     * are observations for the shared state plane. A memory.max or oom counter
-     * without an oom_kill proves only that one allocation was denied; an
-     * engine may reject that request and remain healthy. These observations
-     * must neither override the engine's declared scheduler capacity nor turn
-     * ordinary KV-cache pressure into a destructive lifecycle event. Low host
-     * headroom alone is not proof that the protected runtime faulted.
-     * Containment is reserved for observed kernel OOM kills above. An engine
-     * that exits after a denied allocation is independently caught by pidfd.
+     * The warning floor is an admission signal. The lower graceful floor is a
+     * non-negotiable control-plane reserve: once it is crossed, preserving the
+     * host takes precedence over keeping a loaded model resident. The
+     * emergency floor is handled above without waiting for PSI or a kernel OOM.
      */
+    if (input->available_bytes <= thresholds->graceful_available_bytes) {
+        return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_STOP, "host_memory_below_graceful_floor"};
+    }
+    if (input->available_bytes <= thresholds->warning_available_bytes) {
+        if (input->swap_used_bytes >= thresholds->swap_stop_bytes) {
+            return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_STOP, "host_swap_growth"};
+        }
+        if (input->psi_full_delta_us >= thresholds->psi_full_us) {
+            return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_STOP, "host_memory_full_psi"};
+        }
+        const bool near_engine_limit = input->memory_max_bytes != 0u
+            && input->memory_max_bytes != UINT64_MAX
+            && input->memory_current_bytes
+                >= input->memory_max_bytes - input->memory_max_bytes / 20u;
+        if (input->psi_some_delta_us >= thresholds->psi_some_us
+            && (near_engine_limit
+                || input->cgroup_high_delta != 0
+                || input->cgroup_oom_delta != 0
+                || input->cgroup_max_delta != 0)) {
+            return (watchdog_safety_decision){WATCHDOG_SAFETY_ACTION_STOP, "engine_memory_pressure"};
+        }
+    }
     return decision;
 }
 

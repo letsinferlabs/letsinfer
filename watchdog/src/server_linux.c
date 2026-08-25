@@ -31,6 +31,7 @@
 #define WATCHDOG_MINUTE_CAPACITY 43200u
 #define WATCHDOG_QUARTER_CAPACITY 35040u
 #define WATCHDOG_PENDING_MAX 256u
+#define WATCHDOG_SAFETY_INTERVAL_MS 100u
 #define WATCHDOG_QUERY_SCAN_MAX 1024u
 #define WATCHDOG_TLS_HANDSHAKE_TIMEOUT_MS 10000u
 #define WATCHDOG_CLIENT_IDLE_TIMEOUT_MS 30000u
@@ -106,6 +107,7 @@ typedef struct watchdog_server {
     bool started;
     uint64_t next_sequence;
     uint64_t next_sample_ms;
+    uint64_t next_safety_ms;
     uint64_t next_flush_ms;
     uint64_t last_sample_error_ms;
     watchdog_client clients[WATCHDOG_HARD_MAX_CONTROLLERS];
@@ -637,6 +639,40 @@ static int flush_storage_callback(void *context) {
     return flush_storage((watchdog_server *)context);
 }
 
+static int check_safety(watchdog_server *server) {
+    watchdog_sample sample;
+    if (server->has_latest) {
+        sample = server->latest;
+    } else {
+        watchdog_sample_init(&sample);
+    }
+    sample.unix_ms = clock_ms(CLOCK_REALTIME);
+    sample.monotonic_ms = clock_ms(CLOCK_MONOTONIC);
+    watchdog_safety_result safety_results[WATCHDOG_SAFETY_MAX_TARGETS];
+    size_t safety_result_count = 0u;
+    if (watchdog_safety_supervisor_tick(
+            &server->safety,
+            &sample,
+            flush_storage_callback,
+            server,
+            safety_results,
+            &safety_result_count) != 0) return WATCHDOG_COLLECT_FATAL;
+    for (size_t index = 0u; index < safety_result_count; ++index) {
+        watchdog_safety_result *result = &safety_results[index];
+        const watchdog_event event = {
+            .unix_ms = sample.unix_ms,
+            .kind = result->kind,
+            .severity = result->severity,
+            .workload_id = sample.workload_id,
+            .payload_json = result->payload_json
+        };
+        if (watchdog_metadata_add_event(&server->metadata, &event, NULL) != 0) {
+            return WATCHDOG_COLLECT_FATAL;
+        }
+    }
+    return 0;
+}
+
 static int collect_sample(watchdog_server *server) {
     if (server->pending_count == WATCHDOG_PENDING_MAX && flush_storage(server) != 0) return -1;
     watchdog_sample sample;
@@ -670,31 +706,6 @@ static int collect_sample(watchdog_server *server) {
     server->pending[server->pending_count++] = sample;
     server->latest = sample;
     server->has_latest = true;
-
-    watchdog_safety_result safety_results[WATCHDOG_SAFETY_MAX_TARGETS];
-    size_t safety_result_count = 0u;
-    if (watchdog_safety_supervisor_tick(
-            &server->safety,
-            &sample,
-            flush_storage_callback,
-            server,
-            safety_results,
-            &safety_result_count) != 0) return WATCHDOG_COLLECT_FATAL;
-    for (size_t safety_index = 0u;
-         safety_index < safety_result_count;
-         ++safety_index) {
-        watchdog_safety_result *safety_result = &safety_results[safety_index];
-        const watchdog_event event = {
-            .unix_ms = sample.unix_ms,
-            .kind = safety_result->kind,
-            .severity = safety_result->severity,
-            .workload_id = sample.workload_id,
-            .payload_json = safety_result->payload_json
-        };
-        if (watchdog_metadata_add_event(&server->metadata, &event, NULL) != 0) {
-            return WATCHDOG_COLLECT_FATAL;
-        }
-    }
 
     watchdog_sample completed;
     if (watchdog_rollup_push(&server->minute_rollup, &sample, &completed)) {
@@ -1027,6 +1038,7 @@ static int run_loop(watchdog_server *server) {
         }
         uint64_t deadline = server->next_sample_ms < server->next_flush_ms
             ? server->next_sample_ms : server->next_flush_ms;
+        if (server->next_safety_ms < deadline) deadline = server->next_safety_ms;
         int timeout = deadline <= before_poll ? 0 : (int)(deadline - before_poll);
         if (query_ready) timeout = 0;
         const int ready = poll(
@@ -1072,6 +1084,13 @@ static int run_loop(watchdog_server *server) {
             server->next_sample_ms += server->config.sample_interval_ms;
             if (server->next_sample_ms <= now) {
                 server->next_sample_ms = now + server->config.sample_interval_ms;
+            }
+        }
+        if (now >= server->next_safety_ms) {
+            if (check_safety(server) == WATCHDOG_COLLECT_FATAL) return -1;
+            server->next_safety_ms += WATCHDOG_SAFETY_INTERVAL_MS;
+            if (server->next_safety_ms <= now) {
+                server->next_safety_ms = now + WATCHDOG_SAFETY_INTERVAL_MS;
             }
         }
         if (now >= server->next_flush_ms) {
@@ -1141,6 +1160,7 @@ int watchdog_server_run(const watchdog_config *config) {
     reload_requested = 0;
     const uint64_t now = clock_ms(CLOCK_MONOTONIC);
     server->next_sample_ms = now;
+    server->next_safety_ms = now;
     server->next_flush_ms = now + config->flush_interval_ms;
     server->started = true;
     add_server_event(server, "server.start");
