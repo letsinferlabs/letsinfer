@@ -4483,6 +4483,7 @@ def require_matching_container(
     *,
     manifest_sha256: str,
     runtime_digest: str | None,
+    require_memory_containment: bool = True,
 ) -> None:
     labels = inspection.get("Config", {}).get("Labels") or {}
     expected = {
@@ -4516,7 +4517,8 @@ def require_matching_container(
         )
     if inspection.get("Image") != manifest["image"]["immutable_id"]:
         raise LetsInferError("existing container image does not match the release manifest")
-    require_container_memory_contract(inspection, manifest)
+    if require_memory_containment:
+        require_container_memory_contract(inspection, manifest)
 
 
 def container_memory_contract(
@@ -5141,6 +5143,34 @@ def serve(
             )
         qualification_existing = True
         inspection = None
+    if (
+        inspection is not None
+        and qualification_config is None
+        and arguments.existing_ok
+    ):
+        try:
+            require_container_memory_contract(inspection, manifest)
+        except LetsInferError:
+            # A Core-only security update may strengthen containment without
+            # changing the selected runtime. Prove the exact old container
+            # identity before replacing it, and require Watchdog to acknowledge
+            # disarm before the process exits. The recreated container uses the
+            # same manifest, runtime artifact, image, model, and credentials.
+            require_matching_container(
+                inspection,
+                manifest,
+                port,
+                manifest_sha256=manifest_sha256,
+                runtime_digest=runtime_digest,
+                require_memory_containment=False,
+            )
+            if protection_config is not None:
+                disarm_before_planned_stop(protection_config)
+            run(["docker", "update", "--restart", "no", name], check=False)
+            if inspection.get("State", {}).get("Running") is True:
+                run(["docker", "stop", "--time", "120", name])
+            run(["docker", "rm", name])
+            inspection = None
     if inspection is not None:
         if not arguments.existing_ok:
             raise LetsInferError(f"container already exists: {name}")
@@ -16043,6 +16073,7 @@ class LocalEngineGroupExecutor:
                     task["port_base"],
                     manifest_sha256=config["manifest_sha256"],
                     runtime_digest=config["runtime_digest"],
+                    require_memory_containment=False,
                 )
                 labels = inspection.get("Config", {}).get("Labels") or {}
                 expected_labels = {
@@ -16052,7 +16083,32 @@ class LocalEngineGroupExecutor:
                 }
                 if any(labels.get(key) != value for key, value in expected_labels.items()):
                     raise LetsInferError("existing container has a different engine-group identity")
-                if not inspection.get("State", {}).get("Running", False):
+                try:
+                    require_container_memory_contract(inspection, manifest)
+                except LetsInferError:
+                    disarm_before_planned_stop(protection)
+                    run(
+                        [
+                            "docker", "update", "--restart", "no",
+                            config["container_name"],
+                        ],
+                        check=False,
+                    )
+                    if inspection.get("State", {}).get("Running") is True:
+                        run(
+                            [
+                                "docker", "stop", "--time", "120",
+                                config["container_name"],
+                            ]
+                        )
+                    run(["docker", "rm", config["container_name"]])
+                    publish_protection_state(protection, generation, "pending")
+                    run(command)
+                    inspection = container_inspect(config["container_name"])
+                if (
+                    inspection is not None
+                    and not inspection.get("State", {}).get("Running", False)
+                ):
                     run(["docker", "start", config["container_name"]])
                     inspection = container_inspect(config["container_name"])
             if inspection is None:

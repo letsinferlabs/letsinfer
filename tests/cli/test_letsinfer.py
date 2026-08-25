@@ -110,6 +110,65 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         self.assertEqual(option("--memory-swap"), str(memory_max))
         self.assertEqual(option("--oom-score-adj"), str(cli.ENGINE_OOM_SCORE_ADJUST))
 
+    def test_core_update_may_recreate_only_the_exact_unsafe_container(self) -> None:
+        manifest = cli.runtime_execution_manifest(
+            runtime_candidate(), qualified=True
+        )
+        target = cli.target_contract(manifest)
+        adapter = cli.adapter_for(manifest)
+        manifest_sha = "2" * 64
+        inspection = {
+            "Image": manifest["image"]["immutable_id"],
+            "Config": {
+                "Labels": {
+                    cli.MANAGED_LABEL: "true",
+                    cli.MANIFEST_SHA_LABEL: manifest_sha,
+                    cli.RELEASE_LABEL: manifest["release"],
+                    cli.MODEL_LABEL: manifest["model"]["alias"],
+                    cli.PORT_LABEL: "18000",
+                    cli.SECURITY_LABEL: cli.SECURITY_PROFILE,
+                    cli.ENGINE_LABEL: adapter.name,
+                    cli.TARGET_ID_LABEL: target["id"],
+                    cli.TARGET_PLATFORM_LABEL: target["platform"],
+                    cli.ACCELERATOR_ARCHITECTURE_LABEL: target["accelerator"][
+                        "architecture"
+                    ],
+                    cli.MEMORY_MODEL_LABEL: target["memory"]["topology"],
+                    cli.GPU_COUNT_LABEL: str(target["accelerator"]["count"]),
+                    cli.GPU_PARTITIONING_LABEL: target["accelerator"][
+                        "partitioning"
+                    ],
+                }
+            },
+            "HostConfig": {},
+        }
+        with self.assertRaisesRegex(cli.LetsInferError, "containment contract"):
+            cli.require_matching_container(
+                inspection,
+                manifest,
+                18000,
+                manifest_sha256=manifest_sha,
+                runtime_digest=None,
+            )
+        cli.require_matching_container(
+            inspection,
+            manifest,
+            18000,
+            manifest_sha256=manifest_sha,
+            runtime_digest=None,
+            require_memory_containment=False,
+        )
+        inspection["Config"]["Labels"][cli.MODEL_LABEL] = "different"
+        with self.assertRaisesRegex(cli.LetsInferError, "refusing to adopt"):
+            cli.require_matching_container(
+                inspection,
+                manifest,
+                18000,
+                manifest_sha256=manifest_sha,
+                runtime_digest=None,
+                require_memory_containment=False,
+            )
+
     def test_last_watchdog_incident_survives_trip_acknowledgement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
