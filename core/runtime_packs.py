@@ -184,6 +184,52 @@ def _catalog_github_identity(
     return value["github_id"]
 
 
+def _catalog_maintainer_waiver(
+    value: Any,
+    where: str,
+    *,
+    pull_request: int,
+    expected_policy: str,
+) -> None:
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "schema_version",
+            "policy",
+            "actor",
+            "reason",
+            "comment_id",
+            "comment_url",
+            "issued_at",
+        }
+        or value.get("schema_version") != 1
+        or value.get("policy") != expected_policy
+        or not isinstance(value.get("reason"), str)
+        or not value["reason"].strip()
+        or len(value["reason"].encode("utf-8")) > 1000
+        or not isinstance(value.get("comment_id"), int)
+        or isinstance(value.get("comment_id"), bool)
+        or value["comment_id"] <= 0
+        or value.get("comment_url")
+        != (
+            "https://github.com/letsinferlabs/runtimes/pull/"
+            f"{pull_request}#issuecomment-{value.get('comment_id')}"
+        )
+        or not isinstance(value.get("issued_at"), str)
+        or re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+            r"(?:\.[0-9]{1,6})?Z",
+            value["issued_at"],
+        )
+        is None
+    ):
+        raise RuntimePackError(f"catalog maintainer override for {where} is invalid")
+    _catalog_github_identity(
+        value.get("actor"), f"{where}.waiver.actor", allow_organization=False
+    )
+
+
 def _relative_path(value: Any, where: str) -> pathlib.PurePosixPath:
     if not isinstance(value, str) or not value:
         raise RuntimePackError(f"{where} must be a non-empty relative path")
@@ -2353,32 +2399,35 @@ def load_catalog(
                             f"catalog candidate key {candidate} differs from its exact identities"
                         )
                     benchmark = release.get("benchmark")
-                    if benchmark is None:
-                        raise RuntimePackError(
-                            f"qualified catalog release {where} has no benchmark"
-                        )
-                    if not isinstance(benchmark, dict) or set(benchmark) != {
-                        "id",
-                        "suite",
-                        "score",
-                    }:
-                        raise RuntimePackError(f"catalog benchmark for {where} is invalid")
-                    if not isinstance(benchmark.get("id"), str) or not SHA256_RE.fullmatch(
-                        benchmark["id"]
-                    ):
-                        raise RuntimePackError("catalog benchmark id must be a SHA-256")
-                    if benchmark.get("suite") != policy["benchmark_suite"]:
-                        raise RuntimePackError("catalog benchmark suite is unsupported")
-                    score = benchmark.get("score")
-                    if (
-                        not isinstance(score, (int, float))
-                        or isinstance(score, bool)
-                        or not math.isfinite(score)
-                        or score <= 0
-                    ):
-                        raise RuntimePackError(
-                            "catalog benchmark score must be positive and finite"
-                        )
+                    if benchmark is not None:
+                        if not isinstance(benchmark, dict) or set(benchmark) != {
+                            "id",
+                            "suite",
+                            "score",
+                        }:
+                            raise RuntimePackError(
+                                f"catalog benchmark for {where} is invalid"
+                            )
+                        if not isinstance(
+                            benchmark.get("id"), str
+                        ) or not SHA256_RE.fullmatch(benchmark["id"]):
+                            raise RuntimePackError(
+                                "catalog benchmark id must be a SHA-256"
+                            )
+                        if benchmark.get("suite") != policy["benchmark_suite"]:
+                            raise RuntimePackError(
+                                "catalog benchmark suite is unsupported"
+                            )
+                        score = benchmark.get("score")
+                        if (
+                            not isinstance(score, (int, float))
+                            or isinstance(score, bool)
+                            or not math.isfinite(score)
+                            or score <= 0
+                        ):
+                            raise RuntimePackError(
+                                "catalog benchmark score must be positive and finite"
+                            )
                     provenance = release.get("provenance")
                     verification = release.get("verification")
                     if not isinstance(provenance, dict) or not isinstance(
@@ -2440,6 +2489,72 @@ def load_catalog(
                         ):
                             raise RuntimePackError(
                                 f"catalog community qualification for {where} is invalid"
+                            )
+                    elif method in {
+                        "community-two-independent-v1",
+                        "maintainer-waiver-one-independent-v1",
+                        "allowlisted-maintainer-bypass-v1",
+                    }:
+                        waived = method != "community-two-independent-v1"
+                        expected_fields = {
+                            "method",
+                            "consensus_path",
+                            "consensus_sha256",
+                            "verifiers",
+                        }
+                        if waived:
+                            expected_fields.add("waiver")
+                        expected_verifiers = {
+                            "community-two-independent-v1": 2,
+                            "maintainer-waiver-one-independent-v1": 1,
+                        }.get(method)
+                        verifiers = verification.get("verifiers")
+                        if (
+                            set(verification) != expected_fields
+                            or set(provenance)
+                            != {
+                                "repository",
+                                "pull_request",
+                                "pull_request_url",
+                                "proposal_head_sha",
+                                "execution_sha256",
+                                "qualified_commit_sha",
+                                "consensus_sha256",
+                            }
+                            or verification.get("consensus_sha256")
+                            != provenance.get("consensus_sha256")
+                            or not SHA256_RE.fullmatch(
+                                str(verification.get("consensus_sha256"))
+                            )
+                            or verification.get("consensus_path")
+                            != f"{candidate}/benchmark.consensus.json"
+                            or not SHA256_RE.fullmatch(
+                                str(provenance.get("execution_sha256"))
+                            )
+                            or not isinstance(verifiers, list)
+                            or (
+                                expected_verifiers is not None
+                                and len(verifiers) != expected_verifiers
+                            )
+                            or (
+                                method == "allowlisted-maintainer-bypass-v1"
+                                and len(verifiers) > 2
+                            )
+                        ):
+                            raise RuntimePackError(
+                                f"catalog consensus qualification for {where} is invalid"
+                            )
+                        if waived:
+                            _catalog_maintainer_waiver(
+                                verification.get("waiver"),
+                                where,
+                                pull_request=provenance.get("pull_request"),
+                                expected_policy=(
+                                    "maintainer-one-independent-pass-v1"
+                                    if method
+                                    == "maintainer-waiver-one-independent-v1"
+                                    else "allowlisted-maintainer-bypass-v1"
+                                ),
                             )
                     elif method == "runtime-contract-migration-v1":
                         verification_fields = {
@@ -2534,6 +2649,20 @@ def load_catalog(
                         raise RuntimePackError(
                             f"catalog verifiers for {where} are duplicated"
                         )
+                    if benchmark is None and not (
+                        method == "allowlisted-maintainer-bypass-v1"
+                        and len(verifiers) == 0
+                    ):
+                        raise RuntimePackError(
+                            f"catalog release {where} lacks required benchmark evidence"
+                        )
+                    if benchmark is not None and (
+                        method == "allowlisted-maintainer-bypass-v1"
+                        and len(verifiers) == 0
+                    ):
+                        raise RuntimePackError(
+                            f"unverified catalog release {where} carries a benchmark score"
+                        )
             if recommended is not None:
                 recommended_candidate = candidates[recommended["candidate"]]
                 recommended_release = recommended_candidate["releases"].get(
@@ -2542,6 +2671,10 @@ def load_catalog(
                 if not isinstance(recommended_release, dict):
                     raise RuntimePackError(
                         f"catalog recommendation for {model}/{target_id} is not qualified"
+                    )
+                if recommended_release.get("benchmark") is None:
+                    raise RuntimePackError(
+                        f"catalog recommendation for {model}/{target_id} is unscored"
                     )
     return value
 

@@ -7441,12 +7441,19 @@ def _group_release_identity(
         or release.get("engine") != runtime.runtime["engine"]["id"]
         or release.get("engine_oci") != runtime.runtime["engine"]["oci"]["reference"]
         or release.get("model_uri") != runtime.runtime["model"]["uri"]
-        or not isinstance(benchmark, Mapping)
-        or not isinstance(benchmark.get("id"), str)
-        or not SHA256_RE.fullmatch(benchmark["id"])
-        or not isinstance(runtime_benchmark, Mapping)
         or (
-            record is not None
+            benchmark is not None
+            and (
+                not isinstance(benchmark, Mapping)
+                or not isinstance(benchmark.get("id"), str)
+                or not SHA256_RE.fullmatch(benchmark["id"])
+            )
+        )
+        or not isinstance(runtime_benchmark, Mapping)
+        or (benchmark is None and record is not None)
+        or (
+            benchmark is not None
+            and record is not None
             and (
                 not isinstance(record, Mapping)
                 or benchmark.get("id") != record.get("id")
@@ -7486,10 +7493,14 @@ def _group_release_identity(
         "target_id": target_id,
         "target_contract_sha256": target_sha256,
         "qualification": "qualified",
-        "benchmark": {
-            "id": benchmark["id"],
-            "evidence": benchmark.get("evidence"),
-        },
+        "benchmark": (
+            None
+            if benchmark is None
+            else {
+                "id": benchmark["id"],
+                "evidence": benchmark.get("evidence"),
+            }
+        ),
         "authors": [author["github_login"] for author in authors],
         "license": release["license"],
     }
@@ -11418,8 +11429,12 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
                             "engine": release["engine"],
                             "target": target,
                             "model_uri": release["model_uri"],
-                            "benchmark_id": benchmark["id"],
-                            "benchmark_score": benchmark["score"],
+                            "benchmark_id": (
+                                benchmark["id"] if benchmark is not None else None
+                            ),
+                            "benchmark_score": (
+                                benchmark["score"] if benchmark is not None else None
+                            ),
                             "verification": release["verification"],
                             "provenance": release["provenance"],
                             "recommended": recommended,
@@ -11479,7 +11494,7 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
             row["target"],
             (
                 str(len(row["verification"]["verifiers"]))
-                if row["verification"]["method"] == "community-consensus-v1"
+                if "consensus_path" in row["verification"]
                 else "legacy"
             ),
             " · ".join(
@@ -11487,6 +11502,7 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
                 for enabled, label in (
                     (row["recommended"], "recommended"),
                     (row["installed"], "installed"),
+                    (row["benchmark_score"] is None, "unscored"),
                 )
                 if enabled
             )
@@ -11682,7 +11698,11 @@ def inspect_runtime(arguments: argparse.Namespace) -> int:
             provenance = publication["provenance"]
             verifiers = ", ".join(
                 f"@{item['github_login']}" for item in verification["verifiers"]
-            ) or "maintainer migration"
+            ) or (
+                "maintainer override"
+                if verification["method"] == "allowlisted-maintainer-bypass-v1"
+                else "maintainer migration"
+            )
             if presenter is not None:
                 presenter.records(
                     (
@@ -11702,7 +11722,7 @@ def inspect_runtime(arguments: argparse.Namespace) -> int:
                     f"verifiers={verifiers}\t"
                     f"score={benchmark['score'] if benchmark is not None else 'unscored'}"
                 )
-            if verification["method"] == "community-consensus-v1":
+            if "consensus_path" in verification:
                 if presenter is not None:
                     presenter.records(
                         (
