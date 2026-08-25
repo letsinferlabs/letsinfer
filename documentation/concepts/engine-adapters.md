@@ -49,6 +49,17 @@ The adapter must expose:
 - `/v1/letsinfer/telemetry` with normalized request, queue, token, context,
   prefix-cache, and KV-cache fields.
 
+During a long startup, an adapter may also expose the authenticated optional
+`/v1/letsinfer/progress` endpoint. It returns one bounded schema-1 object with
+exact fields `schema_version`, `state`, `detail`, and `updated_unix_ms`.
+`state` is one of `acquiring-inputs`, `preparing-cache`,
+`building-auxiliary`, `loading-model`, `warming-kernels`,
+`materializing-prompts`, `measuring`, `finalizing-evidence`, or
+`restoring-service`. `detail` is a concise engine-neutral explanation, never a
+model path, command line, credential, or log stream. Core treats an absent,
+stale, malformed, oversized, or unreachable endpoint as unavailable and
+continues with its own generic phase.
+
 Core treats unavailable optional metrics as unavailable, never as zero. The
 adapter must keep lifecycle and telemetry state monotonic enough for Watchdog,
 the status CLI, and the Mac app to consume the same state plane.

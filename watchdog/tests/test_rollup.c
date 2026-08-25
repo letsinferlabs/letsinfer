@@ -21,6 +21,7 @@ void test_rollup_averages_and_rotates(void) {
     first.cpu_clock_mhz = 2000u;
     first.gpu_clock_mhz = 1000u;
     first.active_requests = 2u;
+    first.connected_clients = 6u;
     first.queued_requests = 4u;
     first.requests_completed = 10u;
     first.output_tokens = 100u;
@@ -37,6 +38,7 @@ void test_rollup_averages_and_rotates(void) {
     second.cpu_clock_mhz = 3000u;
     second.gpu_clock_mhz = 2000u;
     second.active_requests = 4u;
+    second.connected_clients = 8u;
     second.queued_requests = 2u;
     second.requests_completed = 12u;
     second.output_tokens = 140u;
@@ -63,6 +65,7 @@ void test_rollup_averages_and_rotates(void) {
     TEST_ASSERT(completed.gpu_clock_mhz == 1500u);
     TEST_ASSERT(completed.vram_clock_mhz == WATCHDOG_CLOCK_UNKNOWN);
     TEST_ASSERT(completed.active_requests == 3u);
+    TEST_ASSERT(completed.connected_clients == 7u);
     TEST_ASSERT(completed.queued_requests == 3u);
     TEST_ASSERT(completed.requests_completed == 12u);
     TEST_ASSERT(completed.output_tokens == 140u);

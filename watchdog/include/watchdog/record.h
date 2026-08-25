@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define WATCHDOG_RECORD_BYTES 280u
+#define WATCHDOG_RECORD_BYTES 284u
 #define WATCHDOG_MAX_CPU_CORES 32u
 #define WATCHDOG_GPU_ENGINES 6u
 #define WATCHDOG_PERCENT_UNKNOWN 255u
@@ -62,6 +62,7 @@ typedef struct watchdog_sample {
     uint32_t system_ram_clock_mhz;
     uint32_t active_requests;
     uint32_t queued_requests;
+    uint32_t connected_clients;
     uint64_t requests_received;
     uint64_t requests_admitted;
     uint64_t requests_completed;
