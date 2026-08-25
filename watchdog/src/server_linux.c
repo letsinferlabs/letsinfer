@@ -648,6 +648,7 @@ static int collect_sample(watchdog_server *server) {
             server->config.gateway_metrics_path, sample.unix_ms, &gateway) == 0) {
         sample.flags |= WATCHDOG_SAMPLE_GATEWAY_AVAILABLE;
         sample.active_requests = gateway.active_requests;
+        sample.connected_clients = gateway.connected_clients;
         sample.queued_requests = gateway.queued_requests;
         sample.requests_received = gateway.requests_received;
         sample.requests_admitted = gateway.requests_admitted;

@@ -44,6 +44,7 @@ typedef struct watchdog_rollup {
     watchdog_unsigned_accumulator vram_clock;
     watchdog_unsigned_accumulator system_ram_clock;
     watchdog_unsigned_accumulator active_requests;
+    watchdog_unsigned_accumulator connected_clients;
     watchdog_unsigned_accumulator queued_requests;
 } watchdog_rollup;
 

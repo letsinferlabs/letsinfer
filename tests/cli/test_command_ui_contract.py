@@ -75,6 +75,7 @@ def serving_payload() -> dict[str, object]:
         "protection": {"armed": True, "trip_latched": False},
         "telemetry": {
             "active_requests": 2,
+            "connected_clients": 1,
             "queued_requests": 1,
             "rates": {
                 "output_tokens_per_second": 58.9,

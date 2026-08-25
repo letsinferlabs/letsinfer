@@ -12,7 +12,7 @@
 
 #define GATEWAY_METRICS_MAX_BYTES 4096u
 #define GATEWAY_METRICS_MAX_AGE_MS 5000u
-#define GATEWAY_METRICS_FIELDS 18u
+#define GATEWAY_METRICS_FIELDS 19u
 
 typedef struct metric_field {
     const char *name;
@@ -25,6 +25,7 @@ typedef struct metric_field {
 
 static const metric_field fields[GATEWAY_METRICS_FIELDS] = {
     FIELD_U32(active_requests),
+    FIELD_U32(connected_clients),
     FIELD_U32(queued_requests),
     FIELD_U64(requests_received),
     FIELD_U64(requests_admitted),
@@ -115,7 +116,7 @@ int watchdog_gateway_metrics_read(
         *separator = '\0';
         const char *value = separator + 1;
         if (strcmp(line, "version") == 0) {
-            if (version || strcmp(value, "1") != 0) return -1;
+            if (version || strcmp(value, "2") != 0) return -1;
             version = true;
             continue;
         }

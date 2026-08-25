@@ -99,6 +99,7 @@ message TelemetrySample {
   uint64 prefix_cache_hits = 40;
   uint64 usage_records_dropped = 41;
   uint64 usage_write_errors = 42;
+  uint32 connected_clients = 43;
 }
 
 message GpuMetrics {
