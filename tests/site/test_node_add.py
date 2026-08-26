@@ -834,10 +834,14 @@ class NodeAddContractTests(unittest.TestCase):
             mock.patch.object(cli, "_site_store", return_value=mock.MagicMock()),
             mock.patch.object(cli, "plan_local_move", side_effect=(blocked, ready)),
             mock.patch.object(
-                cli, "_node_move_running_group_ids", return_value=group_ids
+                cli,
+                "_node_move_stop_targets",
+                return_value=(group_ids, None),
             ) as resolve,
             mock.patch.object(
-                cli, "_stop_node_move_groups", return_value=group_ids
+                cli,
+                "_stop_node_move_models",
+                return_value=(group_ids, None),
             ) as stop,
             mock.patch.object(cli, "_command_activity", return_value=activity),
             mock.patch.object(cli, "site_move_command", return_value=0) as move,
@@ -853,8 +857,17 @@ class NodeAddContractTests(unittest.TestCase):
             "Stop model deepseek-v4-flash and move this node into Home?",
             require_tty=True,
         )
+        warning = presenter.panel.call_args.args[0]
+        self.assertIn("This main node will become a child of Home", warning[0])
+        self.assertEqual(warning[1], "OpenAI endpoint  http://home.local:8000/v1")
+        self.assertIn("controller pairings", warning[2])
+        self.assertIn("must be placed again by Home", warning[3])
+        self.assertEqual(
+            presenter.panel.call_args.kwargs["title"],
+            "Main node authority will move",
+        )
         resolve.assert_called_once_with((active,))
-        stop.assert_called_once_with(group_ids)
+        stop.assert_called_once_with(group_ids, None)
         move.assert_called_once()
         clear.assert_called_once_with(request["request_id"])
 
@@ -884,22 +897,26 @@ class NodeAddContractTests(unittest.TestCase):
             mock.patch.object(cli, "_site_store", return_value=mock.MagicMock()),
             mock.patch.object(cli, "plan_local_move", side_effect=(blocked, ready)),
             mock.patch.object(
-                cli, "_node_move_running_group_ids", return_value=group_ids
+                cli,
+                "_node_move_stop_targets",
+                return_value=(group_ids, None),
             ),
             mock.patch.object(
-                cli, "_stop_node_move_groups", return_value=group_ids
+                cli,
+                "_stop_node_move_models",
+                return_value=(group_ids, None),
             ),
             mock.patch.object(cli, "_command_activity", return_value=activity),
             mock.patch.object(
                 cli, "site_move_command", side_effect=cli.LetsInferError("expired")
             ),
             mock.patch.object(cli, "read_site_identity", return_value=identity),
-            mock.patch.object(cli, "_restore_node_move_groups") as restore,
+            mock.patch.object(cli, "_restore_node_move_models") as restore,
             mock.patch.object(cli, "clear_node_add_request") as clear,
             self.assertRaisesRegex(cli.LetsInferError, "expired"),
         ):
             cli._accept_node_add_request(arguments, identity, request, confirmed=True)
-        restore.assert_called_once_with(group_ids)
+        restore.assert_called_once_with(group_ids, None)
         clear.assert_not_called()
 
     def test_candidate_declining_model_stop_is_a_normal_cancellation(self) -> None:
@@ -921,7 +938,7 @@ class NodeAddContractTests(unittest.TestCase):
             mock.patch.object(cli, "_human_presenter", return_value=presenter),
             mock.patch.object(cli, "_site_store", return_value=mock.MagicMock()),
             mock.patch.object(cli, "plan_local_move", return_value=plan),
-            mock.patch.object(cli, "_stop_node_move_groups") as stop,
+            mock.patch.object(cli, "_stop_node_move_models") as stop,
             self.assertRaisesRegex(cli.CommandDenied, "Node move cancelled"),
         ):
             cli._accept_node_add_request(
@@ -931,6 +948,124 @@ class NodeAddContractTests(unittest.TestCase):
                 confirmed=True,
             )
         stop.assert_not_called()
+
+    def test_node_move_stops_a_running_qualification_candidate(self) -> None:
+        placement_id = "6" * 32
+        placement = {
+            "placement_id": placement_id,
+            "model": "nemotron-3.5-lightning",
+            "state": "running",
+        }
+        qualification = {
+            "qualification_mode": True,
+            "placement_id": placement_id,
+            "model": placement["model"],
+        }
+        store = mock.MagicMock()
+        store.__enter__.return_value.engine_groups.return_value = []
+        path = mock.Mock()
+        path.is_file.return_value = True
+        with (
+            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(
+                cli, "qualification_service_config_path", return_value=path
+            ),
+            mock.patch.object(
+                cli, "read_service_config", return_value=qualification
+            ),
+        ):
+            self.assertEqual(
+                cli._node_move_stop_targets((placement,)),
+                ((), qualification),
+            )
+
+        with (
+            mock.patch.object(
+                cli, "_qualification_candidate_lifecycle", return_value=0
+            ) as lifecycle,
+            mock.patch.object(
+                cli, "_stop_node_move_groups", return_value=()
+            ),
+        ):
+            self.assertEqual(
+                cli._stop_node_move_models((), qualification),
+                ((), qualification),
+            )
+        lifecycle.assert_called_once_with(qualification, "stop")
+
+    def test_candidate_move_stops_the_qualification_owner_then_moves(self) -> None:
+        request = self.request()
+        presenter = mock.Mock()
+        presenter.prompt.confirm.return_value = True
+        arguments = types.SimpleNamespace(action_id="node.add", json=False)
+        identity = types.SimpleNamespace(site_id="8" * 32)
+        active = {
+            "placement_id": "6" * 32,
+            "model": "nemotron-3.5-lightning",
+            "state": "running",
+        }
+        qualification = {
+            "qualification_mode": True,
+            "placement_id": active["placement_id"],
+            "model": active["model"],
+        }
+        blocked = types.SimpleNamespace(
+            active_placements=(active,),
+            blocking_reasons=(
+                "all source-site placements must be stopped before the move",
+            ),
+        )
+        ready = types.SimpleNamespace(active_placements=(), blocking_reasons=())
+        activity = mock.MagicMock()
+        activity.enabled = False
+        with (
+            mock.patch.object(cli, "_human_presenter", return_value=presenter),
+            mock.patch.object(cli, "_site_store", return_value=mock.MagicMock()),
+            mock.patch.object(cli, "plan_local_move", side_effect=(blocked, ready)),
+            mock.patch.object(
+                cli,
+                "_node_move_stop_targets",
+                return_value=((), qualification),
+            ),
+            mock.patch.object(
+                cli,
+                "_stop_node_move_models",
+                return_value=((), qualification),
+            ) as stop,
+            mock.patch.object(cli, "_command_activity", return_value=activity),
+            mock.patch.object(cli, "site_move_command", return_value=0) as move,
+            mock.patch.object(cli, "clear_node_add_request"),
+        ):
+            self.assertEqual(
+                cli._accept_node_add_request(
+                    arguments, identity, request, confirmed=True
+                ),
+                0,
+            )
+        stop.assert_called_once_with((), qualification)
+        move.assert_called_once()
+
+    def test_node_move_rejects_an_unowned_running_placement(self) -> None:
+        placement_id = "6" * 32
+        store = mock.MagicMock()
+        store.__enter__.return_value.engine_groups.return_value = []
+        path = mock.Mock()
+        path.is_file.return_value = False
+        with (
+            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(
+                cli, "qualification_service_config_path", return_value=path
+            ),
+            self.assertRaisesRegex(cli.LetsInferError, "active owner"),
+        ):
+            cli._node_move_stop_targets(
+                (
+                    {
+                        "placement_id": placement_id,
+                        "model": "nemotron-3.5-lightning",
+                    },
+                )
+            )
 
     def test_node_move_resolves_only_stable_running_groups(self) -> None:
         placement_id = "6" * 32
