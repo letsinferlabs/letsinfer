@@ -44,6 +44,17 @@ class MockProductEnvironment:
                 "models": models,
                 "services": self.state["services"],
             },
+            "topology": {
+                "nodes": nodes,
+                "links": [
+                    {
+                        "left": nodes[0]["node_id"],
+                        "right": nodes[1]["node_id"],
+                        "verified": nodes[1]["state"] == "active",
+                    }
+                ],
+                "models": models,
+            },
             "doctor": {
                 "ready": all(item["passed"] for item in self.state["checks"]),
                 "checks": self.state["checks"],
@@ -268,12 +279,27 @@ class ProductCommandScenarioTests(unittest.TestCase):
         context = mock.MagicMock()
         context.__enter__.return_value = store
         output = io.StringIO()
+        identity = types.SimpleNamespace(
+            role="main",
+            member_id="main-1",
+            coordinator_id="main-1",
+        )
+        rows = [
+            {
+                "member_id": "child-1",
+                "display_name": "Workshop",
+                "role": "child",
+                "state": "active",
+            }
+        ]
         with (
             contextlib.redirect_stdout(output),
+            mock.patch.object(cli, "read_site_identity", return_value=identity),
+            mock.patch.object(cli, "_node_command_rows", return_value=rows),
             mock.patch.object(cli, "_site_store", return_value=context),
         ):
             result = cli.member_drain_command(
-                argparse.Namespace(member="child-1", json=True)
+                argparse.Namespace(member="child-1", json=True, yes=True)
             )
         self.assertEqual(result, 0)
         self.assertEqual(

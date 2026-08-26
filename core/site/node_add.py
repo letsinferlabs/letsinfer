@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import pathlib
@@ -35,6 +36,31 @@ class NodeAddError(RuntimeError):
 
 def request_path() -> pathlib.Path:
     return data_root() / "node-add-request.json"
+
+
+def decision_path() -> pathlib.Path:
+    return data_root() / "node-add-decision.json"
+
+
+def _write_private_json(path: pathlib.Path, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(
+                json.dumps(dict(value), sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+                + b"\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _private_document(path: pathlib.Path) -> dict[str, Any]:
@@ -112,25 +138,8 @@ def store_request(value: Mapping[str, Any]) -> dict[str, Any]:
     now = int(time.time())
     if not now < document["expires_at_unix"] <= now + MAX_REQUEST_SECONDS:
         raise NodeAddError("node-add request lifetime is invalid")
-    path = request_path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.parent.chmod(0o700)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(
-                json.dumps(document, sort_keys=True, separators=(",", ":")).encode(
-                    "utf-8"
-                )
-                + b"\n"
-            )
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.replace(path)
-        path.chmod(0o600)
-    finally:
-        temporary.unlink(missing_ok=True)
+    decision_path().unlink(missing_ok=True)
+    _write_private_json(request_path(), document)
     return document
 
 
@@ -153,6 +162,75 @@ def clear_request(request_id: str) -> None:
     if value["request_id"] != request_id:
         raise NodeAddError("node-add request changed before completion")
     path.unlink()
+
+
+def deny_request(request_id: str) -> dict[str, Any]:
+    path = request_path()
+    if not path.exists():
+        raise NodeAddError("node-add request is no longer pending")
+    value = _private_document(path)
+    if value["request_id"] != request_id:
+        raise NodeAddError("node-add request changed before denial")
+    decision = {
+        "schema_version": 1,
+        "protocol": PROTOCOL,
+        "request_id": request_id,
+        "status": "denied",
+        "expires_at_unix": value["expires_at_unix"],
+    }
+    _write_private_json(decision_path(), decision)
+    path.unlink()
+    return {
+        "protocol": PROTOCOL,
+        "request_id": request_id,
+        "status": "denied",
+    }
+
+
+def request_status(request_id: str) -> dict[str, Any]:
+    if not ID_RE.fullmatch(request_id):
+        raise NodeAddError("node-add request identity is invalid")
+    pending = pending_request()
+    if pending is not None and pending["request_id"] == request_id:
+        status = "pending"
+    else:
+        status = "unknown"
+        path = decision_path()
+        if path.exists():
+            try:
+                details = path.stat()
+                raw = path.read_bytes()
+                value = json.loads(raw)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise NodeAddError("node-add decision cannot be read") from error
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(details.st_mode)
+                or details.st_uid != os.getuid()
+                or stat.S_IMODE(details.st_mode) & 0o077
+                or len(raw) > 4096
+                or not isinstance(value, dict)
+                or set(value)
+                != {
+                    "schema_version",
+                    "protocol",
+                    "request_id",
+                    "status",
+                    "expires_at_unix",
+                }
+                or type(value.get("schema_version")) is not int
+                or value.get("schema_version") != 1
+                or value.get("protocol") != PROTOCOL
+                or value.get("status") != "denied"
+                or not ID_RE.fullmatch(str(value.get("request_id", "")))
+                or type(value.get("expires_at_unix")) is not int
+            ):
+                raise NodeAddError("node-add decision is invalid")
+            if value["expires_at_unix"] <= int(time.time()):
+                path.unlink()
+            elif value["request_id"] == request_id:
+                status = "denied"
+    return {"protocol": PROTOCOL, "request_id": request_id, "status": status}
 
 
 def send_request(
@@ -180,8 +258,89 @@ def send_request(
     return result
 
 
+def query_request_status(
+    endpoint: str,
+    certificate_sha256: str,
+    request_id: str,
+) -> dict[str, Any]:
+    if not ID_RE.fullmatch(request_id):
+        raise NodeAddError("node-add request identity is invalid")
+    parsed = urllib.parse.urlsplit(endpoint)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.path not in {"", "/"}:
+        raise NodeAddError("node-add candidate endpoint is invalid")
+    try:
+        result = PinnedHTTPS(
+            parsed.hostname,
+            parsed.port or DEFAULT_PORT,
+            certificate_sha256,
+        ).request("GET", f"/node/v1/add-request/{request_id}")
+    except ControlError as error:
+        raise NodeAddError(str(error)) from error
+    if (
+        set(result) != {"protocol", "request_id", "status"}
+        or result.get("protocol") != PROTOCOL
+        or result.get("request_id") != request_id
+        or result.get("status") not in {"pending", "denied", "unknown"}
+    ):
+        raise NodeAddError("node-add candidate returned an invalid request status")
+    return result
+
+
+def _decode_avahi_text(value: str) -> str:
+    """Decode Avahi's parsable ``\\DDD`` decimal byte escapes as UTF-8."""
+
+    raw = bytearray()
+    index = 0
+    while index < len(value):
+        if (
+            value[index] == "\\"
+            and index + 3 < len(value)
+            and value[index + 1:index + 4].isdigit()
+        ):
+            byte = int(value[index + 1:index + 4], 10)
+            if byte > 255:
+                raise NodeAddError("node discovery contains an invalid Avahi escape")
+            raw.append(byte)
+            index += 4
+            continue
+        raw.extend(value[index].encode("utf-8"))
+        index += 1
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise NodeAddError("node discovery contains invalid UTF-8") from error
+
+
+def _node_name(instance: str, hostname: str) -> str:
+    service_name = _decode_avahi_text(instance).removeprefix("Let's Infer — ")
+    service_name = re.sub(r"\s+#\d+$", "", service_name).strip()
+    host_name = _decode_avahi_text(hostname).rstrip(".")
+    if host_name.casefold().endswith(".local"):
+        host_name = host_name[:-6]
+    # RC.76 initialized every machine with the generic name Home. Prefer the
+    # already-public DNS hostname for those installations so adoption remains
+    # intelligible without rewriting persistent identity.
+    if not service_name or service_name.casefold() == "home":
+        return host_name or service_name
+    return service_name
+
+
+def _address_rank(value: str) -> tuple[int, bytes]:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return (5, value.encode("utf-8"))
+    if address.is_loopback:
+        category = 4
+    elif address.is_link_local:
+        category = 2 if address.version == 4 else 3
+    else:
+        category = 0 if address.version == 4 else 1
+    return (category, address.packed)
+
+
 def _parse_avahi(output: str) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
+    records: dict[str, tuple[dict[str, Any], tuple[str, str, int, str, str]]] = {}
     for line in output.splitlines():
         fields = line.split(";")
         if len(fields) < 10 or fields[0] != "=" or fields[4] != SERVICE_TYPE:
@@ -205,20 +364,41 @@ def _parse_avahi(output: str) -> list[dict[str, Any]]:
             or txt.get("control") != "letsinfer-node-control-v1"
         ):
             continue
+        try:
+            name = _node_name(fields[3], fields[6])
+        except NodeAddError:
+            continue
         host = f"[{address}]" if ":" in address else address
-        records.append(
-            {
-                "node_id": txt["node"],
-                "machine_id": txt["machine"],
-                "name": fields[3].removeprefix("Let's Infer — "),
-                "role": txt.get("role", "unknown"),
-                "state": txt.get("state", "configured"),
-                "endpoint": f"https://{host}:{port}",
-                "certificate_sha256": txt["tls"],
-                "address": address,
-            }
+        record = {
+            "node_id": txt["node"],
+            "machine_id": txt["machine"],
+            "name": name,
+            "role": txt.get("role", "unknown"),
+            "state": txt.get("state", "configured"),
+            "endpoint": f"https://{host}:{port}",
+            "certificate_sha256": txt["tls"],
+            "address": address,
+        }
+        identity = (
+            record["machine_id"],
+            record["certificate_sha256"],
+            port,
+            record["role"],
+            record["state"],
         )
-    return records
+        previous = records.get(record["node_id"])
+        if previous is not None and previous[1] != identity:
+            raise NodeAddError(
+                "node discovery found conflicting advertisements for one node"
+            )
+        if previous is None or _address_rank(address) < _address_rank(
+            str(previous[0]["address"])
+        ):
+            records[record["node_id"]] = (record, identity)
+    return sorted(
+        (record for record, _identity in records.values()),
+        key=lambda record: (str(record["name"]).casefold(), str(record["node_id"])),
+    )
 
 
 def discover_nodes(

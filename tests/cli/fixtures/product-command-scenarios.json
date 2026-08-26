@@ -400,6 +400,45 @@
           }
         }
       },
+      "topology": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": {
+          "action": "topology",
+          "links": [
+            {
+              "left": "main-1",
+              "right": "child-1",
+              "verified": false
+            }
+          ],
+          "models": [
+            {
+              "model": "ling-3-flash",
+              "nodes": [
+                "main-1"
+              ],
+              "replicas": 1,
+              "runtime": "sglang-ling@0.1.0-rc.2",
+              "state": "failed"
+            }
+          ],
+          "nodes": [
+            {
+              "display_name": "Home",
+              "node_id": "main-1",
+              "role": "main",
+              "state": "active"
+            },
+            {
+              "display_name": "Workshop",
+              "node_id": "child-1",
+              "role": "child",
+              "state": "offline"
+            }
+          ]
+        }
+      },
       "update.check": {
         "exit_code": 0,
         "stderr": "",
@@ -898,6 +937,46 @@
             "node": "active",
             "watchdog": "active"
           }
+        }
+      },
+      "topology": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": {
+          "action": "topology",
+          "links": [
+            {
+              "left": "main-1",
+              "right": "child-1",
+              "verified": true
+            }
+          ],
+          "models": [
+            {
+              "model": "ling-3-flash",
+              "nodes": [
+                "main-1",
+                "child-1"
+              ],
+              "replicas": 2,
+              "runtime": "sglang-ling@0.1.0-rc.2",
+              "state": "running"
+            }
+          ],
+          "nodes": [
+            {
+              "display_name": "Home",
+              "node_id": "main-1",
+              "role": "main",
+              "state": "active"
+            },
+            {
+              "display_name": "Workshop",
+              "node_id": "child-1",
+              "role": "child",
+              "state": "active"
+            }
+          ]
         }
       },
       "uninstall": {

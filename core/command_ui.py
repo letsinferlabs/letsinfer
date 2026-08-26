@@ -21,11 +21,16 @@ redirected stream it emits ordinary JSON without terminal decoration.
 from __future__ import annotations
 
 import builtins
+import contextlib
 import getpass
 import json
+import os
 import re
+import select
 import sys
+import termios
 import textwrap
+import tty
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Iterable, Mapping, Sequence, TextIO
@@ -396,13 +401,19 @@ class PromptFacade:
         default: str | None = None,
         require_tty: bool = False,
     ) -> str:
-        """Choose one value by its name or one-based index."""
+        """Choose one value with a highlighted TTY selector or line input."""
 
         if not choices:
             raise ValueError("choices cannot be empty")
         if default is not None and default not in choices:
             raise ValueError("default must be one of the choices")
         self._ensure_available(require_tty)
+        if (
+            self.terminal.interactive
+            and self._input_echoes
+            and sys.stdin.isatty()
+        ):
+            return self._interactive_choose(message, choices, default=default)
         for index, choice in enumerate(choices, 1):
             prefix = f"  {str(index).rjust(2)}  "
             if self.terminal.interactive:
@@ -437,6 +448,154 @@ class PromptFacade:
             validator=validate,
         )
         return choices[int(answer) - 1] if answer.isdecimal() else answer
+
+    def _choice_lines(
+        self,
+        choices: Sequence[str],
+        selected: int,
+    ) -> list[str]:
+        rendered: list[str] = []
+        for index, choice in enumerate(choices, 1):
+            prefix = f"  {str(index).rjust(2)}  "
+            lines = _wrap_plain(
+                choice,
+                self.terminal.width,
+                initial_indent=prefix,
+                subsequent_indent=" " * len(prefix),
+            )
+            if index - 1 == selected:
+                for line in lines:
+                    selected_line = line + " "
+                    if not self.terminal.color:
+                        selected_line = "> " + selected_line[2:]
+                    rendered.append(
+                        self.terminal.paint(
+                            selected_line,
+                            ui.BOLD,
+                            ui.DARK,
+                            ui.LIGHT_BACKGROUND,
+                        )
+                    )
+                continue
+            lines[0] = (
+                f"  {self.terminal.paint(str(index).rjust(2), ui.DIM)}  "
+                + lines[0][len(prefix):]
+            )
+            rendered.extend(lines)
+        return rendered
+
+    def _read_choice_key(self) -> str:
+        descriptor = sys.stdin.fileno()
+
+        def read_byte() -> str:
+            value = os.read(descriptor, 1)
+            if not value:
+                raise PromptUnavailable("selection input ended")
+            return value.decode("latin-1")
+
+        value = read_byte()
+        if value in {"\r", "\n"}:
+            return "enter"
+        if value == "\x03":
+            raise KeyboardInterrupt
+        if value == "\x04":
+            raise PromptUnavailable("selection input ended")
+        if value in {"j", "J", "\t"}:
+            return "down"
+        if value in {"k", "K"}:
+            return "up"
+        if value.isdecimal():
+            return value
+        if value != "\x1b":
+            return "unknown"
+        sequence = ""
+        for _index in range(8):
+            # SSH and serial terminals may deliver ESC separately from the
+            # remaining cursor-key bytes. A short gap is not an Escape-key
+            # cancellation; Ctrl-C remains the explicit cancellation path.
+            ready, _writable, _errors = select.select([descriptor], [], [], 0.5)
+            if not ready:
+                return "unknown"
+            sequence += read_byte()
+            if len(sequence) > 1 and sequence[-1] in "ABCDHF~":
+                break
+        if sequence.startswith(("[", "O")):
+            return {
+                "A": "up",
+                "B": "down",
+                "C": "right",
+                "D": "left",
+                "H": "home",
+                "F": "end",
+            }.get(sequence[-1], "unknown")
+        return "unknown"
+
+    @contextlib.contextmanager
+    def navigation_mode(self) -> Iterable[None]:
+        descriptor = sys.stdin.fileno()
+        previous = termios.tcgetattr(descriptor)
+        try:
+            tty.setcbreak(descriptor)
+            yield
+        finally:
+            termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
+
+    def poll_navigation_key(self, timeout_seconds: float) -> str | None:
+        descriptor = sys.stdin.fileno()
+        ready, _writable, _errors = select.select(
+            [descriptor], [], [], max(0.0, timeout_seconds)
+        )
+        return self._read_choice_key() if ready else None
+
+    def _interactive_choose(
+        self,
+        message: str,
+        choices: Sequence[str],
+        *,
+        default: str | None,
+    ) -> str:
+        ui.before_external_output()
+        selected = choices.index(default) if default is not None else 0
+        self.stream.write(
+            f"{self._prefix()} {self.terminal.paint(message, ui.BOLD)}\n"
+        )
+
+        def surface() -> list[str]:
+            return [
+                *self._choice_lines(choices, selected),
+                self.terminal.paint("  'Enter' to select", ui.DIM),
+            ]
+
+        lines = surface()
+        self.stream.write("\n".join(lines) + "\n")
+        self.stream.flush()
+        with self.navigation_mode():
+            try:
+                while True:
+                    key = self._read_choice_key()
+                    if key == "enter":
+                        return choices[selected]
+                    before = selected
+                    if key == "up":
+                        selected = (selected - 1) % len(choices)
+                    elif key == "down":
+                        selected = (selected + 1) % len(choices)
+                    elif key == "home":
+                        selected = 0
+                    elif key == "end":
+                        selected = len(choices) - 1
+                    elif key.isdecimal() and 1 <= int(key) <= min(9, len(choices)):
+                        selected = int(key) - 1
+                    if selected == before:
+                        continue
+                    updated = surface()
+                    self.stream.write(f"\033[{len(lines)}F")
+                    for line in updated:
+                        self.stream.write(ui.CLEAR_LINE + line + "\n")
+                    self.stream.flush()
+                    lines = updated
+            except KeyboardInterrupt:
+                raise
 
     def _validation_error(self, message: str) -> None:
         if self.terminal.interactive:
@@ -908,7 +1067,7 @@ class CommandUI:
             return tuple(lines)
 
         available = max(1, self.content_width - indent)
-        if available < 32:
+        if available < 32 or len(label) > label_width:
             label_lines = self.render_wrapped(
                 label,
                 indent=indent,
@@ -1368,6 +1527,7 @@ class CommandUI:
         value: object,
         *,
         title: str | None = None,
+        borderless: bool = False,
         max_depth: int = 6,
         max_items: int = 100,
     ) -> tuple[str, ...]:
@@ -1393,6 +1553,10 @@ class CommandUI:
             max_depth=max_depth,
             max_items=max_items,
         )
+        if borderless:
+            if title:
+                lines = [self.terminal.paint(title, ui.BOLD), *lines]
+            return tuple(lines)
         return self.render_panel(lines, title=title)
 
     def object(
@@ -1400,6 +1564,7 @@ class CommandUI:
         value: object,
         *,
         title: str | None = None,
+        borderless: bool = False,
         max_depth: int = 6,
         max_items: int = 100,
     ) -> None:
@@ -1407,6 +1572,7 @@ class CommandUI:
             self.render_object(
                 value,
                 title=title,
+                borderless=borderless,
                 max_depth=max_depth,
                 max_items=max_items,
             )

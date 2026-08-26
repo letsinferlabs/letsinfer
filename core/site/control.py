@@ -50,9 +50,13 @@ from .telemetry import TelemetryAggregator, TelemetryError, validate_sample
 
 PROTOCOL = "letsinfer-node-control-v1"
 LINK_PROTOCOL = "letsinfer-node-link-v1"
+DETACH_PROTOCOL = "letsinfer-node-detach-v1"
+NODE_INVENTORY_PROTOCOL = "letsinfer-node-inventory-v1"
+MEMBER_STATE_PROTOCOL = "letsinfer-member-state-v1"
 DEFAULT_PORT = 9770
 MAX_BODY_BYTES = 16 * 1024
 REQUEST_TIMEOUT_SECONDS = 15
+FACTS_PUBLISH_INTERVAL_SECONDS = 1.0
 ENROLLMENT_RATE_LIMIT = 12
 ENROLLMENT_RATE_WINDOW_SECONDS = 60
 MAX_RATE_LIMIT_PEERS = 256
@@ -578,7 +582,7 @@ def post_member_facts(
 
 
 class FactsPublisher:
-    """Bounded ten-second inventory publication for one configured member."""
+    """Bounded live inventory publication for one configured member."""
 
     def __init__(
         self,
@@ -617,7 +621,13 @@ class FactsPublisher:
                 self.last_error = None
             except ControlError as error:
                 self.last_error = str(error)[:256]
-            self.stop_event.wait(max(0.1, 10.0 - (time.monotonic() - started)))
+            self.stop_event.wait(
+                max(
+                    0.1,
+                    FACTS_PUBLISH_INTERVAL_SECONDS
+                    - (time.monotonic() - started),
+                )
+            )
 
     def close(self) -> None:
         self.stop_event.set()
@@ -884,6 +894,207 @@ def _member_control_request(
     return value
 
 
+def request_self_detach(
+    endpoint: str,
+    *,
+    source: SiteIdentity,
+    ca_file: pathlib.Path,
+    certificate_file: pathlib.Path,
+    key_file: pathlib.Path,
+) -> dict[str, Any]:
+    """Remove this authenticated child from its former main after local staging."""
+
+    parsed = urllib.parse.urlsplit(endpoint)
+    if (
+        source.role != "child"
+        or parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.path not in {"", "/"}
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ControlError("child detach request is invalid")
+    for path, label in (
+        (ca_file, "site CA"),
+        (certificate_file, "member certificate"),
+        (key_file, "member key"),
+    ):
+        if path.is_symlink() or not path.is_file():
+            raise ControlError(f"child detach {label} is unavailable")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.maximum_version = ssl.TLSVersion.TLSv1_3
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.load_verify_locations(ca_file)
+    context.load_cert_chain(certificate_file, key_file)
+    connection = http.client.HTTPSConnection(
+        parsed.hostname,
+        parsed.port or DEFAULT_PORT,
+        context=context,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    document = {
+        "protocol": DETACH_PROTOCOL,
+        "site_id": source.site_id,
+        "member_id": source.member_id,
+    }
+    payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    try:
+        connection.connect()
+        if connection.sock is None:
+            raise ControlError("child detach TLS connection is unavailable")
+        if _member_id_from_certificate(connection.sock.getpeercert()) != source.coordinator_id:
+            raise ControlError("child detach TLS peer is not the current main")
+        connection.request(
+            "POST",
+            "/node/v1/detach",
+            body=payload,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        response = connection.getresponse()
+        raw = response.read(MAX_BODY_BYTES + 1)
+    except (OSError, ssl.SSLError, http.client.HTTPException) as error:
+        raise ControlError(f"child detach request failed: {error}") from error
+    finally:
+        connection.close()
+    if len(raw) > MAX_BODY_BYTES:
+        raise ControlError("child detach response is too large")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ControlError("child detach response is invalid") from error
+    expected = {
+        "protocol": DETACH_PROTOCOL,
+        "site_id": source.site_id,
+        "member_id": source.member_id,
+        "state": "removed",
+    }
+    if response.status != 200 or value != expected:
+        detail = value.get("error") if isinstance(value, dict) else None
+        raise ControlError(str(detail or "child detach was rejected"))
+    return value
+
+
+def _coordinator_request(
+    endpoint: str,
+    *,
+    source: SiteIdentity,
+    method: str,
+    path: str,
+    body: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    parsed = urllib.parse.urlsplit(endpoint)
+    if (
+        source.role != "child"
+        or parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.path not in {"", "/"}
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or method not in {"GET", "POST"}
+        or not path.startswith("/node/v1/")
+    ):
+        raise ControlError("coordinator request is invalid")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.maximum_version = ssl.TLSVersion.TLSv1_3
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.load_verify_locations(site_ca_certificate_path())
+    context.load_cert_chain(member_certificate_path(), member_key_path())
+    connection = http.client.HTTPSConnection(
+        parsed.hostname,
+        parsed.port or DEFAULT_PORT,
+        context=context,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    payload = (
+        None
+        if body is None
+        else json.dumps(dict(body), separators=(",", ":")).encode("utf-8")
+    )
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    try:
+        connection.connect()
+        if connection.sock is None:
+            raise ControlError("coordinator TLS connection is unavailable")
+        if _member_id_from_certificate(connection.sock.getpeercert()) != source.coordinator_id:
+            raise ControlError("coordinator TLS identity changed")
+        connection.request(method, path, body=payload, headers=headers)
+        response = connection.getresponse()
+        raw = response.read(MAX_BODY_BYTES + 1)
+    except (OSError, ssl.SSLError, http.client.HTTPException) as error:
+        raise ControlError(f"coordinator request failed: {error}") from error
+    finally:
+        connection.close()
+    if len(raw) > MAX_BODY_BYTES:
+        raise ControlError("coordinator response is too large")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ControlError("coordinator response is invalid") from error
+    if response.status != 200 or not isinstance(value, dict):
+        detail = value.get("error") if isinstance(value, dict) else None
+        raise ControlError(str(detail or "coordinator request was rejected"))
+    return value
+
+
+def fetch_coordinator_node_inventory(source: SiteIdentity) -> list[dict[str, Any]]:
+    address = source.coordinator_address
+    host = f"[{address}]" if ":" in address and not address.startswith("[") else address
+    value = _coordinator_request(
+        f"https://{host}:{DEFAULT_PORT}",
+        source=source,
+        method="GET",
+        path="/node/v1/member-inventory",
+    )
+    nodes = value.get("nodes")
+    if (
+        value.get("protocol") != NODE_INVENTORY_PROTOCOL
+        or set(value) != {"protocol", "nodes"}
+        or not isinstance(nodes, list)
+        or len(nodes) not in {1, 2}
+        or any(not isinstance(row, dict) for row in nodes)
+    ):
+        raise ControlError("coordinator node inventory is invalid")
+    return [dict(row) for row in nodes]
+
+
+def request_self_member_state(
+    source: SiteIdentity,
+    *,
+    paused: bool,
+) -> dict[str, Any]:
+    address = source.coordinator_address
+    host = f"[{address}]" if ":" in address and not address.startswith("[") else address
+    value = _coordinator_request(
+        f"https://{host}:{DEFAULT_PORT}",
+        source=source,
+        method="POST",
+        path="/node/v1/member-state",
+        body={
+            "protocol": MEMBER_STATE_PROTOCOL,
+            "member_id": source.member_id,
+            "paused": paused,
+        },
+    )
+    expected_state = "draining" if paused else "active"
+    if value != {
+        "protocol": MEMBER_STATE_PROTOCOL,
+        "member_id": source.member_id,
+        "state": expected_state,
+    }:
+        raise ControlError("coordinator member-state response is invalid")
+    return value
+
+
 def submit_member_group_job(
     endpoint: str,
     *,
@@ -1004,6 +1215,7 @@ class SiteControlState:
         | None = None,
         node_add_provider: Callable[[Mapping[str, Any]], Mapping[str, Any]]
         | None = None,
+        node_add_status_provider: Callable[[str], Mapping[str, Any]] | None = None,
     ) -> None:
         self.identity = identity
         self.facts_provider = facts_provider
@@ -1013,6 +1225,7 @@ class SiteControlState:
         self.adoption_provider = adoption_provider
         self.adoption_completed_provider = adoption_completed_provider
         self.node_add_provider = node_add_provider
+        self.node_add_status_provider = node_add_status_provider
         self.certificate_sha256 = hashlib.sha256(
             ssl.PEM_cert_to_DER_cert(
                 member_certificate_path().read_text(encoding="ascii")
@@ -1028,6 +1241,121 @@ class SiteControlState:
             return self.node_add_provider(value)
         except NodeAddError as error:
             raise ControlError(str(error)) from error
+
+    def node_add_status(self, request_id: str) -> Mapping[str, Any]:
+        if self.node_add_status_provider is None:
+            raise ControlError("node-add request status is unavailable")
+        from .node_add import NodeAddError
+
+        try:
+            return self.node_add_status_provider(request_id)
+        except NodeAddError as error:
+            raise ControlError(str(error)) from error
+
+    def detach_member(
+        self,
+        value: Mapping[str, Any],
+        *,
+        requester_member_id: str,
+    ) -> dict[str, Any]:
+        if self.identity.role != "main":
+            raise ControlError("child detach is main-only")
+        if (
+            set(value) != {"protocol", "site_id", "member_id"}
+            or value.get("protocol") != DETACH_PROTOCOL
+            or value.get("site_id") != self.identity.site_id
+            or value.get("member_id") != requester_member_id
+        ):
+            raise ControlError("child detach identity is invalid")
+        try:
+            with SiteStore(identity=self.identity) as store:
+                result = store.remove_member(
+                    requester_member_id,
+                    actor_type="member",
+                    actor_id=requester_member_id,
+                    origin_interface="child-control",
+                )
+        except SiteError as error:
+            raise ControlError(str(error)) from error
+        return {
+            "protocol": DETACH_PROTOCOL,
+            "site_id": self.identity.site_id,
+            **result,
+        }
+
+    def member_inventory(self, requester_member_id: str) -> dict[str, Any]:
+        if self.identity.role != "main":
+            raise ControlError("node inventory is main-only")
+        try:
+            with SiteStore(identity=self.identity) as store:
+                rows = [
+                    row
+                    for row in store.members()
+                    if row["member_id"]
+                    in {self.identity.member_id, requester_member_id}
+                ]
+        except SiteError as error:
+            raise ControlError(str(error)) from error
+        if not any(row["member_id"] == requester_member_id for row in rows):
+            raise ControlError("requester is not an active site member")
+        nodes = []
+        for row in rows:
+            facts = row.get("facts") if isinstance(row.get("facts"), dict) else {}
+            inventory = (
+                facts.get("inventory")
+                if isinstance(facts.get("inventory"), dict)
+                else {}
+            )
+            nodes.append(
+                {
+                    "member_id": row["member_id"],
+                    "display_name": row["display_name"],
+                    "role": row["role"],
+                    "address": row["address"],
+                    "state": row["state"],
+                    "updated_at_unix": row["updated_at_unix"],
+                    "observed_at_unix": facts.get("observed_at_unix"),
+                    "platform": facts.get("platform"),
+                    "accelerator": facts.get("accelerator"),
+                    "memory": facts.get("memory"),
+                    "health": facts.get("health"),
+                    "connection_interface": inventory.get(
+                        "default_network_interface"
+                    ),
+                }
+            )
+        return {
+            "protocol": NODE_INVENTORY_PROTOCOL,
+            "nodes": sorted(nodes, key=lambda row: (row["role"] != "main", row["member_id"])),
+        }
+
+    def set_requester_member_state(
+        self,
+        value: Mapping[str, Any],
+        *,
+        requester_member_id: str,
+    ) -> dict[str, Any]:
+        if self.identity.role != "main":
+            raise ControlError("member state is main-only")
+        if (
+            set(value) != {"protocol", "member_id", "paused"}
+            or value.get("protocol") != MEMBER_STATE_PROTOCOL
+            or value.get("member_id") != requester_member_id
+            or not isinstance(value.get("paused"), bool)
+        ):
+            raise ControlError("member-state request is invalid")
+        try:
+            with SiteStore(identity=self.identity) as store:
+                result = store.set_member_draining(
+                    requester_member_id,
+                    bool(value["paused"]),
+                    actor_type="member",
+                    actor_id=requester_member_id,
+                    origin_interface="child-control",
+                )
+        except SiteError as error:
+            raise ControlError(str(error)) from error
+        return {"protocol": MEMBER_STATE_PROTOCOL, **result}
 
     def discovery(self) -> dict[str, Any]:
         direct_connectx = False
@@ -1395,10 +1723,21 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if not self.server.enrollment_limiter.allow(peer):  # type: ignore[attr-defined]
             raise RateLimitError("membership enrollment rate limit exceeded")
 
+    def _require_node_add_status_capacity(self) -> None:
+        peer = str(self.client_address[0])
+        if not self.server.node_add_status_limiter.allow(peer):  # type: ignore[attr-defined]
+            raise RateLimitError("node-add status rate limit exceeded")
+
     def do_GET(self) -> None:
         try:
             if self.path == "/node/v1/discovery":
                 self._respond(200, self.state.discovery())
+                return
+            if self.path == "/node/v1/member-inventory":
+                self._respond(
+                    200,
+                    self.state.member_inventory(self._require_site_member()),
+                )
                 return
             prefix = "/node/v1/enroll/"
             if self.path.startswith(prefix):
@@ -1422,6 +1761,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     200,
                     self.state.membership(self._require_site_member()),
                 )
+                return
+            node_add_prefix = "/node/v1/add-request/"
+            if self.path.startswith(node_add_prefix):
+                self._require_node_add_status_capacity()
+                request_id = self.path.removeprefix(node_add_prefix)
+                if not ID_RE.fullmatch(request_id):
+                    raise ControlError("node-add request identity is invalid")
+                self._respond(200, self.state.node_add_status(request_id))
                 return
             group_prefix = "/node/v1/groups/"
             if self.path.startswith(group_prefix):
@@ -1449,7 +1796,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if self.path not in {
             "/node/v1/enroll", "/node/v1/link-challenge", "/node/v1/link-probe",
             "/node/v1/telemetry", "/node/v1/facts", "/node/v1/group-job",
-            "/node/v1/adopt", "/node/v1/add-request",
+            "/node/v1/adopt", "/node/v1/add-request", "/node/v1/detach",
+            "/node/v1/member-state",
         }:
             self._respond(404, {"error": "not found"})
             return
@@ -1479,6 +1827,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 )
             elif self.path == "/node/v1/add-request":
                 response = self.state.node_add_request(value)
+            elif self.path == "/node/v1/detach":
+                response = self.state.detach_member(
+                    value,
+                    requester_member_id=self._require_site_member(),
+                )
+            elif self.path == "/node/v1/member-state":
+                response = self.state.set_requester_member_state(
+                    value,
+                    requester_member_id=self._require_site_member(),
+                )
             elif self.path == "/node/v1/link-challenge":
                 response = self.state.link_challenge(
                     value, requester_member_id=self._require_site_member()
@@ -1529,6 +1887,7 @@ class SiteControlServer(http.server.HTTPServer):
         super().__init__(address, _Handler, bind_and_activate=False)
         self.control_state = state
         self.enrollment_limiter = PeerRateLimiter()
+        self.node_add_status_limiter = PeerRateLimiter(limit=180)
         self.socket = _server_tls_context().wrap_socket(self.socket, server_side=True)
         self.server_bind()
         self.server_activate()
