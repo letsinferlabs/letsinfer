@@ -176,7 +176,11 @@ class _PublicEngineRegistry:
         ):
             raise VerificationError("external Engine reference is invalid")
         self.reference = reference
-        self.registry = match["registry"]
+        self.registry = (
+            "registry-1.docker.io"
+            if match["registry"] == "docker.io"
+            else match["registry"]
+        )
         self.repository = match["repository"]
         self.manifest_digest = match["digest"]
         self.repository_reference = f"{self.registry}/{self.repository}"
@@ -242,13 +246,47 @@ class _PublicEngineRegistry:
     def image(self, expected_platform: str) -> _RemoteEngineImage:
         manifest_data = self._read(
             f"manifests/{self.manifest_digest}",
-            accept=", ".join(sorted(OCI_MANIFEST_MEDIA_TYPES)),
+            accept=", ".join(
+                sorted(OCI_MANIFEST_MEDIA_TYPES | OCI_INDEX_MEDIA_TYPES)
+            ),
             limit=MAX_ENGINE_DOCUMENT_BYTES,
             label="manifest",
         )
         if "sha256:" + hashlib.sha256(manifest_data).hexdigest() != self.manifest_digest:
             raise VerificationError("external Engine manifest digest differs")
-        manifest = _oci_object(manifest_data, "external image manifest")
+        manifest = _oci_object(manifest_data, "external registry object")
+        if manifest.get("mediaType") in OCI_INDEX_MEDIA_TYPES or (
+            "manifests" in manifest and "config" not in manifest
+        ):
+            try:
+                expected_os, expected_architecture = expected_platform.split("/", 1)
+            except ValueError as error:
+                raise VerificationError("external Engine platform is invalid") from error
+            candidates = []
+            for offset, raw in enumerate(manifest.get("manifests", [])):
+                item = _oci_descriptor(raw, f"external index manifest {offset}")
+                platform_value = item.get("platform")
+                if isinstance(platform_value, Mapping) and (
+                    platform_value.get("os"),
+                    platform_value.get("architecture"),
+                ) == (expected_os, expected_architecture):
+                    candidates.append(item)
+            if len(candidates) != 1:
+                raise VerificationError(
+                    "external Engine index does not contain exactly one target platform"
+                )
+            selected = candidates[0]
+            manifest_data = self._read(
+                f"manifests/{selected['digest']}",
+                accept=", ".join(sorted(OCI_MANIFEST_MEDIA_TYPES)),
+                limit=MAX_ENGINE_DOCUMENT_BYTES,
+                label="platform manifest",
+            )
+            if "sha256:" + hashlib.sha256(manifest_data).hexdigest() != selected["digest"]:
+                raise VerificationError("external Engine platform manifest digest differs")
+            manifest = _oci_object(
+                manifest_data, "external platform image manifest"
+            )
         config = _oci_descriptor(
             manifest.get("config"), "external image configuration"
         )
@@ -370,6 +408,189 @@ class _PublicEngineRegistry:
             ) from error
         finally:
             temporary.unlink(missing_ok=True)
+
+
+EXECUTION_CONFIG_FIELDS = (
+    "ArgsEscaped",
+    "Cmd",
+    "Entrypoint",
+    "Env",
+    "ExposedPorts",
+    "Healthcheck",
+    "OnBuild",
+    "Shell",
+    "StopSignal",
+    "User",
+    "Volumes",
+    "WorkingDir",
+)
+
+
+def engine_payload_digest(
+    platform_name: str,
+    image_config: Mapping[str, Any],
+    diff_ids: Sequence[str],
+    *,
+    base_reference: str | None = None,
+    overlay_digest: str | None = None,
+) -> str:
+    try:
+        os_name, architecture = platform_name.split("/", 1)
+    except ValueError as error:
+        raise VerificationError("Engine payload platform is invalid") from error
+    if not os_name or not architecture or any(
+        OCI_DIGEST_RE.fullmatch(str(value)) is None for value in diff_ids
+    ):
+        raise VerificationError("Engine payload identity is invalid")
+    if (base_reference is None) != (overlay_digest is None):
+        raise VerificationError("Engine payload base and overlay are incomplete")
+    if base_reference is not None and (
+        OCI_REFERENCE_RE.fullmatch(base_reference) is None
+        or OCI_DIGEST_RE.fullmatch(str(overlay_digest)) is None
+    ):
+        raise VerificationError("Engine payload base or overlay identity is invalid")
+    config = image_config.get("config")
+    if config is None:
+        config = {}
+    if not isinstance(config, Mapping):
+        raise VerificationError("Engine payload runtime configuration is invalid")
+    material = {
+        "schema_version": 2 if base_reference is not None else 1,
+        "platform": platform_name,
+        **(
+            {
+                "base_reference": base_reference,
+                "overlay_digest": overlay_digest,
+            }
+            if base_reference is not None
+            else {"rootfs_diff_ids": list(diff_ids)}
+        ),
+        "runtime_config": {
+            field: config[field]
+            for field in EXECUTION_CONFIG_FIELDS
+            if field in config
+        },
+    }
+    return "sha256:" + sha256_bytes(canonical_bytes(material))
+
+
+def normalized_engine_overlay_digest(
+    root: pathlib.Path,
+    layers: Sequence[Mapping[str, Any]],
+    external_indices: Collection[int],
+) -> str:
+    state: dict[str, dict[str, Any]] = {}
+    for layer_offset, descriptor in enumerate(layers):
+        if layer_offset in external_indices:
+            continue
+        path, _unused = _oci_blob(
+            root, descriptor, f"payload layer {layer_offset}"
+        )
+        compressed = path.read_bytes()
+        media_type = str(descriptor["mediaType"])
+        data = (
+            gzip.decompress(compressed)
+            if media_type in OCI_GZIP_LAYER_MEDIA_TYPES
+            else compressed
+        )
+        try:
+            archive = tarfile.open(fileobj=io.BytesIO(data), mode="r:")
+        except tarfile.TarError as error:
+            raise VerificationError(
+                f"verifier Engine payload layer {layer_offset} is invalid"
+            ) from error
+        with archive:
+            for member in archive:
+                raw_path = pathlib.PurePosixPath(member.name)
+                parts = tuple(
+                    part for part in raw_path.parts if part not in {"", "."}
+                )
+                if (
+                    raw_path.is_absolute()
+                    or not parts
+                    or any(part == ".." for part in parts)
+                ):
+                    raise VerificationError(
+                        "verifier Engine payload contains an unsafe path"
+                    )
+                name = pathlib.PurePosixPath(*parts).as_posix()
+                parent = pathlib.PurePosixPath(name).parent
+                basename = pathlib.PurePosixPath(name).name
+                if basename == ".wh..wh..opq":
+                    prefix = (
+                        "" if str(parent) == "." else parent.as_posix() + "/"
+                    )
+                    state = {
+                        key: value
+                        for key, value in state.items()
+                        if not (
+                            key == parent.as_posix() or key.startswith(prefix)
+                        )
+                    }
+                    continue
+                if basename.startswith(".wh."):
+                    target = (parent / basename.removeprefix(".wh.")).as_posix()
+                    state = {
+                        key: value
+                        for key, value in state.items()
+                        if key != target and not key.startswith(target + "/")
+                    }
+                    continue
+                kind = (
+                    "file"
+                    if member.isfile()
+                    else "directory"
+                    if member.isdir()
+                    else "symlink"
+                    if member.issym()
+                    else "hardlink"
+                    if member.islnk()
+                    else None
+                )
+                if kind is None:
+                    raise VerificationError(
+                        "verifier Engine payload contains an unsupported entry"
+                    )
+                content_sha256 = None
+                if member.isfile():
+                    handle = archive.extractfile(member)
+                    if handle is None:
+                        raise VerificationError(
+                            "verifier Engine payload file is unavailable"
+                        )
+                    value = hashlib.sha256()
+                    for chunk in iter(
+                        lambda: handle.read(1024 * 1024), b""
+                    ):
+                        value.update(chunk)
+                    content_sha256 = value.hexdigest()
+                if not member.isdir():
+                    state = {
+                        key: value
+                        for key, value in state.items()
+                        if not key.startswith(name + "/")
+                    }
+                state[name] = {
+                    "path": name,
+                    "type": kind,
+                    "mode": member.mode & 0o7777,
+                    "uid": member.uid,
+                    "gid": member.gid,
+                    "linkname": (
+                        member.linkname
+                        if kind in {"symlink", "hardlink"}
+                        else ""
+                    ),
+                    "content_sha256": content_sha256,
+                    "xattrs": {
+                        key: value
+                        for key, value in sorted(member.pax_headers.items())
+                        if key.startswith("SCHILY.xattr.")
+                    },
+                }
+    return "sha256:" + sha256_bytes(
+        canonical_bytes([state[key] for key in sorted(state)])
+    )
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -857,8 +1078,6 @@ def _external_engine_layers(
         or not isinstance(target_repository, str)
         or target_repository
         != f"{expected_match['registry']}/{expected_match['repository']}"
-        or target_repository
-        != f"{source_match['registry']}/{source_match['repository']}"
     ):
         raise VerificationError("external Engine blob inventory identity is invalid")
 
@@ -868,7 +1087,6 @@ def _external_engine_layers(
         (
             str(layer["digest"]),
             int(layer["size"]),
-            str(layer["mediaType"]),
             remote.diff_ids[offset],
         )
         for offset, layer in enumerate(remote.layers)
@@ -908,7 +1126,6 @@ def _external_engine_layers(
         if dict(raw) != expected or (
             str(layer["digest"]),
             int(layer["size"]),
-            str(layer["mediaType"]),
             diff_ids[index],
         ) not in remote_records:
             raise VerificationError(
@@ -1151,6 +1368,21 @@ def _inspect_engine_layout(
         "manifest_digest": manifest_descriptor["digest"],
         "manifest_bytes": len(manifest_data),
         "config_digest": config_descriptor["digest"],
+        "payload_digest": engine_payload_digest(
+            expected_platform,
+            config,
+            tuple(map(str, diff_ids)),
+            **(
+                {
+                    "base_reference": external.source_reference,
+                    "overlay_digest": normalized_engine_overlay_digest(
+                        root, layer_descriptors, external_indices
+                    ),
+                }
+                if external is not None
+                else {}
+            ),
+        ),
         "layer_digests": [value["digest"] for value in layer_descriptors],
         "local_layer_count": len(layer_descriptors) - len(external_indices),
         "external_layer_count": len(external_indices),
@@ -1433,6 +1665,10 @@ def validate_verifier_bundle(
         not isinstance(engine, dict)
         or engine.get("reference") != runtime_engine["reference"]
         or engine.get("config_digest") != runtime_engine["immutable_id"]
+        or (
+            runtime_engine.get("payload_id") is not None
+            and engine.get("payload_digest") != runtime_engine["payload_id"]
+        )
     ):
         raise VerificationError("verifier Engine identity differs from runtime.json")
     engine_archive = None
@@ -1442,6 +1678,10 @@ def validate_verifier_bundle(
         if (
             engine.get("manifest_digest") != str(engine["reference"]).rsplit("@", 1)[-1]
             or engine.get("config_digest") != runtime_engine["immutable_id"]
+            or (
+                runtime_engine.get("payload_id") is not None
+                and engine.get("payload_digest") != runtime_engine["payload_id"]
+            )
             or engine.get("platform") != runtime_platform
         ):
             raise VerificationError("verifier built Engine identity differs")
@@ -1785,9 +2025,19 @@ def execution_subject(
             pack_sha256=pack_sha256,
             pack_bytes=pack_bytes,
         ),
-        "engine_oci_manifest_digest": str(engine_oci.get("reference", "")).rsplit(
-            "@", 1
-        )[-1],
+        **(
+            {
+                "engine_payload_sha256": str(
+                    engine_oci.get("payload_id")
+                ).removeprefix("sha256:")
+            }
+            if engine_oci.get("payload_id") is not None
+            else {
+                "engine_oci_manifest_digest": str(
+                    engine_oci.get("reference", "")
+                ).rsplit("@", 1)[-1]
+            }
+        ),
         "model_revisions": sorted(revisions, key=lambda item: str(item["name"])),
         "benchmark_contract_sha256": sha256_bytes(
             canonical_bytes(benchmark.get("contract"))
@@ -1798,7 +2048,16 @@ def execution_subject(
         CANDIDATE_RE.fullmatch(str(subject["candidate_id"])) is None
         or not SHA256_RE.fullmatch(str(subject["runtime_pack_sha256"]))
         or not OCI_DIGEST_RE.fullmatch(str(subject["runtime_oci_manifest_digest"]))
-        or not OCI_DIGEST_RE.fullmatch(str(subject["engine_oci_manifest_digest"]))
+        or (
+            "engine_payload_sha256" in subject
+            and not SHA256_RE.fullmatch(str(subject["engine_payload_sha256"]))
+        )
+        or (
+            "engine_oci_manifest_digest" in subject
+            and not OCI_DIGEST_RE.fullmatch(
+                str(subject["engine_oci_manifest_digest"])
+            )
+        )
     ):
         raise VerificationError("runtime execution identity is invalid")
     return subject | {"execution_sha256": sha256_bytes(canonical_bytes(subject))}

@@ -1998,12 +1998,24 @@ def run_isolated_matrix(
     engine_oci = engine.get("oci")
     if not isinstance(primary, dict) or not isinstance(engine_oci, dict):
         raise RuntimeMatrixError("runtime primary artifact or Engine OCI is unavailable")
+    payload_id = engine_oci.get("payload_id")
+    payload_bound = (
+        isinstance(payload_id, str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", payload_id) is not None
+    )
     subject = {
         "candidate_id": runtime_source.get("id"),
         "runtime_version": runtime_source.get("version"),
         "model_uri": model.get("uri"),
         "model_revision": primary.get("revision"),
-        "engine_oci": engine_oci.get("reference"),
+        **(
+            {
+                "engine_payload_sha256": payload_id.removeprefix("sha256:"),
+                "measured_engine_oci": engine_oci.get("reference"),
+            }
+            if payload_bound
+            else {"engine_oci": engine_oci.get("reference")}
+        ),
         "target": target.get("id"),
         "target_contract_sha256": hashlib.sha256(
             benchmark_record.canonical_bytes(target)
@@ -2022,7 +2034,9 @@ def run_isolated_matrix(
     )
     public_record = {
         "schema_version": (
-            benchmark_record.TTFT_CACHE_SCHEMA_VERSION
+            benchmark_record.EXECUTION_PAYLOAD_SCHEMA_VERSION
+            if payload_bound
+            else benchmark_record.TTFT_CACHE_SCHEMA_VERSION
             if ttft_cache_result is not None
             else benchmark_record.SHARED_SCHEMA_VERSION
             if shared_matrix
