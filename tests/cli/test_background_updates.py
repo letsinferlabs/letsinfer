@@ -15,6 +15,7 @@ from unittest import mock
 
 from core import cli
 from core.actions import action as command_action
+from core.updates import background
 from core.updates.background import (
     DISABLE_BACKGROUND_UPDATE_ENV,
     request_background_refresh,
@@ -167,6 +168,61 @@ class BackgroundRefreshRequestTests(unittest.TestCase):
         self.manager.refresh.side_effect = RuntimeError("offline")
         self.assertTrue(self.request())
         self.callbacks[0]()
+
+    def test_macos_uses_fresh_process_spawn_instead_of_fork(self):
+        with (
+            mock.patch.object(background.sys, "platform", "darwin"),
+            mock.patch.object(
+                background, "_launch_macos_refresh", return_value=True
+            ) as launch,
+            mock.patch.object(background, "_launch_detached") as fork_launch,
+        ):
+            result = request_background_refresh(
+                self.manager,
+                snapshot=UpdateSnapshot(()),
+                environ={},
+                clock=lambda: NOW,
+            )
+        self.assertTrue(result)
+        launch.assert_called_once_with()
+        fork_launch.assert_not_called()
+
+    def test_linux_keeps_the_existing_detached_fork_launcher(self):
+        with (
+            mock.patch.object(background.sys, "platform", "linux"),
+            mock.patch.object(
+                background, "_launch_detached", return_value=True
+            ) as fork_launch,
+            mock.patch.object(background, "_launch_macos_refresh") as macos_launch,
+        ):
+            result = request_background_refresh(
+                self.manager,
+                snapshot=UpdateSnapshot(()),
+                environ={},
+                clock=lambda: NOW,
+            )
+        self.assertTrue(result)
+        fork_launch.assert_called_once()
+        self.assertTrue(callable(fork_launch.call_args.args[0]))
+        macos_launch.assert_not_called()
+
+    def test_macos_spawn_uses_the_current_interpreter_and_null_stdio(self):
+        thread = mock.Mock()
+        with (
+            mock.patch.object(background.os, "open", return_value=9),
+            mock.patch.object(background.os, "close") as close,
+            mock.patch.object(background.os, "posix_spawn", return_value=42) as spawn,
+            mock.patch.object(background.threading, "Thread", return_value=thread),
+        ):
+            self.assertTrue(background._launch_macos_refresh())
+        arguments = spawn.call_args.args[1]
+        environment = spawn.call_args.args[2]
+        self.assertEqual(arguments[0], background.sys.executable)
+        self.assertEqual(arguments[1:4], ("-I", "-B", "-c"))
+        self.assertEqual(environment[DISABLE_BACKGROUND_UPDATE_ENV], "1")
+        self.assertEqual(spawn.call_args.kwargs["file_actions"][0][-2:], (9, 0))
+        close.assert_called_once_with(9)
+        thread.start.assert_called_once_with()
 
 
 class _TTY(io.StringIO):

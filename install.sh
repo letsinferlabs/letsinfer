@@ -74,6 +74,65 @@ fail() {
     exit 1
 }
 
+select_macos_python() {
+    if [ -n "${LETSINFER_PYTHON:-}" ]; then
+        set -- "$LETSINFER_PYTHON"
+    else
+        set -- \
+            python3.14 python3.13 python3.12 python3.11 python3.10 python3.9 python3 \
+            /opt/homebrew/opt/python@3.14/bin/python3.14 \
+            /opt/homebrew/opt/python@3.13/bin/python3.13 \
+            /opt/homebrew/opt/python@3.12/bin/python3.12 \
+            /opt/homebrew/opt/python@3.11/bin/python3.11 \
+            /opt/homebrew/opt/python@3.10/bin/python3.10 \
+            /opt/homebrew/opt/python@3.9/bin/python3.9 \
+            /usr/local/opt/python@3.14/bin/python3.14 \
+            /usr/local/opt/python@3.13/bin/python3.13 \
+            /usr/local/opt/python@3.12/bin/python3.12 \
+            /usr/local/opt/python@3.11/bin/python3.11 \
+            /usr/local/opt/python@3.10/bin/python3.10 \
+            /usr/local/opt/python@3.9/bin/python3.9 \
+            /opt/local/bin/python3.14 \
+            /opt/local/bin/python3.13 \
+            /opt/local/bin/python3.12 \
+            /opt/local/bin/python3.11 \
+            /opt/local/bin/python3.10 \
+            /opt/local/bin/python3.9
+    fi
+    for candidate do
+        case "$candidate" in
+            */*) python_path=$candidate ;;
+            *) python_path=$(command -v "$candidate" 2>/dev/null || true) ;;
+        esac
+        [ -n "$python_path" ] && [ -x "$python_path" ] || continue
+        resolved=$(
+            "$python_path" - <<'PY' 2>/dev/null
+import hashlib
+import http.server
+import pathlib
+import plistlib
+import sqlite3
+import ssl
+import sys
+import urllib.request
+
+if sys.version_info < (3, 9) or not getattr(ssl, "HAS_TLSv1_3", False):
+    raise SystemExit(1)
+hashlib.sha256(b"letsinfer").digest()
+sqlite3.connect(":memory:").close()
+plistlib.dumps({"letsinfer": True})
+path = pathlib.Path(sys.executable).absolute()
+if not path.is_file():
+    raise SystemExit(1)
+print(path)
+PY
+        ) || continue
+        printf '%s\n' "$resolved"
+        return 0
+    done
+    return 1
+}
+
 pause_for_login_refresh() {
     clear_progress
     progress_active=0
@@ -134,7 +193,7 @@ activate_docker_group_for_install() {
 linux_distribution_id() {
     os_release_path=$1
     [ -f "$os_release_path" ] || return 1
-    python3 - "$os_release_path" <<'PY'
+    "$python_command" - "$os_release_path" <<'PY'
 import pathlib
 import re
 import shlex
@@ -421,10 +480,19 @@ case "$(uname -m)" in
 esac
 archive_name="letsinfer-$platform_os-$platform_arch.tar.gz"
 
-for command_name in curl python3 ssh-keygen tar mktemp; do
+for command_name in curl ssh-keygen tar mktemp; do
     command -v "$command_name" >/dev/null 2>&1 \
         || fail "required command is unavailable: $command_name"
 done
+python_command=python3
+if [ "$platform_os" = "macos" ]; then
+    python_command=$(select_macos_python) \
+        || fail "macOS requires a working Python 3.9 or newer with TLS 1.3 support"
+else
+    command -v python3 >/dev/null 2>&1 \
+        || fail "required command is unavailable: python3"
+fi
+export LETSINFER_PYTHON=$python_command
 if [ "$user_install" -eq 0 ]; then
     command -v sudo >/dev/null 2>&1 || fail "sudo is required for the default system installation"
     sudo -v
@@ -441,7 +509,7 @@ if [ "$run_setup" -eq 1 ] && [ "$platform_os" = "linux" ]; then
 fi
 
 if [ -n "$version" ]; then
-    python3 - "$version" <<'PY' || fail "version is not a release or release candidate"
+    "$python_command" - "$version" <<'PY' || fail "version is not a release or release candidate"
 import re
 import sys
 
@@ -558,7 +626,7 @@ elif [ -n "$version" ]; then
 else
     metadata="$temporary/releases.json"
     download "https://api.github.com/repos/$repository/releases?per_page=30" "$metadata"
-    version=$(python3 - "$metadata" <<'PY'
+    version=$("$python_command" - "$metadata" <<'PY'
 import json
 import pathlib
 import re
@@ -613,7 +681,7 @@ ssh-keygen -Y verify -f "$allowed_signers" -I letsinfer-release \
     -n letsinfer-release -s "$signature" <"$checksums" >/dev/null 2>&1 \
     || fail "release checksum signature is invalid"
 
-python3 - "$checksums" "$archive_name" "$archive" <<'PY' \
+"$python_command" - "$checksums" "$archive_name" "$archive" <<'PY' \
     || fail "release archive checksum is invalid"
 import hashlib
 import pathlib
@@ -651,12 +719,12 @@ unpacked="$temporary/unpacked"
 mkdir "$unpacked"
 tar -xzf "$archive" -C "$unpacked"
 [ -d "$unpacked/letsinfer" ] || fail "release archive root is missing"
-(cd "$unpacked/letsinfer" && python3 -m tools.source_archive verify "$archive" >/dev/null) \
+(cd "$unpacked/letsinfer" && "$python_command" -m tools.source_archive verify "$archive" >/dev/null) \
     || fail "release source manifest verification failed"
 if [ -z "$version" ]; then
     version=$(
         cd "$unpacked/letsinfer"
-        python3 -c 'from core import PRODUCT_VERSION; print(PRODUCT_VERSION)'
+        "$python_command" -c 'from core import PRODUCT_VERSION; print(PRODUCT_VERSION)'
     ) || fail "release version is unreadable"
 fi
 
@@ -665,7 +733,7 @@ if [ "$run_setup" -eq 1 ] && [ "$platform_os" = "linux" ] \
     progress 65 "Preparing platform networking"
     network_log="$temporary/platform-network.log"
     if ! (cd "$unpacked/letsinfer" && \
-        python3 -m core.platform.network apply-if-detected) \
+        "$python_command" -m core.platform.network apply-if-detected) \
         >"$network_log" 2>&1; then
         tail -n 40 "$network_log" >&2
         fail "platform network setup failed"
@@ -694,11 +762,23 @@ fi
 
 umask 022
 if [ "$user_install" -eq 1 ]; then
-    "$unpacked/letsinfer/bin/letsinfer-install" \
-        --home "$LETSINFER_HOME" --launcher-root "$prefix/bin" >/dev/null
+    if [ "$platform_os" = "macos" ]; then
+        "$unpacked/letsinfer/bin/letsinfer-install" \
+            --home "$LETSINFER_HOME" --launcher-root "$prefix/bin" \
+            --python "$python_command" >/dev/null
+    else
+        "$unpacked/letsinfer/bin/letsinfer-install" \
+            --home "$LETSINFER_HOME" --launcher-root "$prefix/bin" >/dev/null
+    fi
     command_path="$prefix/bin/letsinfer"
 else
-    "$unpacked/letsinfer/bin/letsinfer-install" --home "$LETSINFER_HOME" >/dev/null
+    if [ "$platform_os" = "macos" ]; then
+        "$unpacked/letsinfer/bin/letsinfer-install" \
+            --home "$LETSINFER_HOME" --python "$python_command" >/dev/null
+    else
+        "$unpacked/letsinfer/bin/letsinfer-install" \
+            --home "$LETSINFER_HOME" >/dev/null
+    fi
     sudo install -d -m 0755 "$launcher_dir"
     for launcher_name in letsinfer letsinfer-recovery; do
         launcher="$launcher_dir/$launcher_name"
@@ -743,7 +823,7 @@ if [ "$run_setup" -eq 1 ]; then
         fi
         fail "site initialization failed"
     fi
-    if ! python3 - "$setup_json" >"$setup_summary" <<'PY'
+    if ! "$python_command" - "$setup_json" >"$setup_summary" <<'PY'
 import json
 import pathlib
 import sys

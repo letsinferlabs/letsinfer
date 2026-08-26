@@ -7117,7 +7117,10 @@ def install_core_gateway_service(
                 "--max-connections",
                 str(config["gateway_max_connections"]),
             ),
-            environment={"PYTHONDONTWRITEBYTECODE": "1"},
+            environment={
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "LETSINFER_PYTHON": sys.executable,
+            },
         )
         try:
             atomic_json(config_path, config)
@@ -7275,7 +7278,10 @@ def install_node_service_only(
                         "--port",
                         str(SITE_CONTROL_PORT),
                     ),
-                    environment={"PYTHONDONTWRITEBYTECODE": "1"},
+                    environment={
+                        "PYTHONDONTWRITEBYTECODE": "1",
+                        "LETSINFER_PYTHON": sys.executable,
+                    },
                 ),
                 no_start=no_start,
             )
