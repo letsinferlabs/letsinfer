@@ -63,6 +63,16 @@ esac
         self._executable(self.fake_bin / "ssh-keygen", "#!/bin/sh\nexit 0\n")
         self._executable(self.fake_bin / "launchctl", "#!/bin/sh\nexit 0\n")
         self._executable(
+            self.fake_bin / "sg",
+            """#!/bin/sh
+[ "$#" -eq 3 ] || exit 2
+[ "$2" = "-c" ] || exit 2
+FAKE_DOCKER_AS_ROOT=1
+export FAKE_DOCKER_AS_ROOT
+exec /bin/sh -c "$3"
+""",
+        )
+        self._executable(
             self.fake_bin / "docker",
             """#!/bin/sh
 [ "$1" = "--version" ] && exit 0
@@ -397,22 +407,29 @@ exit "${FAKE_SETUP_STATUS:-0}"
             pathlib.Path(environment["FAKE_DOCKER_GROUP_MARKER"]).exists()
         )
 
-    def test_linux_enrolls_docker_group_then_requests_a_fresh_login(self) -> None:
+    def test_linux_enrolls_docker_group_and_continues_in_refreshed_group(self) -> None:
         environment = self._environment(
             FAKE_DOCKER_MODE="denied", FAKE_UNAME_S="Linux"
         )
 
         result = self._run_pipe(environment, "--repair-docker-access")
 
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("Added operator to docker", result.stderr)
-        self.assertIn("Start a new login session and rerun", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "using refreshed docker group access for this installation",
+            result.stderr,
+        )
         self.assertTrue(
             pathlib.Path(environment["FAKE_DOCKER_GROUP_MARKER"]).exists()
         )
-        self.assertFalse(pathlib.Path(environment["LETSINFER_HOME"]).exists())
+        self.assertEqual(
+            pathlib.Path(environment["FAKE_SETUP_ARGS_FILE"]).read_text(
+                encoding="utf-8"
+            ),
+            "core-setup --json\n",
+        )
 
-    def test_linux_reports_a_stale_login_without_readding_the_group(self) -> None:
+    def test_linux_uses_existing_account_group_without_readding_it(self) -> None:
         environment = self._environment(
             FAKE_ACCOUNT_HAS_DOCKER="1",
             FAKE_DOCKER_MODE="denied",
@@ -421,10 +438,19 @@ exit "${FAKE_SETUP_STATUS:-0}"
 
         result = self._run_pipe(environment, "--repair-docker-access")
 
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("this login has stale groups", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "using refreshed docker group access for this installation",
+            result.stderr,
+        )
         self.assertFalse(
             pathlib.Path(environment["FAKE_DOCKER_GROUP_MARKER"]).exists()
+        )
+        self.assertEqual(
+            pathlib.Path(environment["FAKE_SETUP_ARGS_FILE"]).read_text(
+                encoding="utf-8"
+            ),
+            "core-setup --json\n",
         )
 
     def test_linux_repairs_a_stale_user_manager_before_setup(self) -> None:
