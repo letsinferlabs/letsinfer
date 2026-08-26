@@ -120,7 +120,15 @@ esac
             self.fake_bin / "stat",
             "#!/bin/sh\nprintf '%s\\n' '999:docker'\n",
         )
-        for command in ("cmake", "ctest", "cc", "openssl", "usermod"):
+        for command in (
+            "avahi-browse",
+            "avahi-publish-service",
+            "cmake",
+            "ctest",
+            "cc",
+            "openssl",
+            "usermod",
+        ):
             self._executable(self.fake_bin / command, "#!/bin/sh\nexit 0\n")
         self._executable(
             self.fake_bin / "curl",
