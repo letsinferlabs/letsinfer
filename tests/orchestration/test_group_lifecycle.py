@@ -369,6 +369,26 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         orchestrator.recover.assert_not_called()
         sync.assert_called_once_with(store, result)
 
+    def test_resume_does_not_restart_an_already_running_sibling(self) -> None:
+        store = _Store()
+        store.group["plan"] = {"group_id": store.group_id}
+        with (
+            mock.patch.object(
+                cli,
+                "read_site_identity",
+                return_value=types.SimpleNamespace(role="main"),
+            ),
+            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(
+                cli, "_restore_engine_group_orchestrator"
+            ) as restore,
+        ):
+            result = cli._engine_group_lifecycle("example-model", "start")
+        assert result is not None
+        self.assertEqual(result["state"], "running")
+        self.assertEqual(result["desired_state"], "running")
+        restore.assert_not_called()
+
     def test_restart_stops_then_starts_without_acknowledging_trips(self) -> None:
         store = _Store()
         result = {

@@ -147,6 +147,11 @@ from . import benchmark_jobs, benchmark_verification, command_ui, ui
 from .ui_contracts import OutputContract, ProgressKind, SurfaceKind, contract as ui_contract
 from .state_plane import runtime_lifecycle as derive_runtime_lifecycle
 from .platform import macos as macos_services
+from .platform.network import (
+    NetworkPlanError,
+    apply_network_plan,
+    host_network_plan,
+)
 from .site.state import (
     SiteError,
     SiteStore,
@@ -208,6 +213,8 @@ from .site.topology import (
     validate_member_facts,
 )
 from .site.telemetry import (
+    read_latest_watchdog_sample,
+    watchdog_live_samples,
     TelemetryAggregator,
     TelemetryError,
     TelemetryPublisher,
@@ -471,6 +478,26 @@ def _command_activity(
 
 class LetsInferError(RuntimeError):
     """A user-actionable release or launch error."""
+
+
+class CommandNotAllowed(RuntimeError):
+    """A valid command belongs to another node role."""
+
+    def __init__(self, scope: CommandScope, identity: Any) -> None:
+        self.scope = scope
+        self.identity = identity
+        if scope is CommandScope.MAIN:
+            address = str(identity.coordinator_address)
+            name = address.removesuffix(".localdomain").removesuffix(".local")
+            message = (
+                "Please run this from the main node.\n"
+                f"Main node: {name} · {address}"
+            )
+        elif scope is CommandScope.CHILD:
+            message = "Please run this from a child node."
+        else:
+            message = "This command is not allowed from the current node."
+        super().__init__(message)
 
 
 class CommandDenied(RuntimeError):
@@ -6855,7 +6882,7 @@ NoNewPrivileges=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart={_systemd_quote(executable)} node-agent --listen 0.0.0.0 --port {SITE_CONTROL_PORT}
 TimeoutStopSec=15
@@ -8652,6 +8679,28 @@ def _engine_group_lifecycle(
             return None
         results: list[dict[str, Any]] = []
         for row, _placement in selected:
+            if (
+                action == "start"
+                and row["state"] == "running"
+                and row["desired_state"] == "running"
+            ):
+                results.append(
+                    {
+                        **row["plan"],
+                        "placement_id": row["placement_id"],
+                        "desired_state": "running",
+                        "state": "running",
+                        "member_states": [dict(value) for value in row["members"]],
+                    }
+                )
+                continue
+            if action in {"start", "restart", "recover"}:
+                link_failure = _engine_group_required_link_failure(row, store)
+                if link_failure is not None:
+                    raise LetsInferError(
+                        "engine group cannot resume until its required node link "
+                        f"is verified: {row['group_id']} ({link_failure})"
+                    )
             orchestrator, _manifest = _restore_engine_group_orchestrator(
                 store,
                 row,
@@ -9153,10 +9202,121 @@ def _engine_group_status(model: str | None) -> list[dict[str, Any]]:
     return values
 
 
+def _engine_group_required_link_failure(
+    row: Mapping[str, Any],
+    store: SiteStore,
+    *,
+    now_unix: int | None = None,
+) -> str | None:
+    """Return a bounded reason only when one sealed group link is unavailable."""
+
+    plan = row.get("plan")
+    connections = plan.get("connections") if isinstance(plan, Mapping) else None
+    resources = plan.get("resources") if isinstance(plan, Mapping) else None
+    if not isinstance(connections, list) or not connections:
+        return None
+    if not isinstance(resources, list):
+        return "required_link_plan_invalid"
+    member_ids = {
+        str(resource.get("node_id"))
+        for resource in resources
+        if isinstance(resource, Mapping)
+    }
+    if len(member_ids) != len(resources):
+        return "required_link_plan_invalid"
+    now = int(time.time()) if now_unix is None else now_unix
+    members = {
+        str(member["member_id"]): member
+        for member in store.members()
+        if str(member.get("member_id")) in member_ids
+        and member.get("state") in {"active", "draining"}
+    }
+    if set(members) != member_ids:
+        return None
+    if any(
+        not isinstance(member.get("facts"), Mapping)
+        or not isinstance(member["facts"].get("observed_at_unix"), int)
+        or not 0
+        <= now - int(member["facts"]["observed_at_unix"])
+        <= TOPOLOGY_ONLINE_SECONDS
+        for member in members.values()
+    ):
+        return None
+    try:
+        graph = TopologyGraph(
+            [dict(members[member_id]["facts"]) for member_id in sorted(member_ids)],
+            now_unix=now,
+            member_certificates={
+                member_id: str(members[member_id]["certificate_sha256"])
+                for member_id in member_ids
+            },
+        )
+    except TopologyError:
+        return "required_link_evidence_invalid"
+    for required in connections:
+        if not isinstance(required, Mapping) or not isinstance(
+            required.get("nodes"), list
+        ):
+            return "required_link_plan_invalid"
+        key = tuple(sorted(str(value) for value in required["nodes"]))
+        current = graph.links.get(key)
+        if current is None:
+            return "required_link_unavailable"
+        if (
+            current.get("kind") != required.get("kind")
+            or current.get("rdma") is not required.get("rdma")
+            or int(current.get("speed_mbps", -1))
+            < int(required.get("speed_mbps", 0))
+            or int(current.get("mtu", -1)) < int(required.get("mtu", 0))
+        ):
+            return "required_link_degraded"
+    return None
+
+
+def _pause_engine_group_for_link_loss(
+    store: SiteStore,
+    row: Mapping[str, Any],
+    orchestrator: EngineGroupOrchestrator,
+    reason: str,
+) -> dict[str, Any]:
+    """Drain and stop exactly one affected group, preserving every sibling."""
+
+    draining = {
+        **dict(row["plan"]),
+        "placement_id": row["placement_id"],
+        "desired_state": "stopped",
+        "state": "stopping",
+        "member_states": [dict(value) for value in row["members"]],
+    }
+    _sync_group_placement(store, draining)
+    stopped = orchestrator.stop()
+    paused = store.set_engine_group(
+        row["plan"],
+        placement_id=row["placement_id"],
+        source=row["source"],
+        engine_credential_sha256=row["engine_credential_sha256"],
+        desired_state="stopped",
+        state="stopped",
+        members=stopped["member_states"],
+        action="group.link-pause",
+        error=reason,
+        actor_type="system",
+        actor_id="main",
+        origin_interface="link-monitor",
+    )
+    _sync_group_placement(store, paused)
+    return paused
+
+
 @_serialized_engine_group_lifecycle
 def reconcile_engine_groups_once() -> dict[str, Any]:
     """Refresh durable health without changing a group's desired lifecycle."""
-    summary: dict[str, list[str]] = {"healthy": [], "degraded": [], "failed": []}
+    summary: dict[str, list[str]] = {
+        "healthy": [],
+        "degraded": [],
+        "paused": [],
+        "failed": [],
+    }
     now = int(time.time())
     with _site_store() as store:
         for row in store.engine_groups():
@@ -9170,6 +9330,40 @@ def reconcile_engine_groups_once() -> dict[str, Any]:
                     and now - int(row["updated_at_unix"]) < 300
                 )
                 orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
+                link_failure = _engine_group_required_link_failure(
+                    row,
+                    store,
+                    now_unix=now,
+                )
+                if link_failure is not None:
+                    try:
+                        _pause_engine_group_for_link_loss(
+                            store,
+                            row,
+                            orchestrator,
+                            link_failure,
+                        )
+                        summary["paused"].append(row["group_id"])
+                    except Exception:
+                        current_row = next(
+                            (
+                                value
+                                for value in store.engine_groups()
+                                if value["group_id"] == row["group_id"]
+                            ),
+                            None,
+                        )
+                        if current_row is not None:
+                            failed = {
+                                **current_row["plan"],
+                                "placement_id": current_row["placement_id"],
+                                "desired_state": current_row["desired_state"],
+                                "state": current_row["state"],
+                                "member_states": current_row["members"],
+                            }
+                            _sync_group_placement(store, failed)
+                        summary["failed"].append(row["group_id"])
+                    continue
                 current = orchestrator.reconcile()
                 if not recovery_in_cooldown:
                     states = {
@@ -10344,6 +10538,19 @@ def _local_controller_telemetry(
     """Read the node agent's live aggregate without consuming a Watchdog slot."""
 
     telemetry = _local_controller_telemetry_document(config)
+    return _telemetry_summary(
+        telemetry,
+        preferred_member_id=preferred_member_id,
+    )
+
+
+def _telemetry_summary(
+    telemetry: Mapping[str, Any] | None,
+    *,
+    preferred_member_id: str | None,
+) -> dict[str, Any] | None:
+    """Select one local sample while retaining aggregate inference counters."""
+
     aggregate = telemetry.get("aggregate") if isinstance(telemetry, dict) else None
     if not isinstance(aggregate, dict):
         return None
@@ -10380,6 +10587,46 @@ def _local_controller_telemetry(
             result["system"] = sample.get("system")
             result["workload"] = sample.get("workload")
     return result
+
+
+def _local_watchdog_telemetry(identity: Any) -> dict[str, Any] | None:
+    """Read this node's authenticated live Watchdog sample without main authority."""
+
+    stop_event = threading.Event()
+    samples: Any = None
+    try:
+        samples = watchdog_live_samples(
+            member_id=identity.member_id,
+            port=WATCHDOG_TELEMETRY_PORT,
+            ca_file=default_watchdog_controller_ca_path(),
+            controller_cert_file=default_watchdog_local_controller_cert_path(),
+            controller_key_file=default_watchdog_local_controller_key_path(),
+            stop_event=stop_event,
+        )
+        sample = next(samples)
+    except (OSError, StopIteration, TelemetryError):
+        try:
+            sample = read_latest_watchdog_sample(
+                default_watchdog_data_root() / "raw.ring",
+                member_id=identity.member_id,
+            )
+        except (OSError, TelemetryError):
+            return None
+    finally:
+        stop_event.set()
+        if samples is not None:
+            close = getattr(samples, "close", None)
+            if close is not None:
+                close()
+    try:
+        aggregator = TelemetryAggregator()
+        telemetry = aggregator.update(sample)
+    except (OSError, TelemetryError):
+        return None
+    return _telemetry_summary(
+        telemetry,
+        preferred_member_id=identity.member_id,
+    )
 
 
 def _local_status_node(identity: Any) -> dict[str, Any]:
@@ -10624,6 +10871,8 @@ def status(arguments: argparse.Namespace) -> int:
                     preferred_member_id=identity.member_id,
                 )
                 if identity.role == "main" and node_active == "active"
+                else _local_watchdog_telemetry(identity)
+                if node_active == "active"
                 else None
             ),
         }
@@ -10831,8 +11080,10 @@ def status(arguments: argparse.Namespace) -> int:
         "config": str(config_path) if config else None,
     }
     local_member_id: str | None = None
+    local_identity: Any = None
     try:
         identity = read_site_identity()
+        local_identity = identity
         local_member_id = identity.member_id
         payload.update(_complete_local_node_status(identity))
     except (OSError, SiteError, StopIteration):
@@ -10844,9 +11095,13 @@ def status(arguments: argparse.Namespace) -> int:
         payload["engine_groups"] = live_groups
     payload["models"] = _model_status_from_groups(live_groups)
     payload["lifecycle"] = runtime_lifecycle(payload)
-    payload["telemetry"] = _local_controller_telemetry(
-        config,
-        preferred_member_id=local_member_id,
+    payload["telemetry"] = (
+        _local_watchdog_telemetry(local_identity)
+        if local_identity is not None and local_identity.role == "child"
+        else _local_controller_telemetry(
+            config,
+            preferred_member_id=local_member_id,
+        )
     )
     if arguments.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -12859,6 +13114,12 @@ def _start_engine_group_by_id(group_id: str) -> None:
         if row["state"] != "stopped" or row["desired_state"] != "stopped":
             raise LetsInferError(
                 "engine group entered an unsafe state before restoration"
+            )
+        link_failure = _engine_group_required_link_failure(row, store)
+        if link_failure is not None:
+            raise LetsInferError(
+                "engine group cannot resume until its required node link is verified: "
+                f"{group_id} ({link_failure})"
             )
         orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
         started = orchestrator.start()
@@ -18419,11 +18680,13 @@ def _topology_status_snapshot() -> dict[str, Any]:
     models_by_member: dict[str, list[dict[str, Any]]] = {
         str(row["member_id"]): [] for row in members
     }
+    grouped_placement_ids: set[str] = set()
     for group in groups:
         placement = placements.get(group["placement_id"])
         resources = group.get("plan", {}).get("resources")
         if placement is None or not isinstance(resources, list):
             raise LetsInferError("engine-group topology record is incomplete")
+        grouped_placement_ids.add(str(group["placement_id"]))
         for resource in resources:
             if not isinstance(resource, Mapping):
                 raise LetsInferError("engine-group topology resource is invalid")
@@ -18437,6 +18700,31 @@ def _topology_status_snapshot() -> dict[str, Any]:
                     "group_id": group["group_id"],
                     "runtime": placement["runtime"],
                     "target": placement["target"],
+                    "reason": group.get("last_error"),
+                }
+            )
+    for placement_id, placement in sorted(placements.items()):
+        if (
+            placement_id in grouped_placement_ids
+            or placement.get("state") not in {"starting", "running", "draining"}
+        ):
+            continue
+        placement_members = placement.get("members")
+        if not isinstance(placement_members, list):
+            raise LetsInferError("standalone topology placement is incomplete")
+        for member_id_value in placement_members:
+            member_id = str(member_id_value)
+            if member_id not in models_by_member:
+                continue
+            models_by_member[member_id].append(
+                {
+                    "model": placement["model"],
+                    "state": placement["state"],
+                    "group_id": None,
+                    "placement_id": placement_id,
+                    "runtime": placement["runtime"],
+                    "target": placement["target"],
+                    "reason": None,
                 }
             )
 
@@ -19490,7 +19778,7 @@ def _authorize_command(arguments: argparse.Namespace) -> tuple[Any, Any]:
                         store.record_denied(action_id, action_id, reason)
                 except SiteError:
                     pass
-            raise LetsInferError(reason)
+            raise CommandNotAllowed(metadata.scope, identity)
     return metadata, identity
 
 
@@ -19639,8 +19927,57 @@ def node_info_command(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _prepare_platform_network_for_node_add(arguments: argparse.Namespace) -> None:
+    """Offer one provider-owned link setup without embedding target policy."""
+
+    if platform.system().lower() != "linux":
+        return
+    try:
+        plan = host_network_plan(require_live=True)
+    except NetworkPlanError as error:
+        raise LetsInferError(str(error)) from error
+    if plan is None:
+        return
+    presenter = _human_presenter()
+    if presenter is None or not sys.stdin.isatty():
+        return
+    try:
+        approved = presenter.prompt.confirm(
+            "High-speed node link detected without addresses. Configure it automatically? Administrator access is required.",
+            require_tty=True,
+        )
+    except command_ui.PromptUnavailable as error:
+        raise LetsInferError("node-link setup confirmation was cancelled") from error
+    if not approved:
+        presenter.result(
+            "High-speed link setup skipped",
+            semantic=command_ui.Semantic.WARNING,
+            detail="Node discovery will continue over the management network",
+        )
+        return
+    activity = _command_activity(arguments, "Configuring high-speed node links")
+    try:
+        with activity, ui.protect_stdout(activity):
+            result = apply_network_plan(plan)
+    except NetworkPlanError as error:
+        raise LetsInferError(str(error)) from error
+    if result["state"] == "configured":
+        presenter.result(
+            "High-speed node links configured",
+            semantic=command_ui.Semantic.SUCCESS,
+            detail="Cable changes will now be detected automatically",
+        )
+    else:
+        presenter.result(
+            "Existing high-speed network plan retained",
+            semantic=command_ui.Semantic.INFO,
+            detail="Let’s Infer did not overwrite externally managed networking",
+        )
+
+
 def node_add_command(arguments: argparse.Namespace) -> int:
     """Run the unified discovery, request, and approval workflow."""
+    _prepare_platform_network_for_node_add(arguments)
     identity = read_site_identity()
     if identity.role == "child":
         _detach_child_for_node_add(arguments, identity)
@@ -21550,6 +21887,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                 )
         return result
+    except CommandNotAllowed as error:
+        terminal = ui.Terminal(sys.stderr)
+        if machine_output or raw_output or not terminal.interactive:
+            terminal.stream.write(f"NOT ALLOWED: {error}\n")
+        else:
+            command_ui.CommandUI(terminal.stream).result(
+                "NOT ALLOWED",
+                semantic=command_ui.Semantic.WARNING,
+                detail=str(error),
+            )
+        terminal.stream.flush()
+        return 1
     except CommandDenied as error:
         if metadata is not None and not audit_recorded:
             _audit_command_result(

@@ -107,7 +107,9 @@ def topology_payload() -> dict[str, object]:
                 "health": "healthy",
                 "accelerator": "NVIDIA GB10",
                 "memory_total_gib": 119,
-                "models": [{"model": "nemotron-3.5-lightning"}],
+                "models": [
+                    {"model": "nemotron-3.5-lightning", "state": "running"}
+                ],
                 "traffic": {"rx_kib_s": 12, "tx_kib_s": 34, "fresh": True},
             },
             {
@@ -119,7 +121,9 @@ def topology_payload() -> dict[str, object]:
                 "connection": "Wireless",
                 "accelerator": "NVIDIA GB10",
                 "memory_total_gib": 121,
-                "models": [{"model": "deepseek-v4-flash"}],
+                "models": [
+                    {"model": "deepseek-v4-flash", "state": "running"}
+                ],
                 "traffic": {"rx_kib_s": 56, "tx_kib_s": 78, "fresh": True},
             },
         ],
@@ -573,7 +577,7 @@ class ImmutableStatusContractTests(unittest.TestCase):
         ]
         white = ui.BOLD + ui.LIGHT
         self.assertIn(white + "│" + ui.RESET, frames[0])
-        self.assertIn(white + "[Wireless]" + ui.RESET, frames[1])
+        self.assertIn(white + "[ConnectX]" + ui.RESET, frames[1])
         self.assertIn(white + "│" + ui.RESET, frames[2])
         self.assertIn(white + "└── " + ui.RESET, frames[3])
         self.assertEqual(len(set(frames)), 4)
@@ -641,7 +645,15 @@ class ImmutableStatusContractTests(unittest.TestCase):
                 "model": "deepseek-v4-flash",
                 "runtime": "runtime@1",
                 "target": "dgx-spark",
-            }
+            },
+            {
+                "placement_id": "5" * 32,
+                "model": "nemotron-3.5-lightning",
+                "runtime": "qualification@1",
+                "target": "dgx-spark",
+                "state": "running",
+                "members": [main_id],
+            },
         ]
         store.__enter__.return_value.engine_groups.return_value = [
             {
@@ -685,7 +697,11 @@ class ImmutableStatusContractTests(unittest.TestCase):
             snapshot = cli._topology_status_snapshot()
         self.assertEqual(snapshot["links"][0]["age_seconds"], 1)
         child = next(row for row in snapshot["nodes"] if row["member_id"] == child_id)
+        main = next(row for row in snapshot["nodes"] if row["member_id"] == main_id)
         self.assertEqual(child["models"][0]["model"], "deepseek-v4-flash")
+        self.assertEqual(main["models"][0]["model"], "nemotron-3.5-lightning")
+        self.assertEqual(main["models"][0]["state"], "running")
+        self.assertIsNone(main["models"][0]["group_id"])
         self.assertEqual(child["traffic"]["tx_kib_s"], 34)
         self.assertTrue(child["traffic"]["fresh"])
 

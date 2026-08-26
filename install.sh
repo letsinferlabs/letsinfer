@@ -532,6 +532,18 @@ if [ -z "$version" ]; then
     ) || fail "release version is unreadable"
 fi
 
+if [ "$run_setup" -eq 1 ] && [ "$platform_os" = "linux" ] \
+    && [ "$user_install" -eq 0 ]; then
+    progress 65 "Preparing platform networking"
+    network_log="$temporary/platform-network.log"
+    if ! (cd "$unpacked/letsinfer" && \
+        python3 -m core.platform.network apply-if-detected) \
+        >"$network_log" 2>&1; then
+        tail -n 40 "$network_log" >&2
+        fail "platform network setup failed"
+    fi
+fi
+
 progress 70 "Installing core"
 
 if [ "$run_setup" -eq 1 ]; then

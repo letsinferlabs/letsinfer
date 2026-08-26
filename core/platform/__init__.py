@@ -1,1 +1,1 @@
-"""Operating-system service integration for Let's Infer core."""
+"""Isolated operating-system and hardware-provider integration boundaries."""

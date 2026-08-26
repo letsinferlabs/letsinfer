@@ -47,6 +47,16 @@ operator, and administrator roles control telemetry, lifecycle, and sensitive
 administration. The private controller API exposes fixed typed operations;
 there is no arbitrary shell route.
 
+## Physical link lifecycle
+
+Core treats node membership and engine-group data links as separate scopes.
+Platform providers may prepare addressing for supported high-speed hardware,
+but generic topology accepts a link only after mutual certificate and direct
+route proof. Losing that proof pauses only groups whose immutable connection
+plans require the link. The nodes remain online over their management network,
+the gateway keeps routing unaffected groups, and reconnection requires an
+explicit model resume rather than silently restarting work.
+
 ## Replication
 
 A model service is the logical model your clients request. It may contain one
