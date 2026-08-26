@@ -18,6 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from core.runtime_packs import (  # noqa: E402
+    BENCHMARK_SCHEMA_VERSION,
     EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
     RuntimePackError,
@@ -35,6 +36,7 @@ SCHEMA_VERSION = 4
 SHARED_SCHEMA_VERSION = 5
 TTFT_CACHE_SCHEMA_VERSION = 6
 EXECUTION_PAYLOAD_SCHEMA_VERSION = 7
+DISTRIBUTION_PAYLOAD_SCHEMA_VERSION = 8
 LEGACY_SUBJECT_FIELDS = {
     "candidate_id",
     "runtime_version",
@@ -54,7 +56,21 @@ EXECUTION_PAYLOAD_SUBJECT_FIELDS = {
     "target",
     "target_contract_sha256",
 }
-SUBJECT_FIELDS = LEGACY_SUBJECT_FIELDS | EXECUTION_PAYLOAD_SUBJECT_FIELDS
+NATIVE_PAYLOAD_SUBJECT_FIELDS = {
+    "candidate_id",
+    "runtime_version",
+    "model_uri",
+    "model_revision",
+    "engine_payload_sha256",
+    "measured_engine_kind",
+    "target",
+    "target_contract_sha256",
+}
+SUBJECT_FIELDS = (
+    LEGACY_SUBJECT_FIELDS
+    | EXECUTION_PAYLOAD_SUBJECT_FIELDS
+    | NATIVE_PAYLOAD_SUBJECT_FIELDS
+)
 RESULT_FIELDS = {
     "workload",
     "prompt_domain",
@@ -173,9 +189,10 @@ def validate_subject(value: Any) -> dict[str, Any]:
     if fields not in {
         frozenset(LEGACY_SUBJECT_FIELDS),
         frozenset(EXECUTION_PAYLOAD_SUBJECT_FIELDS),
+        frozenset(NATIVE_PAYLOAD_SUBJECT_FIELDS),
     }:
         raise BenchmarkRecordError(
-            "benchmark subject must use the legacy OCI identity or execution payload identity"
+            "benchmark subject must use an OCI or native execution identity"
         )
     candidate = value.get("candidate_id")
     if not isinstance(candidate, str) or re.fullmatch(
@@ -204,7 +221,7 @@ def validate_subject(value: Any) -> dict[str, Any]:
             r"[^\s@]+@sha256:[0-9a-f]{64}", engine_oci
         ) is None:
             raise BenchmarkRecordError("subject.engine_oci must be digest-pinned")
-    else:
+    elif fields == EXECUTION_PAYLOAD_SUBJECT_FIELDS:
         payload = value.get("engine_payload_sha256")
         measured = value.get("measured_engine_oci")
         if not isinstance(payload, str) or SHA256_RE.fullmatch(payload) is None:
@@ -216,6 +233,21 @@ def validate_subject(value: Any) -> dict[str, Any]:
         ) is None:
             raise BenchmarkRecordError(
                 "subject.measured_engine_oci must be digest-pinned"
+            )
+    else:
+        payload = value.get("engine_payload_sha256")
+        kind = value.get("measured_engine_kind")
+        if not isinstance(payload, str) or SHA256_RE.fullmatch(payload) is None:
+            raise BenchmarkRecordError(
+                "subject.engine_payload_sha256 must be a SHA-256"
+            )
+        if kind not in {
+            "native-archive",
+            "python-standalone",
+            "embedded-application",
+        }:
+            raise BenchmarkRecordError(
+                "subject.measured_engine_kind must be a native distribution"
             )
     target = value.get("target")
     if not isinstance(target, str) or re.fullmatch(
@@ -568,7 +600,10 @@ def validate_record(value: Any) -> dict[str, Any]:
             if isinstance(value, dict) and "ttft_cache" in value
             else EXECUTION_PAYLOAD_RECORD_FIELDS
         )
-        if schema_version == EXECUTION_PAYLOAD_SCHEMA_VERSION
+        if schema_version in {
+            EXECUTION_PAYLOAD_SCHEMA_VERSION,
+            DISTRIBUTION_PAYLOAD_SCHEMA_VERSION,
+        }
         else TTFT_CACHE_RECORD_FIELDS
         if schema_version == TTFT_CACHE_SCHEMA_VERSION
         else SHARED_RECORD_FIELDS
@@ -588,17 +623,20 @@ def validate_record(value: Any) -> dict[str, Any]:
             SHARED_SCHEMA_VERSION,
             TTFT_CACHE_SCHEMA_VERSION,
             EXECUTION_PAYLOAD_SCHEMA_VERSION,
+            DISTRIBUTION_PAYLOAD_SCHEMA_VERSION,
         }
     ):
         raise BenchmarkRecordError(
             f"benchmark record schema_version must be {SCHEMA_VERSION} or "
             f"{SHARED_SCHEMA_VERSION}, {TTFT_CACHE_SCHEMA_VERSION}, or "
-            f"{EXECUTION_PAYLOAD_SCHEMA_VERSION}"
+            f"{EXECUTION_PAYLOAD_SCHEMA_VERSION}, or "
+            f"{DISTRIBUTION_PAYLOAD_SCHEMA_VERSION}"
         )
     if schema_version in {
         SHARED_SCHEMA_VERSION,
         TTFT_CACHE_SCHEMA_VERSION,
         EXECUTION_PAYLOAD_SCHEMA_VERSION,
+        DISTRIBUTION_PAYLOAD_SCHEMA_VERSION,
     }:
         contract = value.get("benchmark_contract")
         if not isinstance(contract, dict):
@@ -610,6 +648,7 @@ def validate_record(value: Any) -> dict[str, Any]:
                 f"benchmark_contract is invalid: {error}"
             ) from error
         if contract.get("schema_version") not in {
+            BENCHMARK_SCHEMA_VERSION,
             SHARED_BENCHMARK_SCHEMA_VERSION,
             PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
             SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
@@ -618,7 +657,7 @@ def validate_record(value: Any) -> dict[str, Any]:
             EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
         }:
             raise BenchmarkRecordError(
-                "benchmark_contract must use shared-matrix schema 3 through 8"
+                "benchmark_contract must use schema 2 through 8"
             )
         expected_contract = (
             EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION
@@ -652,7 +691,10 @@ def validate_record(value: Any) -> dict[str, Any]:
         ttft_cache_results_sha256(results, ttft_cache)
         if schema_version == TTFT_CACHE_SCHEMA_VERSION
         or (
-            schema_version == EXECUTION_PAYLOAD_SCHEMA_VERSION
+            schema_version in {
+                EXECUTION_PAYLOAD_SCHEMA_VERSION,
+                DISTRIBUTION_PAYLOAD_SCHEMA_VERSION,
+            }
             and has_ttft_cache
         )
         else results_sha256(results)
@@ -660,7 +702,10 @@ def validate_record(value: Any) -> dict[str, Any]:
     if value.get("results_sha256") != actual_results_sha:
         raise BenchmarkRecordError("benchmark record results_sha256 does not match results")
     if schema_version == TTFT_CACHE_SCHEMA_VERSION or (
-        schema_version == EXECUTION_PAYLOAD_SCHEMA_VERSION
+        schema_version in {
+            EXECUTION_PAYLOAD_SCHEMA_VERSION,
+            DISTRIBUTION_PAYLOAD_SCHEMA_VERSION,
+        }
         and has_ttft_cache
     ):
         validate_ttft_cache_result(ttft_cache)
@@ -748,6 +793,21 @@ def validate_record(value: Any) -> dict[str, Any]:
         ):
             _unknown_or_rate(result.get(field), f"{where}.{field}")
         _validate_telemetry(result, where)
+    subject_fields = set(value.get("subject", {}))
+    if (
+        schema_version == EXECUTION_PAYLOAD_SCHEMA_VERSION
+        and subject_fields != EXECUTION_PAYLOAD_SUBJECT_FIELDS
+    ):
+        raise BenchmarkRecordError(
+            "benchmark record schema 7 requires an OCI execution payload subject"
+        )
+    if (
+        schema_version == DISTRIBUTION_PAYLOAD_SCHEMA_VERSION
+        and subject_fields != NATIVE_PAYLOAD_SUBJECT_FIELDS
+    ):
+        raise BenchmarkRecordError(
+            "benchmark record schema 8 requires a native execution payload subject"
+        )
     expected_id = benchmark_id(
         value.get("installation_id"),
         timestamp_ns,

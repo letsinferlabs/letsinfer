@@ -153,8 +153,8 @@ class RuntimeImageRemovalTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"LETSINFER_HOME": str(home)}):
                 references = cli._installed_runtime_image_references()
 
-        self.assertIn(runtime["engine"]["oci"]["reference"], references)
-        self.assertIn(runtime["engine"]["oci"]["immutable_id"], references)
+        self.assertIn(runtime["engine"]["distribution"]["reference"], references)
+        self.assertIn(runtime["engine"]["distribution"]["immutable_id"], references)
         self.assertIn(runtime["model"]["acquisition"]["image"], references)
         self.assertNotIn("unrelated:latest", references)
 

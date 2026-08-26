@@ -361,5 +361,51 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             with self.assertRaisesRegex(cli.LetsInferError, "differs from the staged"):
                 executor.start(changed)
 
+    def test_native_start_uses_the_sealed_launchd_job(self) -> None:
+        native_manifest = {
+            "serving": {},
+            "container": {"startup_timeout_seconds": 2},
+            "model": {"alias": "fixture-model"},
+            "image": {
+                "distribution": "native-archive",
+                "platform": "macos/arm64",
+                "payload_id": "sha256:" + "8" * 64,
+            },
+        }
+        native = {**self.config, "_manifest": native_manifest}
+        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        with (
+            mock.patch.object(cli.platform, "system", return_value="Darwin"),
+            mock.patch.object(cli, "_read_engine_group_config", return_value=native),
+            mock.patch.object(cli, "authorize_serving_launch"),
+            mock.patch.object(cli, "verify_host_target"),
+            mock.patch.object(cli, "verify_installed_runtime"),
+            mock.patch.object(cli, "require_memory_reserve"),
+            mock.patch.object(cli, "health_ready", return_value=True),
+            mock.patch.object(cli, "certificate_sha256", return_value="7" * 64),
+            mock.patch(
+                "core.native_engine.native_launch_command",
+                return_value=("/bin/engine", "serve"),
+            ),
+            mock.patch(
+                "core.native_engine.native_launch_environment",
+                return_value={"LETSINFER_NATIVE_ENGINE_ROOT": "/native"},
+            ),
+            mock.patch.object(cli.macos_services, "install_launch_agent") as install,
+            mock.patch.object(
+                cli.macos_services,
+                "service_state",
+                return_value=("enabled", "active", None),
+            ),
+        ):
+            result = executor.start(self.job)
+
+        self.assertEqual(result["state"], "running")
+        agent = install.call_args.args[0]
+        self.assertEqual(agent.arguments, ("/bin/engine", "serve"))
+        self.assertEqual(agent.environment["LETSINFER_LISTEN_PORT"], "18000")
+        self.assertEqual(agent.environment["LETSINFER_NATIVE_BACKEND_PORT"], "18001")
+        self.assertEqual(agent.environment["LETSINFER_ENGINE_PROTOCOL"], "2")
+
 if __name__ == "__main__":
     unittest.main()

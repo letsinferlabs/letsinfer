@@ -233,6 +233,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                 "address": "https://node.local:9770",
                 "device_uuids": ["GPU-0"],
                 "port_base": 18000,
+                "port_count": 1,
             }],
             "strategy": "single",
             "service_id": "3" * 32,
@@ -268,7 +269,10 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         ))
         runtime = types.SimpleNamespace(
             digest=runtime_digest,
-            runtime={"orchestration": None},
+            runtime={
+                "orchestration": None,
+                "engine": {"distribution": {"kind": "oci-container"}},
+            },
             runtime_path=pathlib.Path("/runtime/runtime.json"),
         )
         execution_manifest = mock.Mock(return_value=regenerated_manifest)

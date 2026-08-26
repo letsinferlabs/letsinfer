@@ -1585,7 +1585,7 @@ def validate_verifier_bundle(
     }
     engine_files = {"engine.oci.tar", "engine.spdx.json"}
     expected = basic | (engine_files if mode == "build-engine" else set())
-    if mode not in {"reuse-engine", "build-engine"}:
+    if mode not in {"reuse-engine", "build-engine", "build-native-engine"}:
         raise VerificationError("verifier artifact Engine mode is invalid")
     entries = list(root.iterdir())
     if any(
@@ -1656,15 +1656,21 @@ def validate_verifier_bundle(
             for key, value in calculated.items():
                 if key != "execution_sha256" and subject.get(key) != value:
                     raise VerificationError("verifier runtime execution subject differs")
-            runtime_engine = pack.runtime["engine"]["oci"]
+            runtime_engine = pack.runtime["engine"]["distribution"]
             runtime_platform = pack.runtime["target"]["platform"]
     except RuntimePackError as error:
         raise VerificationError(f"verifier runtime pack is invalid: {error}") from error
     engine = document.get("engine")
     if (
         not isinstance(engine, dict)
-        or engine.get("reference") != runtime_engine["reference"]
-        or engine.get("config_digest") != runtime_engine["immutable_id"]
+        or engine.get("kind") != runtime_engine["kind"]
+        or (
+            runtime_engine["kind"] == "oci-container"
+            and (
+                engine.get("reference") != runtime_engine["reference"]
+                or engine.get("config_digest") != runtime_engine["immutable_id"]
+            )
+        )
         or (
             runtime_engine.get("payload_id") is not None
             and engine.get("payload_digest") != runtime_engine["payload_id"]
@@ -1676,7 +1682,8 @@ def validate_verifier_bundle(
     engine_tag = None
     if mode == "build-engine":
         if (
-            engine.get("manifest_digest") != str(engine["reference"]).rsplit("@", 1)[-1]
+            runtime_engine["kind"] != "oci-container"
+            or engine.get("manifest_digest") != str(engine["reference"]).rsplit("@", 1)[-1]
             or engine.get("config_digest") != runtime_engine["immutable_id"]
             or (
                 runtime_engine.get("payload_id") is not None
@@ -1697,6 +1704,14 @@ def validate_verifier_bundle(
         if any(engine.get(key) != value for key, value in identity.items()):
             raise VerificationError("verifier Engine OCI metadata differs")
         engine_tag = f"letsinfer-verifier/{candidate}:{pr.head_sha[:12]}"
+    elif mode == "build-native-engine":
+        if (
+            runtime_engine["kind"] == "oci-container"
+            or engine.get("platform") != runtime_platform
+            or engine.get("source_revision") != runtime_engine["source_revision"]
+            or engine.get("payload_digest") != runtime_engine["payload_id"]
+        ):
+            raise VerificationError("verifier native Engine identity differs")
     provenance = _bundle_object(root / "provenance.json")
     if provenance.get("subject") != subject or provenance.get("engine") != engine:
         raise VerificationError("verifier artifact provenance differs")
@@ -2010,11 +2025,22 @@ def execution_subject(
         )
     candidate = runtime.get("id")
     version = runtime.get("version")
-    engine_oci = engine.get("oci")
-    if not isinstance(engine_oci, Mapping) or not isinstance(
-        benchmark.get("contract"), Mapping
-    ):
-        raise VerificationError("runtime Engine OCI identity is unavailable")
+    from .engine_distribution import (
+        EngineDistributionError,
+        distribution_payload_sha256,
+        validate_engine_distribution,
+    )
+
+    try:
+        engine_distribution = validate_engine_distribution(
+            engine.get("distribution"),
+            target_platform=str(target.get("platform", "")),
+        )
+    except EngineDistributionError as error:
+        raise VerificationError(str(error)) from error
+    if not isinstance(benchmark.get("contract"), Mapping):
+        raise VerificationError("runtime benchmark contract is unavailable")
+    engine_payload = distribution_payload_sha256(engine_distribution)
     subject = {
         "candidate_id": candidate,
         "runtime_version": version,
@@ -2026,15 +2052,11 @@ def execution_subject(
             pack_bytes=pack_bytes,
         ),
         **(
-            {
-                "engine_payload_sha256": str(
-                    engine_oci.get("payload_id")
-                ).removeprefix("sha256:")
-            }
-            if engine_oci.get("payload_id") is not None
+            {"engine_payload_sha256": engine_payload}
+            if engine_payload is not None
             else {
                 "engine_oci_manifest_digest": str(
-                    engine_oci.get("reference", "")
+                    engine_distribution.get("reference", "")
                 ).rsplit("@", 1)[-1]
             }
         ),

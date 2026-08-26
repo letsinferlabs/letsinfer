@@ -120,6 +120,7 @@ class EngineGroupInstallTests(unittest.TestCase):
             runtime={
                 "id": "engine--owner--model--one-node",
                 "version": "1.0.0",
+                "engine": {"distribution": {"kind": "oci-container"}},
                 "orchestration": None,
             },
         )

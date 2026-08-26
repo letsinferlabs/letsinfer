@@ -26,7 +26,7 @@ runtime, model artifacts, engine, lifecycle, safety, and telemetry.
 - [CLI reference](reference/cli.md)
 - [Runtime format](reference/runtime-format.md)
 - [Runtime candidates](concepts/runtime-packs.md)
-- [Engine protocol and Engine OCI](concepts/engine-adapters.md)
+- [Engine protocol and distributions](concepts/engine-adapters.md)
 - [Nodes, replication, and trust](concepts/sites.md)
 
 ## Operations
@@ -41,6 +41,6 @@ runtime, model artifacts, engine, lifecycle, safety, and telemetry.
 - [Testing and pull-request gates](contributing/testing.md)
 - [Developing and publishing runtimes](contributing/runtimes.md)
 
-The public contract is runtime schema 5, runtime artifact schema 5, catalog
-schema 6, revocation-ledger schema 1, and Engine protocol 2. Unsupported
+The public contract is runtime schema 6, runtime artifact schema 6, catalog
+schema 7, revocation-ledger schema 1, and Engine protocol 2. Unsupported
 schemas fail closed.

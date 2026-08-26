@@ -18,7 +18,11 @@ def release_identity(
         "source": "registry.example/runtime@sha256:" + "7" * 64,
         "runtime_digest": runtime_digest,
         "manifest_sha256": manifest_sha256,
-        "engine_oci": "registry.example/engine@sha256:" + "8" * 64,
+        "engine_distribution": {
+            "kind": "oci-container",
+            "reference": "registry.example/engine@sha256:" + "8" * 64,
+            "immutable_id": "sha256:" + "d" * 64,
+        },
         "model_uri": "hf://example/model",
         "artifacts": [{
             "name": "model",
@@ -35,6 +39,7 @@ def release_identity(
         },
         "authors": ["Letsinfer"],
         "license": "AGPL-3.0-only",
+        "native_execution": None,
     }
 
 

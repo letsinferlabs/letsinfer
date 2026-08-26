@@ -3,7 +3,7 @@
 [Back to documentation](../README.md)
 
 A runtime candidate is the complete, reproducible way to run one exact model
-artifact with one exact Engine OCI on one hardware target. You can change
+artifact with one exact Engine distribution on one hardware target. You can change
 model revisions, quantizations, engine arguments, kernels, patches, cache
 configuration, and capacity limits inside a runtime without changing core.
 
@@ -22,7 +22,7 @@ Let's Infer:
 3. selects the recommended qualified candidate;
 4. downloads the immutable runtime pack;
 5. downloads every model artifact declared by that runtime;
-6. pulls the digest-pinned Engine OCI;
+6. stages the immutable Engine distribution selected by the runtime;
 7. verifies all identities and compatibility; and
 8. starts the runtime behind your node's OpenAI-compatible gateway.
 
@@ -58,11 +58,12 @@ Watchdog, benchmark, prompt, and node-orchestration code stays in core.
 
 ## Engine independence
 
-The Engine OCI combines an upstream engine version and the adapter for that
-version. The runtime pins the OCI by digest and supplies opaque native
-arguments. Core speaks only Engine protocol v2.
+The Engine distribution combines an upstream engine version and the adapter
+for that version. The runtime pins an OCI, verified native archive,
+standalone-Python environment, or embedded iOS Engine and supplies opaque
+native arguments. Core speaks only Engine protocol v2.
 
-You need a new Engine OCI when the upstream engine or its adapter changes. You
+You need a new Engine distribution payload when the upstream engine or its adapter changes. You
 need a core change only when the stable Let's Infer Engine protocol itself
 changes.
 
@@ -94,7 +95,7 @@ Parallelism stays inside an exact runtime. The target declares its required
 node count, GPUs per node, memory, and verified interconnect. Its optional
 orchestration contract declares generic node tasks, startup phases, readiness,
 and one endpoint owner. Core allocates authenticated resources and manages the
-group atomically; the Engine OCI privately turns those tasks into ranks,
+group atomically; the Engine distribution privately turns those tasks into ranks,
 pipeline stages, collectives, and engine commands.
 
 This keeps power with runtime authors: a new TP degree, PP schedule, GPU count,
@@ -105,7 +106,7 @@ endpoints and can replicate a complete parallel group without rewriting it.
 
 ## Qualification and recommendations
 
-A candidate becomes qualified only after the exact model revision, Engine OCI,
+A candidate becomes qualified only after the exact model revision, Engine distribution,
 runtime bytes, target contract, recipe, safety envelope, and benchmark record
 pass their declared gates. Evidence does not transfer across a changed Engine
 OCI, model revision, or runtime pack.
@@ -137,13 +138,14 @@ Catalog changes do not silently alter a running installation:
 Installed packs are content-addressed below
 `$LETSINFER_HOME/runtimes/objects/`. Model snapshots live below
 `$LETSINFER_HOME/models/<owner>--<repository>/<revision>/`. OCI download state
-lives below `$LETSINFER_HOME/oci/`, while the container runtime retains its
+lives below `$LETSINFER_HOME/oci/`; native Engine payloads live below
+`$LETSINFER_HOME/state/native-engines/`; and the container runtime retains its
 native content store. The last verified signed catalog lives below
 `$LETSINFER_HOME/state/catalog/` and is shared by model list, install, update, and
 update checks.
 
 Receipts bind the candidate ID, version, pack digest, target contract, model,
-Engine OCI, installation identity, and selection policy. A bounded history
+Engine distribution, installation identity, and selection policy. A bounded history
 supports explicit rollback.
 
 ## Building a candidate
