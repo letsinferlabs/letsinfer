@@ -37,6 +37,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any, Iterable, Mapping, Sequence
 
 from benchmarks import benchmark_record as benchmark_record_contract
@@ -215,6 +216,15 @@ from .site.adoption import (
     AdoptionError,
     resolve_direct_peer,
 )
+from .site.node_add import (
+    NodeAddError,
+    PROTOCOL as NODE_ADD_PROTOCOL,
+    clear_request as clear_node_add_request,
+    discover_nodes as discover_addable_nodes,
+    pending_request as pending_node_add_request,
+    send_request as send_node_add_request,
+    store_request as store_node_add_request,
+)
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -283,59 +293,50 @@ MIN_API_KEY_BYTES = 32
 # internal service commands, raw logs/exports, and one-time secrets retain
 # stable byte contracts. Status and benchmark own their complete live surfaces.
 ACTION_PROGRESS: Mapping[str, tuple[str, str]] = {
-    "setup": ("Creating the node", "Node ready"),
-    "update": ("Updating Let's Infer core", "Core updated"),
-    "node.move": ("Preparing the node move", "Node move ready"),
-    "topology.probe": ("Probing the child link", "Child link verified"),
-    "topology.plan": ("Planning model placement", "Placement plan ready"),
-    "child.prepare": ("Preparing the child identity", "Child identity ready"),
-    "child.join": ("Joining the main node", "Child joined"),
-    "child.invite": ("Creating the child invitation", "Child invitation ready"),
-    "child.approve": ("Approving the child", "Child approved"),
-    "child.sync": ("Refreshing child facts", "Child facts refreshed"),
-    "child.drain": ("Draining the child", "Child drained"),
-    "child.resume": ("Resuming the child", "Child active"),
-    "child.remove": ("Removing the child", "Child removed"),
-    "alias.set": ("Saving the model alias", "Model alias saved"),
-    "alias.remove": ("Removing the model alias", "Model alias removed"),
-    "pack": ("Building the runtime pack", "Runtime pack built"),
-    "upgrade": ("Resolving the runtime upgrade", "Runtime upgraded"),
-    "rollback": ("Restoring the previous runtime", "Runtime restored"),
-    "verify": ("Verifying the runtime", "Runtime verified"),
-    "acquire": ("Acquiring the model", "Model acquired"),
-    "install": ("Installing the runtime", "Runtime installed"),
-    "scale": ("Scaling the replica pool", "Replica pool scaled"),
-    "serve": ("Starting inference", "Inference ready"),
-    "start": ("Starting inference", "Inference ready"),
-    "restart": ("Restarting inference", "Inference ready"),
-    "recover": ("Recovering inference", "Inference recovered"),
-    "expose": ("Enabling public inference", "Public inference enabled"),
-    "unexpose": ("Disabling public inference", "Public inference disabled"),
-    "pair": ("Opening controller pairing", "Pairing session closed"),
-    "controllers.forget": ("Revoking the controller", "Controller revoked"),
-    "key.create": ("Creating the API key", "API key created"),
-    "key.rotate": ("Rotating the API key", "API key rotated"),
-    "key.revoke": ("Revoking the API key", "API key revoked"),
-    "key.policy": ("Updating the API key policy", "API key policy updated"),
-    "stop": ("Stopping inference", "Inference stopped"),
+    "node.add": ("Searching for nodes", "Node workflow complete"),
+    "node.pause": ("Pausing the child", "Child paused"),
+    "node.resume": ("Resuming the child", "Child active"),
+    "node.remove": ("Removing the child", "Child removed"),
+    "model.install": ("Installing models", "Models installed"),
+    "model.remove": ("Removing the model", "Model removed"),
+    "model.pause": ("Pausing inference", "Model paused"),
+    "model.resume": ("Resuming inference", "Model active"),
+    "model.restart": ("Restarting inference", "Model active"),
+    "model.recover": ("Recovering inference", "Model recovered"),
+    "model.rollback": ("Restoring the previous runtime", "Model restored"),
+    "benchmark.stop": ("Stopping the benchmark", "Benchmark stopped"),
+    "benchmark.clean": ("Cleaning benchmark data", "Benchmark data removed"),
+    "benchmark.verification.stop": ("Stopping verification", "Verification stopped"),
+    "auth.controller.add": ("Opening controller pairing", "Pairing session closed"),
+    "auth.controller.revoke": ("Revoking the controller", "Controller revoked"),
+    "auth.key.create": ("Creating the API key", "API key created"),
+    "auth.key.rotate": ("Rotating the API key", "API key rotated"),
+    "auth.key.revoke": ("Revoking the API key", "API key revoked"),
+    "auth.key.update": ("Updating the API key", "API key updated"),
+    "exposure.enable": ("Enabling public inference", "Public inference enabled"),
+    "exposure.disable": ("Disabling public inference", "Public inference disabled"),
+    "update.core": ("Updating Let's Infer Core", "Core updated"),
+    "update.model": ("Updating model runtimes", "Models updated"),
     "uninstall": ("Removing the service", "Service removed"),
 }
 
 READ_PROGRESS: Mapping[str, tuple[str, str]] = {
-    "node.status": ("Reading the node identity", "Node identity loaded"),
-    "hardware": ("Inspecting local hardware", "Hardware inspected"),
+    "node.info": ("Reading node information", "Node information loaded"),
+    "node.list": ("Reading node membership", "Nodes loaded"),
+    "model.list": ("Loading models", "Models loaded"),
+    "model.logs": ("Opening model logs", "Model logs closed"),
+    "benchmark.list": ("Loading benchmark cells", "Benchmark cells loaded"),
+    "benchmark.status": ("Reading benchmark status", "Benchmark status loaded"),
+    "benchmark.verification.status": (
+        "Reading verification status",
+        "Verification status loaded",
+    ),
     "update.check": ("Checking for updates", "Update check complete"),
-    "topology.show": ("Reading the verified topology", "Topology loaded"),
-    "child.list": ("Reading node membership", "Node membership loaded"),
-    "alias.list": ("Reading model aliases", "Model aliases loaded"),
-    "list": ("Loading available runtimes", "Available runtimes loaded"),
-    "runtimes": ("Loading installed runtimes", "Installed runtimes loaded"),
-    "inspect": ("Inspecting the runtime", "Runtime inspected"),
     "doctor": ("Checking node readiness", "Readiness check complete"),
     "exposure.status": ("Checking public exposure", "Exposure checked"),
-    "controllers.list": ("Reading paired controllers", "Controllers loaded"),
-    "key.list": ("Reading API keys", "API keys loaded"),
-    "key.show": ("Reading the API key policy", "API key policy loaded"),
+    "auth.controller.list": ("Reading paired controllers", "Controllers loaded"),
+    "auth.key.list": ("Reading API keys", "API keys loaded"),
+    "auth.key.show": ("Reading the API key policy", "API key policy loaded"),
     "audit.list": ("Reading the audit chain", "Audit events loaded"),
     "audit.show": ("Reading the audit event", "Audit event loaded"),
     "audit.verify": ("Verifying the audit chain", "Audit chain verified"),
@@ -346,9 +347,16 @@ READ_PROGRESS: Mapping[str, tuple[str, str]] = {
 # declared boundary at the point where it actually completes. ``update`` owns
 # its established StepProgress directly; these handlers use
 # ``_command_step_progress`` below. Everything else uses one truthful spinner.
-HANDLER_STEP_PROGRESS = frozenset({"topology.probe"})
+HANDLER_STEP_PROGRESS = frozenset()
 POST_PROMPT_PROGRESS = frozenset(
-    {"node.move", "child.join", "install", "upgrade", "rollback", "pair", "uninstall"}
+    {
+        "node.add",
+        "model.install",
+        "model.rollback",
+        "auth.controller.add",
+        "update.model",
+        "uninstall",
+    }
 )
 
 
@@ -2256,7 +2264,7 @@ def publish_protection_state(
     if phase == "pending" and trip_path.exists():
         raise LetsInferError(
             f"Watchdog protection trip is latched at {trip_path}; "
-            "inspect it and run `letsinfer restart` to acknowledge recovery"
+            "inspect it and run `letsinfer model recover MODEL` to acknowledge recovery"
         )
     if phase == "pending" and ack_path.is_file():
         ack_path.unlink()
@@ -3944,7 +3952,7 @@ def pair_controller(arguments: argparse.Namespace) -> int:
         )
     try:
         waiting = _command_activity(
-            arguments, "Waiting for a controller", action_id="pair"
+            arguments, "Waiting for a controller"
         )
         with waiting, ui.protect_stdout(waiting):
             with state.condition:
@@ -3983,7 +3991,7 @@ def pair_controller(arguments: argparse.Namespace) -> int:
             )
             state.condition.notify_all()
             completing = _command_activity(
-                arguments, "Completing controller pairing", action_id="pair"
+                arguments, "Completing controller pairing"
             )
             with completing, ui.protect_stdout(completing):
                 while (
@@ -5287,7 +5295,7 @@ def serve(
         preparing = _command_activity(
             arguments,
             "Preparing the qualification runtime",
-            action_id="serve",
+            action_id=arguments.action_id,
         )
         with preparing, ui.protect_stdout(preparing):
             host, actual_image_id = prepare_launch()
@@ -5315,7 +5323,7 @@ def serve(
             await_runtime()
             return
         waiting = _command_activity(
-            arguments, "Waiting for inference readiness", action_id="serve"
+            arguments, "Waiting for inference readiness"
         )
         with waiting, ui.protect_stdout(waiting):
             await_runtime()
@@ -6215,7 +6223,7 @@ def _qualification_candidate_lifecycle(
     else:
         if protection_trip_latched(config):
             raise LetsInferError(
-                "runtime protection is tripped; use `letsinfer recover`"
+                "runtime protection is tripped; use `letsinfer model recover MODEL`"
             )
         cleared_trip = False
 
@@ -9418,7 +9426,7 @@ def _install_catalog_nodes(
             "An existing runtime must be removed first. Replace it now?"
         ):
             raise LetsInferError("installation cancelled before replacement")
-    activity = _command_activity(arguments, action_id="install")
+    activity = _command_activity(arguments)
     with activity, ui.protect_stdout(activity):
         if replacements:
             _remove_engine_groups_by_id(
@@ -9783,7 +9791,7 @@ def install(arguments: argparse.Namespace) -> int:
         with SiteStore() as store:
             if store.authenticate_key(gateway_token) is None:
                 raise LetsInferError(
-                    "the local inference API key is not registered; run `letsinfer setup`"
+                    "the local inference API key is not registered; rerun the installer"
                 )
     except SiteError as error:
         raise LetsInferError(str(error)) from error
@@ -10057,6 +10065,7 @@ def stop(arguments: argparse.Namespace) -> int:
     if arguments.name is None and arguments.config is None:
         group = _engine_group_lifecycle(model, "stop")
         if group is not None:
+            paused = getattr(arguments, "action_id", None) == "model.pause"
             groups = group.get("groups")
             members = (
                 sum(len(item["member_states"]) for item in groups)
@@ -10074,12 +10083,12 @@ def stop(arguments: argparse.Namespace) -> int:
                         ),
                         command_ui.RecordRow("Group", group["group_id"]),
                         command_ui.RecordRow("Members", members),
-                        command_ui.RecordRow("State", "Stopped"),
+                        command_ui.RecordRow("State", "Paused" if paused else "Stopped"),
                     )
                 )
             else:
                 print(
-                    f"STOPPED group={group['group_id']} "
+                    f"{'PAUSED' if paused else 'STOPPED'} group={group['group_id']} "
                     f"members={members}"
                 )
             return 0
@@ -10271,6 +10280,68 @@ def _local_status_node(identity: Any) -> dict[str, Any]:
     return summary
 
 
+def _public_node_state(value: object) -> object:
+    """Translate internal persistence state into the public pause vocabulary."""
+
+    return "paused" if value == "draining" else value
+
+
+def _public_node_record(row: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(row)
+    result["state"] = _public_node_state(result.get("state"))
+    return result
+
+
+def _complete_local_node_status(identity: Any) -> dict[str, Any]:
+    if identity.role == "main":
+        with _site_store() as store:
+            nodes = [_public_node_record(row) for row in store.members()]
+    else:
+        nodes = [{
+            "member_id": identity.member_id,
+            "display_name": socket.gethostname(),
+            "role": identity.role,
+            "address": identity.coordinator_address,
+            "state": "active",
+        }]
+    node = _local_status_node(identity)
+    local = next(
+        (row for row in nodes if row.get("member_id") == identity.member_id),
+        None,
+    )
+    if local is not None:
+        node["state"] = local["state"]
+    try:
+        links = LinkStore(identity).facts()
+    except LinkError:
+        links = []
+    return {
+        "node": node,
+        "nodes": nodes,
+        "hardware": host_device_fingerprint(),
+        "links": links,
+    }
+
+
+def _model_status_from_groups(groups: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    indexed: dict[str, list[Mapping[str, Any]]] = {}
+    for group in groups:
+        indexed.setdefault(str(group["model"]), []).append(group)
+    result: list[dict[str, Any]] = []
+    for model, model_groups in sorted(indexed.items()):
+        states = {str(group["state"]) for group in model_groups}
+        state = next(iter(states)) if len(states) == 1 else "mixed"
+        result.append({
+            "model": model,
+            "state": state,
+            "replicas": len(model_groups),
+            "group_ids": sorted(str(group["group_id"]) for group in model_groups),
+            "runtimes": sorted({str(group["runtime"]) for group in model_groups}),
+            "targets": sorted({str(group["target"]) for group in model_groups}),
+        })
+    return result
+
+
 def status(arguments: argparse.Namespace) -> int:
     if (
         not arguments.json
@@ -10313,26 +10384,7 @@ def status(arguments: argparse.Namespace) -> int:
         identity = read_site_identity()
         if identity.role == "main":
             groups = _engine_group_status(model)
-            if groups:
-                if getattr(arguments, "_live_snapshot", False):
-                    live_groups = groups
-                else:
-                    if arguments.json:
-                        print(json.dumps({"engine_groups": groups}, sort_keys=True))
-                    else:
-                        for group in groups:
-                            print(
-                                f"GROUP {group['group_id']} model={group['model']} "
-                                f"strategy={group['strategy']} state={group['state']} "
-                                f"desired={group['desired_state']}"
-                            )
-                            for member in group["members"]:
-                                print(
-                                    f"  MEMBER {member['member_id']} "
-                                    f"task={member['task_id']} "
-                                    f"state={member['state']}"
-                                )
-                    return 0
+            live_groups = groups
         elif model is not None:
             raise LetsInferError(
                 "node-wide engine-group status is available from the main node"
@@ -10432,7 +10484,6 @@ def status(arguments: argparse.Namespace) -> int:
             "container": {},
             "protection": None,
             "runtime": None,
-            "node": _local_status_node(identity),
             "telemetry": (
                 _local_controller_telemetry(
                     preferred_member_id=identity.member_id,
@@ -10441,8 +10492,10 @@ def status(arguments: argparse.Namespace) -> int:
                 else None
             ),
         }
+        payload.update(_complete_local_node_status(identity))
         if live_groups:
             payload["engine_groups"] = live_groups
+        payload["models"] = _model_status_from_groups(live_groups)
         payload["lifecycle"] = runtime_lifecycle(payload)
         if arguments.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -10459,7 +10512,16 @@ def status(arguments: argparse.Namespace) -> int:
                     f"auth={str(gateway_auth_required and gateway_authenticated).lower()}"
                 )
                 print(f"endpoint={endpoint}")
-            print("runtime=not-installed")
+            print(f"nodes={len(payload['nodes'])} links={len(payload['links'])}")
+            if payload["models"]:
+                for installed_model in payload["models"]:
+                    print(
+                        f"model={installed_model['model']} "
+                        f"state={installed_model['state']} "
+                        f"replicas={installed_model['replicas']}"
+                    )
+            else:
+                print("runtime=not-installed")
         return 0 if payload["lifecycle"]["state"] == "ready" else 1
 
     enabled, active, memory_bytes = _service_state()
@@ -10637,9 +10699,15 @@ def status(arguments: argparse.Namespace) -> int:
     try:
         identity = read_site_identity()
         local_member_id = identity.member_id
-        payload["node"] = _local_status_node(identity)
+        payload.update(_complete_local_node_status(identity))
     except (OSError, SiteError, StopIteration):
         payload["node"] = None
+        payload["nodes"] = []
+        payload["hardware"] = None
+        payload["links"] = []
+    if live_groups:
+        payload["engine_groups"] = live_groups
+    payload["models"] = _model_status_from_groups(live_groups)
     payload["lifecycle"] = runtime_lifecycle(payload)
     payload["telemetry"] = _local_controller_telemetry(
         config,
@@ -10884,7 +10952,7 @@ def _run_engine_service_action(
     else:
         if protection_trip_latched(config):
             raise LetsInferError(
-                "runtime protection is tripped; use `letsinfer recover`"
+                "runtime protection is tripped; use `letsinfer model recover MODEL`"
             )
         cleared_trip = False
     systemd_action = "start" if action == "start" else "restart"
@@ -12107,6 +12175,9 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
                         }
                     )
 
+    if getattr(arguments, "installed", False):
+        rows = [row for row in rows if row["installed"]]
+
     rows.sort(
         key=lambda item: (
             item["model"],
@@ -12126,7 +12197,7 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
                         "age_seconds": snapshot.age_seconds,
                     },
                     "compatible_targets": target_ids,
-                    "runtimes": rows,
+                    "models": rows,
                 },
                 indent=2,
                 sort_keys=True,
@@ -12894,7 +12965,7 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
         resolving = _command_activity(
             arguments,
             f"Preparing upgrade {completed + 1} of {len(changes)}",
-            action_id="upgrade",
+            action_id=arguments.action_id,
         )
         with resolving, ui.protect_stdout(resolving):
             manifest_path, manifest, control_root, receipt = prepare_runtime_install(
@@ -12929,7 +13000,7 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
             applying = _command_activity(
                 arguments,
                 f"Applying upgrade {completed + 1} of {len(changes)}",
-                action_id="upgrade",
+                action_id=arguments.action_id,
             )
             with applying, ui.protect_stdout(applying):
                 install_engine_group(
@@ -13089,7 +13160,7 @@ def rollback_runtime(arguments: argparse.Namespace) -> int:
             applying = _command_activity(
                 arguments,
                 f"Rolling back group {completed + 1} of {len(planned)}",
-                action_id="rollback",
+                action_id=arguments.action_id,
             )
             with applying, ui.protect_stdout(applying):
                 restored_group_id = _install_retained_group_release(
@@ -13954,7 +14025,7 @@ def _benchmark_self_command(
     output: pathlib.Path,
     resident_group_ids: Sequence[str] = (),
 ) -> list[str]:
-    command = [str(executable), "benchmark", arguments.runtime]
+    command = [str(executable), "benchmark", "run", arguments.runtime]
     values = (
         ("--base-url", arguments.base_url),
         ("--output-directory", output),
@@ -14113,7 +14184,8 @@ def _verification_self_command(
     command = [
         str(executable),
         "benchmark",
-        "verify",
+        "verification",
+        "run",
         arguments.verification_target,
     ]
     if arguments.candidate is not None:
@@ -14133,7 +14205,7 @@ def _verification_job_snapshot(*, machine: bool = False) -> int:
                     "No runtime verification has been started",
                     semantic=command_ui.Semantic.MUTED,
                     detail=(
-                        "Run `letsinfer benchmark verify <pull-request-url>` "
+                        "Run `letsinfer benchmark verification run <pull-request-url>` "
                         "to start one"
                     ),
                 )
@@ -14350,6 +14422,7 @@ def _nested_benchmark_arguments(
     arguments = parser().parse_args(
         [
             "benchmark",
+            "run",
             runtime,
             "--output-directory",
             str(output),
@@ -14508,7 +14581,7 @@ def _run_verification_worker(arguments: argparse.Namespace) -> int:
         ):
             raise LetsInferError(
                 "community verification requires the current catalog recommendation "
-                f"as its exact baseline; run `letsinfer install {logical_model}` "
+                f"as its exact baseline; run `letsinfer model install {logical_model}` "
                 "before retrying"
             )
         candidate_manifest, candidate_prepared, candidate_previous = (
@@ -14722,10 +14795,10 @@ def _benchmark_verify(arguments: argparse.Namespace) -> int:
         return _verification_job_snapshot(machine=arguments.json)
     if target == "stop":
         if arguments.json:
-            raise LetsInferError("benchmark verify stop does not accept --json")
+            raise LetsInferError("benchmark verification stop does not accept --json")
         return _verification_stop()
     if arguments.json:
-        raise LetsInferError("--json is available only for benchmark verify status")
+        raise LetsInferError("--json is available only for benchmark verification status")
     if arguments.job_worker:
         return _run_verification_worker(arguments)
 
@@ -14805,7 +14878,7 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         or getattr(arguments, "candidate", None) is not None
     ):
         raise LetsInferError(
-            "the second benchmark argument is available only after `benchmark verify`"
+            "verification targets are available only under `benchmark verification`"
         )
     if arguments.runtime is None:
         if (
@@ -15139,8 +15212,8 @@ def _run_benchmark_with_service_isolation(
     """Suspend an active engine while a benchmark owns the inference host."""
     if protection_config is not None and protection_trip_latched(protection_config):
         raise LetsInferError(
-            "runtime protection is already tripped; run letsinfer recover before "
-            "benchmarking"
+            "runtime protection is already tripped; run "
+            "letsinfer model recover MODEL before benchmarking"
         )
     # Preserve the inference-slot intent before the matrix begins.  Each cell
     # deliberately replaces the candidate container and store, so restoration
@@ -15156,8 +15229,8 @@ def _run_benchmark_with_service_isolation(
             raise LetsInferError("qualification slot has an invalid lifecycle mode")
         if protection_trip_latched(candidate):
             raise LetsInferError(
-                "runtime protection is already tripped; run letsinfer recover "
-                "before benchmarking"
+                "runtime protection is already tripped; run "
+                "letsinfer model recover MODEL before benchmarking"
             )
         candidate_inspection = container_inspect(candidate["name"])
         candidate_was_running = bool(
@@ -15505,7 +15578,7 @@ def check_updates(arguments: argparse.Namespace) -> int:
                 command = (
                     f"letsinfer update --version {record.available_version}"
                     if record.kind == "core"
-                    else f"letsinfer upgrade {record.apply}"
+                    else f"letsinfer update model {record.apply}"
                 )
                 presenter.verbatim(command, label="Apply", copyable=True)
         else:
@@ -15534,7 +15607,9 @@ def check_updates(arguments: argparse.Namespace) -> int:
                             f"Apply with `letsinfer update --version {record.available_version}`"
                         )
                     else:
-                        terminal.status(f"Apply with `letsinfer upgrade {record.apply}`")
+                        terminal.status(
+                            f"Apply with `letsinfer update model {record.apply}`"
+                        )
     return int(
         (snapshot.busy and not snapshot.records)
         or any(
@@ -16005,12 +16080,12 @@ def site_move_command(arguments: argparse.Namespace) -> int:
             )
         active_work = [
             unit
-            for unit in (ENGINE_SERVICE_NAME, GATEWAY_SERVICE_NAME)
+            for unit in (ENGINE_SERVICE_NAME,)
             if prior_units[unit][1] == "active"
         ]
         if active_work:
             raise LetsInferError(
-                "node move requires inference and gateway services to be stopped first: "
+                "node move requires active inference services to be stopped first: "
                 + ",".join(active_work)
             )
 
@@ -16023,12 +16098,15 @@ def site_move_command(arguments: argparse.Namespace) -> int:
         )
     try:
         if not arguments.no_service:
-            for unit in (RECOVERY_TIMER_NAME, NODE_SERVICE_NAME, SERVICE_NAME):
+            for unit in (
+                RECOVERY_TIMER_NAME,
+                GATEWAY_SERVICE_NAME,
+                NODE_SERVICE_NAME,
+                SERVICE_NAME,
+            ):
                 if prior_units[unit][1] == "active":
                     run_passthrough(["systemctl", "--user", "stop", unit])
-        moving = _command_activity(
-            arguments, "Joining the destination node", action_id="node.move"
-        )
+        moving = _command_activity(arguments, "Joining the destination node")
         with moving, ui.protect_stdout(moving):
             with LocalMoveTransaction(identity) as transaction:
                 enrollment = join_site(
@@ -16089,6 +16167,7 @@ def site_move_command(arguments: argparse.Namespace) -> int:
             "comparison_code": enrollment.comparison_code,
         }
     )
+    arguments.result = result
     if arguments.json:
         print(json.dumps(result, sort_keys=True))
     else:
@@ -16143,6 +16222,7 @@ def member_list_command(arguments: argparse.Namespace) -> int:
     else:
         with _site_store() as store:
             rows = store.members()
+    rows = [_public_node_record(row) for row in rows]
     if arguments.json:
         print(json.dumps(rows, sort_keys=True))
     else:
@@ -16489,18 +16569,19 @@ def member_drain_command(arguments: argparse.Namespace) -> int:
             result = store.set_member_draining(arguments.member, True)
         except SiteError as error:
             raise LetsInferError(str(error)) from error
+    result = {**result, "state": "paused"}
     if arguments.json:
         print(json.dumps(result, sort_keys=True))
     else:
         presenter = _human_presenter()
         if presenter is not None:
             presenter.result(
-                "Node is draining",
+                "Node is paused",
                 semantic=command_ui.Semantic.WARNING,
                 detail=arguments.member,
             )
         else:
-            print(f"DRAINING {arguments.member}")
+            print(f"PAUSED {arguments.member}")
     return 0
 
 
@@ -17340,6 +17421,14 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
             "node.move.commit", {"move": {"move_id": result.get("move_id")}}
         )
 
+    def receive_node_add(value: Mapping[str, Any]) -> Mapping[str, Any]:
+        request = store_node_add_request(value)
+        return {
+            "protocol": NODE_ADD_PROTOCOL,
+            "request_id": request["request_id"],
+            "status": "pending",
+        }
+
     state = SiteControlState(
         identity,
         facts_provider=local_facts,
@@ -17350,6 +17439,7 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
         adoption_completed_provider=(
             adoption_completed if identity.role == "main" else None
         ),
+        node_add_provider=receive_node_add,
     )
 
     def controller_site_document() -> dict[str, Any]:
@@ -18655,7 +18745,7 @@ def _authorize_command(arguments: argparse.Namespace) -> tuple[Any, Any]:
         except SiteError as error:
             if metadata.requires_site:
                 raise LetsInferError(
-                    "this command requires a configured node; run `letsinfer setup` first"
+                    "this command requires a configured node; rerun the installer first"
                 ) from error
     if identity is not None:
         allowed = (
@@ -18678,22 +18768,19 @@ def _authorize_command(arguments: argparse.Namespace) -> tuple[Any, Any]:
 
 
 _HANDLER_AUDITED_ACTIONS = {
-    "setup": {"node.setup"},
-    "node.move": {"node.move"},
-    "pair": {"pair"},
-    "controllers.forget": {"controllers.forget"},
-    "key.create": {"key.create"},
-    "key.rotate": {"key.rotate"},
-    "key.revoke": {"key.revoke"},
-    "key.policy": {"key.policy"},
-    "child.invite": {"child.invite"},
-    "child.approve": {"child.approve"},
-    "child.sync": {"child.sync"},
-    "child.drain": {"child.drain"},
-    "child.resume": {"child.resume"},
-    "child.remove": {"child.remove"},
-    "expose": {"exposure.enable"},
-    "unexpose": {"exposure.disable"},
+    "core-setup": {"node.setup"},
+    "node.add": {"child.invite", "child.approve", "node.move"},
+    "node.pause": {"child.drain"},
+    "node.resume": {"child.resume"},
+    "node.remove": {"child.remove"},
+    "auth.controller.add": {"pair"},
+    "auth.controller.revoke": {"controllers.forget"},
+    "auth.key.create": {"key.create"},
+    "auth.key.rotate": {"key.rotate"},
+    "auth.key.revoke": {"key.revoke"},
+    "auth.key.update": {"key.policy"},
+    "exposure.enable": {"exposure.enable"},
+    "exposure.disable": {"exposure.disable"},
 }
 
 
@@ -18750,6 +18837,624 @@ def _audit_command_result(
             ) from error
 
 
+def node_info_command(arguments: argparse.Namespace) -> int:
+    """Show one complete local-node identity and hardware document."""
+    try:
+        identity = read_site_identity()
+        node = identity_json(identity)
+        node["state"] = "active"
+        if identity.role == "main":
+            with SiteStore(identity=identity) as store:
+                node["state"] = next(
+                    (
+                        row["state"]
+                        for row in store.members()
+                        if row["member_id"] == identity.member_id
+                    ),
+                    "active",
+                )
+        node["state"] = _public_node_state(node["state"])
+        fingerprint = host_device_fingerprint()
+        location = resolved_catalog_location(arguments.catalog)
+        targets = (
+            compatible_catalog_targets(
+                CatalogManager(location).load().document,
+                fingerprint,
+            )
+            if location is not None
+            else []
+        )
+        try:
+            links = LinkStore(identity).facts()
+        except LinkError:
+            links = []
+    except (CatalogError, RuntimePackError, SiteError) as error:
+        raise LetsInferError(str(error)) from error
+    payload = {
+        "schema_version": 1,
+        "node": node,
+        "hardware": fingerprint,
+        "compatible_targets": targets,
+        "links": links,
+    }
+    if arguments.json:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.object(payload, title="Node information")
+        else:
+            print(json.dumps(payload, sort_keys=True, indent=2))
+    return 0
+
+
+def node_add_command(arguments: argparse.Namespace) -> int:
+    """Run the unified discovery, request, and approval workflow."""
+    return _node_add_workflow(arguments)
+
+
+def _node_add_snapshot(
+    identity: Any,
+    discovered: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    with _site_store() as store:
+        pending_children = [
+            {
+                "member_id": row["member_id"],
+                "display_name": row["display_name"],
+                "address": row["address"],
+                "state": row["state"],
+                "approval_expires_at_unix": row.get("approval_expires_at_unix"),
+            }
+            for row in store.members()
+            if row["state"] == "pending"
+        ]
+    request = pending_node_add_request()
+    return {
+        "schema_version": 1,
+        "local_node_id": identity.site_id,
+        "incoming_request": request,
+        "pending_children": pending_children,
+        "discovered_nodes": [
+            dict(row) for row in discovered if row.get("node_id") != identity.site_id
+        ],
+    }
+
+
+def _accept_node_add_request(
+    arguments: argparse.Namespace,
+    identity: Any,
+    request: Mapping[str, Any],
+) -> int:
+    presenter = _human_presenter()
+    if presenter is None:
+        raise LetsInferError("accepting a node request requires an interactive terminal")
+    try:
+        accepted = presenter.prompt.confirm(
+            f"Move this node into {request['main_name']}?",
+            require_tty=True,
+        )
+    except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+        raise LetsInferError("node-add approval was cancelled") from error
+    if not accepted:
+        raise LetsInferError("node-add request was not approved")
+    move_arguments = argparse.Namespace(
+        action_id=arguments.action_id,
+        apply=True,
+        source_site_id=identity.site_id,
+        endpoint=request["main_endpoint"],
+        invite=request["invite_id"],
+        coordinator_certificate_sha256=request["main_certificate_sha256"],
+        code=request["membership_code"],
+        name=socket.gethostname(),
+        address=socket.getfqdn() or socket.gethostname(),
+        no_service=False,
+        json=False,
+    )
+    result = site_move_command(move_arguments)
+    clear_node_add_request(str(request["request_id"]))
+    return result
+
+
+def _approve_pending_child(
+    arguments: argparse.Namespace,
+    children: Sequence[Mapping[str, Any]],
+) -> int:
+    presenter = _human_presenter()
+    if presenter is None:
+        raise LetsInferError("approving a child requires an interactive terminal")
+    labels = [
+        f"{row['display_name']} · {row['member_id']}" for row in children
+    ]
+    try:
+        selected_label = presenter.prompt.choose(
+            "Pending child",
+            labels,
+            require_tty=True,
+        )
+        selected = children[labels.index(selected_label)]
+        code = presenter.prompt.secret(
+            f"Comparison code shown on {selected['display_name']}",
+            require_tty=True,
+        )
+    except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+        raise LetsInferError("child approval was cancelled") from error
+    return member_approve_command(
+        argparse.Namespace(
+            member=selected["member_id"],
+            comparison_code=code,
+            json=False,
+        )
+    )
+
+
+def _send_node_add_request(
+    arguments: argparse.Namespace,
+    identity: Any,
+    candidates: Sequence[Mapping[str, Any]],
+) -> int:
+    presenter = _human_presenter()
+    if presenter is None:
+        raise LetsInferError("selecting a node requires an interactive terminal")
+    labels = [
+        f"{row['name']} · {row['address']} · {row['node_id']}" for row in candidates
+    ]
+    try:
+        selected_label = presenter.prompt.choose(
+            "Node to add",
+            labels,
+            require_tty=True,
+        )
+    except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+        raise LetsInferError("node selection was cancelled") from error
+    selected = candidates[labels.index(selected_label)]
+    with _site_store() as store:
+        invite = store.create_invite("lan", lifetime_seconds=180)
+    endpoint_address = identity.coordinator_address
+    endpoint_host = (
+        f"[{endpoint_address}]" if ":" in endpoint_address else endpoint_address
+    )
+    document = {
+        "protocol": NODE_ADD_PROTOCOL,
+        "request_id": uuid.uuid4().hex,
+        "main_node_id": identity.site_id,
+        "main_name": identity.display_name,
+        "main_endpoint": f"https://{endpoint_host}:{SITE_CONTROL_PORT}",
+        "main_certificate_sha256": certificate_sha256(
+            site_member_certificate_path()
+        ),
+        "invite_id": invite["invite_id"],
+        "membership_code": invite["code"],
+        "expires_at_unix": invite["expires_at_unix"],
+    }
+    try:
+        acknowledgement = send_node_add_request(
+            str(selected["endpoint"]),
+            str(selected["certificate_sha256"]),
+            document,
+        )
+    except NodeAddError as error:
+        raise LetsInferError(str(error)) from error
+    presenter.result(
+        f"Request sent to {selected['name']}",
+        semantic=command_ui.Semantic.SUCCESS,
+        detail=acknowledgement["request_id"],
+    )
+    return 0
+
+
+def _node_add_workflow(arguments: argparse.Namespace) -> int:
+    identity = read_site_identity()
+    try:
+        discovered = discover_addable_nodes(
+            timeout_seconds=arguments.timeout,
+            address=arguments.address,
+            certificate_sha256=getattr(arguments, "certificate_sha256", None),
+        )
+        snapshot = _node_add_snapshot(identity, discovered)
+    except (NodeAddError, SiteError) as error:
+        raise LetsInferError(str(error)) from error
+    if arguments.json:
+        print(json.dumps(snapshot, sort_keys=True))
+        return 0
+    if snapshot["incoming_request"] is not None:
+        return _accept_node_add_request(
+            arguments,
+            identity,
+            snapshot["incoming_request"],
+        )
+    if snapshot["pending_children"]:
+        return _approve_pending_child(arguments, snapshot["pending_children"])
+    if snapshot["discovered_nodes"]:
+        return _send_node_add_request(
+            arguments,
+            identity,
+            snapshot["discovered_nodes"],
+        )
+    presenter = _human_presenter()
+    if presenter is not None:
+        presenter.empty("No addable nodes were found")
+    else:
+        print("No addable nodes were found.")
+    return 0
+
+
+def model_list_command(arguments: argparse.Namespace) -> int:
+    """List signed catalog models with their installed state."""
+    return list_available_runtimes(arguments)
+
+
+def _choose_installed_model(message: str) -> str:
+    with _site_store() as store:
+        placements = {row["placement_id"]: row for row in store.placements()}
+        models = sorted(
+            {
+                placements[row["placement_id"]]["model"]
+                for row in store.engine_groups()
+                if row["state"] != "removed"
+                and row["desired_state"] != "removed"
+                and row["placement_id"] in placements
+            }
+        )
+    if not models:
+        raise LetsInferError("no models are installed")
+    if len(models) == 1:
+        return models[0]
+    presenter = _human_presenter()
+    if presenter is None:
+        raise LetsInferError("multiple models are installed; specify one explicitly")
+    try:
+        return presenter.prompt.choose(message, models, require_tty=True)
+    except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+        raise LetsInferError("model selection was cancelled") from error
+
+
+def _model_install_arguments(arguments: argparse.Namespace, model: str) -> argparse.Namespace:
+    values = vars(arguments).copy()
+    values.update(
+        {
+            "model": model,
+            "port": 8000,
+            "engine_port": 18000,
+            "gateway_listen": "0.0.0.0",
+            "gateway_max_connections": 128,
+            "gateway_queue_timeout": 0,
+            "name": None,
+            "model_cache": None,
+            "store_root": None,
+            "runtime_cache_root": None,
+            "api_key_file": None,
+            "tls_cert_file": None,
+            "tls_key_file": None,
+            "watchdog_data_root": None,
+            "watchdog_listen": None,
+            "watchdog_port": None,
+            "watchdog_cert_file": None,
+            "watchdog_key_file": None,
+            "watchdog_controller_ca_file": None,
+            "watchdog_controller_ca_key_file": None,
+            "watchdog_local_controller_cert_file": None,
+            "watchdog_local_controller_key_file": None,
+            "config": None,
+            "download_dependencies": True,
+            "no_build_image": False,
+            "no_service": False,
+            "no_start": False,
+        }
+    )
+    return argparse.Namespace(**values)
+
+
+def model_install_command(arguments: argparse.Namespace) -> int:
+    if arguments.model is not None:
+        return install(_model_install_arguments(arguments, arguments.model))
+    return _interactive_model_install(arguments)
+
+
+def _interactive_model_install(arguments: argparse.Namespace) -> int:
+    presenter = _human_presenter()
+    if presenter is None:
+        raise LetsInferError("model install requires MODEL in non-interactive use")
+    location = resolved_catalog_location(arguments.catalog)
+    if location is None:
+        raise LetsInferError("model installation requires a signed catalog")
+    try:
+        catalog = CatalogManager(location).load().document
+    except (CatalogError, RuntimePackError) as error:
+        raise LetsInferError(str(error)) from error
+    identity, graph = _fresh_site_topology()
+    with _site_store() as store:
+        members = [dict(row) for row in store.members() if row["state"] == "active"]
+    assignments: dict[str, list[str]] = {}
+    for member in members:
+        choices = []
+        for model in sorted(catalog["models"]):
+            try:
+                _catalog_release_for_node(
+                    catalog,
+                    model,
+                    None,
+                    identity=identity,
+                    graph=graph,
+                    member_id=member["member_id"],
+                    ignore_allocations=True,
+                )
+            except LetsInferError:
+                continue
+            choices.append(model)
+        if not choices:
+            continue
+        choices.append("Skip")
+        try:
+            selected = presenter.prompt.choose(
+                f"Model for {member['display_name']}",
+                choices,
+                default="Skip",
+                require_tty=True,
+            )
+        except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+            raise LetsInferError("model installation was cancelled") from error
+        if selected != "Skip":
+            assignments.setdefault(selected, []).append(member["member_id"])
+    if not assignments:
+        raise LetsInferError("no model installation was selected")
+    for model, nodes in assignments.items():
+        child = _model_install_arguments(arguments, model)
+        child.node = nodes
+        child.all_nodes = False
+        install(child)
+    return 0
+
+
+def model_remove_command(arguments: argparse.Namespace) -> int:
+    return _remove_model_placements(arguments)
+
+
+def _remove_model_placements(arguments: argparse.Namespace) -> int:
+    identity = read_site_identity()
+    with _site_store() as store:
+        members = store.members()
+        placements = {row["placement_id"]: row for row in store.placements()}
+        groups = [
+            row
+            for row in store.engine_groups()
+            if row["state"] != "removed"
+            and row["desired_state"] != "removed"
+            and row["placement_id"] in placements
+            and placements[row["placement_id"]]["model"] == arguments.model
+        ]
+    if not groups:
+        raise LetsInferError(f"no installed model serves {arguments.model!r}")
+    requested = list(arguments.node or [])
+    if arguments.all_nodes and requested:
+        raise LetsInferError("--node and --all-nodes cannot be combined")
+    selected_nodes: set[str]
+    if arguments.all_nodes:
+        selected_nodes = {
+            resource["node_id"]
+            for group in groups
+            for resource in group["plan"]["resources"]
+        }
+    elif requested:
+        selector = argparse.Namespace(node=requested, all_nodes=False)
+        selected_nodes = set(_selected_install_node_ids(selector, identity, members))
+    else:
+        if not sys.stdin.isatty():
+            raise LetsInferError(
+                "model removal requires --node or explicit --all-nodes"
+            )
+        if not ui.confirm(f"Remove {arguments.model} from every node?"):
+            raise LetsInferError("model removal cancelled")
+        selected_nodes = {
+            resource["node_id"]
+            for group in groups
+            for resource in group["plan"]["resources"]
+        }
+    group_ids = [
+        group["group_id"]
+        for group in groups
+        if any(
+            resource["node_id"] in selected_nodes
+            for resource in group["plan"]["resources"]
+        )
+    ]
+    if not group_ids:
+        raise LetsInferError("the selected nodes do not host this model")
+    _remove_engine_groups_by_id(group_ids)
+    result = {
+        "model": arguments.model,
+        "removed_group_ids": group_ids,
+        "node_ids": sorted(selected_nodes),
+    }
+    if arguments.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                f"Removed {arguments.model}",
+                semantic=command_ui.Semantic.SUCCESS,
+                detail=f"{len(group_ids)} group(s)",
+            )
+        else:
+            print(
+                f"REMOVED model={arguments.model} "
+                f"groups={','.join(group_ids)}"
+            )
+    return 0
+
+
+def _model_lifecycle_arguments(arguments: argparse.Namespace) -> argparse.Namespace:
+    return argparse.Namespace(
+        **vars(arguments),
+        config=None,
+        name=None,
+        container_only=False,
+    )
+
+
+def model_pause_command(arguments: argparse.Namespace) -> int:
+    return stop(_model_lifecycle_arguments(arguments))
+
+
+def model_resume_command(arguments: argparse.Namespace) -> int:
+    return start_service(_model_lifecycle_arguments(arguments))
+
+
+def model_restart_command(arguments: argparse.Namespace) -> int:
+    return restart_service(_model_lifecycle_arguments(arguments))
+
+
+def model_recover_command(arguments: argparse.Namespace) -> int:
+    return recover_service(_model_lifecycle_arguments(arguments))
+
+
+def model_rollback_command(arguments: argparse.Namespace) -> int:
+    return rollback_runtime(
+        argparse.Namespace(**vars(arguments), runtime=arguments.model)
+    )
+
+
+def model_logs_command(arguments: argparse.Namespace) -> int:
+    return _model_logs(arguments)
+
+
+def _model_logs(arguments: argparse.Namespace) -> int:
+    identity = read_site_identity()
+    with _site_store() as store:
+        placements = {row["placement_id"]: row for row in store.placements()}
+        local_groups = [
+            row["group_id"]
+            for row in store.engine_groups()
+            if row["state"] != "removed"
+            and row["desired_state"] != "removed"
+            and row["placement_id"] in placements
+            and placements[row["placement_id"]]["model"] == arguments.model
+            and any(
+                resource["node_id"] == identity.member_id
+                for resource in row["plan"]["resources"]
+            )
+        ]
+    if arguments.group is not None:
+        if arguments.group not in local_groups:
+            raise LetsInferError("selected group does not locally serve this model")
+        selected = arguments.group
+    elif len(local_groups) == 1:
+        selected = local_groups[0]
+    elif not local_groups:
+        raise LetsInferError("this node has no local group for the selected model")
+    else:
+        raise LetsInferError("multiple local groups serve this model; specify --group")
+    return logs(
+        argparse.Namespace(
+            config=None,
+            group=selected,
+            tail=arguments.tail,
+            follow=arguments.follow,
+        )
+    )
+
+
+def _benchmark_namespace(
+    arguments: argparse.Namespace,
+    *,
+    runtime: str | None,
+    verification_target: str | None = None,
+    list_cells: bool = False,
+) -> argparse.Namespace:
+    values = {
+        "runtime": runtime,
+        "verification_target": verification_target,
+        "candidate": None,
+        "base_url": None,
+        "output_directory": None,
+        "api_key_file": None,
+        "ca_cert_file": None,
+        "container": None,
+        "store_root": None,
+        "launch_directory": None,
+        "measured_commit": None,
+        "source_attestation": None,
+        "watchdog_trip_file": None,
+        "timeout": None,
+        "list": list_cells,
+        "detach": False,
+        "json": False,
+        "yes": False,
+        "job_worker": False,
+        "job_id": None,
+        "resident_group": [],
+    }
+    values.update(vars(arguments))
+    values["runtime"] = runtime
+    values["verification_target"] = verification_target
+    values["list"] = list_cells
+    for concurrency in (1, 2, 4, 8, 16):
+        values.setdefault(f"c{concurrency}", False)
+    for context in ("32k", "64k", "128k", "256k"):
+        values.setdefault(f"context_{context}", False)
+    return argparse.Namespace(**values)
+
+
+def benchmark_run_command(arguments: argparse.Namespace) -> int:
+    return benchmark_runtime(_benchmark_namespace(arguments, runtime=arguments.model))
+
+
+def benchmark_list_command(arguments: argparse.Namespace) -> int:
+    return benchmark_runtime(
+        _benchmark_namespace(arguments, runtime=arguments.model, list_cells=True)
+    )
+
+
+def benchmark_status_command(arguments: argparse.Namespace) -> int:
+    return benchmark_runtime(_benchmark_namespace(arguments, runtime=None))
+
+
+def benchmark_stop_command(arguments: argparse.Namespace) -> int:
+    return benchmark_runtime(_benchmark_namespace(arguments, runtime="stop"))
+
+
+def benchmark_clean_command(arguments: argparse.Namespace) -> int:
+    return benchmark_runtime(_benchmark_namespace(arguments, runtime="clean"))
+
+
+def benchmark_verification_run_command(arguments: argparse.Namespace) -> int:
+    namespace = _benchmark_namespace(
+        arguments,
+        runtime="verify",
+        verification_target=arguments.pull_request,
+    )
+    namespace.candidate = arguments.candidate
+    return benchmark_runtime(namespace)
+
+
+def benchmark_verification_status_command(arguments: argparse.Namespace) -> int:
+    return benchmark_runtime(
+        _benchmark_namespace(arguments, runtime="verify", verification_target="status")
+    )
+
+
+def benchmark_verification_stop_command(arguments: argparse.Namespace) -> int:
+    return benchmark_runtime(
+        _benchmark_namespace(arguments, runtime="verify", verification_target="stop")
+    )
+
+
+def update_core_command(arguments: argparse.Namespace) -> int:
+    return update_core(argparse.Namespace(version=arguments.version))
+
+
+def update_model_command(arguments: argparse.Namespace) -> int:
+    model = arguments.model or _choose_installed_model("Update model")
+    return upgrade_runtime(
+        argparse.Namespace(
+            **vars(arguments),
+            runtime=model,
+            to=None,
+        )
+    )
+
+
 def parser() -> argparse.ArgumentParser:
     root = ui.ArgumentParser(
         prog="letsinfer",
@@ -18758,611 +19463,338 @@ def parser() -> argparse.ArgumentParser:
     )
     subcommands = root.add_subparsers(dest="command", required=True)
 
-    setup = subcommands.add_parser(
-        "setup", help=help_label("create this machine's Let's Infer node", "setup")
-    )
-    setup.add_argument("--name", default="Home")
-    setup.add_argument("--address")
-    setup.add_argument(
-        "--no-service",
-        action="store_true",
-        help="create a local development identity without a persistent node service",
-    )
-    setup.add_argument("--json", action="store_true")
-    setup.set_defaults(action=setup_command, action_id="setup")
-
-    site_command = subcommands.add_parser(
-        "node", help="inspect this Let's Infer node"
-    )
-    site_operations = site_command.add_subparsers(dest="site_operation", required=True)
-    site_show = site_operations.add_parser(
-        "status", help=help_label("show node identity and role", "node.status")
-    )
-    site_show.add_argument("--json", action="store_true")
-    site_show.set_defaults(action=site_status_command, action_id="node.status")
-    site_move = site_operations.add_parser(
-        "move", help=help_label("plan or apply a move into another node", "node.move")
-    )
-    site_move.add_argument("--apply", action="store_true")
-    site_move.add_argument("--source-node-id", dest="source_site_id")
-    site_move.add_argument("--endpoint")
-    site_move.add_argument("--invite")
-    site_move.add_argument(
-        "--main-certificate-sha256", dest="coordinator_certificate_sha256"
-    )
-    site_move.add_argument("--code")
-    site_move.add_argument("--name")
-    site_move.add_argument("--address")
-    site_move.add_argument("--no-service", action="store_true", help=argparse.SUPPRESS)
-    site_move.add_argument("--json", action="store_true")
-    site_move.set_defaults(action=site_move_command, action_id="node.move")
-
-    topology_group = subcommands.add_parser("topology", help="inspect verified node topology")
-    topology_operations = topology_group.add_subparsers(
-        dest="topology_operation", required=True
-    )
-    topology_show = topology_operations.add_parser(
-        "show", help=help_label("show verified node topology", "topology.show")
-    )
-    topology_show.add_argument("--json", action="store_true")
-    topology_show.set_defaults(action=topology_command, action_id="topology.show")
-    topology_probe = topology_operations.add_parser(
-        "probe",
-        help=help_label("prove a bidirectional child-node link", "topology.probe"),
-    )
-    topology_probe.add_argument("left")
-    topology_probe.add_argument("right")
-    topology_probe.add_argument("--left-interface", required=True)
-    topology_probe.add_argument("--right-interface", required=True)
-    topology_probe.add_argument(
-        "--kind", choices=("connectx", "ethernet", "wifi", "other"), required=True
-    )
-    topology_probe.add_argument("--json", action="store_true")
-    topology_probe.set_defaults(
-        action=topology_probe_command, action_id="topology.probe"
-    )
-    topology_plan = topology_operations.add_parser(
-        "plan",
-        help=help_label("plan the best qualified model placement", "topology.plan"),
-    )
-    topology_plan.add_argument("model")
-    topology_plan.add_argument("--runtime", help="select an exact runtime candidate ID")
-    topology_plan.add_argument("--catalog")
-    topology_plan.add_argument("--json", action="store_true")
-    topology_plan.set_defaults(action=topology_plan_command, action_id="topology.plan")
-
-    member_command = subcommands.add_parser("child", help="manage child nodes")
-    member_operations = member_command.add_subparsers(dest="member_operation", required=True)
-    member_list = member_operations.add_parser(
-        "list", help=help_label("list the main and child nodes", "child.list")
-    )
-    member_list.add_argument("--json", action="store_true")
-    member_list.set_defaults(action=member_list_command, action_id="child.list")
-    member_prepare = member_operations.add_parser(
-        "prepare", help=help_label("create this machine's pending child identity", "child.prepare")
-    )
-    member_prepare.add_argument("--json", action="store_true")
-    member_prepare.set_defaults(action=member_prepare_command, action_id="child.prepare")
-    member_join = member_operations.add_parser(
-        "join", help=help_label("join an authorized main node as a child", "child.join")
-    )
-    member_join.add_argument("endpoint")
-    member_join.add_argument("--invite", required=True)
-    member_join.add_argument(
-        "--main-certificate-sha256",
-        dest="coordinator_certificate_sha256",
-        required=True,
-    )
-    member_join.add_argument("--code")
-    member_join.add_argument("--connectx", action="store_true")
-    member_join.add_argument("--name")
-    member_join.add_argument("--address")
-    member_join.add_argument(
-        "--no-service",
-        action="store_true",
-        help="join for local protocol development without installing the node service",
-    )
-    member_join.add_argument("--json", action="store_true")
-    member_join.set_defaults(action=member_join_command, action_id="child.join")
-    member_invite = member_operations.add_parser(
-        "invite", help=help_label("authorize one bounded child join", "child.invite")
-    )
-    member_invite.add_argument("--mode", choices=("lan", "remote", "connectx"), required=True)
-    member_invite.add_argument("--candidate-fingerprint")
-    member_invite.add_argument("--candidate-endpoint")
-    member_invite.add_argument("--interface")
-    member_invite.add_argument("--expires-in", type=int, default=180)
-    member_invite.add_argument("--json", action="store_true")
-    member_invite.set_defaults(action=member_invite_command, action_id="child.invite")
-    member_approve = member_operations.add_parser(
-        "approve", help=help_label("approve a matching child comparison code", "child.approve")
-    )
-    member_approve.add_argument("member")
-    member_approve.add_argument("comparison_code")
-    member_approve.add_argument("--json", action="store_true")
-    member_approve.set_defaults(action=member_approve_command, action_id="child.approve")
-    member_sync = member_operations.add_parser(
-        "sync", help=help_label("refresh authenticated child facts", "child.sync")
-    )
-    member_sync.add_argument("--json", action="store_true")
-    member_sync.set_defaults(action=member_sync_command, action_id="child.sync")
-    member_drain = member_operations.add_parser(
-        "drain", help=help_label("stop assigning new work to a child", "child.drain")
-    )
-    member_drain.add_argument("member")
-    member_drain.add_argument("--json", action="store_true")
-    member_drain.set_defaults(action=member_drain_command, action_id="child.drain")
-    member_resume = member_operations.add_parser(
-        "resume", help=help_label("resume assigning work to a drained child", "child.resume")
-    )
-    member_resume.add_argument("member")
-    member_resume.add_argument("--json", action="store_true")
-    member_resume.set_defaults(action=member_resume_command, action_id="child.resume")
-    member_remove = member_operations.add_parser(
-        "remove", help=help_label("remove an inactive child", "child.remove")
-    )
-    member_remove.add_argument("member")
-    member_remove.add_argument("--json", action="store_true")
-    member_remove.set_defaults(action=member_remove_command, action_id="child.remove")
-
-    alias_command = subcommands.add_parser("alias", help="manage stable model aliases")
-    alias_operations = alias_command.add_subparsers(dest="alias_operation", required=True)
-    alias_list = alias_operations.add_parser(
-        "list", help=help_label("list model aliases", "alias.list")
-    )
-    alias_list.add_argument("--json", action="store_true")
-    alias_list.set_defaults(action=alias_list_command, action_id="alias.list")
-    alias_set = alias_operations.add_parser(
-        "set", help=help_label("create or replace a model alias", "alias.set")
-    )
-    alias_set.add_argument("alias")
-    alias_set.add_argument("model")
-    alias_set.add_argument("--json", action="store_true")
-    alias_set.set_defaults(action=alias_set_command, action_id="alias.set")
-    alias_remove = alias_operations.add_parser(
-        "remove", help=help_label("remove a model alias", "alias.remove")
-    )
-    alias_remove.add_argument("alias")
-    alias_remove.add_argument("--json", action="store_true")
-    alias_remove.set_defaults(action=alias_remove_command, action_id="alias.remove")
-
-    hardware_probe = subcommands.add_parser(
-        "hardware", help="show the capabilities used for runtime target selection"
-    )
-    hardware_probe.add_argument("--json", action="store_true")
-    hardware_probe.add_argument("--catalog")
-    hardware_probe.set_defaults(action=hardware, action_id="hardware")
-
-    updating = subcommands.add_parser(
-        "update", help="update Let's Infer core without changing runtimes"
-    )
-    updating.add_argument(
-        "--version", help="install this exact stable or release-candidate version"
-    )
-    updating.set_defaults(action=update_core, action_id="update")
-    update_operations = updating.add_subparsers(dest="update_operation")
-    update_check = update_operations.add_parser(
-        "check", help=help_label("check core and selected runtime", "update.check")
-    )
-    update_check.add_argument("--catalog")
-    update_check.add_argument("--json", action="store_true")
-    update_check.set_defaults(action=check_updates, action_id="update.check")
-
-    runtime_listing = subcommands.add_parser(
-        "runtimes", help="list installed immutable runtime packs"
-    )
-    runtime_listing.set_defaults(action=list_runtimes, action_id="runtimes")
-
-    available_listing = subcommands.add_parser(
-        "list", help="list qualified runtimes available for this hardware"
-    )
-    available_listing.add_argument("model", nargs="?")
-    available_listing.add_argument(
-        "--versions", action="store_true", help="include every retained release"
-    )
-    available_listing.add_argument(
-        "--all-targets",
-        action="store_true",
-        help="include runtimes for hardware targets other than this device",
-    )
-    available_listing.add_argument(
-        "--refresh", action="store_true", help="require a fresh signed catalog"
-    )
-    available_listing.add_argument("--catalog")
-    available_listing.add_argument("--json", action="store_true")
-    available_listing.set_defaults(action=list_available_runtimes, action_id="list")
-
-    packing = subcommands.add_parser(
-        "pack", help="build a deterministic runtime-pack artifact"
-    )
-    packing.add_argument("source")
-    packing.add_argument("--output", required=True)
-    packing.set_defaults(action=pack_runtime, action_id="pack")
-
-    inspecting = subcommands.add_parser(
-        "inspect", help="inspect an installed runtime and its resolved command"
-    )
-    inspecting.add_argument("runtime")
-    inspecting.add_argument("--target")
-    inspecting.add_argument("--catalog")
-    inspecting.add_argument("--port", type=int, default=8000)
-    inspecting.add_argument("--command", action="store_true")
-    inspecting.add_argument("--json", action="store_true")
-    inspecting.set_defaults(action=inspect_runtime, action_id="inspect")
-
-    upgrading = subcommands.add_parser(
-        "upgrade", help="upgrade an installed runtime according to its selection policy"
-    )
-    upgrading.add_argument("runtime")
-    upgrading.add_argument("--target")
-    upgrading.add_argument("--catalog")
-    upgrading.add_argument("--to")
-    upgrading.add_argument("--dry-run", action="store_true")
-    upgrading.set_defaults(action=upgrade_runtime, action_id="upgrade")
-
-    rolling_back = subcommands.add_parser(
-        "rollback", help="reinstall the previous retained runtime"
-    )
-    rolling_back.add_argument("runtime")
-    rolling_back.add_argument("--target")
-    rolling_back.add_argument("--dry-run", action="store_true")
-    rolling_back.set_defaults(action=rollback_runtime, action_id="rollback")
-
-    checking = subcommands.add_parser(
-        "verify", help="verify an installed runtime and its exact artifacts"
-    )
-    checking.add_argument("model")
-    checking.add_argument("--target")
-    checking.add_argument("--model-cache")
-    checking.add_argument(
-        "--source-only", action="store_true", help="verify only the immutable runtime pack"
-    )
-    checking.set_defaults(action=verify, action_id="verify")
-
-    acquiring = subcommands.add_parser(
-        "acquire", help="acquire and verify an exact model artifact"
-    )
-    acquiring.add_argument("model")
-    acquiring.add_argument("--target")
-    acquiring.add_argument("--model-cache")
-    acquiring.set_defaults(action=acquire, action_id="acquire")
-
-    benchmarking = subcommands.add_parser(
-        "benchmark", help="start, inspect, or stop a durable runtime benchmark"
-    )
-    benchmarking.add_argument(
-        "runtime",
-        nargs="?",
-        help=(
-            "installed runtime, `stop` to cancel the active benchmark, or "
-            "`clean` to remove local benchmark data; use `verify PR_URL` for "
-            "community qualification"
-        ),
-    )
-    benchmarking.add_argument(
-        "verification_target",
-        nargs="?",
-        help="pull-request URL, `status`, or `stop` after `benchmark verify`",
-    )
-    benchmarking.add_argument(
-        "--candidate",
-        help="select one exact changed candidate when a verification PR is ambiguous",
-    )
-    benchmarking.add_argument("--base-url")
-    benchmarking.add_argument("--output-directory", type=pathlib.Path)
-    benchmarking.add_argument("--api-key-file", type=pathlib.Path)
-    benchmarking.add_argument("--ca-cert-file", type=pathlib.Path)
-    benchmarking.add_argument("--container")
-    benchmarking.add_argument("--store-root", type=pathlib.Path)
-    benchmarking.add_argument("--launch-directory", type=pathlib.Path)
-    benchmarking.add_argument("--measured-commit")
-    benchmarking.add_argument("--source-attestation", type=pathlib.Path)
-    benchmarking.add_argument("--watchdog-trip-file", type=pathlib.Path)
-    benchmarking.add_argument("--timeout", type=int)
-    for concurrency in (1, 2, 4, 8, 16):
-        benchmarking.add_argument(f"--c{concurrency}", action="store_true")
-    for context in ("32k", "64k", "128k", "256k"):
-        benchmarking.add_argument(
-            f"--{context}", action="store_true", dest=f"context_{context}"
-        )
-    benchmarking.add_argument(
-        "--list", action="store_true", help="validate and print cells without inference"
-    )
-    benchmarking.add_argument(
-        "--detach",
-        action="store_true",
-        help="start the benchmark without attaching to its live progress",
-    )
-    benchmarking.add_argument(
-        "--json", action="store_true", help="emit machine-readable benchmark status"
-    )
-    benchmarking.add_argument(
-        "--yes", action="store_true", help="confirm deletion for benchmark clean"
-    )
-    benchmarking.add_argument("--job-worker", action="store_true", help=argparse.SUPPRESS)
-    benchmarking.add_argument("--job-id", help=argparse.SUPPRESS)
-    benchmarking.add_argument(
-        "--resident-group", action="append", default=[], help=argparse.SUPPRESS
-    )
-    benchmarking.set_defaults(action=benchmark_runtime, action_id="benchmark")
-
-    installing = subcommands.add_parser(
-        "install", help="install a model or immutable runtime pack"
-    )
-    installing.add_argument("model")
-    installing.add_argument("--runtime", help="select an exact runtime candidate ID")
-    installing.add_argument("--catalog")
-    installing.add_argument(
-        "--node",
-        action="append",
-        help="install on this child or main node; repeat to create replicas",
-    )
-    installing.add_argument(
-        "--all-nodes",
-        action="store_true",
-        help="install one compatible target-specific replica on every active node",
-    )
-    installing.add_argument(
-        "--replace-existing",
-        action="store_true",
-        help="confirm replacement of model groups occupying selected devices",
-    )
-    installing.add_argument("--port", type=int, default=8000)
-    installing.add_argument("--engine-port", type=int, default=18000, help=argparse.SUPPRESS)
-    installing.add_argument("--gateway-listen", default="0.0.0.0")
-    installing.add_argument("--gateway-max-connections", type=int, default=128)
-    installing.add_argument(
-        "--gateway-queue-timeout",
-        type=int,
-        default=0,
-        help="seconds to wait for admission; 0 waits until the client disconnects",
-    )
-    installing.add_argument("--name")
-    installing.add_argument("--model-cache")
-    installing.add_argument("--store-root")
-    installing.add_argument("--runtime-cache-root")
-    installing.add_argument("--engine-api-key-file", dest="api_key_file")
-    installing.add_argument("--tls-cert-file")
-    installing.add_argument("--tls-key-file")
-    installing.add_argument("--watchdog-data-root")
-    installing.add_argument("--watchdog-listen")
-    installing.add_argument("--watchdog-port", type=int)
-    installing.add_argument("--watchdog-cert-file")
-    installing.add_argument("--watchdog-key-file")
-    installing.add_argument("--watchdog-controller-ca-file")
-    installing.add_argument("--watchdog-controller-ca-key-file")
-    installing.add_argument("--watchdog-local-controller-cert-file")
-    installing.add_argument("--watchdog-local-controller-key-file")
-    installing.add_argument("--config")
-    installing.add_argument(
-        "--download",
-        dest="download_dependencies",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    installing.add_argument(
-        "--no-download",
-        dest="download_dependencies",
-        action="store_false",
-        help="require exact model artifacts and registry image layers to exist already",
-    )
-    installing.add_argument(
-        "--no-build-image", action="store_true", help="require the exact image to exist already"
-    )
-    installing.add_argument(
-        "--no-service", action="store_true", help="do not install a user systemd service"
-    )
-    installing.add_argument(
-        "--no-start", action="store_true", help="install and enable the service without starting it"
-    )
-    installing.set_defaults(action=install, action_id="install", download_dependencies=True)
-
-    scaling = subcommands.add_parser(
-        "scale", help="set the number of independent engine groups for one model"
-    )
-    scaling.add_argument("model")
-    scaling.add_argument("--replicas", type=int, required=True)
-    scaling.add_argument("--runtime", help="select an exact runtime candidate ID")
-    scaling.add_argument("--catalog")
-    scaling.set_defaults(action=scale_command, action_id="scale")
-
-    serving = subcommands.add_parser("serve", help="start an installed runtime")
-    serving.add_argument("model")
-    serving.add_argument("--target")
-    serving.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="internal engine port (defaults to the installed engine port)",
-    )
-    serving.add_argument("--name")
-    serving.add_argument("--model-cache")
-    serving.add_argument("--store-root")
-    serving.add_argument("--runtime-cache-root")
-    serving.add_argument("--engine-api-key-file", dest="api_key_file")
-    serving.add_argument("--tls-cert-file")
-    serving.add_argument("--tls-key-file")
-    serving.add_argument("--evidence-dir")
-    serving.add_argument(
-        "--qualification-mode",
-        action="store_true",
-        help=(
-            "permit an explicitly unqualified serving configuration only with an explicit "
-            "evidence directory; normal serving and installation remain gated"
-        ),
-    )
-    serving.add_argument("--dry-run", action="store_true")
-    serving.add_argument("--existing-ok", action="store_true", help=argparse.SUPPRESS)
-    serving.add_argument("--protection-config", help=argparse.SUPPRESS)
-    serving.set_defaults(action=serve, action_id="serve")
-
-    showing = subcommands.add_parser("status", help="show node runtime or managed-container status")
-    showing.add_argument("model", nargs="?")
-    showing.add_argument("--name")
-    showing.add_argument("--config")
+    showing = subcommands.add_parser("status", help="show the complete node status")
     showing.add_argument("--json", action="store_true")
-    showing.set_defaults(action=status, action_id="status")
+    showing.set_defaults(
+        action=status,
+        action_id="status",
+        model=None,
+        name=None,
+        config=None,
+    )
 
     diagnosing = subcommands.add_parser(
-        "doctor", help="audit operational and publication readiness"
+        "doctor", help="audit complete operational and publication readiness"
     )
-    diagnosing.add_argument("model", nargs="?")
-    diagnosing.add_argument("--config")
     diagnosing.add_argument("--json", action="store_true")
     diagnosing.add_argument(
         "--require-stable",
         action="store_true",
         help="treat candidate/publication status as a failing readiness check",
     )
-    diagnosing.set_defaults(action=doctor, action_id="doctor")
-
-    logging = subcommands.add_parser("logs", help="show managed server logs")
-    logging.add_argument("--config")
-    logging.add_argument("--group", help="select one exact local engine group")
-    logging.add_argument("--tail", type=int, default=200)
-    logging.add_argument("--follow", action="store_true")
-    logging.set_defaults(action=logs, action_id="logs")
-
-    starting = subcommands.add_parser(
-        "start", help=help_label("start a stopped node runtime", "start")
-    )
-    starting.add_argument("model", nargs="?")
-    starting.add_argument("--config")
-    starting.set_defaults(action=start_service, action_id="start")
-
-    restarting = subcommands.add_parser(
-        "restart", help=help_label("restart a node runtime", "restart")
-    )
-    restarting.add_argument("model", nargs="?")
-    restarting.add_argument("--config")
-    restarting.set_defaults(action=restart_service, action_id="restart")
-
-    recovering = subcommands.add_parser(
-        "recover",
-        help=help_label(
-            "acknowledge protection trips and recover a node runtime", "recover"
-        ),
-    )
-    recovering.add_argument("model", nargs="?")
-    recovering.add_argument("--config")
-    recovering.set_defaults(action=recover_service, action_id="recover")
-
-    exposure = subcommands.add_parser(
-        "exposure", help="inspect public inference exposure"
-    )
-    exposure.add_argument("--json", action="store_true")
-    exposure.set_defaults(
-        action=exposure_status_command, action_id="exposure.status"
+    diagnosing.set_defaults(
+        action=doctor,
+        action_id="doctor",
+        model=None,
+        config=None,
     )
 
-    exposing = subcommands.add_parser(
-        "expose",
-        help=help_label(
-            "publish only the inference gateway through Tailscale Funnel",
-            "expose",
-        ),
+    node_command = subcommands.add_parser("node", help="inspect and manage nodes")
+    node_operations = node_command.add_subparsers(dest="node_operation", required=True)
+    node_info = node_operations.add_parser(
+        "info", help=help_label("show this node identity and hardware", "node.info")
     )
-    exposing.add_argument("--json", action="store_true")
-    exposing.set_defaults(action=expose_command, action_id="expose")
-
-    unexposing = subcommands.add_parser(
-        "unexpose",
-        help=help_label("disable public inference exposure", "unexpose"),
+    node_info.add_argument("--catalog")
+    node_info.add_argument("--json", action="store_true")
+    node_info.set_defaults(action=node_info_command, action_id="node.info")
+    node_list = node_operations.add_parser(
+        "list", help=help_label("list the main and child nodes", "node.list")
     )
-    unexposing.add_argument("--json", action="store_true")
-    unexposing.set_defaults(action=unexpose_command, action_id="unexpose")
+    node_list.add_argument("--json", action="store_true")
+    node_list.set_defaults(action=member_list_command, action_id="node.list")
+    node_add = node_operations.add_parser(
+        "add", help=help_label("discover, request, and approve a child node", "node.add")
+    )
+    node_add.add_argument("--address")
+    node_add.add_argument("--certificate-sha256")
+    node_add.add_argument("--timeout", type=int, default=5)
+    node_add.add_argument("--json", action="store_true")
+    node_add.set_defaults(action=node_add_command, action_id="node.add")
+    node_pause = node_operations.add_parser(
+        "pause", help=help_label("pause new work on a child", "node.pause")
+    )
+    node_pause.add_argument("member", metavar="CHILD")
+    node_pause.add_argument("--json", action="store_true")
+    node_pause.set_defaults(
+        action=member_drain_command,
+        action_id="node.pause",
+    )
+    node_resume = node_operations.add_parser(
+        "resume", help=help_label("resume work on a paused child", "node.resume")
+    )
+    node_resume.add_argument("member", metavar="CHILD")
+    node_resume.add_argument("--json", action="store_true")
+    node_resume.set_defaults(
+        action=member_resume_command,
+        action_id="node.resume",
+    )
+    node_remove = node_operations.add_parser(
+        "remove", help=help_label("remove an inactive child", "node.remove")
+    )
+    node_remove.add_argument("member", metavar="CHILD")
+    node_remove.add_argument("--json", action="store_true")
+    node_remove.set_defaults(
+        action=member_remove_command,
+        action_id="node.remove",
+    )
 
-    pairing = subcommands.add_parser(
-        "pair", help=help_label(
-            "pair one controller with a short, human-verified code", "pair"
+    model_command = subcommands.add_parser("model", help="manage logical models")
+    model_operations = model_command.add_subparsers(dest="model_operation", required=True)
+    model_list = model_operations.add_parser(
+        "list", help=help_label("list catalog models and installed state", "model.list")
+    )
+    model_list.add_argument("model", nargs="?")
+    model_list.add_argument("--versions", action="store_true")
+    model_list.add_argument("--all-targets", action="store_true")
+    model_list.add_argument("--installed", action="store_true")
+    model_list.add_argument("--refresh", action="store_true")
+    model_list.add_argument("--catalog")
+    model_list.add_argument("--json", action="store_true")
+    model_list.set_defaults(action=model_list_command, action_id="model.list")
+    model_install = model_operations.add_parser(
+        "install", help=help_label("install models on selected nodes", "model.install")
+    )
+    model_install.add_argument("model", nargs="?")
+    model_install.add_argument("--runtime")
+    model_install.add_argument("--catalog")
+    model_install.add_argument("--node", action="append")
+    model_install.add_argument("--all-nodes", action="store_true")
+    model_install.add_argument("--replace-existing", action="store_true")
+    model_install.set_defaults(action=model_install_command, action_id="model.install")
+    model_remove = model_operations.add_parser(
+        "remove", help=help_label("remove a model from selected nodes", "model.remove")
+    )
+    model_remove.add_argument("model")
+    model_remove.add_argument("--node", action="append")
+    model_remove.add_argument("--all-nodes", action="store_true")
+    model_remove.add_argument("--json", action="store_true")
+    model_remove.set_defaults(action=model_remove_command, action_id="model.remove")
+    for name, handler, action_id, help_text in (
+        ("pause", model_pause_command, "model.pause", "pause a model"),
+        ("resume", model_resume_command, "model.resume", "resume a paused model"),
+        ("restart", model_restart_command, "model.restart", "restart a model"),
+        ("recover", model_recover_command, "model.recover", "recover a protected model"),
+    ):
+        lifecycle = model_operations.add_parser(
+            name, help=help_label(help_text, action_id)
         )
+        lifecycle.add_argument("model")
+        lifecycle.set_defaults(action=handler, action_id=action_id)
+    model_rollback = model_operations.add_parser(
+        "rollback", help=help_label("restore the previous model runtime", "model.rollback")
     )
-    pairing.add_argument("--config")
-    pairing.add_argument(
-        "--timeout", type=int, default=CONTROLLER_PAIRING_TIMEOUT_SECONDS
+    model_rollback.add_argument("model")
+    model_rollback.add_argument("--target")
+    model_rollback.add_argument("--dry-run", action="store_true")
+    model_rollback.set_defaults(action=model_rollback_command, action_id="model.rollback")
+    model_logs = model_operations.add_parser(
+        "logs", help=help_label("show logs for a model", "model.logs")
     )
-    pairing.add_argument(
+    model_logs.add_argument("model")
+    model_logs.add_argument("--group")
+    model_logs.add_argument("--tail", type=int, default=200)
+    model_logs.add_argument("--follow", action="store_true")
+    model_logs.set_defaults(action=model_logs_command, action_id="model.logs")
+
+    benchmark_command = subcommands.add_parser("benchmark", help="manage benchmarks")
+    benchmark_operations = benchmark_command.add_subparsers(
+        dest="benchmark_operation", required=True
+    )
+
+    def benchmark_options(target: argparse.ArgumentParser, *, selections: bool) -> None:
+        if selections:
+            for concurrency in (1, 2, 4, 8, 16):
+                target.add_argument(f"--c{concurrency}", action="store_true")
+            for context in ("32k", "64k", "128k", "256k"):
+                target.add_argument(
+                    f"--{context}", action="store_true", dest=f"context_{context}"
+                )
+        target.add_argument("--json", action="store_true")
+
+    benchmark_run = benchmark_operations.add_parser(
+        "run", help=help_label("run a model benchmark", "benchmark.run")
+    )
+    benchmark_run.add_argument("model")
+    benchmark_run.add_argument("--detach", action="store_true")
+    benchmark_run.add_argument("--base-url", help=argparse.SUPPRESS)
+    benchmark_run.add_argument("--output-directory", type=pathlib.Path, help=argparse.SUPPRESS)
+    benchmark_run.add_argument("--api-key-file", type=pathlib.Path, help=argparse.SUPPRESS)
+    benchmark_run.add_argument("--ca-cert-file", type=pathlib.Path, help=argparse.SUPPRESS)
+    benchmark_run.add_argument("--container", help=argparse.SUPPRESS)
+    benchmark_run.add_argument("--store-root", type=pathlib.Path, help=argparse.SUPPRESS)
+    benchmark_run.add_argument("--launch-directory", type=pathlib.Path, help=argparse.SUPPRESS)
+    benchmark_run.add_argument("--measured-commit", help=argparse.SUPPRESS)
+    benchmark_run.add_argument("--source-attestation", type=pathlib.Path, help=argparse.SUPPRESS)
+    benchmark_run.add_argument("--watchdog-trip-file", type=pathlib.Path, help=argparse.SUPPRESS)
+    benchmark_run.add_argument("--timeout", type=int, help=argparse.SUPPRESS)
+    benchmark_run.add_argument("--job-worker", action="store_true", help=argparse.SUPPRESS)
+    benchmark_run.add_argument("--job-id", help=argparse.SUPPRESS)
+    benchmark_run.add_argument(
+        "--resident-group", action="append", default=[], help=argparse.SUPPRESS
+    )
+    benchmark_options(benchmark_run, selections=True)
+    benchmark_run.set_defaults(action=benchmark_run_command, action_id="benchmark.run")
+    benchmark_list = benchmark_operations.add_parser(
+        "list", help=help_label("list benchmark cells", "benchmark.list")
+    )
+    benchmark_list.add_argument("model")
+    benchmark_options(benchmark_list, selections=True)
+    benchmark_list.set_defaults(action=benchmark_list_command, action_id="benchmark.list")
+    benchmark_status = benchmark_operations.add_parser(
+        "status", help=help_label("show the active benchmark", "benchmark.status")
+    )
+    benchmark_options(benchmark_status, selections=False)
+    benchmark_status.set_defaults(action=benchmark_status_command, action_id="benchmark.status")
+    benchmark_stop = benchmark_operations.add_parser(
+        "stop", help=help_label("stop the active benchmark", "benchmark.stop")
+    )
+    benchmark_options(benchmark_stop, selections=False)
+    benchmark_stop.set_defaults(action=benchmark_stop_command, action_id="benchmark.stop")
+    benchmark_clean = benchmark_operations.add_parser(
+        "clean", help=help_label("remove local benchmark data", "benchmark.clean")
+    )
+    benchmark_clean.add_argument("--yes", action="store_true")
+    benchmark_clean.add_argument("--json", action="store_true")
+    benchmark_clean.set_defaults(action=benchmark_clean_command, action_id="benchmark.clean")
+    verification = benchmark_operations.add_parser(
+        "verification", help="manage runtime proposal verification"
+    )
+    verification_operations = verification.add_subparsers(
+        dest="verification_operation", required=True
+    )
+    verification_run = verification_operations.add_parser(
+        "run", help=help_label("verify a runtime proposal", "benchmark.verification.run")
+    )
+    verification_run.add_argument("pull_request")
+    verification_run.add_argument("--candidate")
+    verification_run.add_argument("--detach", action="store_true")
+    verification_run.add_argument("--json", action="store_true")
+    verification_run.add_argument("--job-worker", action="store_true", help=argparse.SUPPRESS)
+    verification_run.add_argument("--job-id", help=argparse.SUPPRESS)
+    verification_run.set_defaults(
+        action=benchmark_verification_run_command,
+        action_id="benchmark.verification.run",
+    )
+    verification_status = verification_operations.add_parser(
+        "status",
+        help=help_label(
+            "show active proposal verification", "benchmark.verification.status"
+        ),
+    )
+    verification_status.add_argument("--json", action="store_true")
+    verification_status.set_defaults(
+        action=benchmark_verification_status_command,
+        action_id="benchmark.verification.status",
+    )
+    verification_stop = verification_operations.add_parser(
+        "stop",
+        help=help_label(
+            "stop active proposal verification", "benchmark.verification.stop"
+        ),
+    )
+    verification_stop.add_argument("--json", action="store_true")
+    verification_stop.set_defaults(
+        action=benchmark_verification_stop_command,
+        action_id="benchmark.verification.stop",
+    )
+
+    auth = subcommands.add_parser("auth", help="manage authentication")
+    auth_operations = auth.add_subparsers(dest="auth_operation", required=True)
+    auth_controller = auth_operations.add_parser("controller", help="manage controllers")
+    controller_operations = auth_controller.add_subparsers(
+        dest="controller_operation", required=True
+    )
+    controller_add = controller_operations.add_parser(
+        "add", help=help_label("pair a controller", "auth.controller.add")
+    )
+    controller_add.add_argument("--timeout", type=int, default=CONTROLLER_PAIRING_TIMEOUT_SECONDS)
+    controller_add.add_argument(
         "--role",
         choices=("viewer", "operator", "administrator"),
         default="administrator",
     )
-    pairing.set_defaults(action=pair_controller, action_id="pair")
-
-    controller_command = subcommands.add_parser(
-        "controllers", help="manage paired Let's Infer controllers"
-    )
-    controller_operations = controller_command.add_subparsers(
-        dest="operation", required=True
+    controller_add.set_defaults(
+        action=pair_controller,
+        action_id="auth.controller.add",
+        config=None,
     )
     controller_list = controller_operations.add_parser(
-        "list", help=help_label("list paired controllers", "controllers.list")
+        "list", help=help_label("list controllers", "auth.controller.list")
     )
-    controller_list.add_argument("--config")
     controller_list.add_argument("--json", action="store_true")
     controller_list.set_defaults(
-        action=controllers, action_id="controllers.list", controller=None
+        action=controllers,
+        action_id="auth.controller.list",
+        config=None,
+        operation="list",
+        controller=None,
     )
-    controller_forget = controller_operations.add_parser(
-        "forget", help=help_label("revoke a paired controller", "controllers.forget")
+    controller_revoke = controller_operations.add_parser(
+        "revoke", help=help_label("revoke a controller", "auth.controller.revoke")
     )
-    controller_forget.add_argument("controller")
-    controller_forget.add_argument("--config")
-    controller_forget.add_argument("--json", action="store_true")
-    controller_forget.set_defaults(action=controllers, action_id="controllers.forget")
+    controller_revoke.add_argument("controller")
+    controller_revoke.add_argument("--json", action="store_true")
+    controller_revoke.set_defaults(
+        action=controllers,
+        action_id="auth.controller.revoke",
+        config=None,
+        operation="forget",
+    )
+    auth_key = auth_operations.add_parser("key", help="manage inference API keys")
+    key_operations = auth_key.add_subparsers(dest="key_operation", required=True)
 
-    key_command = subcommands.add_parser("key", help="manage inference API keys")
-    key_operations = key_command.add_subparsers(dest="key_operation", required=True)
+    def key_policy_options(target: argparse.ArgumentParser, *, create: bool) -> None:
+        target.add_argument("--model", action="append", default=[] if create else None)
+        target.add_argument("--expires-at", type=int)
+        target.add_argument("--requests-per-minute", type=int)
+        target.add_argument("--tokens-per-minute", type=int)
+        target.add_argument("--concurrency", type=int)
+        target.add_argument("--max-context", type=int)
+        target.add_argument("--tenant")
+        target.add_argument("--application")
+        target.add_argument("--json", action="store_true")
+
     key_create = key_operations.add_parser(
-        "create", help=help_label("create a scoped inference API key", "key.create")
+        "create", help=help_label("create an API key", "auth.key.create")
     )
     key_create.add_argument("name")
-    key_create.add_argument("--model", action="append", default=[])
-    key_create.add_argument("--expires-at", type=int)
-    key_create.add_argument("--requests-per-minute", type=int)
-    key_create.add_argument("--tokens-per-minute", type=int)
-    key_create.add_argument("--concurrency", type=int)
-    key_create.add_argument("--max-context", type=int)
-    key_create.add_argument("--tenant")
-    key_create.add_argument("--application")
-    key_create.add_argument("--json", action="store_true")
-    key_create.set_defaults(action=key_create_command, action_id="key.create")
-    key_list = key_operations.add_parser(
-        "list", help=help_label("list API-key metadata", "key.list")
+    key_policy_options(key_create, create=True)
+    key_create.set_defaults(action=key_create_command, action_id="auth.key.create")
+    for name, handler, action_id, help_text in (
+        ("list", key_list_command, "auth.key.list", "list API keys"),
+        ("show", key_show_command, "auth.key.show", "show an API key"),
+        ("rotate", key_rotate_command, "auth.key.rotate", "rotate an API key"),
+        ("revoke", key_revoke_command, "auth.key.revoke", "revoke an API key"),
+    ):
+        key_parser = key_operations.add_parser(name, help=help_label(help_text, action_id))
+        if name != "list":
+            key_parser.add_argument("key")
+        key_parser.add_argument("--json", action="store_true")
+        key_parser.set_defaults(action=handler, action_id=action_id)
+    key_update = key_operations.add_parser(
+        "update", help=help_label("update an API-key policy", "auth.key.update")
     )
-    key_list.add_argument("--json", action="store_true")
-    key_list.set_defaults(action=key_list_command, action_id="key.list")
-    key_show = key_operations.add_parser(
-        "show", help=help_label("inspect one API-key policy", "key.show")
+    key_update.add_argument("key")
+    key_policy_options(key_update, create=False)
+    key_update.set_defaults(action=key_policy_command, action_id="auth.key.update")
+
+    exposure = subcommands.add_parser("exposure", help="manage public exposure")
+    exposure_operations = exposure.add_subparsers(dest="exposure_operation", required=True)
+    exposure_status = exposure_operations.add_parser(
+        "status", help=help_label("show public exposure", "exposure.status")
     )
-    key_show.add_argument("key")
-    key_show.add_argument("--json", action="store_true")
-    key_show.set_defaults(action=key_show_command, action_id="key.show")
-    key_rotate = key_operations.add_parser(
-        "rotate", help=help_label("replace and revoke an API key", "key.rotate")
+    exposure_status.add_argument("--json", action="store_true")
+    exposure_status.set_defaults(action=exposure_status_command, action_id="exposure.status")
+    exposure_enable = exposure_operations.add_parser(
+        "enable", help=help_label("enable public inference", "exposure.enable")
     )
-    key_rotate.add_argument("key")
-    key_rotate.add_argument("--json", action="store_true")
-    key_rotate.set_defaults(action=key_rotate_command, action_id="key.rotate")
-    key_revoke = key_operations.add_parser(
-        "revoke", help=help_label("revoke an API key", "key.revoke")
+    exposure_enable.add_argument("--json", action="store_true")
+    exposure_enable.set_defaults(action=expose_command, action_id="exposure.enable")
+    exposure_disable = exposure_operations.add_parser(
+        "disable", help=help_label("disable public inference", "exposure.disable")
     )
-    key_revoke.add_argument("key")
-    key_revoke.add_argument("--json", action="store_true")
-    key_revoke.set_defaults(action=key_revoke_command, action_id="key.revoke")
-    key_policy = key_operations.add_parser(
-        "policy", help=help_label("replace an API-key policy", "key.policy")
-    )
-    key_policy.add_argument("key")
-    key_policy.add_argument("--model", action="append")
-    key_policy.add_argument("--expires-at", type=int)
-    key_policy.add_argument("--requests-per-minute", type=int)
-    key_policy.add_argument("--tokens-per-minute", type=int)
-    key_policy.add_argument("--concurrency", type=int)
-    key_policy.add_argument("--max-context", type=int)
-    key_policy.add_argument("--tenant")
-    key_policy.add_argument("--application")
-    key_policy.add_argument("--json", action="store_true")
-    key_policy.set_defaults(action=key_policy_command, action_id="key.policy")
+    exposure_disable.add_argument("--json", action="store_true")
+    exposure_disable.set_defaults(action=unexpose_command, action_id="exposure.disable")
 
     audit_command = subcommands.add_parser("audit", help="inspect the node audit chain")
     audit_operations = audit_command.add_subparsers(dest="audit_operation", required=True)
@@ -19389,28 +19821,49 @@ def parser() -> argparse.ArgumentParser:
     audit_export.add_argument("--output")
     audit_export.set_defaults(action=audit_export_command, action_id="audit.export")
 
-    stopping = subcommands.add_parser(
-        "stop", help=help_label("stop a node runtime", "stop")
+    update_command = subcommands.add_parser("update", help="check and apply updates")
+    update_operations = update_command.add_subparsers(
+        dest="update_operation", required=True
     )
-    stopping.add_argument("model", nargs="?")
-    stopping.add_argument(
-        "--name",
-        help="remove only this managed container without stopping the resident service",
+    update_check = update_operations.add_parser(
+        "check", help=help_label("check Core and model updates", "update.check")
     )
-    stopping.add_argument("--config")
-    stopping.add_argument("--container-only", action="store_true", help=argparse.SUPPRESS)
-    stopping.set_defaults(action=stop, action_id="stop")
+    update_check.add_argument("--catalog")
+    update_check.add_argument("--json", action="store_true")
+    update_check.set_defaults(action=check_updates, action_id="update.check")
+    update_core_parser = update_operations.add_parser(
+        "core", help=help_label("update Core", "update.core")
+    )
+    update_core_parser.add_argument("version", nargs="?")
+    update_core_parser.set_defaults(action=update_core_command, action_id="update.core")
+    update_model_parser = update_operations.add_parser(
+        "model", help=help_label("update installed models", "update.model")
+    )
+    update_model_parser.add_argument("model", nargs="?")
+    update_model_parser.add_argument("--target")
+    update_model_parser.add_argument("--catalog")
+    update_model_parser.add_argument("--dry-run", action="store_true")
+    update_model_parser.set_defaults(
+        action=update_model_command,
+        action_id="update.model",
+    )
 
     uninstalling = subcommands.add_parser(
         "uninstall", help="remove Let's Infer and all locally managed data"
     )
-    uninstalling.add_argument("--config")
     uninstalling.add_argument(
         "--keep-models",
         action="store_true",
         help="preserve the models directory while removing everything else",
     )
-    uninstalling.set_defaults(action=uninstall, action_id="uninstall")
+    uninstalling.set_defaults(action=uninstall, action_id="uninstall", config=None)
+
+    core_setup = subcommands.add_parser("core-setup", help=argparse.SUPPRESS)
+    core_setup.add_argument("--name", default="Home")
+    core_setup.add_argument("--address")
+    core_setup.add_argument("--no-service", action="store_true")
+    core_setup.add_argument("--json", action="store_true")
+    core_setup.set_defaults(action=setup_command, action_id="core-setup")
 
     service_start = subcommands.add_parser(
         "service-start", help="start from service configuration (systemd internal)"
@@ -19443,6 +19896,7 @@ def parser() -> argparse.ArgumentParser:
     core_prune.add_argument("--quiet", action="store_true")
     core_prune.set_defaults(action=prune_core_command, action_id="core-prune")
     internal_commands = {
+        "core-setup",
         "service-start",
         "service-stop",
         "gateway",
@@ -19536,7 +19990,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 installed=installed_release,
                 public_command=public_command,
                 explicit_check=arguments.action_id in {
-                    "update",
+                    "update.core",
                     "update.check",
                     "uninstall",
                 },
@@ -19579,7 +20033,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         generic_progress = (
             has_bounded_progress
-            and metadata.name not in {"update", "uninstall"}
+            and metadata.name not in {"update.core", "uninstall"}
             and metadata.name not in HANDLER_STEP_PROGRESS
         )
 
@@ -19633,7 +20087,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             and presentation.show_cached_updates
             and not owns_surface
             and update_manager is not None
-            and arguments.action_id not in {"update", "update.check", "uninstall"}
+            and arguments.action_id
+            not in {"update.core", "update.check", "uninstall"}
         ):
             refreshed_snapshot = update_manager.cached()
             refreshed = refreshed_snapshot.available

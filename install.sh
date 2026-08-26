@@ -579,7 +579,7 @@ if [ "$run_setup" -eq 1 ]; then
     setup_log="$temporary/setup.stderr"
     setup_summary="$temporary/setup.summary"
     progress 80 "Initializing services"
-    if ! "$command_path" setup --json >"$setup_json" 2>"$setup_log"; then
+    if ! "$command_path" core-setup --json >"$setup_json" 2>"$setup_log"; then
         clear_progress
         progress_active=0
         if [ -s "$setup_log" ]; then

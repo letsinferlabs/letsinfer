@@ -61,13 +61,13 @@ curl -fsSL https://letsinfer.ai/install.sh | sh
 Install a model:
 
 ```bash
-letsinfer install MODEL
+letsinfer model install MODEL
 ```
 
 Create an API key and inspect the live service:
 
 ```bash
-letsinfer key create my-app
+letsinfer auth key create my-app
 letsinfer status
 ```
 
@@ -100,20 +100,19 @@ independent runtime candidates—without adding model-specific code to core.
 
 | Task | Command |
 | --- | --- |
-| Inspect hardware | `letsinfer hardware` |
-| Discover compatible runtimes | `letsinfer list` |
-| Install a model | `letsinfer install MODEL` |
-| Replicate on every compatible node | `letsinfer install MODEL --all-nodes` |
-| Set the replica count | `letsinfer scale MODEL --replicas N` |
-| Inspect the node topology | `letsinfer topology show` |
+| Inspect this node and hardware | `letsinfer node info` |
+| List catalog and installed models | `letsinfer model list` |
+| Install a model | `letsinfer model install MODEL` |
+| Assign models interactively | `letsinfer model install` |
+| Add a child node | `letsinfer node add` |
 | Watch live status | `letsinfer status` |
-| Create an API key | `letsinfer key create my-app` |
+| Create an API key | `letsinfer auth key create my-app` |
 | Check for updates | `letsinfer update check` |
-| Update core | `letsinfer update` |
-| Upgrade a runtime | `letsinfer upgrade MODEL` |
-| Roll back a runtime | `letsinfer rollback MODEL` |
-| Run the C1 benchmark | `letsinfer benchmark MODEL --c1` |
-| Verify a runtime PR | `letsinfer benchmark verify PR_URL` |
+| Update Core | `letsinfer update core` |
+| Update a model | `letsinfer update model MODEL` |
+| Roll back a model | `letsinfer model rollback MODEL` |
+| Run the C1 benchmark | `letsinfer benchmark run MODEL --c1` |
+| Verify a runtime PR | `letsinfer benchmark verification run PR_URL` |
 | Verify an installation | `letsinfer doctor` |
 | Remove everything | `letsinfer uninstall` |
 
