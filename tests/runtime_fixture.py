@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Small schema-v5 runtime candidates shared by engine-neutral core tests."""
+"""Small schema-v6 runtime candidates shared by engine-neutral core tests."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 def runtime_candidate() -> dict[str, Any]:
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "id": "example-engine--example--model--test-target",
         "version": "1.0.0",
         "logical_model": "example-model",
@@ -37,7 +37,8 @@ def runtime_candidate() -> dict[str, Any]:
         "engine": {
             "id": "example-engine",
             "protocol": {"version": 2},
-            "oci": {
+            "distribution": {
+                "kind": "oci-container",
                 "reference": "registry.example/engine@sha256:" + "1" * 64,
                 "immutable_id": "sha256:" + "2" * 64,
             },
@@ -50,6 +51,7 @@ def runtime_candidate() -> dict[str, Any]:
             "uri": "hf://Example/Model",
             "artifact": "model",
             "acquisition": {
+                "kind": "oci-container",
                 "image": "registry.example/acquire@sha256:" + "3" * 64,
             },
         },
@@ -80,5 +82,28 @@ def runtime_candidate() -> dict[str, Any]:
             "max_active_requests": 4,
             "max_context_tokens": 32768,
         },
-        "benchmark": {"contract": {}},
+        "benchmark": {
+            "contract": {
+                "schema_version": 2,
+                "suite": "letsinfer-code-prose-v1",
+                "generator": {"id": "letsinfer-code-prose", "version": 2},
+                "tokenizer": {
+                    "capability": "engine-rendered-chat-count-v1",
+                    "model_sha256": "3d20b7ab253233a978ba1e941ebfc05fe927c4d016f080b88137d96725f8c429",
+                    "engine_image_sha256": "2" * 64,
+                    "render_contract": "openai-chat-user-v1",
+                },
+                "request": {
+                    "output_tokens": 128,
+                    "min_completion_tokens": 1,
+                    "require_natural_stop": True,
+                    "temperature": 0,
+                    "seed": 42,
+                },
+                "sample_interval_seconds": 5,
+                "cases": [
+                    {"id": "32k", "prompt_tokens": 32768, "concurrencies": [1]}
+                ],
+            }
+        },
     }

@@ -933,7 +933,7 @@ def runtime_execution_manifest(
 ) -> dict[str, Any]:
     """Derive the private core execution view from authoritative runtime.json.
 
-    Runtime packs expose only schema-v5 runtime.json. The control plane keeps a
+    Runtime packs expose only schema-v6 runtime.json. The control plane keeps a
     deterministic, hash-bound execution view so existing lifecycle code never
     needs to reinterpret source metadata. Qualification is authorization from a
     signed catalog, never an author-controlled property of executable bytes.
@@ -961,6 +961,8 @@ def runtime_execution_manifest(
         "arguments": list(engine["arguments"]),
         "environment": dict(engine["environment"]),
     }
+    distribution = dict(engine["distribution"])
+    distribution_kind = distribution.pop("kind")
     execution = {
         "schema_version": 1,
         "release": f"{runtime['id']}@{runtime['version']}",
@@ -971,11 +973,18 @@ def runtime_execution_manifest(
             "alias": runtime["logical_model"],
             "id": model["uri"].removeprefix("hf://"),
             "artifact": model["artifact"],
-            "acquisition_image": model["acquisition"]["image"],
+            "acquisition": dict(model["acquisition"]),
         },
         "artifacts": artifacts,
         "image": (
-            {"distribution": "registry-digest", **engine["oci"]}
+            {
+                "distribution": (
+                    "registry-digest"
+                    if distribution_kind == "oci-container"
+                    else distribution_kind
+                ),
+                **distribution,
+            }
             if image_override is None
             else dict(image_override)
         ),
@@ -1172,46 +1181,63 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     model = _require(manifest, "model", dict, "manifest")
     _reject_unknown_fields(
         model,
-        {"alias", "id", "artifact", "acquisition_image"},
+        {"alias", "id", "artifact", "acquisition"},
         "manifest.model",
     )
     for key in ("alias", "id", "artifact"):
         value = _require(model, key, str, "manifest.model")
         if not value or any(character.isspace() for character in value):
             raise LetsInferError(f"manifest.model.{key} must be a machine identifier")
-    acquisition_image = _require(
-        model, "acquisition_image", str, "manifest.model"
-    )
-    if not REGISTRY_DIGEST_RE.fullmatch(acquisition_image):
-        raise LetsInferError("manifest.model.acquisition_image must be digest-pinned")
+    acquisition = _require(model, "acquisition", dict, "manifest.model")
+    if acquisition.get("kind") == "oci-container":
+        if set(acquisition) != {"kind", "image"} or not REGISTRY_DIGEST_RE.fullmatch(
+            str(acquisition.get("image", ""))
+        ):
+            raise LetsInferError(
+                "manifest.model.acquisition OCI image must be digest-pinned"
+            )
+    elif acquisition != {
+        "kind": "huggingface-http",
+        "client": "huggingface-http-v1",
+    }:
+        raise LetsInferError("manifest.model.acquisition is invalid")
 
     image = _require(manifest, "image", dict, "manifest")
-    if set(image) not in (
+    distribution = _require(image, "distribution", str, "manifest.image")
+    if distribution in {"local-image-id", "registry-digest"} and set(image) not in (
         {"distribution", "reference", "immutable_id"},
         {"distribution", "reference", "immutable_id", "base"},
         {"distribution", "reference", "immutable_id", "payload_id"},
         {"distribution", "reference", "immutable_id", "base", "payload_id"},
     ):
         raise LetsInferError("manifest.image has invalid fields")
-    distribution = _require(image, "distribution", str, "manifest.image")
-    reference = _require(image, "reference", str, "manifest.image")
-    immutable_id = _require(image, "immutable_id", str, "manifest.image")
-    if distribution not in {"local-image-id", "registry-digest"}:
-        raise LetsInferError("manifest.image.distribution is invalid")
-    if not IMAGE_ID_RE.fullmatch(immutable_id):
-        raise LetsInferError("manifest.image.immutable_id must be an exact image ID")
-    if distribution == "registry-digest" and not REGISTRY_DIGEST_RE.fullmatch(
-        reference
-    ):
-        raise LetsInferError("registry image reference must be digest-pinned")
-    if distribution == "local-image-id" and reference != immutable_id:
-        raise LetsInferError("local image reference must equal its immutable image ID")
-    if "base" in image and not REGISTRY_DIGEST_RE.fullmatch(image["base"]):
-        raise LetsInferError("manifest.image.base must be digest-pinned")
-    if "payload_id" in image and not IMAGE_ID_RE.fullmatch(image["payload_id"]):
-        raise LetsInferError(
-            "manifest.image.payload_id must be a SHA-256 execution payload"
-        )
+    if distribution in {"local-image-id", "registry-digest"}:
+        reference = _require(image, "reference", str, "manifest.image")
+        immutable_id = _require(image, "immutable_id", str, "manifest.image")
+        if not IMAGE_ID_RE.fullmatch(immutable_id):
+            raise LetsInferError("manifest.image.immutable_id must be an exact image ID")
+        if distribution == "registry-digest" and not REGISTRY_DIGEST_RE.fullmatch(
+            reference
+        ):
+            raise LetsInferError("registry image reference must be digest-pinned")
+        if distribution == "local-image-id" and reference != immutable_id:
+            raise LetsInferError("local image reference must equal its immutable image ID")
+        if "base" in image and not REGISTRY_DIGEST_RE.fullmatch(image["base"]):
+            raise LetsInferError("manifest.image.base must be digest-pinned")
+        if "payload_id" in image and not IMAGE_ID_RE.fullmatch(image["payload_id"]):
+            raise LetsInferError(
+                "manifest.image.payload_id must be a SHA-256 execution payload"
+            )
+    else:
+        try:
+            from core.engine_distribution import validate_engine_distribution
+
+            validate_engine_distribution(
+                {"kind": distribution, **{key: item for key, item in image.items() if key != "distribution"}},
+                target_platform=target["platform"],
+            )
+        except ValueError as error:
+            raise LetsInferError(str(error)) from error
 
     container = _require(manifest, "container", dict, "manifest")
     allowed_container = {
@@ -1228,7 +1254,6 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     _reject_unknown_fields(container, allowed_container, "manifest.container")
     for key in (
         "memory_bytes",
-        "shm_bytes",
         "min_available_gib",
         "runtime_min_available_gib",
         "startup_timeout_seconds",
@@ -1236,6 +1261,20 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         value = container.get(key)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise LetsInferError(f"manifest.container.{key} must be positive")
+    shm_bytes = container.get("shm_bytes")
+    if (
+        not isinstance(shm_bytes, int)
+        or isinstance(shm_bytes, bool)
+        or shm_bytes < 0
+        or (
+            distribution in {"registry-digest", "local-image-id"}
+            and shm_bytes == 0
+        )
+    ):
+        raise LetsInferError(
+            "manifest.container.shm_bytes must be positive for OCI Engines and "
+            "nonnegative for native Engines"
+        )
     if container["runtime_min_available_gib"] >= container["min_available_gib"]:
         raise LetsInferError(
             "manifest.container.runtime_min_available_gib must be below the launch floor"
@@ -1891,6 +1930,13 @@ def nvidia_query(field: str, expected_count: int) -> list[str]:
 
 def host_device_fingerprint() -> dict[str, Any]:
     """Probe the stable capabilities used to map this host to a runtime target."""
+    if platform.system() == "Darwin":
+        from core.apple_hardware import AppleHardwareError, device_fingerprint
+
+        try:
+            return device_fingerprint()
+        except AppleHardwareError as error:
+            raise LetsInferError(str(error)) from error
     count = gpu_count()
     compute = [value.lower() for value in nvidia_query("compute_cap", count)]
     architectures = {
@@ -1943,18 +1989,30 @@ def refresh_local_member_facts() -> dict[str, Any]:
             "child-control channel"
         )
     try:
-        link_store = LinkStore(identity)
-        facts = collect_local_facts(
-            identity.member_id,
-            host_device_fingerprint(),
-            data_path=site_data_root(),
-            protection_trip_path=(
-                default_watchdog_data_root() / PROTECTION_ROOT_NAME
-            ),
-            memory_pressure_available_bytes=active_memory_pressure_available_bytes(),
-            product_version=PRODUCT_VERSION,
-            links=link_store.facts(),
-        )
+        if platform.system() == "Darwin":
+            from core.apple_hardware import AppleHardwareError, member_facts
+
+            try:
+                facts = member_facts(
+                    identity.member_id,
+                    data_path=site_data_root(),
+                    product_version=PRODUCT_VERSION,
+                )
+            except AppleHardwareError as error:
+                raise LetsInferError(str(error)) from error
+        else:
+            link_store = LinkStore(identity)
+            facts = collect_local_facts(
+                identity.member_id,
+                host_device_fingerprint(),
+                data_path=site_data_root(),
+                protection_trip_path=(
+                    default_watchdog_data_root() / PROTECTION_ROOT_NAME
+                ),
+                memory_pressure_available_bytes=active_memory_pressure_available_bytes(),
+                product_version=PRODUCT_VERSION,
+                links=link_store.facts(),
+            )
         signature = member_proof(facts)
         with SiteStore(identity=identity) as store:
             return store.update_member_facts(
@@ -1972,8 +2030,18 @@ def host_hardware_fingerprint_sha256(
     machine_id_path: pathlib.Path = pathlib.Path("/etc/machine-id"),
 ) -> str:
     """Hash stable host and physical-GPU identifiers without exposing them."""
+    if platform.system() == "Darwin":
+        from core.apple_hardware import (
+            AppleHardwareError,
+            hardware_fingerprint_sha256,
+        )
+
+        try:
+            return hardware_fingerprint_sha256()
+        except AppleHardwareError as error:
+            raise LetsInferError(str(error)) from error
     if platform.system().lower() != "linux":
-        raise LetsInferError("runtime installation identity requires a Linux host")
+        raise LetsInferError("runtime installation identity requires Linux or macOS")
     try:
         machine_id = machine_id_path.read_text(encoding="ascii").strip().lower()
     except (OSError, UnicodeDecodeError) as error:
@@ -2012,9 +2080,17 @@ def verify_host_target(manifest: dict[str, Any]) -> dict[str, Any]:
 
 def memory_snapshot(manifest: dict[str, Any]) -> dict[str, Any]:
     target = target_contract(manifest)
-    available_gib = parse_mem_available_gib(
-        pathlib.Path("/proc/meminfo").read_text(encoding="utf-8")
-    )
+    if platform.system() == "Darwin":
+        from core.apple_hardware import AppleHardwareError, available_memory_gib
+
+        try:
+            available_gib = available_memory_gib()
+        except AppleHardwareError as error:
+            raise LetsInferError(str(error)) from error
+    else:
+        available_gib = parse_mem_available_gib(
+            pathlib.Path("/proc/meminfo").read_text(encoding="utf-8")
+        )
     snapshot = {
         "memory_model": target["memory"]["topology"],
         "host_available_gib": available_gib,
@@ -2135,9 +2211,21 @@ def _display_command(command: Sequence[str]) -> str:
     return shlex.join(rendered)
 
 
-def run(command: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run(
+    command: Sequence[str],
+    *,
+    check: bool = True,
+    environment: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(command, text=True, capture_output=True, check=check)
+        options: dict[str, Any] = {
+            "text": True,
+            "capture_output": True,
+            "check": check,
+        }
+        if environment is not None:
+            options["env"] = dict(environment)
+        return subprocess.run(command, **options)
     except FileNotFoundError as error:
         raise LetsInferError(
             f"required command is unavailable: {_display_command(command[:1])}"
@@ -4487,47 +4575,65 @@ def acquire_model_snapshot(manifest: dict[str, Any], model_cache: pathlib.Path) 
         parent = destination.parent
         ensure_private_directory(parent)
         staging = parent / f".{artifact['revision']}.incoming-{secrets.token_hex(8)}"
-        staging.mkdir(mode=0o700)
-        container_destination = (
-            f"/model-store/{artifact['storage_slug']}/{staging.name}"
-        )
-        download_arguments = (
-            f"repo_id={artifact['repository']!r}, revision={artifact['revision']!r}, "
-            f"local_dir={container_destination!r}"
-        )
-        if "filename" in artifact:
-            download_arguments += f", allow_patterns={[artifact['filename']]!r}"
-        script = (
-            "from huggingface_hub import snapshot_download; "
-            f"snapshot_download({download_arguments})"
-        )
         try:
-            run_passthrough(
-                [
-                    "docker",
-                    "run",
-                    "--rm",
-                    "--pull",
-                    "missing",
-                    "--platform",
-                    target_contract(manifest)["platform"],
-                    "--entrypoint",
-                    "python3",
-                    "--user",
-                    f"{os.getuid()}:{os.getgid()}",
-                    "--workdir",
-                    "/tmp",
-                    "-v",
-                    f"{model_cache}:/model-store",
-                    "-e",
-                    "HF_HOME=/tmp/huggingface",
-                    "-e",
-                    "HOME=/tmp",
-                    manifest["model"]["acquisition_image"],
-                    "-c",
-                    script,
-                ]
-            )
+            acquisition = manifest["model"]["acquisition"]
+            if acquisition["kind"] == "oci-container":
+                staging.mkdir(mode=0o700)
+                container_destination = (
+                    f"/model-store/{artifact['storage_slug']}/{staging.name}"
+                )
+                download_arguments = (
+                    f"repo_id={artifact['repository']!r}, revision={artifact['revision']!r}, "
+                    f"local_dir={container_destination!r}"
+                )
+                if "filename" in artifact:
+                    download_arguments += f", allow_patterns={[artifact['filename']]!r}"
+                script = (
+                    "from huggingface_hub import snapshot_download; "
+                    f"snapshot_download({download_arguments})"
+                )
+                run_passthrough(
+                    [
+                        "docker",
+                        "run",
+                        "--rm",
+                        "--pull",
+                        "missing",
+                        "--platform",
+                        target_contract(manifest)["platform"],
+                        "--entrypoint",
+                        "python3",
+                        "--user",
+                        f"{os.getuid()}:{os.getgid()}",
+                        "--workdir",
+                        "/tmp",
+                        "-v",
+                        f"{model_cache}:/model-store",
+                        "-e",
+                        "HF_HOME=/tmp/huggingface",
+                        "-e",
+                        "HOME=/tmp",
+                        acquisition["image"],
+                        "-c",
+                        script,
+                    ]
+                )
+            else:
+                from core.native_model_acquisition import (
+                    NativeModelAcquisitionError,
+                    acquire_snapshot,
+                )
+
+                try:
+                    acquire_snapshot(
+                        artifact["repository"],
+                        artifact["revision"],
+                        staging,
+                        filename=artifact.get("filename"),
+                        expected_file_sha256=artifact.get("sha256"),
+                    )
+                except NativeModelAcquisitionError as error:
+                    raise LetsInferError(str(error)) from error
             metadata = staging / ".cache"
             if metadata.exists():
                 shutil.rmtree(metadata)
@@ -4558,10 +4664,75 @@ def verify_installed_runtime(
     manifest: dict[str, Any],
     *,
     model_cache: pathlib.Path,
+    runtime_artifact_root: pathlib.Path | None = None,
 ) -> str:
-    """Verify exact model bytes and the adapter baked into the Engine OCI."""
+    """Verify exact model bytes and the selected Engine distribution."""
 
     verify_model_snapshot(manifest, model_cache)
+    if manifest["image"]["distribution"] not in {
+        "registry-digest",
+        "local-image-id",
+    }:
+        actual = ensure_image(
+            manifest,
+            build=False,
+            pull=False,
+            artifact_root=runtime_artifact_root,
+        )
+        if runtime_artifact_root is not None:
+            from core.native_engine import (
+                NativeEngineError,
+                native_launch_command,
+                native_launch_environment,
+            )
+
+            distribution = {
+                "kind": manifest["image"]["distribution"],
+                **{
+                    key: value
+                    for key, value in manifest["image"].items()
+                    if key != "distribution"
+                },
+            }
+            try:
+                result = run(
+                    list(
+                        native_launch_command(
+                            distribution,
+                            runtime_artifact_root,
+                            command="verify",
+                        )
+                    )
+                    + ["--protocol", str(ENGINE_PROTOCOL_VERSION)],
+                    environment={
+                        **os.environ,
+                        **native_launch_environment(
+                            distribution, runtime_artifact_root
+                        ),
+                    },
+                    check=False,
+                )
+            except NativeEngineError as error:
+                raise LetsInferError(str(error)) from error
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout).strip() or "no adapter output"
+                raise LetsInferError(
+                    f"native Engine protocol verification failed: {detail}"
+                )
+            try:
+                report = json.loads(result.stdout)
+            except json.JSONDecodeError as error:
+                raise LetsInferError(
+                    "native Engine adapter verification returned invalid JSON"
+                ) from error
+            if report != {
+                "engine_protocol": ENGINE_PROTOCOL_VERSION,
+                "status": "ok",
+            }:
+                raise LetsInferError(
+                    "native Engine adapter verification returned the wrong contract"
+                )
+        return actual
     actual_image_id = image_id(manifest)
     result = run(
         [
@@ -4800,6 +4971,40 @@ def ensure_image(
     pull: bool = True,
     artifact_root: pathlib.Path | None = None,
 ) -> str:
+    if manifest["image"]["distribution"] not in {
+        "registry-digest",
+        "local-image-id",
+    }:
+        from core.native_engine import (
+            NativeEngineError,
+            stage_native_engine,
+            verify_staged_native_engine,
+        )
+
+        distribution = {
+            "kind": manifest["image"]["distribution"],
+            **{
+                key: value
+                for key, value in manifest["image"].items()
+                if key != "distribution"
+            },
+        }
+        try:
+            root = verify_staged_native_engine(distribution)
+        except NativeEngineError as error:
+            if not pull:
+                raise LetsInferError(
+                    "the exact native Engine is absent and dependency downloads are disabled"
+                ) from error
+            if artifact_root is None:
+                raise LetsInferError(
+                    "native Engine staging requires its immutable runtime artifact root"
+                ) from error
+            try:
+                root = stage_native_engine(distribution, artifact_root)
+            except NativeEngineError as stage_error:
+                raise LetsInferError(str(stage_error)) from stage_error
+        return str(manifest["image"]["payload_id"])
     try:
         return image_id(manifest)
     except LetsInferError:
@@ -8027,6 +8232,8 @@ def _group_release_identity(
 ) -> dict[str, Any]:
     """Bind one installed group to the exact signed-catalog release."""
     release = dict(catalog_release_value)
+    from core.engine_distribution import distribution_projection
+
     benchmark = release.get("benchmark")
     runtime_benchmark = runtime.runtime.get("benchmark")
     record = (
@@ -8038,7 +8245,8 @@ def _group_release_identity(
     if (
         release.get("source") != source
         or release.get("engine") != runtime.runtime["engine"]["id"]
-        or release.get("engine_oci") != runtime.runtime["engine"]["oci"]["reference"]
+        or release.get("engine_distribution")
+        != distribution_projection(runtime.runtime["engine"]["distribution"])
         or release.get("model_uri") != runtime.runtime["model"]["uri"]
         or (
             benchmark is not None
@@ -8079,6 +8287,25 @@ def _group_release_identity(
         }
         for artifact in runtime.runtime["artifacts"]
     ]
+    distribution = runtime.runtime["engine"]["distribution"]
+    native_execution = (
+        None
+        if distribution["kind"] == "oci-container"
+        else {
+            "engine": {
+                "id": runtime.runtime["engine"]["id"],
+                "protocol": dict(runtime.runtime["engine"]["protocol"]),
+                "model_format": runtime.runtime["engine"]["model_format"],
+                "cache_provider": runtime.runtime["engine"]["cache_provider"],
+                "arguments": list(runtime.runtime["engine"]["arguments"]),
+                "environment": dict(runtime.runtime["engine"]["environment"]),
+            },
+            "model": dict(runtime.runtime["model"]),
+            "artifacts": [dict(item) for item in runtime.runtime["artifacts"]],
+            "cache": dict(runtime.runtime["cache"]),
+            "serving": dict(runtime.runtime["serving"]),
+        }
+    )
     return {
         "logical_model": runtime.runtime["logical_model"],
         "candidate_id": candidate_id,
@@ -8086,7 +8313,7 @@ def _group_release_identity(
         "source": source,
         "runtime_digest": runtime.digest,
         "manifest_sha256": manifest_sha256,
-        "engine_oci": release["engine_oci"],
+        "engine_distribution": dict(runtime.runtime["engine"]["distribution"]),
         "model_uri": release["model_uri"],
         "artifacts": artifacts,
         "target_id": target_id,
@@ -8102,6 +8329,7 @@ def _group_release_identity(
         ),
         "authors": [author["github_login"] for author in authors],
         "license": release["license"],
+        "native_execution": native_execution,
     }
 
 
@@ -8189,12 +8417,16 @@ def install_engine_group(
     try:
         if contract is None:
             member_id = group_member_ids[0]
+            port_count = int(
+                runtime.runtime["engine"]["distribution"].get("port_count", 1)
+            )
             port_base = next(
                 (
                     candidate
                     for candidate in range(18000, 60000)
                     if all(
-                        candidate + 1 <= used or used + length <= candidate
+                        candidate + port_count <= used
+                        or used + length <= candidate
                         for used, length in occupied[member_id]
                     )
                 ),
@@ -8216,6 +8448,7 @@ def install_engine_group(
                 service_id=service_id,
                 release=release_identity,
                 port_base=port_base,
+                port_count=port_count,
             )
         else:
             port_bases = allocate_group_ports(
@@ -8496,6 +8729,7 @@ def _restore_engine_group_orchestrator(
                 service_id=document["service_id"],
                 release=document["release"],
                 port_base=resource["port_base"],
+                port_count=resource["port_count"],
             )
         else:
             plan = build_group_plan(
@@ -12124,10 +12358,13 @@ def _installed_runtime_image_references() -> set[str]:
             # never be trusted to select a Docker image for removal.
             continue
         image = manifest["image"]
-        references.update((image["reference"], image["immutable_id"]))
-        if "base" in image:
-            references.add(image["base"])
-        references.add(manifest["model"]["acquisition_image"])
+        if image["distribution"] in {"registry-digest", "local-image-id"}:
+            references.update((image["reference"], image["immutable_id"]))
+            if "base" in image:
+                references.add(image["base"])
+        acquisition = manifest["model"]["acquisition"]
+        if acquisition["kind"] == "oci-container":
+            references.add(acquisition["image"])
     return references
 
 
@@ -17532,10 +17769,13 @@ class LocalEngineGroupExecutor:
                 target_contract(manifest)["placement"],
             )
             task = job["task"]
+            single_port_count = int(
+                runtime.runtime["engine"]["distribution"].get("port_count", 1)
+            )
             expected_task = (
                 {
                     "task_id": "task-0",
-                    "port_count": 1,
+                    "port_count": single_port_count,
                     "launcher": "manifest",
                     "environment": {},
                     "readiness": {"kind": "manifest"},
@@ -17584,7 +17824,9 @@ class LocalEngineGroupExecutor:
                 build_image=True,
             )
             verify_installed_runtime(
-                manifest, model_cache=model_cache
+                manifest,
+                model_cache=model_cache,
+                runtime_artifact_root=runtime_root,
             )
             credential_file = root / "engine-api.key"
             _atomic_private_text(credential_file, engine_credential + "\n")
@@ -17659,8 +17901,10 @@ class LocalEngineGroupExecutor:
         return self._start_config(config)
 
     def _start_config(self, config: Mapping[str, Any]) -> Mapping[str, Any]:
-        verify_active_core_watchdog()
         manifest = config["_manifest"]
+        if self._config_uses_native(config):
+            return self._start_native_config(config)
+        verify_active_core_watchdog()
         task = config["task"]
         authorize_serving_launch(
             manifest["serving"], qualification_mode=False, evidence_dir=None
@@ -17671,6 +17915,7 @@ class LocalEngineGroupExecutor:
         verify_installed_runtime(
             manifest,
             model_cache=pathlib.Path(config["model_cache"]),
+            runtime_artifact_root=runtime_root,
         )
         require_memory_reserve(manifest, phase="launch")
         rdma_binding = _engine_group_rdma_binding(
@@ -17780,6 +18025,122 @@ class LocalEngineGroupExecutor:
                 run(["docker", "rm", config["container_name"]], check=False)
             raise
 
+    def _native_label(self, group_id: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{32}", group_id):
+            raise LetsInferError("native Engine group identity is invalid")
+        return f"ai.letsinfer.engine.{group_id}"
+
+    def _config_uses_native(self, config: Mapping[str, Any]) -> bool:
+        manifest = config.get("_manifest")
+        image = manifest.get("image") if isinstance(manifest, Mapping) else None
+        return isinstance(image, Mapping) and image.get("distribution") not in {
+            "registry-digest",
+            "local-image-id",
+        }
+
+    def _native_distribution(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        image = manifest["image"]
+        if image["distribution"] in {"registry-digest", "local-image-id"}:
+            raise LetsInferError("runtime uses an OCI Engine")
+        return {
+            "kind": image["distribution"],
+            **{key: value for key, value in image.items() if key != "distribution"},
+        }
+
+    def _start_native_config(
+        self, config: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        if platform.system() != "Darwin":
+            raise LetsInferError("native Apple Engines require macOS")
+        manifest = config["_manifest"]
+        task = config["task"]
+        authorize_serving_launch(
+            manifest["serving"], qualification_mode=False, evidence_dir=None
+        )
+        verify_host_target(manifest)
+        runtime_root = pathlib.Path(config["object_root"])
+        verify_installed_runtime(
+            manifest,
+            model_cache=pathlib.Path(config["model_cache"]),
+            runtime_artifact_root=runtime_root,
+        )
+        require_memory_reserve(manifest, phase="launch")
+        from core.native_engine import (
+            NativeEngineError,
+            native_launch_command,
+            native_launch_environment,
+        )
+
+        distribution = self._native_distribution(manifest)
+        try:
+            command = native_launch_command(distribution, runtime_root)
+            environment = {
+                **native_launch_environment(distribution, runtime_root),
+                "LETSINFER_ENGINE_PROTOCOL": str(ENGINE_PROTOCOL_VERSION),
+                "LETSINFER_RUNTIME_CONFIG": str(runtime_root / RUNTIME_CONFIG),
+                "LETSINFER_MODEL_ROOT": str(config["model_cache"]),
+                "LETSINFER_CACHE_ROOT": str(config["runtime_cache_root"]),
+                "LETSINFER_LISTEN_HOST": "0.0.0.0",
+                "LETSINFER_LISTEN_PORT": str(task["port_base"]),
+                "LETSINFER_NATIVE_BACKEND_PORT": str(
+                    task["port_base"] + task["port_count"] - 1
+                ),
+                "LETSINFER_API_KEY_FILE": str(config["credential_file"]),
+                "LETSINFER_TLS_CERT_FILE": str(config["tls_certificate_file"]),
+                "LETSINFER_TLS_KEY_FILE": str(config["tls_key_file"]),
+                "LETSINFER_SERVED_MODEL": str(manifest["model"]["alias"]),
+                "LETSINFER_GROUP_ID": str(config["group_id"]),
+                "LETSINFER_MEMBER_ID": str(config["member_id"]),
+                "LETSINFER_TASK_ID": str(task["task_id"]),
+            }
+        except NativeEngineError as error:
+            raise LetsInferError(str(error)) from error
+        label = self._native_label(str(config["group_id"]))
+        try:
+            macos_services.install_launch_agent(
+                macos_services.LaunchAgent(
+                    label=label,
+                    arguments=tuple(command),
+                    environment=environment,
+                )
+            )
+        except macos_services.MacOSServiceError as error:
+            raise LetsInferError(f"cannot start native Engine: {error}") from error
+        deadline = time.monotonic() + manifest["container"][
+            "startup_timeout_seconds"
+        ]
+        try:
+            while time.monotonic() < deadline:
+                _enabled, active, _detail = macos_services.service_state(label)
+                if active != "active":
+                    raise LetsInferError("native Engine exited during startup")
+                require_memory_reserve(manifest, phase="runtime")
+                if health_ready(
+                    task["port_base"],
+                    pathlib.Path(config["tls_certificate_file"]),
+                ):
+                    break
+                time.sleep(1)
+            else:
+                raise LetsInferError("native Engine readiness timed out")
+            if task["endpoint_owner"] and not model_identity_ready(
+                manifest,
+                task["port_base"],
+                pathlib.Path(config["tls_certificate_file"]),
+                pathlib.Path(config["credential_file"]),
+            ):
+                raise LetsInferError(
+                    "native Engine model identity does not match its release"
+                )
+            require_memory_reserve(manifest, phase="runtime")
+            return self._safe_result(config, "running")
+        except BaseException:
+            try:
+                macos_services.remove_launch_agent(label)
+            except macos_services.MacOSServiceError:
+                pass
+            raise
+
     def observe(self, group: Mapping[str, Any]) -> Mapping[str, Any]:
         """Report actual process/protection readiness, not only journal intent."""
         group_id = str(group.get("group_id", ""))
@@ -17804,6 +18165,27 @@ class LocalEngineGroupExecutor:
         stored_state = str(group.get("state", ""))
         if stored_state == "removed":
             return {"state": "removed", "protection_trip_latched": False}
+        if self._config_uses_native(config):
+            label = self._native_label(group_id)
+            try:
+                _enabled, active, _detail = macos_services.service_state(label)
+            except macos_services.MacOSServiceError as error:
+                raise LetsInferError(str(error)) from error
+            if active != "active":
+                state = (
+                    stored_state
+                    if stored_state in {"staged", "stopped"}
+                    else "failed"
+                )
+                return {"state": state, "protection_trip_latched": False}
+            task = config["task"]
+            ready = health_ready(
+                task["port_base"], pathlib.Path(config["tls_certificate_file"])
+            )
+            return {
+                "state": "running" if stored_state == "running" and ready else "failed",
+                "protection_trip_latched": False,
+            }
         inspection = container_inspect(config["container_name"])
         protection = protection_status(config, inspection)
         trip_latched = bool(protection["trip_latched"])
@@ -17840,12 +18222,21 @@ class LocalEngineGroupExecutor:
         """Explicitly acknowledge this slot's durable trip and restart it."""
         config = _read_engine_group_config(job["group_id"])
         self._assert_job_matches_config(job, config)
-        clear_protection_trip(config)
+        if not self._config_uses_native(config):
+            clear_protection_trip(config)
         return self._start_config(config)
 
     def stop(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
         config = _read_engine_group_config(job["group_id"])
         self._assert_job_matches_config(job, config)
+        if self._config_uses_native(config):
+            try:
+                macos_services.remove_launch_agent(
+                    self._native_label(str(config["group_id"]))
+                )
+            except macos_services.MacOSServiceError as error:
+                raise LetsInferError(str(error)) from error
+            return self._safe_result(config, "stopped")
         protection = {
             "protection_root": config["protection_root"],
             "name": config["container_name"],
@@ -17859,9 +18250,29 @@ class LocalEngineGroupExecutor:
     def remove(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
         config = _read_engine_group_config(job["group_id"])
         self._assert_job_matches_config(job, config)
-        if container_inspect(config["container_name"]) is not None:
+        native = self._config_uses_native(config)
+        if native:
+            _enabled, active, _detail = macos_services.service_state(
+                self._native_label(str(config["group_id"]))
+            )
+            if active == "active":
+                raise LetsInferError(
+                    "native Engine must be stopped before removal"
+                )
+        elif container_inspect(config["container_name"]) is not None:
             raise LetsInferError("engine-group container must be stopped before removal")
         result = self._safe_result(config, "removed")
+        if native:
+            root = _engine_group_path(job["group_id"])
+            if root.resolve(strict=True) != (
+                default_engine_group_root() / job["group_id"]
+            ).resolve(strict=True):
+                raise LetsInferError(
+                    "refusing to remove a non-canonical engine-group directory"
+                )
+            shutil.rmtree(root)
+            _fsync_path(root.parent)
+            return result
         protection_root = pathlib.Path(config["protection_root"])
         expected_protection_root = (
             default_watchdog_data_root()

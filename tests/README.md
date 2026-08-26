@@ -21,7 +21,7 @@ lifecycle, packaging, installation, mocked updates, and failure recovery;
 through the common dispatcher, and that CI cannot drift from this inventory.
 The portable macOS release contracts are included as `macos-contract`.
 
-`runtime_fixture.py` supplies one synthetic schema-v5 candidate with exact
+`runtime_fixture.py` supplies one synthetic schema-v6 candidate with exact
 model, Engine OCI, and target identities. `fixtures/runtime-source/` is a tiny
 runtime-owned source root used to prove that runtime artifacts remain separate
 from independently identified core bundles. None of these fixtures is

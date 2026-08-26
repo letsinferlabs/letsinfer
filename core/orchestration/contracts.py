@@ -16,6 +16,11 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from core.engine_distribution import (
+    EngineDistributionError,
+    validate_engine_distribution,
+)
+
 
 SCHEMA_VERSION = 3
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -129,9 +134,9 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
     """Validate the immutable signed-catalog release bound to one group."""
     required = {
         "logical_model", "candidate_id", "version", "source",
-        "runtime_digest", "manifest_sha256", "engine_oci", "model_uri",
+        "runtime_digest", "manifest_sha256", "engine_distribution", "model_uri",
         "artifacts", "target_id", "target_contract_sha256", "qualification",
-        "benchmark", "authors", "license",
+        "benchmark", "authors", "license", "native_execution",
     }
     if not isinstance(value, dict) or set(value) != required:
         raise OrchestrationError("engine-group release identity is incomplete")
@@ -147,9 +152,30 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
         raise OrchestrationError("engine-group release candidate_id is invalid")
     if not isinstance(value.get("version"), str) or not VERSION_RE.fullmatch(value["version"]):
         raise OrchestrationError("engine-group release version is invalid")
-    for key in ("source", "engine_oci"):
-        if not isinstance(value.get(key), str) or not OCI_DIGEST_RE.fullmatch(value[key]):
-            raise OrchestrationError(f"engine-group release {key} is not digest-pinned OCI")
+    if not isinstance(value.get("source"), str) or not OCI_DIGEST_RE.fullmatch(
+        value["source"]
+    ):
+        raise OrchestrationError("engine-group release source is not digest-pinned OCI")
+    try:
+        distribution = validate_engine_distribution(value.get("engine_distribution"))
+    except EngineDistributionError as error:
+        raise OrchestrationError(str(error)) from error
+    native_execution = value.get("native_execution")
+    if distribution["kind"] == "oci-container":
+        if native_execution is not None:
+            raise OrchestrationError("OCI engine-group release cannot carry native execution")
+    elif (
+        not isinstance(native_execution, dict)
+        or set(native_execution) != {"engine", "model", "artifacts", "cache", "serving"}
+        or not isinstance(native_execution.get("engine"), dict)
+        or not isinstance(native_execution.get("model"), dict)
+        or not isinstance(native_execution.get("artifacts"), list)
+        or not native_execution["artifacts"]
+        or not isinstance(native_execution.get("cache"), dict)
+        or not isinstance(native_execution.get("serving"), dict)
+        or len(_canonical_bytes(native_execution)) > 12 * 1024
+    ):
+        raise OrchestrationError("native engine-group execution projection is invalid")
     for key in ("runtime_digest", "manifest_sha256", "target_contract_sha256"):
         if not isinstance(value.get(key), str) or not SHA256_RE.fullmatch(value[key]):
             raise OrchestrationError(f"engine-group release {key} is invalid")
@@ -873,6 +899,7 @@ def build_single_group_plan(
     service_id: str,
     release: Mapping[str, Any],
     port_base: int,
+    port_count: int = 1,
 ) -> GroupPlan:
     """Build one ordinary engine as a one-endpoint, one-member group."""
     safe_release = validate_release_identity(dict(release))
@@ -917,12 +944,19 @@ def build_single_group_plan(
         or port_base not in range(1024, 65536)
     ):
         raise OrchestrationError("single group port is invalid")
+    if (
+        not isinstance(port_count, int)
+        or isinstance(port_count, bool)
+        or port_count not in range(1, 33)
+        or port_base + port_count > 65536
+    ):
+        raise OrchestrationError("single group port count is invalid")
     assignment = TaskAssignment(
         member_id=member_id,
         address=member_address,
         task_id="task-0",
         port_base=port_base,
-        port_count=1,
+        port_count=port_count,
         launcher="manifest",
         command=(),
         environment=(),
@@ -949,7 +983,7 @@ def build_single_group_plan(
                 "address": member_address,
                 "task_id": "task-0",
                 "port_base": port_base,
-                "port_count": 1,
+                "port_count": port_count,
                 "device_uuids": list(device_uuids),
             }
         ],

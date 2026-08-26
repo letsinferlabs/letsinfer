@@ -55,7 +55,7 @@ letsinfer update model qwen3.8-27b
 ```
 
 Let's Infer verifies and stages the candidate before replacing the active
-service. Model, Engine OCI, runtime pack, target, memory, Watchdog, health,
+service. Model, Engine distribution, runtime pack, target, memory, Watchdog, health,
 authentication, and served identity must all pass. A failed activation restores
 the previous configuration and running service.
 

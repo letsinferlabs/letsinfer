@@ -1135,7 +1135,8 @@ class RuntimeMatrixTests(unittest.TestCase):
                     "model": {"uri": "hf://example/model", "artifact": "model"},
                     "artifacts": [{"name": "model", "revision": "4" * 40}],
                     "engine": {
-                        "oci": {
+                        "distribution": {
+                            "kind": "oci-container",
                             "reference": "ghcr.io/example/engine@sha256:" + "5" * 64
                         }
                     },
@@ -1432,7 +1433,8 @@ class RuntimeMatrixTests(unittest.TestCase):
                         {"name": "model", "revision": "4" * 40}
                     ],
                     "engine": {
-                        "oci": {
+                        "distribution": {
+                            "kind": "oci-container",
                             "reference": "ghcr.io/example/engine@sha256:" + "5" * 64
                         }
                     },

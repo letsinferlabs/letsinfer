@@ -1,0 +1,29 @@
+include:
+  - project.yml
+packages:
+  MLCSwift:
+    path: Vendor/MLCSwift
+targets:
+  LetsInferIOS:
+    dependencies:
+      - package: MLCSwift
+    settings:
+      base:
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(PROJECT_DIR)/Vendor/MLC/lib
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lc++
+          - -framework
+          - Accelerate
+          - -framework
+          - Metal
+          - -Wl,-all_load
+          - -lmodel_iphone
+          - -lmlc_llm
+          - -ltvm_ffi_static
+          - -ltvm_runtime
+          - -ltokenizers_cpp
+          - -lsentencepiece
+          - -ltokenizers_c
