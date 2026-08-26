@@ -11,7 +11,7 @@ import pathlib
 import unittest
 from unittest import mock
 
-from core import cli, ui
+from core import cli, topology_ui, ui
 from core.actions import ACTIONS, MutationClass
 from core.ui_contracts import (
     OutputContract,
@@ -73,6 +73,9 @@ def serving_payload() -> dict[str, object]:
             },
         },
         "protection": {"armed": True, "trip_latched": False},
+        "updates": [
+            {"kind": "core", "subject": "core", "version": "0.11.0-rc.77"}
+        ],
         "telemetry": {
             "active_requests": 2,
             "connected_clients": 1,
@@ -83,6 +86,53 @@ def serving_payload() -> dict[str, object]:
                 "prefill_tokens_per_second": 219.4,
             },
         },
+    }
+
+
+def topology_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "site_id": "1" * 32,
+        "topology_sha256": "a" * 64,
+        "observed_at_unix": 1_800_000_000,
+        "updates": [
+            {"kind": "core", "subject": "core", "version": "0.11.0-rc.77"}
+        ],
+        "nodes": [
+            {
+                "member_id": "1" * 32,
+                "name": "homeai",
+                "role": "main",
+                "state": "active",
+                "health": "healthy",
+                "accelerator": "NVIDIA GB10",
+                "memory_total_gib": 119,
+                "models": [{"model": "nemotron-3.5-lightning"}],
+                "traffic": {"rx_kib_s": 12, "tx_kib_s": 34, "fresh": True},
+            },
+            {
+                "member_id": "2" * 32,
+                "name": "homeai-node-2",
+                "role": "child",
+                "state": "active",
+                "health": "healthy",
+                "connection": "Wireless",
+                "accelerator": "NVIDIA GB10",
+                "memory_total_gib": 121,
+                "models": [{"model": "deepseek-v4-flash"}],
+                "traffic": {"rx_kib_s": 56, "tx_kib_s": 78, "fresh": True},
+            },
+        ],
+        "links": [
+            {
+                "members": ["1" * 32, "2" * 32],
+                "kind": "connectx",
+                "speed_mbps": 200000,
+                "mtu": 9000,
+                "rdma": True,
+                "age_seconds": 1,
+            }
+        ],
     }
 
 
@@ -100,9 +150,19 @@ class PresentationInventoryTests(unittest.TestCase):
                 else:
                     self.assertTrue(presentation.branded)
 
+    def test_every_public_command_declares_the_shared_update_callout(self) -> None:
+        for name, action in ACTIONS.items():
+            if action.mutation is MutationClass.INTERNAL:
+                continue
+            with self.subTest(action=name):
+                self.assertTrue(UI_CONTRACTS[name].show_cached_updates)
+
     def test_special_surfaces_are_narrow_and_explicit(self) -> None:
         self.assertIs(
             UI_CONTRACTS["status"].surface, SurfaceKind.FROZEN_STATUS
+        )
+        self.assertIs(
+            UI_CONTRACTS["topology"].output, OutputContract.LIVE_DASHBOARD
         )
         self.assertIs(
             UI_CONTRACTS["benchmark.run"].output, OutputContract.LIVE_DASHBOARD
@@ -287,7 +347,7 @@ class PresentationInventoryTests(unittest.TestCase):
 
 
 class CommandPrimitiveTests(unittest.TestCase):
-    def test_command_header_uses_the_exact_status_lockup_and_section(self) -> None:
+    def test_command_header_keeps_function_left_and_brand_right(self) -> None:
         stream = FakeStream(tty=True)
         self.assertTrue(
             ui.command_header(
@@ -296,19 +356,11 @@ class CommandPrimitiveTests(unittest.TestCase):
                 environ={"TERM": "xterm-256color"},
             )
         )
-        self.assertEqual(
-            stream.getvalue(),
-            ui.BOLD
-            + ui.DARK
-            + ui.LIGHT_BACKGROUND
-            + " ϟ  LET'S INFER "
-            + ui.RESET
-            + " "
-            + ui.DIM
-            + "/  AUTH / KEY / CREATE"
-            + ui.RESET
-            + "\n\n",
-        )
+        first = stream.getvalue().splitlines()[0]
+        plain = ui.ANSI.sub("", first)
+        self.assertTrue(plain.startswith("Auth Key Create"))
+        self.assertTrue(plain.endswith(" ϟ  LET'S INFER "))
+        self.assertIn(ui.LIGHT_BACKGROUND + " ϟ  LET'S INFER ", first)
 
     def test_command_header_retains_layout_without_color(self) -> None:
         stream = FakeStream(tty=True)
@@ -317,9 +369,9 @@ class CommandPrimitiveTests(unittest.TestCase):
             stream=stream,
             environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
         )
-        self.assertEqual(
-            stream.getvalue(), " ϟ  LET'S INFER  /  NODE / ADD\n\n"
-        )
+        first = stream.getvalue().splitlines()[0]
+        self.assertTrue(first.startswith("Node Add"))
+        self.assertTrue(first.endswith(" ϟ  LET'S INFER "))
 
     def test_command_header_is_silent_for_redirected_and_dumb_terminals(self) -> None:
         cases = (
@@ -339,7 +391,9 @@ class CommandPrimitiveTests(unittest.TestCase):
             "model.install", stream=stream, environ={"TERM": "xterm-256color"}
         )
         plain = ui.ANSI.sub("", stream.getvalue())
-        self.assertEqual(plain, " >  LET'S INFER  /  MODEL / INSTALL\n\n")
+        first = plain.splitlines()[0]
+        self.assertTrue(first.startswith("Model Install"))
+        self.assertTrue(first.endswith(" >  LET'S INFER "))
         self.assertNotIn("ϟ", plain)
 
     def test_explicit_spinner_section_does_not_depend_on_message_wording(self) -> None:
@@ -436,9 +490,22 @@ class CommandPrimitiveTests(unittest.TestCase):
             parser.parse_args([])
         self.assertEqual(stopped.exception.code, 2)
         self.assertEqual(stream.getvalue().count("LET'S INFER"), 1)
-        self.assertIn("/  AUTH KEY CREATE", stream.getvalue())
-        self.assertIn("FAILED", stream.getvalue())
-        self.assertIn("the following arguments are required: name", stream.getvalue())
+        first = ui.ANSI.sub("", stream.getvalue().splitlines()[0])
+        self.assertTrue(first.startswith("Auth Key Create"))
+        self.assertTrue(first.endswith(" ϟ  LET'S INFER "))
+        self.assertIn("Usage:", stream.getvalue())
+        self.assertNotIn("FAILED", stream.getvalue())
+        self.assertNotIn("the following arguments are required", stream.getvalue())
+
+        invalid = FakeStream(tty=True)
+        with (
+            contextlib.redirect_stderr(invalid),
+            mock.patch.dict("os.environ", {"TERM": "xterm", "NO_COLOR": "1"}, clear=True),
+            self.assertRaises(SystemExit),
+        ):
+            parser.parse_args(["application", "--unknown"])
+        self.assertIn("unrecognized arguments: --unknown", invalid.getvalue())
+        self.assertNotIn("FAILED", invalid.getvalue())
 
     def test_palette_is_the_exact_shared_design_palette(self) -> None:
         self.assertEqual(
@@ -479,6 +546,148 @@ class ImmutableStatusContractTests(unittest.TestCase):
         )
         expected = (FIXTURES / "status-serving-80.txt").read_text(encoding="utf-8")
         self.assertEqual(stream.getvalue(), expected)
+
+    def test_topology_dashboard_bytes_are_fixed_at_eighty_columns(self) -> None:
+        rendered = topology_ui.topology_text(
+            topology_payload(),
+            stream=FakeStream(tty=True),
+            environ={
+                "TERM": "xterm-256color",
+                "NO_COLOR": "1",
+                "COLUMNS": "80",
+            },
+            frame=2,
+        )
+        expected = (FIXTURES / "topology-live-80.txt").read_text(encoding="utf-8")
+        self.assertEqual(rendered, expected)
+
+    def test_topology_membership_pulse_moves_from_main_to_child(self) -> None:
+        stream = FakeStream(tty=True)
+        terminal = ui.Terminal(
+            stream,
+            environ={"TERM": "xterm-256color", "COLUMNS": "80"},
+        )
+        frames = [
+            "\n".join(topology_ui.topology_lines(topology_payload(), terminal, frame=index))
+            for index in range(4)
+        ]
+        white = ui.BOLD + ui.LIGHT
+        self.assertIn(white + "│" + ui.RESET, frames[0])
+        self.assertIn(white + "[Wireless]" + ui.RESET, frames[1])
+        self.assertIn(white + "│" + ui.RESET, frames[2])
+        self.assertIn(white + "└── " + ui.RESET, frames[3])
+        self.assertEqual(len(set(frames)), 4)
+
+    def test_topology_snapshot_binds_links_placements_and_member_traffic(self) -> None:
+        main_id = "1" * 32
+        child_id = "2" * 32
+
+        def facts(member_id: str, name: str) -> dict[str, object]:
+            return {
+                "member_id": member_id,
+                "observed_at_unix": 100,
+                "platform": "linux/arm64",
+                "accelerator": {
+                    "vendor": "nvidia",
+                    "architecture": "sm_121",
+                    "count": 1,
+                },
+                "memory": {"total_gib": 119},
+                "health": {"state": "healthy"},
+                "inventory": {"gpu_name": name},
+            }
+
+        graph = mock.Mock()
+        graph.members = {
+            main_id: facts(main_id, "NVIDIA GB10"),
+            child_id: facts(child_id, "NVIDIA GB10"),
+        }
+        graph.links = {
+            (main_id, child_id): {
+                "members": [main_id, child_id],
+                "kind": "connectx",
+                "speed_mbps": 200000,
+                "mtu": 9000,
+                "rdma": True,
+                "observed_at_unix": 99,
+            }
+        }
+        graph.sha256.return_value = "a" * 64
+        store = mock.MagicMock()
+        store.__enter__.return_value.members.return_value = [
+            {
+                "member_id": main_id,
+                "display_name": "homeai",
+                "role": "main",
+                "state": "active",
+                "address": "homeai.local",
+                "certificate_sha256": "a" * 64,
+                "facts": graph.members[main_id],
+            },
+            {
+                "member_id": child_id,
+                "display_name": "homeai-node-2",
+                "role": "child",
+                "state": "active",
+                "address": "homeai-node-2.local",
+                "certificate_sha256": "b" * 64,
+                "facts": graph.members[child_id],
+            },
+        ]
+        store.__enter__.return_value.device_allocations.return_value = []
+        store.__enter__.return_value.placements.return_value = [
+            {
+                "placement_id": "3" * 32,
+                "model": "deepseek-v4-flash",
+                "runtime": "runtime@1",
+                "target": "dgx-spark",
+            }
+        ]
+        store.__enter__.return_value.engine_groups.return_value = [
+            {
+                "placement_id": "3" * 32,
+                "group_id": "4" * 32,
+                "state": "running",
+                "desired_state": "running",
+                "plan": {"resources": [{"node_id": child_id}]},
+            }
+        ]
+        telemetry = {
+            "members": [
+                {
+                    "stale": False,
+                    "sample": {
+                        "member_id": child_id,
+                        "unix_ms": 100000,
+                        "system": {
+                            "network_rx_kib_s": 12,
+                            "network_tx_kib_s": 34,
+                        },
+                    },
+                }
+            ]
+        }
+        identity = mock.Mock(
+            role="main",
+            site_id="5" * 32,
+            coordinator_id=main_id,
+            coordinator_address="homeai.local",
+        )
+        with (
+            mock.patch.object(cli, "read_site_identity", return_value=identity),
+            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(cli, "TopologyGraph", return_value=graph),
+            mock.patch.object(
+                cli, "_local_controller_telemetry_document", return_value=telemetry
+            ),
+            mock.patch.object(cli.time, "time", return_value=100),
+        ):
+            snapshot = cli._topology_status_snapshot()
+        self.assertEqual(snapshot["links"][0]["age_seconds"], 1)
+        child = next(row for row in snapshot["nodes"] if row["member_id"] == child_id)
+        self.assertEqual(child["models"][0]["model"], "deepseek-v4-flash")
+        self.assertEqual(child["traffic"]["tx_kib_s"], 34)
+        self.assertTrue(child["traffic"]["fresh"])
 
 
 if __name__ == "__main__":

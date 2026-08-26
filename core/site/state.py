@@ -596,7 +596,14 @@ def setup_site(display_name: str = "Home", coordinator_address: str | None = Non
         raise SiteError("site identity cannot be a symlink")
     site_fingerprint = _generate_identity_key(site_key_path(), site_public_key_path())
     member_fingerprint = _generate_identity_key(member_key_path(), member_public_key_path())
-    member_id = uuid.uuid4().hex
+    member_id_file = config_root() / "member-id"
+    if member_id_file.exists():
+        member_id = _private_file(member_id_file, minimum_bytes=32).decode("ascii").strip()
+        if not ID_RE.fullmatch(member_id):
+            raise SiteError("pending member identity is invalid")
+    else:
+        member_id = uuid.uuid4().hex
+        _atomic_private(member_id_file, (member_id + "\n").encode("ascii"))
     installation = _prepare_installation_identity()
     now = int(installation["created_at_unix"])
     value = {
@@ -1620,35 +1627,98 @@ class SiteStore:
             "site_public_key_sha256": self.identity.site_public_key_sha256,
             "member_public_key_sha256": fingerprint,
             "member_certificate_sha256": certificate_sha256,
-            "state": "active" if invite["mode"] == "connectx" else "pending",
+            "state": (
+                "active"
+                if invite["mode"] in {"connectx", "lan"}
+                else "pending"
+            ),
             "approval_expires_at_unix": (
-                None if invite["mode"] == "connectx" else invite["expires_at_unix"]
+                invite["expires_at_unix"]
+                if invite["mode"] == "remote"
+                else None
             ),
             "issued_at_unix": now,
         }
         comparison_code = (
-            None
-            if invite["mode"] == "connectx"
-            else f"{int(hashlib.sha256(_canonical_bytes(transcript)).hexdigest(), 16) % 1_000_000:06d}"
+            f"{int(hashlib.sha256(_canonical_bytes(transcript)).hexdigest(), 16) % 1_000_000:06d}"
+            if invite["mode"] == "remote"
+            else None
         )
         approval_code_hash = (
             None if comparison_code is None else self._hash_secret(comparison_code)
         )
+        existing = self.connection.execute(
+            "SELECT * FROM members WHERE member_id=? OR public_key_sha256=?",
+            (member_id, fingerprint),
+        ).fetchall()
+        if len(existing) > 1 or (
+            existing
+            and (
+                existing[0]["member_id"] != member_id
+                or existing[0]["public_key_sha256"] != fingerprint
+                or existing[0]["state"] != "removed"
+            )
+        ):
+            raise SiteError("membership physical identity is already registered")
+        before = (
+            {
+                "member_id": member_id,
+                "public_key_sha256": fingerprint,
+                "state": "removed",
+            }
+            if existing
+            else {}
+        )
 
         def enroll(connection: sqlite3.Connection) -> dict[str, Any]:
-            connection.execute(
-                """INSERT INTO members
-                   (member_id,display_name,role,address,public_key_sha256,public_key_pem,
-                    certificate_sha256,certificate_pem,state,approval_code_hash,
-                    approval_expires_at_unix,facts_json,
-                    facts_signature_base64,facts_sha256,joined_at_unix,updated_at_unix)
-                   VALUES(?,?,'child',?,?,?,?,?,?,?,?, '{}',NULL,NULL,?,?)""",
-                (
-                    member_id, name, member_address, fingerprint, member_public_key,
-                    certificate_sha256, certificate_pem, membership["state"],
-                    approval_code_hash, membership["approval_expires_at_unix"], now, now,
-                ),
-            )
+            if existing:
+                changed = connection.execute(
+                    """UPDATE members SET display_name=?,role='child',address=?,
+                       public_key_pem=?,certificate_sha256=?,certificate_pem=?,state=?,
+                       approval_code_hash=?,approval_expires_at_unix=?,facts_json='{}',
+                       facts_signature_base64=NULL,facts_sha256=NULL,joined_at_unix=?,
+                       updated_at_unix=? WHERE member_id=? AND state='removed'
+                       AND public_key_sha256=?""",
+                    (
+                        name,
+                        member_address,
+                        member_public_key,
+                        certificate_sha256,
+                        certificate_pem,
+                        membership["state"],
+                        approval_code_hash,
+                        membership["approval_expires_at_unix"],
+                        now,
+                        now,
+                        member_id,
+                        fingerprint,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise SiteError("removed membership changed concurrently")
+            else:
+                connection.execute(
+                    """INSERT INTO members
+                       (member_id,display_name,role,address,public_key_sha256,public_key_pem,
+                        certificate_sha256,certificate_pem,state,approval_code_hash,
+                        approval_expires_at_unix,facts_json,
+                        facts_signature_base64,facts_sha256,joined_at_unix,updated_at_unix)
+                       VALUES(?,?,'child',?,?,?,?,?,?,?,?, '{}',NULL,NULL,?,?)""",
+                    (
+                        member_id,
+                        name,
+                        member_address,
+                        fingerprint,
+                        member_public_key,
+                        certificate_sha256,
+                        certificate_pem,
+                        membership["state"],
+                        approval_code_hash,
+                        membership["approval_expires_at_unix"],
+                        now,
+                        now,
+                    ),
+                )
             changed = connection.execute(
                 "UPDATE membership_invites SET consumed_at_unix=? WHERE invite_id=? AND consumed_at_unix IS NULL",
                 (now, invite_id),
@@ -1658,11 +1728,14 @@ class SiteStore:
             return membership
 
         signature = sign_site_document(membership)
-        document = self.mutate(
-            action="child.enroll", target=member_id, before={}, callback=enroll,
-            after=lambda _connection, result: result,
-            actor_type="member-candidate", actor_id=member_id, origin_interface="pairing",
-        )
+        try:
+            document = self.mutate(
+                action="child.enroll", target=member_id, before=before, callback=enroll,
+                after=lambda _connection, result: result,
+                actor_type="member-candidate", actor_id=member_id, origin_interface="pairing",
+            )
+        except sqlite3.IntegrityError as error:
+            raise SiteError("membership identity conflicts with retained state") from error
         return {
             "document": document,
             "signature": signature,
@@ -1729,6 +1802,50 @@ class SiteStore:
             correlation_id=correlation_id,
         )
 
+    def approve_member_locally(
+        self,
+        member_id: str,
+        *,
+        actor_type: str = "local-user",
+        actor_id: str | None = None,
+        origin_interface: str = "cli",
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Activate one legacy pending child after explicit local node-add intent."""
+
+        if not ID_RE.fullmatch(member_id):
+            raise SiteError("member identity is invalid")
+        current = self.connection.execute(
+            "SELECT * FROM members WHERE member_id=? AND state='pending'", (member_id,)
+        ).fetchone()
+        if current is None:
+            raise SiteError("member is not awaiting approval")
+        before = {"member_id": member_id, "state": "pending"}
+        now = int(time.time())
+
+        def approve(connection: sqlite3.Connection) -> dict[str, Any]:
+            changed = connection.execute(
+                """UPDATE members SET state='active',approval_code_hash=NULL,
+                   approval_expires_at_unix=NULL,updated_at_unix=?
+                   WHERE member_id=? AND state='pending'""",
+                (now, member_id),
+            ).rowcount
+            if changed != 1:
+                raise SiteError("member changed concurrently")
+            return {"member_id": member_id, "state": "active"}
+
+        return self.mutate(
+            action="child.approve",
+            target=member_id,
+            before=before,
+            callback=approve,
+            after=lambda _connection, result: result,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            origin_interface=origin_interface,
+            correlation_id=correlation_id,
+        )
+
     def members(self, *, include_removed: bool = False) -> list[dict[str, Any]]:
         where = "" if include_removed else " WHERE state!='removed'"
         rows = self.connection.execute(
@@ -1768,7 +1885,7 @@ class SiteStore:
         facts_json = _safe_json(dict(facts))
         facts_hash = _state_hash(dict(facts))
         # Authenticated inventory is a bounded, replace-in-place observation,
-        # not an authoritative site mutation. Auditing each ten-second sample
+        # not an authoritative site mutation. Auditing each live sample
         # would create an unbounded event stream and obscure actual control
         # changes; the signed bytes and their digest remain in the one member
         # row and topology plans bind the exact snapshot they consume.
@@ -1791,7 +1908,7 @@ class SiteStore:
         """Verify a bounded transient statement without persisting its body."""
         member = self.connection.execute(
             "SELECT public_key_pem,public_key_sha256 FROM members "
-            "WHERE member_id=? AND state='active'",
+            "WHERE member_id=? AND state IN ('active','draining')",
             (member_id,),
         ).fetchone()
         if member is None:
@@ -1877,7 +1994,8 @@ class SiteStore:
         if current is None:
             raise SiteError("member is not active in this site")
         for placement in self.connection.execute(
-            "SELECT placement_id,members_json FROM placements WHERE state='running'"
+            "SELECT placement_id,members_json FROM placements "
+            "WHERE state IN ('starting','running','draining')"
         ):
             if member_id in json.loads(placement["members_json"]):
                 raise SiteError(

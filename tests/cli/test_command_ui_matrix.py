@@ -141,6 +141,22 @@ class HeaderMatrixTests(unittest.TestCase):
 
 
 class WidthAndFidelityMatrixTests(unittest.TestCase):
+    def test_borderless_object_wraps_complete_long_labels_onto_own_line(self) -> None:
+        output, _stream = presenter(80)
+        lines = output.render_object(
+            {
+                "installation_id": "a" * 64,
+                "node_public_key_sha256": "b" * 64,
+            },
+            borderless=True,
+        )
+        rendered = plain(lines)
+        self.assertIn("Installation Id\n", rendered)
+        self.assertIn("Node Public Key Sha256\n", rendered)
+        self.assertNotIn("…", rendered)
+        self.assertNotIn("┌", rendered)
+        self.assertNotIn("└", rendered)
+
     def _surfaces(self, output: command_ui.CommandUI) -> dict[str, tuple[str, ...]]:
         columns = (
             command_ui.TableColumn("kind", "KIND"),
@@ -260,6 +276,86 @@ class WidthAndFidelityMatrixTests(unittest.TestCase):
 
 
 class PromptFacadeTests(unittest.TestCase):
+    def test_split_ssh_arrow_sequence_is_navigation_not_cancellation(self) -> None:
+        output, _stream = presenter(80, no_color=False)
+        stdin = mock.Mock()
+        stdin.fileno.return_value = 19
+        with (
+            mock.patch.object(command_ui.sys, "stdin", stdin),
+            mock.patch.object(
+                command_ui.os,
+                "read",
+                side_effect=(
+                    b"\x1b", b"[", b"A",
+                    b"\x1b", b"O", b"B",
+                    b"\r",
+                ),
+            ),
+            mock.patch.object(
+                command_ui.select,
+                "select",
+                return_value=([19], [], []),
+            ),
+        ):
+            self.assertEqual(output.prompt._read_choice_key(), "up")
+            self.assertEqual(output.prompt._read_choice_key(), "down")
+            self.assertEqual(output.prompt._read_choice_key(), "enter")
+
+        delayed = mock.Mock()
+        delayed.fileno.return_value = 20
+        with (
+            mock.patch.object(command_ui.sys, "stdin", delayed),
+            mock.patch.object(command_ui.os, "read", return_value=b"\x1b"),
+            mock.patch.object(
+                command_ui.select,
+                "select",
+                return_value=([], [], []),
+            ),
+        ):
+            self.assertEqual(output.prompt._read_choice_key(), "unknown")
+
+    def test_tty_choice_highlights_first_row_and_shows_enter_footer(self) -> None:
+        output, stream = presenter(80, no_color=False)
+        stdin = mock.Mock()
+        stdin.isatty.return_value = True
+        stdin.fileno.return_value = 19
+        with (
+            mock.patch.object(command_ui.sys, "stdin", stdin),
+            mock.patch.object(
+                output.prompt,
+                "_read_choice_key",
+                side_effect=("down", "up", "enter"),
+            ),
+            mock.patch.object(
+                command_ui.termios,
+                "tcgetattr",
+                return_value=["terminal-state"],
+            ),
+            mock.patch.object(command_ui.termios, "tcsetattr") as restore,
+            mock.patch.object(command_ui.tty, "setcbreak") as cbreak,
+        ):
+            self.assertEqual(
+                output.prompt.choose(
+                    "Node to add",
+                    ("homeai-node-2 · 192.168.1.215", "studio · 192.168.1.10"),
+                    require_tty=True,
+                ),
+                "homeai-node-2 · 192.168.1.215",
+            )
+
+        rendered = stream.getvalue()
+        initial = rendered.split("\033[3F", 1)[0]
+        self.assertIn(ui.LIGHT_BACKGROUND, initial)
+        self.assertIn(ui.DARK, initial)
+        self.assertIn("homeai-node-2 · 192.168.1.215", initial)
+        self.assertIn(ui.DIM + "  'Enter' to select", initial)
+        cbreak.assert_called_once_with(19)
+        restore.assert_called_once_with(
+            19,
+            command_ui.termios.TCSADRAIN,
+            ["terminal-state"],
+        )
+
     def test_text_supports_defaults_required_values_and_validation(self) -> None:
         answers = iter(("", "bad", "valid"))
         output, stream = presenter(32, input_fn=lambda: next(answers))
@@ -1134,7 +1230,7 @@ class BenchmarkSurfaceTests(unittest.TestCase):
         plain = ui.ANSI.sub("", rendered)
         self.assertNotIn(OPAQUE, rendered)
         self.assertNotIn("EVIDENCE", plain)
-        self.assertIn("UPDATE AVAILABLE", rendered)
+        self.assertIn("Update available", rendered)
         self.assertIn("Core 1.2.3", rendered)
         self.assertLess(plain.index("PERFORMANCE"), plain.rindex("32k-code-c1"))
         self.assertIn("58.9 tok/s", plain)

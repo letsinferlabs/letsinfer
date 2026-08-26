@@ -376,3 +376,47 @@ class LocalMoveTransaction:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         if not self.committed:
             self._restore()
+
+
+class LocalDetachTransaction(LocalMoveTransaction):
+    """Stage a child-to-standalone authority replacement with exact rollback."""
+
+    def __init__(self, source: SiteIdentity) -> None:
+        if source.role != "child":
+            raise SiteError("only a child can detach into a standalone node")
+        self.source = source
+        self.config = config_root()
+        self.secrets = secrets_root()
+        self.data = data_root()
+        token = uuid.uuid4().hex
+        self.config_backup = self.config.parent / f".{self.config.name}.site-detach-{token}"
+        self.secrets_backup = self.secrets.parent / f".{self.secrets.name}.site-detach-{token}"
+        self.data_backup = self.data / f".site-detach-{token}"
+        self.committed = False
+        self.started = False
+
+    def validate(self) -> SiteIdentity:
+        if not self.started:
+            raise SiteError("node detach transaction has not started")
+        replacement = read_identity()
+        if replacement.role != "main":
+            raise SiteError("node detach did not install a standalone main identity")
+        if replacement.site_id == self.source.site_id:
+            raise SiteError("node detach retained the former site identity")
+        if (
+            replacement.member_id != self.source.member_id
+            or replacement.installation_id != self.source.installation_id
+            or replacement.created_at_unix != self.source.created_at_unix
+            or replacement.member_public_key_sha256
+            != self.source.member_public_key_sha256
+        ):
+            raise SiteError("node detach changed the physical installation identity")
+        return replacement
+
+    def commit(self) -> SiteIdentity:
+        replacement = self.validate()
+        self.committed = True
+        shutil.rmtree(self.config_backup)
+        shutil.rmtree(self.secrets_backup)
+        shutil.rmtree(self.data_backup)
+        return replacement

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 import multiprocessing
 import pathlib
 import ssl
@@ -158,11 +159,11 @@ class SiteControlTests(unittest.TestCase):
                 group_id="c" * 32,
             )
 
-    def test_enrollment_contract_provisions_only_member_credentials(self) -> None:
+    def test_remote_enrollment_requires_comparison_code(self) -> None:
         with mock.patch.dict(os.environ, self.coordinator_environment):
             coordinator = state.setup_site("Home", "coordinator.local")
             with state.SiteStore(identity=coordinator) as store:
-                invite = store.create_invite("lan")
+                invite = store.create_invite("remote")
             coordinator_control = control.SiteControlState(
                 coordinator, facts_provider=lambda: facts(coordinator.member_id)
             )
@@ -224,6 +225,50 @@ class SiteControlTests(unittest.TestCase):
                     "approval_expires_at_unix": None,
                 },
             )
+
+    def test_lan_enrollment_is_active_after_the_candidate_approves(self) -> None:
+        with mock.patch.dict(os.environ, self.coordinator_environment):
+            coordinator = state.setup_site("Home", "coordinator.local")
+            with state.SiteStore(identity=coordinator) as store:
+                invite = store.create_invite("lan")
+            coordinator_control = control.SiteControlState(
+                coordinator, facts_provider=lambda: facts(coordinator.member_id)
+            )
+            challenge = coordinator_control.challenge(invite["invite_id"])
+        with mock.patch.dict(os.environ, self.member_environment):
+            candidate = state.prepare_member_identity()
+            transcript = control.enrollment_transcript(
+                challenge,
+                candidate,
+                member_name="Member B",
+                member_address="member-b.local",
+            )
+            proof = state.member_proof(transcript)
+        with mock.patch.dict(os.environ, self.coordinator_environment):
+            response = coordinator_control.enroll(
+                {
+                    "protocol": control.PROTOCOL,
+                    "invite_id": invite["invite_id"],
+                    "code": invite["code"],
+                    "member_id": candidate["member_id"],
+                    "member_name": "Member B",
+                    "member_address": "member-b.local",
+                    "member_public_key": candidate["member_public_key"],
+                    "installation_id": candidate["installation_id"],
+                    "installation_created_at_unix": candidate["created_at_unix"],
+                    "proof_signature": proof,
+                }
+            )
+            self.assertEqual(response["document"]["state"], "active")
+            self.assertIsNone(response["comparison_code"])
+            with state.SiteStore(identity=coordinator) as store:
+                enrolled = next(
+                    row
+                    for row in store.members()
+                    if row["member_id"] == candidate["member_id"]
+                )
+            self.assertEqual(enrolled["state"], "active")
+            self.assertIsNone(enrolled["approval_expires_at_unix"])
         with mock.patch.dict(os.environ, self.member_environment):
             joined = state.install_member_identity(
                 response["document"], response["signature"], response["site_public_key"],
@@ -243,6 +288,102 @@ class SiteControlTests(unittest.TestCase):
                     joined.member_id, signed["facts"], signed["signature"]
                 )
                 self.assertEqual(updated["member_id"], joined.member_id)
+            detached = coordinator_control.detach_member(
+                {
+                    "protocol": control.DETACH_PROTOCOL,
+                    "site_id": coordinator.site_id,
+                    "member_id": joined.member_id,
+                },
+                requester_member_id=joined.member_id,
+            )
+            self.assertEqual(
+                detached,
+                {
+                    "protocol": control.DETACH_PROTOCOL,
+                    "site_id": coordinator.site_id,
+                    "member_id": joined.member_id,
+                    "state": "removed",
+                },
+            )
+            with state.SiteStore(identity=coordinator) as store:
+                second_invite = store.create_invite("lan")
+            second_challenge = coordinator_control.challenge(
+                second_invite["invite_id"]
+            )
+        with mock.patch.dict(os.environ, self.member_environment):
+            returning = state.existing_member_identity(joined)
+            second_transcript = control.enrollment_transcript(
+                second_challenge,
+                returning,
+                member_name="Member B",
+                member_address="member-b.local",
+            )
+            second_proof = state.member_proof(second_transcript)
+        with mock.patch.dict(os.environ, self.coordinator_environment):
+            rejoined = coordinator_control.enroll(
+                {
+                    "protocol": control.PROTOCOL,
+                    "invite_id": second_invite["invite_id"],
+                    "code": second_invite["code"],
+                    "member_id": returning["member_id"],
+                    "member_name": "Member B",
+                    "member_address": "member-b.local",
+                    "member_public_key": returning["member_public_key"],
+                    "installation_id": returning["installation_id"],
+                    "installation_created_at_unix": returning["created_at_unix"],
+                    "proof_signature": second_proof,
+                }
+            )
+            self.assertEqual(rejoined["document"]["state"], "active")
+            self.assertIsNone(rejoined["comparison_code"])
+            self.assertNotEqual(
+                rejoined["document"]["member_certificate_sha256"],
+                response["document"]["member_certificate_sha256"],
+            )
+            with state.SiteStore(identity=coordinator) as store:
+                matches = [
+                    row
+                    for row in store.members(include_removed=True)
+                    if row["member_id"] == joined.member_id
+                ]
+            self.assertEqual(len(matches), 1)
+            self.assertEqual(matches[0]["state"], "active")
+            inventory = coordinator_control.member_inventory(joined.member_id)
+            self.assertEqual(inventory["protocol"], control.NODE_INVENTORY_PROTOCOL)
+            self.assertEqual(
+                {row["member_id"] for row in inventory["nodes"]},
+                {coordinator.member_id, joined.member_id},
+            )
+            self.assertTrue(
+                all("observed_at_unix" in row for row in inventory["nodes"])
+            )
+            paused = coordinator_control.set_requester_member_state(
+                {
+                    "protocol": control.MEMBER_STATE_PROTOCOL,
+                    "member_id": joined.member_id,
+                    "paused": True,
+                },
+                requester_member_id=joined.member_id,
+            )
+            self.assertEqual(paused["state"], "draining")
+            resumed = coordinator_control.set_requester_member_state(
+                {
+                    "protocol": control.MEMBER_STATE_PROTOCOL,
+                    "member_id": joined.member_id,
+                    "paused": False,
+                },
+                requester_member_id=joined.member_id,
+            )
+            self.assertEqual(resumed["state"], "active")
+            with self.assertRaisesRegex(control.ControlError, "invalid"):
+                coordinator_control.set_requester_member_state(
+                    {
+                        "protocol": control.MEMBER_STATE_PROTOCOL,
+                        "member_id": coordinator.member_id,
+                        "paused": True,
+                    },
+                    requester_member_id=joined.member_id,
+                )
 
     def test_challenge_rejects_used_invite(self) -> None:
         with mock.patch.dict(os.environ, self.coordinator_environment):
@@ -443,7 +584,7 @@ class SiteControlTests(unittest.TestCase):
                 member_address="127.0.0.1",
             )
             member = enrollment.identity
-            self.assertEqual(enrollment.state, "pending")
+            self.assertEqual(enrollment.state, "active")
         process.join(timeout=10)
         self.assertEqual(process.exitcode, 0)
 
@@ -470,6 +611,121 @@ class SiteControlTests(unittest.TestCase):
                 )
         process.join(timeout=10)
         self.assertEqual(process.exitcode, 0)
+
+        ready = multiprocessing.Queue()
+        process = multiprocessing.Process(
+            target=serve_requests,
+            args=(self.coordinator_environment, 1, ready),
+        )
+        process.start()
+        status, value = ready.get(timeout=10)
+        self.assertEqual(status, "ready", value)
+        with mock.patch.dict(os.environ, self.member_environment):
+            detached = control.request_self_detach(
+                f"https://127.0.0.1:{value}",
+                source=member,
+                ca_file=state.site_ca_certificate_path(),
+                certificate_file=state.member_certificate_path(),
+                key_file=state.member_key_path(),
+            )
+        self.assertEqual(detached["state"], "removed")
+        process.join(timeout=10)
+        self.assertEqual(process.exitcode, 0)
+        with mock.patch.dict(os.environ, self.coordinator_environment):
+            with state.SiteStore(identity=coordinator) as store:
+                removed = next(
+                    row
+                    for row in store.members(include_removed=True)
+                    if row["member_id"] == member.member_id
+                )
+        self.assertEqual(removed["state"], "removed")
+
+    def test_child_detach_client_uses_retained_member_credentials(self) -> None:
+        source = state.SiteIdentity(
+            site_id="1" * 32,
+            member_id="2" * 32,
+            installation_id="3" * 64,
+            display_name="Home",
+            role="child",
+            coordinator_id="4" * 32,
+            coordinator_address="home.local",
+            site_public_key_sha256="5" * 64,
+            member_public_key_sha256="6" * 64,
+            created_at_unix=1_700_000_000,
+        )
+        expected = {
+            "protocol": control.DETACH_PROTOCOL,
+            "site_id": source.site_id,
+            "member_id": source.member_id,
+            "state": "removed",
+        }
+
+        class Response:
+            status = 200
+
+            def read(self, _limit: int) -> bytes:
+                return json.dumps(expected).encode("utf-8")
+
+        connection = mock.Mock()
+        connection.sock.getpeercert.return_value = {"fixture": True}
+        connection.getresponse.return_value = Response()
+        context = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [pathlib.Path(directory) / name for name in ("ca", "cert", "key")]
+            for path in paths:
+                path.write_text("fixture", encoding="ascii")
+            with (
+                mock.patch.object(control.ssl, "SSLContext", return_value=context),
+                mock.patch.object(
+                    control.http.client,
+                    "HTTPSConnection",
+                    return_value=connection,
+                ),
+                mock.patch.object(
+                    control,
+                    "_member_id_from_certificate",
+                    return_value=source.coordinator_id,
+                ),
+            ):
+                result = control.request_self_detach(
+                    "https://home.local:9770",
+                    source=source,
+                    ca_file=paths[0],
+                    certificate_file=paths[1],
+                    key_file=paths[2],
+                )
+        self.assertEqual(result, expected)
+        context.load_verify_locations.assert_called_once_with(paths[0])
+        context.load_cert_chain.assert_called_once_with(paths[1], paths[2])
+        request = connection.request.call_args
+        self.assertEqual(request.args[:2], ("POST", "/node/v1/detach"))
+
+    def test_child_requests_its_own_pause_and_resume(self) -> None:
+        source = state.SiteIdentity(
+            site_id="1" * 32,
+            member_id="2" * 32,
+            installation_id="3" * 64,
+            display_name="Home",
+            role="child",
+            coordinator_id="4" * 32,
+            coordinator_address="home.local",
+            site_public_key_sha256="5" * 64,
+            member_public_key_sha256="6" * 64,
+            created_at_unix=1_700_000_000,
+        )
+        with mock.patch.object(
+            control,
+            "_coordinator_request",
+            return_value={
+                "protocol": control.MEMBER_STATE_PROTOCOL,
+                "member_id": source.member_id,
+                "state": "draining",
+            },
+        ) as request:
+            paused = control.request_self_member_state(source, paused=True)
+        self.assertEqual(paused["state"], "draining")
+        self.assertEqual(request.call_args.kwargs["path"], "/node/v1/member-state")
+        self.assertEqual(request.call_args.kwargs["body"]["member_id"], source.member_id)
 
 
 if __name__ == "__main__":
