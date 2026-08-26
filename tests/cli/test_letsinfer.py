@@ -1572,6 +1572,31 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         ):
             cli.validate_manifest(execution)
 
+    def test_rc80_execution_manifest_acquisition_is_normalized_exactly(self) -> None:
+        execution = cli.runtime_execution_manifest(
+            runtime_candidate(), qualified=True
+        )
+        acquisition = execution["model"].pop("acquisition")
+        execution["model"]["acquisition_image"] = acquisition["image"]
+
+        cli.validate_manifest(execution)
+
+        self.assertEqual(execution["model"]["acquisition"], acquisition)
+        self.assertNotIn("acquisition_image", execution["model"])
+
+        malformed = cli.runtime_execution_manifest(
+            runtime_candidate(), qualified=True
+        )
+        malformed["model"].pop("acquisition")
+        malformed["model"]["acquisition_image"] = "unversioned"
+        with self.assertRaisesRegex(cli.LetsInferError, "must be digest-pinned"):
+            cli.validate_manifest(malformed)
+
+        mixed = cli.runtime_execution_manifest(runtime_candidate(), qualified=True)
+        mixed["model"]["acquisition_image"] = acquisition["image"]
+        with self.assertRaisesRegex(cli.LetsInferError, "unsupported fields"):
+            cli.validate_manifest(mixed)
+
     def test_model_store_mirrors_exact_hugging_face_identity_and_revision(self) -> None:
         execution = cli.runtime_execution_manifest(runtime_candidate(), qualified=False)
         artifact = execution["artifacts"][0]
