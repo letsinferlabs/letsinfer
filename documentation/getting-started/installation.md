@@ -32,6 +32,12 @@ verifies the installed CLI and daemon. Unsupported distributions stop with an
 error instead of guessing at packages or running a downloaded convenience
 installer; macOS installation never changes Docker.
 
+Linux setup also installs the distribution's native Avahi daemon and command
+tools when local DNS-SD discovery is absent, enables `avahi-daemon.service`,
+and verifies both publishing and browsing before the node agent starts. A
+missing local-discovery dependency therefore fails during installation instead
+of leaving the node service in a restart loop.
+
 Before initialization, the installer also verifies Docker from a transient
 systemd user service. If Docker is healthy but the operator cannot access
 `/var/run/docker.sock`, the installer can add that account to the socket's
