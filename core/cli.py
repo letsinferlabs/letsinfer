@@ -1140,6 +1140,8 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     if set(image) not in (
         {"distribution", "reference", "immutable_id"},
         {"distribution", "reference", "immutable_id", "base"},
+        {"distribution", "reference", "immutable_id", "payload_id"},
+        {"distribution", "reference", "immutable_id", "base", "payload_id"},
     ):
         raise LetsInferError("manifest.image has invalid fields")
     distribution = _require(image, "distribution", str, "manifest.image")
@@ -1157,6 +1159,10 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise LetsInferError("local image reference must equal its immutable image ID")
     if "base" in image and not REGISTRY_DIGEST_RE.fullmatch(image["base"]):
         raise LetsInferError("manifest.image.base must be digest-pinned")
+    if "payload_id" in image and not IMAGE_ID_RE.fullmatch(image["payload_id"]):
+        raise LetsInferError(
+            "manifest.image.payload_id must be a SHA-256 execution payload"
+        )
 
     container = _require(manifest, "container", dict, "manifest")
     allowed_container = {
