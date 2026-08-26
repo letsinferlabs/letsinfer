@@ -1191,6 +1191,28 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
 
     target = target_contract(manifest)
     model = _require(manifest, "model", dict, "manifest")
+    legacy_model_fields = {"alias", "id", "artifact", "acquisition_image"}
+    if set(model) == legacy_model_fields:
+        acquisition_image = _require(
+            model, "acquisition_image", str, "manifest.model"
+        )
+        if not REGISTRY_DIGEST_RE.fullmatch(acquisition_image):
+            raise LetsInferError(
+                "manifest.model.acquisition_image must be digest-pinned"
+            )
+        # RC.80 control bundles used one scalar for the same OCI acquisition
+        # identity. The bundle hash is checked before this in-memory projection;
+        # accept only that exact released shape and normalize it to RC.81.
+        model = {
+            "alias": model["alias"],
+            "id": model["id"],
+            "artifact": model["artifact"],
+            "acquisition": {
+                "kind": "oci-container",
+                "image": acquisition_image,
+            },
+        }
+        manifest["model"] = model
     _reject_unknown_fields(
         model,
         {"alias", "id", "artifact", "acquisition"},
