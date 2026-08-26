@@ -512,12 +512,55 @@ class TopologyGraph:
         interconnect: Mapping[str, Any],
     ) -> dict[str, str]:
         """Select one verified engine-traffic address on each distributed member."""
+        interfaces = self.engine_interfaces(placement, interconnect)
+        result: dict[str, str] = {}
+        for member_id, interface_name in interfaces.items():
+            facts = self.members[member_id]
+            interface = next(
+                (
+                    item
+                    for item in facts["network"]["interfaces"]
+                    if item["name"] == interface_name
+                ),
+                None,
+            )
+            if interface is None:
+                raise TopologyError(
+                    "verified engine interface disappeared from member facts"
+                )
+            addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+            for text in interface["addresses"]:
+                try:
+                    address = ipaddress.ip_address(text.split("%", 1)[0])
+                except ValueError:
+                    continue
+                if not address.is_loopback and not address.is_unspecified:
+                    addresses.append(address)
+            addresses.sort(key=lambda item: (item.version != 4, int(item)))
+            if not addresses:
+                raise TopologyError(
+                    f"parallel member {member_id} has no usable engine address"
+                )
+            chosen = str(addresses[0])
+            result[member_id] = (
+                f"[{chosen}]" if addresses[0].version == 6 else chosen
+            )
+        return result
+
+    def engine_interfaces(
+        self,
+        placement: Placement,
+        interconnect: Mapping[str, Any],
+    ) -> dict[str, str]:
+        """Select one verified engine-traffic interface on every group member."""
         if (
             placement.strategy != "parallel"
             or placement.topology_sha256 != self.sha256()
             or set(placement.member_ids) - set(self.members)
         ):
-            raise TopologyError("engine addresses require this exact parallel placement")
+            raise TopologyError(
+                "engine interfaces require this exact parallel placement"
+            )
         selected = set(placement.member_ids)
         result: dict[str, str] = {}
         for member_id in placement.member_ids:
@@ -546,21 +589,11 @@ class TopologyGraph:
             )
             if interface is None:
                 raise TopologyError("verified engine interface disappeared from member facts")
-            addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
-            for text in interface["addresses"]:
-                try:
-                    address = ipaddress.ip_address(text.split("%", 1)[0])
-                except ValueError:
-                    continue
-                if not address.is_loopback and not address.is_unspecified:
-                    addresses.append(address)
-            addresses.sort(key=lambda item: (item.version != 4, int(item)))
-            if not addresses:
+            if interconnect.get("rdma_required") is True and interface["rdma"] is not True:
                 raise TopologyError(
-                    f"parallel member {member_id} has no usable engine address"
+                    f"parallel member {member_id} engine interface is not RDMA-capable"
                 )
-            chosen = str(addresses[0])
-            result[member_id] = f"[{chosen}]" if addresses[0].version == 6 else chosen
+            result[member_id] = interface_name
         return result
 
     def placement_connections(self, placement: Placement) -> list[dict[str, Any]]:

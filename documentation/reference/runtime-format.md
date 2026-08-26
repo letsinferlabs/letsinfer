@@ -216,6 +216,16 @@ collectives, and engine flags never enter core schemas. A one-node parallel
 runtime may receive multiple GPU UUIDs in `task-0`. Complete parallel groups
 may be replicated behind the gateway exactly like independent groups.
 
+When `target.placement.interconnect.rdma_required` is true, core assigns the
+endpoint-owner task to the main node, seals one verified interface into every
+task resource, and revalidates the direct route, HCA, link floor, and exact
+userspace verbs devices immediately before launch. The Engine container
+receives only those `/dev/infiniband` character devices and a memlock limit
+bounded by its declared container memory. Core exports the selected interface
+and HCA as protected resource values; the runtime maps them to its private
+collective configuration and must fail readiness if the Engine falls back to
+a non-RDMA transport.
+
 ## Benchmark record
 
 `benchmark.contract` selects the standard core-owned workload and request

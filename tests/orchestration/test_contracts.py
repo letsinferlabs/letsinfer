@@ -7,7 +7,9 @@ import unittest
 
 from core.orchestration import (
     OrchestrationError,
+    bind_endpoint_member,
     build_group_plan,
+    validate_group_target_interconnect,
     validate_orchestration_contract,
     validate_target_binding,
 )
@@ -120,6 +122,70 @@ class OrchestrationContractTests(unittest.TestCase):
         self.assertRegex(first.group_id, r"^[0-9a-f]{32}$")
         self.assertEqual(first.document()["resources"][0]["address"], "member-a.local:9770")
         self.assertNotIn("rank", first.document())
+
+    def test_endpoint_owner_task_is_bound_to_main_node(self) -> None:
+        child = "1" * 32
+        main = "f" * 32
+        third = "2" * 32
+        contract = self.parallel()
+        ordered = bind_endpoint_member(contract, (child, third, main), main)
+        self.assertEqual(ordered, (main, third, child))
+        with self.assertRaisesRegex(OrchestrationError, "selected main"):
+            bind_endpoint_member(contract, (child, third, "3" * 32), main)
+
+    def test_rdma_group_seals_interfaces_and_matches_target(self) -> None:
+        members = ("1" * 32, "2" * 32, "3" * 32)
+        plan = build_group_plan(
+            self.parallel(),
+            member_ids=members,
+            member_addresses={member: f"192.0.2.{index + 10}" for index, member in enumerate(members)},
+            topology_sha256="4" * 64,
+            manifest_sha256="5" * 64,
+            runtime_digest="6" * 64,
+            service_id="7" * 32,
+            release=release_identity(),
+            member_port_bases={member: 18000 for member in members},
+            member_device_uuids={member: [f"GPU-{index}"] for index, member in enumerate(members)},
+            connections=parallel_connections(members),
+            member_rdma_interfaces={member: f"mlx{index}" for index, member in enumerate(members)},
+            endpoint_member_id=members[0],
+        )
+        document = plan.document()
+        self.assertEqual(document["resources"][0]["rdma_interface"], "mlx0")
+        placement = {
+            "strategy": "parallel",
+            "node_count": 3,
+            "interconnect": {
+                "kind": "connectx",
+                "rdma_required": True,
+                "minimum_speed_mbps": 100000,
+                "minimum_mtu": 9000,
+            },
+        }
+        self.assertIs(
+            validate_group_target_interconnect(document, placement), document
+        )
+        non_rdma = {
+            **placement,
+            "interconnect": {**placement["interconnect"], "rdma_required": False},
+        }
+        with self.assertRaisesRegex(OrchestrationError, "non-RDMA"):
+            validate_group_target_interconnect(document, non_rdma)
+        unbound = build_group_plan(
+            self.parallel(),
+            member_ids=members,
+            member_addresses={member: f"192.0.2.{index + 10}" for index, member in enumerate(members)},
+            topology_sha256="4" * 64,
+            manifest_sha256="5" * 64,
+            runtime_digest="6" * 64,
+            service_id="7" * 32,
+            release=release_identity(),
+            member_port_bases={member: 18000 for member in members},
+            member_device_uuids={member: [f"GPU-{index}"] for index, member in enumerate(members)},
+            connections=parallel_connections(members),
+        ).document()
+        with self.assertRaisesRegex(OrchestrationError, "sealed interface"):
+            validate_group_target_interconnect(unbound, placement)
 
     def test_parallel_plan_rejects_disconnected_or_unverified_resources(self) -> None:
         members = ("1" * 32, "2" * 32, "3" * 32)
