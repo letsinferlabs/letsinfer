@@ -91,6 +91,7 @@ from .exposure import (
     verify_tailscale,
 )
 from .orchestration import (
+    bind_endpoint_member,
     build_group_plan,
     build_single_group_plan,
     MemberAgent,
@@ -100,6 +101,7 @@ from .orchestration import (
     credential_sha256 as group_credential_sha256,
     orchestration_contract_sha256,
     validate_group_document,
+    validate_group_target_interconnect,
     validate_target_binding,
 )
 from .orchestration.coordinator import (
@@ -184,6 +186,7 @@ from .site.discovery import publisher_command as discovery_publisher_command
 from .site.inventory import (
     InventoryError,
     collect_local_facts,
+    resolve_connectx_rdma_binding,
     select_direct_connectx_interface,
     verify_direct_connectx_peer,
     verify_direct_connectx_interface,
@@ -1475,6 +1478,70 @@ def compact_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _rdma_docker_options(
+    binding: Mapping[str, Any] | None,
+    memory_bytes: int,
+) -> list[str]:
+    """Return least-privilege Docker options for one Core-resolved RDMA HCA."""
+    if binding is None:
+        return []
+    if (
+        not isinstance(binding, Mapping)
+        or set(binding) != {
+            "interface", "device", "local_address", "peer_addresses", "device_nodes"
+        }
+        or not isinstance(binding["interface"], str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,31}", binding["interface"])
+        or not isinstance(binding["device"], str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", binding["device"])
+        or not isinstance(binding["local_address"], str)
+        or not isinstance(binding["peer_addresses"], list)
+        or not binding["peer_addresses"]
+        or any(not isinstance(item, str) for item in binding["peer_addresses"])
+        or not isinstance(memory_bytes, int)
+        or isinstance(memory_bytes, bool)
+        or memory_bytes <= 0
+    ):
+        raise LetsInferError("engine-group RDMA binding is invalid")
+    nodes = binding["device_nodes"]
+    if not isinstance(nodes, list) or not nodes or len(nodes) > 16:
+        raise LetsInferError("engine-group RDMA device list is invalid")
+    paths: list[str] = []
+    for node in nodes:
+        if (
+            not isinstance(node, Mapping)
+            or set(node) != {"path", "major", "minor"}
+            or not isinstance(node["path"], str)
+            or not re.fullmatch(
+                r"/dev/infiniband/(?:rdma_cm|uverbs(?:0|[1-9][0-9]*))",
+                node["path"],
+            )
+            or not isinstance(node["major"], int)
+            or isinstance(node["major"], bool)
+            or node["major"] < 0
+            or not isinstance(node["minor"], int)
+            or isinstance(node["minor"], bool)
+            or node["minor"] < 0
+            or node["path"] in paths
+        ):
+            raise LetsInferError("engine-group RDMA device identity is invalid")
+        paths.append(node["path"])
+    options: list[str] = []
+    for path in paths:
+        options.extend(["--device", f"{path}:{path}:rwm"])
+    options.extend(
+        [
+            "--ulimit",
+            f"memlock={memory_bytes}:{memory_bytes}",
+            "-e",
+            f"LETSINFER_RDMA_INTERFACE={binding['interface']}",
+            "-e",
+            f"LETSINFER_RDMA_DEVICE={binding['device']}",
+        ]
+    )
+    return options
+
+
 def docker_command(
     manifest: dict[str, Any],
     *,
@@ -1491,6 +1558,7 @@ def docker_command(
     group_context: Mapping[str, Any] | None = None,
     group_config_file: pathlib.Path | None = None,
     runtime_artifact_root: pathlib.Path | None = None,
+    rdma_binding: Mapping[str, Any] | None = None,
 ) -> list[str]:
     if not SHA256_RE.fullmatch(manifest_sha256):
         raise LetsInferError("container manifest identity must be a SHA-256")
@@ -1546,6 +1614,8 @@ def docker_command(
             raise LetsInferError("engine-group launcher is invalid")
     elif group_config_file is not None:
         raise LetsInferError("engine-group configuration requires a group context")
+    if rdma_binding is not None and group_context is None:
+        raise LetsInferError("RDMA resources require an engine-group context")
     # Startup readiness is verified separately through the authenticated API.
     # Docker health is liveness: long prefills may occupy an engine's HTTP loop,
     # but its kernel listener must remain present for queued requests.
@@ -1637,6 +1707,7 @@ def docker_command(
             if group_context is None
             else "device=" + ",".join(group_context["device_uuids"])
         ),
+        *_rdma_docker_options(rdma_binding, container["memory_bytes"]),
         "--memory",
         str(container["memory_bytes"]),
         "--memory-swap",
@@ -8058,6 +8129,15 @@ def install_engine_group(
         raise LetsInferError("single runtime cannot carry a parallel group contract")
     manifest_sha256 = sha256_file(manifest_path)
     service_id = logical_service_id(identity.site_id, manifest["model"]["alias"])
+    group_member_ids = (
+        placement.member_ids
+        if contract is None
+        else bind_endpoint_member(
+            contract,
+            placement.member_ids,
+            identity.member_id,
+        )
+    )
     with _site_store() as store:
         selected_records = {
             row["member_id"]: row
@@ -8066,10 +8146,10 @@ def install_engine_group(
         }
         existing_groups = store.engine_groups()
     controls = _engine_group_member_controls(
-        list(selected_records.values()), placement.member_ids
+        list(selected_records.values()), group_member_ids
     )
     occupied: dict[str, list[tuple[int, int]]] = {
-        member_id: [] for member_id in placement.member_ids
+        member_id: [] for member_id in group_member_ids
     }
     for existing in existing_groups:
         if existing["state"] in {"removed", "failed"}:
@@ -8081,7 +8161,7 @@ def install_engine_group(
                 )
     try:
         if contract is None:
-            member_id = placement.member_ids[0]
+            member_id = group_member_ids[0]
             port_base = next(
                 (
                     candidate
@@ -8113,7 +8193,7 @@ def install_engine_group(
         else:
             port_bases = allocate_group_ports(
                 contract,
-                member_ids=placement.member_ids,
+                member_ids=group_member_ids,
                 occupied={key: tuple(value) for key, value in occupied.items()},
             )
         if placement.strategy == "parallel" and len(placement.member_ids) > 1:
@@ -8123,12 +8203,18 @@ def install_engine_group(
         else:
             engine_addresses = {
                 member_id: _control_member_host(selected_records[member_id]["address"])
-                for member_id in placement.member_ids
+                for member_id in group_member_ids
             }
         if contract is not None:
+            interconnect = target_contract(manifest)["placement"]["interconnect"]
+            rdma_interfaces = (
+                graph.engine_interfaces(placement, interconnect)
+                if interconnect["rdma_required"]
+                else {}
+            )
             plan = build_group_plan(
                 contract,
-                member_ids=placement.member_ids,
+                member_ids=group_member_ids,
                 member_addresses=engine_addresses,
                 topology_sha256=placement.topology_sha256,
                 manifest_sha256=manifest_sha256,
@@ -8138,6 +8224,8 @@ def install_engine_group(
                 member_port_bases=port_bases,
                 member_device_uuids=placement.device_uuids,
                 connections=graph.placement_connections(placement),
+                member_rdma_interfaces=rdma_interfaces,
+                endpoint_member_id=identity.member_id,
             )
     except (OrchestrationError, GroupOrchestrationError, TopologyError) as error:
         raise LetsInferError(f"cannot build engine-group plan: {error}") from error
@@ -8397,6 +8485,16 @@ def _restore_engine_group_orchestrator(
                     item["node_id"]: item["device_uuids"] for item in resources
                 },
                 connections=document["connections"],
+                member_rdma_interfaces={
+                    item["node_id"]: item["rdma_interface"]
+                    for item in resources
+                    if "rdma_interface" in item
+                },
+                endpoint_member_id=next(
+                    item["node_id"]
+                    for item in resources
+                    if item["task_id"] == document["endpoint_owner"]
+                ),
             )
         if plan.document() != document:
             raise LetsInferError("runtime contract no longer reproduces the engine-group plan")
@@ -16827,6 +16925,114 @@ def _engine_group_member_host(group: Mapping[str, Any], member_id: str) -> str:
     return parsed.hostname
 
 
+def _engine_group_rdma_binding(
+    group: Mapping[str, Any], member_id: str
+) -> dict[str, Any] | None:
+    """Revalidate one sealed RDMA interface and resolve its exact device nodes."""
+    resources = [
+        item for item in group["resources"] if item["node_id"] == member_id
+    ]
+    if len(resources) != 1:
+        raise LetsInferError("engine-group RDMA resource is unavailable")
+    resource = resources[0]
+    interface = resource.get("rdma_interface")
+    if interface is None:
+        return None
+    connections = [
+        item
+        for item in group["connections"]
+        if member_id in item["nodes"] and item["rdma"] is True
+    ]
+    if not connections:
+        raise LetsInferError("engine-group RDMA connection is unavailable")
+    peer_ids = sorted(
+        {
+            node
+            for connection in connections
+            for node in connection["nodes"]
+            if node != member_id
+        }
+    )
+    addresses = {
+        item["node_id"]: _engine_group_member_host(group, item["node_id"])
+        for item in group["resources"]
+    }
+    try:
+        return resolve_connectx_rdma_binding(
+            interface,
+            addresses[member_id],
+            [addresses[peer_id] for peer_id in peer_ids],
+            minimum_speed_mbps=max(item["speed_mbps"] for item in connections),
+            minimum_mtu=max(item["mtu"] for item in connections),
+        )
+    except (InventoryError, KeyError) as error:
+        raise LetsInferError(f"engine-group RDMA binding is unavailable: {error}") from error
+
+
+def _require_matching_rdma_container(
+    inspection: Mapping[str, Any],
+    binding: Mapping[str, Any] | None,
+    memory_bytes: int,
+) -> None:
+    """Reject a reused container whose RDMA devices or memlock differ."""
+    host = inspection.get("HostConfig")
+    config = inspection.get("Config")
+    if not isinstance(host, Mapping) or not isinstance(config, Mapping):
+        if binding is None:
+            return
+        raise LetsInferError("engine-group container RDMA configuration is unavailable")
+    devices = host.get("Devices") or []
+    if not isinstance(devices, list):
+        raise LetsInferError("engine-group container device configuration is invalid")
+    actual = {
+        (
+            item.get("PathOnHost"),
+            item.get("PathInContainer"),
+            item.get("CgroupPermissions"),
+        )
+        for item in devices
+        if isinstance(item, Mapping)
+        and isinstance(item.get("PathOnHost"), str)
+        and item["PathOnHost"].startswith("/dev/infiniband/")
+    }
+    environment = config.get("Env") or []
+    if not isinstance(environment, list) or any(
+        not isinstance(item, str) for item in environment
+    ):
+        raise LetsInferError("engine-group container environment is invalid")
+    rdma_environment = {
+        item for item in environment if item.startswith("LETSINFER_RDMA_")
+    }
+    if binding is None:
+        if actual or rdma_environment:
+            raise LetsInferError("non-RDMA engine group received RDMA resources")
+        return
+    expected = {
+        (item["path"], item["path"], "rwm")
+        for item in binding["device_nodes"]
+    }
+    if actual != expected:
+        raise LetsInferError("engine-group container RDMA devices changed")
+    expected_environment = {
+        f"LETSINFER_RDMA_INTERFACE={binding['interface']}",
+        f"LETSINFER_RDMA_DEVICE={binding['device']}",
+    }
+    if rdma_environment != expected_environment:
+        raise LetsInferError("engine-group container RDMA binding changed")
+    ulimits = host.get("Ulimits") or []
+    memlock = [
+        item
+        for item in ulimits
+        if isinstance(item, Mapping) and item.get("Name") == "memlock"
+    ]
+    if (
+        len(memlock) != 1
+        or memlock[0].get("Soft") != memory_bytes
+        or memlock[0].get("Hard") != memory_bytes
+    ):
+        raise LetsInferError("engine-group container RDMA memlock changed")
+
+
 def _ensure_engine_group_tls(
     certificate: pathlib.Path,
     private_key: pathlib.Path,
@@ -17098,6 +17304,7 @@ class LocalEngineGroupExecutor:
                 raise LetsInferError("engine-group job task differs from the runtime contract")
             group = validate_group_document(dict(job["group"]))
             placement = target_contract(manifest)["placement"]
+            validate_group_target_interconnect(group, placement)
             if (
                 group["strategy"] != placement["strategy"]
                 or len(group["resources"]) != placement["node_count"]
@@ -17205,6 +17412,9 @@ class LocalEngineGroupExecutor:
             model_cache=pathlib.Path(config["model_cache"]),
         )
         require_memory_reserve(manifest, phase="launch")
+        rdma_binding = _engine_group_rdma_binding(
+            config["_group"], config["member_id"]
+        )
         command = docker_command(
             manifest,
             name=config["container_name"],
@@ -17224,6 +17434,7 @@ class LocalEngineGroupExecutor:
             },
             group_config_file=pathlib.Path(config["group_file"]),
             runtime_artifact_root=runtime_root,
+            rdma_binding=rdma_binding,
         )
         protection = {
             "protection_root": config["protection_root"],
@@ -17257,6 +17468,11 @@ class LocalEngineGroupExecutor:
                     inspection = container_inspect(config["container_name"])
             if inspection is None:
                 raise LetsInferError("engine-group container disappeared during start")
+            _require_matching_rdma_container(
+                inspection,
+                rdma_binding,
+                manifest["container"]["memory_bytes"],
+            )
             publish_protection_state(
                 protection, generation, "starting", inspection=inspection
             )

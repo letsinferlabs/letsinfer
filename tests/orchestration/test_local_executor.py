@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import pathlib
 import tempfile
 import unittest
@@ -96,7 +97,10 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             "protection_root": str(root / "watchdog" / "protected-engines" / self.group_id),
             "_manifest": {
                 "serving": {},
-                "container": {"startup_timeout_seconds": 30},
+                "container": {
+                    "startup_timeout_seconds": 30,
+                    "memory_bytes": 120259084288,
+                },
             },
             "_group": self.group,
             "_credential_sha256": "6" * 64,
@@ -176,6 +180,103 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         ):
             remote = executor._safe_result(config, "running")
         self.assertEqual(remote["endpoint"], "https://member.local:18000")
+
+    def test_rdma_docker_options_are_exact_and_never_privileged(self) -> None:
+        binding = {
+            "interface": "enp1s0",
+            "device": "mlx5_0",
+            "local_address": "192.0.2.10",
+            "peer_addresses": ["192.0.2.20"],
+            "device_nodes": [
+                {"path": "/dev/infiniband/rdma_cm", "major": 10, "minor": 57},
+                {"path": "/dev/infiniband/uverbs0", "major": 231, "minor": 192},
+            ],
+        }
+        options = cli._rdma_docker_options(binding, 120259084288)
+        self.assertNotIn("--privileged", options)
+        self.assertIn(
+            "/dev/infiniband/uverbs0:/dev/infiniband/uverbs0:rwm", options
+        )
+        self.assertIn("memlock=120259084288:120259084288", options)
+        self.assertIn("LETSINFER_RDMA_INTERFACE=enp1s0", options)
+        self.assertIn("LETSINFER_RDMA_DEVICE=mlx5_0", options)
+
+        invalid = {
+            **binding,
+            "device_nodes": [
+                {"path": "/dev/null", "major": 1, "minor": 3}
+            ],
+        }
+        with self.assertRaisesRegex(cli.LetsInferError, "device identity"):
+            cli._rdma_docker_options(invalid, 120259084288)
+
+    def test_group_rdma_binding_uses_only_the_sealed_interface_and_peers(self) -> None:
+        group = copy.deepcopy(self.group)
+        group["resources"][1]["rdma_interface"] = "enp1s0"
+        resolved = {
+            "interface": "enp1s0",
+            "device": "mlx5_0",
+            "local_address": "192.0.2.10",
+            "peer_addresses": ["192.0.2.20"],
+            "device_nodes": [
+                {"path": "/dev/infiniband/rdma_cm", "major": 10, "minor": 57},
+                {"path": "/dev/infiniband/uverbs0", "major": 231, "minor": 192},
+            ],
+        }
+        with mock.patch.object(
+            cli, "resolve_connectx_rdma_binding", return_value=resolved
+        ) as resolver:
+            self.assertEqual(
+                cli._engine_group_rdma_binding(group, self.member_id), resolved
+            )
+        resolver.assert_called_once_with(
+            "enp1s0",
+            "member.local",
+            ["coordinator.local"],
+            minimum_speed_mbps=200000,
+            minimum_mtu=9000,
+        )
+        self.assertIsNone(
+            cli._engine_group_rdma_binding(self.group, self.member_id)
+        )
+
+    def test_reused_rdma_container_must_match_devices_memlock_and_binding(self) -> None:
+        binding = {
+            "interface": "enp1s0",
+            "device": "mlx5_0",
+            "local_address": "192.0.2.10",
+            "peer_addresses": ["192.0.2.20"],
+            "device_nodes": [
+                {"path": "/dev/infiniband/rdma_cm", "major": 10, "minor": 57},
+                {"path": "/dev/infiniband/uverbs0", "major": 231, "minor": 192},
+            ],
+        }
+        inspection = {
+            "HostConfig": {
+                "Devices": [
+                    {
+                        "PathOnHost": item["path"],
+                        "PathInContainer": item["path"],
+                        "CgroupPermissions": "rwm",
+                    }
+                    for item in binding["device_nodes"]
+                ],
+                "Ulimits": [
+                    {"Name": "memlock", "Soft": 1024, "Hard": 1024}
+                ],
+            },
+            "Config": {
+                "Env": [
+                    "LETSINFER_RDMA_INTERFACE=enp1s0",
+                    "LETSINFER_RDMA_DEVICE=mlx5_0",
+                ]
+            },
+        }
+        cli._require_matching_rdma_container(inspection, binding, 1024)
+        with self.assertRaisesRegex(cli.LetsInferError, "memlock"):
+            cli._require_matching_rdma_container(inspection, binding, 2048)
+        with self.assertRaisesRegex(cli.LetsInferError, "non-RDMA"):
+            cli._require_matching_rdma_container(inspection, None, 1024)
 
     def test_stop_disarms_before_removing_the_exact_managed_container(self) -> None:
         executor = cli.LocalEngineGroupExecutor(self.member_id)

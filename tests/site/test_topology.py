@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import pathlib
+import stat
 import tempfile
 import time
 import unittest
@@ -165,6 +166,98 @@ class TopologyTests(unittest.TestCase):
                         "enp1s0", "192.0.2.20", sys_class=root
                     )
 
+    def test_connectx_rdma_binding_resolves_exact_character_devices(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            root = base / "sys/class"
+            interface = root / "net/enp1s0"
+            (interface / "device").mkdir(parents=True)
+            for name, value in (
+                ("carrier", "1\n"), ("operstate", "up\n"),
+                ("speed", "200000\n"), ("mtu", "9000\n"),
+            ):
+                (interface / name).write_text(value, encoding="ascii")
+            driver = base / "drivers/mlx5_core"
+            driver.mkdir(parents=True)
+            (interface / "device/driver").symlink_to(
+                driver, target_is_directory=True
+            )
+            (root / "infiniband/mlx5_0/device/net/enp1s0").mkdir(
+                parents=True
+            )
+            verbs = root / "infiniband_verbs/uverbs0"
+            verbs.mkdir(parents=True)
+            (verbs / "ibdev").write_text("mlx5_0\n", encoding="ascii")
+
+            def command(arguments: list[str]) -> str:
+                if "address" in arguments:
+                    return '[{"addr_info":[{"local":"192.0.2.10"}]}]'
+                if "route" in arguments:
+                    return '[{"dev":"enp1s0","prefsrc":"192.0.2.10"}]'
+                raise AssertionError(arguments)
+
+            details = mock.Mock(
+                st_mode=stat.S_IFCHR | 0o660,
+                st_rdev=0,
+            )
+            with mock.patch.object(inventory, "_command", side_effect=command):
+                binding = inventory.resolve_connectx_rdma_binding(
+                    "enp1s0",
+                    "192.0.2.10",
+                    ["192.0.2.20"],
+                    minimum_speed_mbps=200000,
+                    minimum_mtu=9000,
+                    sys_class=root,
+                    dev_root=base / "dev",
+                    lstat=lambda _path: details,
+                    access=lambda _path, _mode: True,
+                )
+            self.assertEqual(binding["device"], "mlx5_0")
+            self.assertEqual(
+                [pathlib.Path(item["path"]).name for item in binding["device_nodes"]],
+                ["rdma_cm", "uverbs0"],
+            )
+
+            (root / "infiniband/mlx5_1/device/net/enp1s0").mkdir(
+                parents=True
+            )
+            with (
+                mock.patch.object(inventory, "_command", side_effect=command),
+                self.assertRaisesRegex(inventory.InventoryError, "exactly one"),
+            ):
+                inventory.resolve_connectx_rdma_binding(
+                    "enp1s0",
+                    "192.0.2.10",
+                    ["192.0.2.20"],
+                    minimum_speed_mbps=200000,
+                    minimum_mtu=9000,
+                    sys_class=root,
+                    dev_root=base / "dev",
+                    lstat=lambda _path: details,
+                    access=lambda _path, _mode: True,
+                )
+            (root / "infiniband/mlx5_1/device/net/enp1s0").rmdir()
+            (root / "infiniband/mlx5_1/device/net").rmdir()
+            (root / "infiniband/mlx5_1/device").rmdir()
+            (root / "infiniband/mlx5_1").rmdir()
+
+            symlink = mock.Mock(st_mode=stat.S_IFLNK | 0o777, st_rdev=0)
+            with (
+                mock.patch.object(inventory, "_command", side_effect=command),
+                self.assertRaisesRegex(inventory.InventoryError, "character device"),
+            ):
+                inventory.resolve_connectx_rdma_binding(
+                    "enp1s0",
+                    "192.0.2.10",
+                    ["192.0.2.20"],
+                    minimum_speed_mbps=200000,
+                    minimum_mtu=9000,
+                    sys_class=root,
+                    dev_root=base / "dev",
+                    lstat=lambda _path: symlink,
+                    access=lambda _path, _mode: True,
+                )
+
     def test_local_inventory_uses_stable_devices_and_bounded_facts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -296,6 +389,12 @@ class TopologyTests(unittest.TestCase):
                 placement, target("parallel", 2)["placement"]["interconnect"]
             ),
             {left: "192.0.2.10", right: "192.0.2.10"},
+        )
+        self.assertEqual(
+            graph.engine_interfaces(
+                placement, target("parallel", 2)["placement"]["interconnect"]
+            ),
+            {left: "enp1s0", right: "enp1s0"},
         )
         broken = facts(right)
         with self.assertRaisesRegex(TopologyError, "no topology-compatible"):
