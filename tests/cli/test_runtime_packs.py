@@ -347,8 +347,8 @@ class RuntimePackTests(unittest.TestCase):
             "generator": {"id": "letsinfer-code-prose", "version": 2},
             "tokenizer": {
                 "capability": "engine-rendered-chat-count-v1",
-                "model_sha256": "1" * 64,
-                "engine_image_sha256": "2" * 64,
+                "model_sha256": "8ca77d89ac9c7b8d6e8777b3c4002f43a56046d59d6eb6443bec3d7271402702",
+                "engine_image_sha256": "b" * 64,
                 "render_contract": "openai-chat-user-v1",
             },
             "request": {
@@ -391,7 +391,8 @@ class RuntimePackTests(unittest.TestCase):
             "engine": {
                 "id": "example-engine",
                 "protocol": {"version": 2},
-                "oci": {
+                "distribution": {
+                    "kind": "oci-container",
                     "reference": "ghcr.io/example/engine@sha256:" + "a" * 64,
                     "immutable_id": "sha256:" + "b" * 64,
                 },
@@ -404,6 +405,7 @@ class RuntimePackTests(unittest.TestCase):
                 "uri": "hf://example/model",
                 "artifact": "model",
                 "acquisition": {
+                    "kind": "oci-container",
                     "image": "ghcr.io/example/acquire@sha256:" + "c" * 64
                 },
             },
@@ -784,10 +786,10 @@ class RuntimePackTests(unittest.TestCase):
             runtime = json.loads(
                 (source / "runtime.json").read_text(encoding="utf-8")
             )
-            runtime["engine"]["oci"]["payload_id"] = "sha256:" + "8" * 64
+            runtime["engine"]["distribution"]["payload_id"] = "sha256:" + "8" * 64
             runtime["benchmark"]["contract"] = value
             self.assertIs(runtime_packs.validate_runtime_config(runtime), runtime)
-            runtime["engine"]["oci"]["payload_id"] = "sha256:" + "9" * 64
+            runtime["engine"]["distribution"]["payload_id"] = "sha256:" + "9" * 64
             with self.assertRaisesRegex(
                 runtime_packs.RuntimePackError, "payload differs"
             ):
@@ -1136,7 +1138,10 @@ class RuntimePackTests(unittest.TestCase):
                                                 "license": "MIT",
                                                 "source": "ghcr.io/example/model@sha256:" + "a" * 64,
                                                 "engine": "example-engine",
-                                                "engine_oci": "ghcr.io/example/engine@sha256:" + "b" * 64,
+                                                "engine_distribution": {
+                                                    "kind": "oci-container",
+                                                    "reference": "ghcr.io/example/engine@sha256:" + "b" * 64,
+                                                },
                                                 "model_uri": "hf://example/model",
                                                 "benchmark": {
                                                     "id": "c" * 64,
@@ -1278,7 +1283,10 @@ class RuntimePackTests(unittest.TestCase):
                                             "license": "MIT",
                                             "source": "registry.example/runtime@sha256:" + "a" * 64,
                                             "engine": "example-engine",
-                                            "engine_oci": "registry.example/engine@sha256:" + "b" * 64,
+                                            "engine_distribution": {
+                                                "kind": "oci-container",
+                                                "reference": "registry.example/engine@sha256:" + "b" * 64,
+                                            },
                                             "model_uri": "hf://example/model",
                                             "benchmark": {
                                                 "id": "c" * 64,

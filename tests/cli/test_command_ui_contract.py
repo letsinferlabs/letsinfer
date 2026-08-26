@@ -11,7 +11,7 @@ import pathlib
 import unittest
 from unittest import mock
 
-from core import cli, topology_ui, ui
+from core import cli, node_usage_ui, topology_ui, ui
 from core.actions import ACTIONS, MutationClass
 from core.ui_contracts import (
     OutputContract,
@@ -537,6 +537,57 @@ class CommandPrimitiveTests(unittest.TestCase):
 
 
 class ImmutableStatusContractTests(unittest.TestCase):
+    def test_node_usage_bytes_are_fixed_at_eighty_columns(self) -> None:
+        stream = FakeStream(tty=True)
+        presenter = cli.command_ui.CommandUI(
+            stream,
+            environ={
+                "TERM": "xterm-256color",
+                "NO_COLOR": "1",
+                "COLUMNS": "80",
+            },
+        )
+        presenter.header("Node Usage")
+        node_usage_ui.render(
+            presenter,
+            {
+                "categories": [
+                    {
+                        "label": "Models",
+                        "allocated_bytes": 140 * 1024**3,
+                        "reclaimable_bytes": 40 * 1024**3,
+                        "reclaimable_items": 2,
+                    },
+                    {
+                        "label": "Runtimes",
+                        "allocated_bytes": 2 * 1024**3,
+                        "reclaimable_bytes": 0,
+                        "reclaimable_items": 0,
+                    },
+                    {
+                        "label": "Caches",
+                        "allocated_bytes": 4 * 1024**3,
+                        "reclaimable_bytes": 3 * 1024**3,
+                        "reclaimable_items": 3,
+                    },
+                ],
+                "total_allocated_bytes": 146 * 1024**3,
+                "total_reclaimable_bytes": 43 * 1024**3,
+                "filesystem": {
+                    "free_bytes": 60 * 1024**3,
+                    "total_bytes": 1000 * 1024**3,
+                },
+                "container_runtime": {
+                    "available": True,
+                    "image_logical_bytes": 86 * 1024**3,
+                    "writable_bytes": 34 * 1024**3,
+                    "managed_containers": 3,
+                },
+            },
+        )
+        expected = (FIXTURES / "node-usage-80.txt").read_text(encoding="utf-8")
+        self.assertEqual(stream.getvalue(), expected)
+
     def test_serving_status_bytes_remain_unchanged_at_eighty_columns(self) -> None:
         stream = FakeStream(tty=True)
         ui.runtime_status(

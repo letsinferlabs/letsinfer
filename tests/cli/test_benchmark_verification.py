@@ -354,8 +354,9 @@ class BenchmarkVerificationTests(unittest.TestCase):
         pack.replace(bundle_root / "runtime.letsinfer")
         engine = {
             "mode": "reuse-engine",
-            "reference": runtime["engine"]["oci"]["reference"],
-            "config_digest": runtime["engine"]["oci"]["immutable_id"],
+            "kind": "oci-container",
+            "reference": runtime["engine"]["distribution"]["reference"],
+            "config_digest": runtime["engine"]["distribution"]["immutable_id"],
         }
         payloads = {
             "runtime-plan.json": verification.canonical_bytes(plan),

@@ -21,11 +21,11 @@ repository's `tools/readme_onboarding.py` owns the exact template.
 
 ## Required schema
 
-Only runtime schema 5 is accepted. The top-level fields are:
+Only runtime schema 6 is accepted. The top-level fields are:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "id": "sglang--owner--model--dgx-spark",
   "version": "1.0.0",
   "logical_model": "model",
@@ -76,6 +76,7 @@ Your runtime owns model acquisition:
     "uri": "hf://owner/repository",
     "artifact": "model",
     "acquisition": {
+      "kind": "oci-container",
       "image": "registry/acquirer@sha256:<digest>"
     }
   },
@@ -105,16 +106,29 @@ $LETSINFER_HOME/models/<lowercase-owner>--<lowercase-repository>/<revision>/
 The path comes from the Hugging Face URI. Equal revisions deduplicate across
 runtime candidates.
 
-## Engine OCI
+An OCI Engine uses `oci-container` acquisition. A native Apple Engine instead
+uses the dependency-free exact-revision client:
 
-Pin one Engine OCI and provide its opaque upstream settings:
+```json
+{"kind": "huggingface-http", "client": "huggingface-http-v1"}
+```
+
+The native client enumerates a full 40-hex Hugging Face revision over HTTPS,
+enforces bounded paths, counts, and sizes, verifies declared LFS and GGUF
+SHA-256 identities, and never executes repository code.
+
+## Engine distribution
+
+`engine.distribution` is a closed union. Linux runtimes normally use an OCI
+distribution:
 
 ```json
 {
   "engine": {
     "id": "sglang",
     "protocol": {"version": 2},
-    "oci": {
+    "distribution": {
+      "kind": "oci-container",
       "reference": "ghcr.io/org/image@sha256:<manifest-digest>",
       "immutable_id": "sha256:<image-config-digest>",
       "payload_id": "sha256:<normalized-execution-payload>",
@@ -128,7 +142,7 @@ Pin one Engine OCI and provide its opaque upstream settings:
 }
 ```
 
-The Engine OCI contains the upstream engine and its matching adapter.
+The Engine distribution contains the upstream engine and its matching adapter.
 `arguments` and `environment` pass through after protocol-owned values are
 protected. `LETSINFER_*` environment names are reserved. Core has no
 engine-version registry or upstream flag schema.
@@ -138,6 +152,39 @@ The payload ID identifies the pinned base, normalized final overlay files, and
 runtime-relevant container configuration. Packaging-only OCI changes preserve
 benchmark evidence when the payload ID is unchanged; changing executable
 payload invalidates qualification.
+
+A macOS archive distribution pins an official archive and the complete
+runtime-owned adapter closure:
+
+```json
+{
+  "kind": "native-archive",
+  "platform": "macos/arm64",
+  "payload_id": "sha256:<payload>",
+  "source_revision": "<40-hex upstream commit>",
+  "entrypoint": "adapter/engine-adapter",
+  "port_count": 2,
+  "archive": {
+    "url": "https://example.invalid/engine.tar.gz",
+    "sha256": "<archive sha256>",
+    "bytes": 123,
+    "format": "tar.gz",
+    "strip_prefix": "engine-release"
+  },
+  "upstream_executable": "bin/engine"
+}
+```
+
+`python-standalone` has the same common identity but replaces `archive` and
+`upstream_executable` with an exact CPython archive and a hash-locked
+`requirements_lock`. Core installs the complete lock into an isolated,
+relocatable package directory; it does not use the host Python environment.
+
+An iOS runtime uses `embedded-application`. It pins the application bundle ID,
+minimum app version, embedded Engine name, upstream source revision, and a
+deterministic payload ID. Its signing policy is `deployment-managed`; signing
+team identities and certificates are never runtime inputs. The app validates
+the exact candidate and payload before accepting a group job.
 
 ## Target, capacity, and cache
 
@@ -167,10 +214,11 @@ topology. In that case the runtime owns rank layout, engine configuration,
 interconnect requirements, kernels, and adapter inputs; core allocates the
 declared devices and treats the complete group as one endpoint.
 
-Use `container` for measured resource and startup bounds. Use `serving` for
+Use `container` for the measured resource and startup envelope even for a
+native distribution; native runtimes set `shm_bytes` to zero. Use `serving` for
 the measured maximum connections, active requests, and context. Use `cache`
 for the selected provider and
-replay contract; its implementation stays inside the Engine OCI.
+replay contract; its implementation stays inside the Engine distribution.
 
 ## Parallel execution
 
@@ -210,7 +258,7 @@ ports, and supplies verified addresses and connection facts. Tasks in one
 startup phase launch concurrently; later phases wait for complete readiness.
 The endpoint is published only after every required task is ready.
 
-The task identifier is deliberately opaque. Your Engine OCI maps it to any TP,
+The task identifier is deliberately opaque. Your Engine distribution maps it to any TP,
 PP, expert, sequence, data, or hybrid strategy; ranks, stages, rendezvous,
 collectives, and engine flags never enter core schemas. A one-node parallel
 runtime may receive multiple GPU UUIDs in `task-0`. Complete parallel groups
@@ -230,16 +278,16 @@ a non-RDMA transport.
 
 `benchmark.contract` selects the standard core-owned workload and request
 matrix. Prompts and runners stay in core, so every model receives the same
-benchmark bytes and measurement rules. Individual verifiers produce complete
-schema-4 benchmark records. The trusted bot aggregates accepted records into
+benchmark bytes and measurement rules. Native payloads produce schema-8 records
+that bind their distribution kind and payload SHA-256. The trusted bot aggregates accepted records into
 `benchmark.consensus.json`, which is excluded from executable pack bytes.
 
 ## Deterministic runtime artifact
 
 The public `letsinfer-runtime-authoring` skill creates a deterministic artifact
 through the exact checked-out Core packing contract, using
-runtime artifact schema 5 and media type
-`application/vnd.letsinfer.runtime.v5+tar`. The generated
+runtime artifact schema 6 and media type
+`application/vnd.letsinfer.runtime.v6+tar`. The generated
 `letsinfer-runtime.json` descriptor records every path, byte length, normalized
 mode, and SHA-256. Paths are sorted; ownership and timestamps are normalized.
 
@@ -260,9 +308,10 @@ gateway, Watchdog, benchmark runners, prompts, and node orchestration belong to
 core and must not be copied into your candidate.
 
 Engine source is required only when the proposal changes or introduces that
-Engine. Existing-Engine runtimes preserve the exact OCI manifest and
-configuration pins without copying upstream source. Never commit generated
-image layers, model weights, build caches, or private benchmark evidence.
+Engine. Existing-Engine runtimes preserve the exact distribution identity
+without copying upstream source. Never commit generated image layers, native
+archives, static libraries, model weights, build caches, signing identities,
+or private benchmark evidence.
 
 The root runtimes `manifest.json` is generated from candidates. Do not edit it
 as a second source of truth.

@@ -324,6 +324,74 @@ class BenchmarkRecordTests(unittest.TestCase):
         )
         self.assertIs(benchmark_record.validate_record(value), value)
 
+        native = json.loads(json.dumps(value))
+        native["schema_version"] = (
+            benchmark_record.DISTRIBUTION_PAYLOAD_SCHEMA_VERSION
+        )
+        native["subject"].pop("measured_engine_oci")
+        native["subject"]["measured_engine_kind"] = "python-standalone"
+        native["id"] = benchmark_record.benchmark_id(
+            native["installation_id"],
+            native["timestamp_unix_ns"],
+            native["subject"],
+            native["benchmark_contract_sha256"],
+            native["results_sha256"],
+        )
+        self.assertIs(benchmark_record.validate_record(native), native)
+
+        native_contract = {
+            "schema_version": 2,
+            "suite": "letsinfer-code-prose-v1",
+            "generator": {"id": "letsinfer-code-prose", "version": 2},
+            "tokenizer": {
+                "capability": "engine-rendered-chat-count-v1",
+                "model_sha256": "7" * 64,
+                "engine_image_sha256": "8" * 64,
+                "render_contract": "openai-chat-user-v1",
+            },
+            "request": {
+                "output_tokens": 128,
+                "min_completion_tokens": 128,
+                "require_natural_stop": False,
+                "temperature": 0,
+                "seed": 42042,
+            },
+            "sample_interval_seconds": 5,
+            "cases": [
+                {"id": "32k", "prompt_tokens": 32768, "concurrencies": [1]}
+            ],
+        }
+        native["benchmark_contract"] = native_contract
+        native["benchmark_contract_sha256"] = hashlib.sha256(
+            benchmark_record.canonical_bytes(native_contract)
+        ).hexdigest()
+        native["id"] = benchmark_record.benchmark_id(
+            native["installation_id"],
+            native["timestamp_unix_ns"],
+            native["subject"],
+            native["benchmark_contract_sha256"],
+            native["results_sha256"],
+        )
+        self.assertIs(benchmark_record.validate_record(native), native)
+
+        native["schema_version"] = benchmark_record.EXECUTION_PAYLOAD_SCHEMA_VERSION
+        native["benchmark_contract"] = contract
+        native["benchmark_contract_sha256"] = hashlib.sha256(
+            benchmark_record.canonical_bytes(contract)
+        ).hexdigest()
+        native["id"] = benchmark_record.benchmark_id(
+            native["installation_id"],
+            native["timestamp_unix_ns"],
+            native["subject"],
+            native["benchmark_contract_sha256"],
+            native["results_sha256"],
+        )
+        with self.assertRaisesRegex(
+            benchmark_record.BenchmarkRecordError,
+            "schema 7 requires an OCI execution payload",
+        ):
+            benchmark_record.validate_record(native)
+
         with_ttft = json.loads(json.dumps(value))
         ttft_cache = {
             "workload": "pp64000,tg1,c1",

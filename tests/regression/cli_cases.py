@@ -10,6 +10,7 @@ CLI_CASES = {
     "doctor": ("doctor", "--json"),
     "node.info": ("node", "info", "--json"),
     "node.list": ("node", "list", "--json"),
+    "node.usage": ("node", "usage", "--json"),
     "node.add": ("node", "add", "--json"),
     "node.pause": ("node", "pause", "child", "--json"),
     "node.resume": ("node", "resume", "child", "--json"),

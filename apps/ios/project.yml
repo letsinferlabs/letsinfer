@@ -1,0 +1,55 @@
+name: LetsInferIOS
+options:
+  bundleIdPrefix: ai.letsinfer
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    CODE_SIGN_STYLE: Automatic
+    CURRENT_PROJECT_VERSION: 1
+    GENERATE_INFOPLIST_FILE: YES
+    MARKETING_VERSION: 0.1.0
+    PRODUCT_NAME: "Let's Infer"
+    SWIFT_VERSION: 5.0
+    TARGETED_DEVICE_FAMILY: "1,2"
+targets:
+  LetsInferIOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: LetsInferIOS
+    dependencies:
+      - framework: Vendor/llama.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.letsinfer.ios
+        INFOPLIST_KEY_CFBundleDisplayName: "Let's Infer"
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Let's Infer uses your local network to let a main node discover and securely add this iPhone or iPad."
+        INFOPLIST_KEY_NSBonjourServices:
+          - _letsinfer._tcp
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIRequiresFullScreen: YES
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lc++
+          - -framework
+          - Accelerate
+          - -framework
+          - Metal
+
+  LetsInferIOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: LetsInferIOSTests
+    dependencies:
+      - target: LetsInferIOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.letsinfer.ios.tests
+        GENERATE_INFOPLIST_FILE: YES

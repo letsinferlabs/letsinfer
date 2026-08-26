@@ -1556,12 +1556,12 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         validated = validate_runtime_config(runtime)
         execution = cli.runtime_execution_manifest(validated, qualified=False)
         self.assertEqual(execution["engine"]["name"], "future-engine")
-        self.assertEqual(execution["image"]["reference"], runtime["engine"]["oci"]["reference"])
+        self.assertEqual(execution["image"]["reference"], runtime["engine"]["distribution"]["reference"])
 
     def test_execution_manifest_accepts_normalized_engine_payload_identity(self) -> None:
         runtime = runtime_candidate()
         payload = "sha256:" + "8" * 64
-        runtime["engine"]["oci"]["payload_id"] = payload
+        runtime["engine"]["distribution"]["payload_id"] = payload
         execution = cli.runtime_execution_manifest(runtime, qualified=True)
         self.assertEqual(execution["image"]["payload_id"], payload)
         cli.validate_manifest(execution)

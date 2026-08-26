@@ -1,0 +1,12 @@
+Node Usage                                                       ϟ  LET'S INFER 
+
+CATEGORY          USED  RECLAIMABLE  ITEMS
+Models         140.0 G       40.0 G      2
+Runtimes         2.0 G          0 B      0
+Caches           4.0 G        3.0 G      3
+Let’s Infer  146.0 G
+Reclaimable  43.0 G
+Disk free    60.0 G        of 1000.0 G
+Images       86.0 G        Logical size; shared layers excluded from
+                           totals
+Writes       34.0 G        3 managed container(s)

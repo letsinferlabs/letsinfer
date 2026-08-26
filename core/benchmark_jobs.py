@@ -262,6 +262,14 @@ def active_state() -> dict[str, Any] | None:
     return state if is_alive(state) else None
 
 
+@contextmanager
+def cleanup_guard() -> Iterator[dict[str, Any] | None]:
+    """Block a new benchmark while a caller removes completed evidence."""
+
+    with _locked():
+        yield active_state()
+
+
 def _base_state(
     *,
     job_id: str,
