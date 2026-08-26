@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import errno
 import hashlib
@@ -23,6 +24,47 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_interactive_model_install_turns_same_model_choices_into_replicas(self) -> None:
+        members = [
+            {"member_id": "a" * 32, "display_name": "Home", "state": "active"},
+            {"member_id": "b" * 32, "display_name": "Workshop", "state": "active"},
+        ]
+        store = mock.MagicMock()
+        store.__enter__.return_value.members.return_value = members
+        presenter = mock.Mock()
+        presenter.prompt.choose.side_effect = ["ling-3-flash", "ling-3-flash"]
+        arguments = argparse.Namespace(
+            model=None,
+            catalog="catalog.json",
+            runtime=None,
+            node=None,
+            all_nodes=False,
+            replace_existing=False,
+            action_id="model.install",
+        )
+        with (
+            mock.patch.object(cli, "_human_presenter", return_value=presenter),
+            mock.patch.object(
+                cli.CatalogManager,
+                "load",
+                return_value=types.SimpleNamespace(
+                    document={"models": {"ling-3-flash": {}}}
+                ),
+            ),
+            mock.patch.object(
+                cli,
+                "_fresh_site_topology",
+                return_value=(mock.sentinel.identity, mock.sentinel.graph),
+            ),
+            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(cli, "_catalog_release_for_node"),
+            mock.patch.object(cli, "install", return_value=0) as install,
+        ):
+            self.assertEqual(cli.model_install_command(arguments), 0)
+        install.assert_called_once()
+        self.assertEqual(install.call_args.args[0].model, "ling-3-flash")
+        self.assertEqual(install.call_args.args[0].node, ["a" * 32, "b" * 32])
+
     def test_pairing_interrupts_are_graceful_at_each_interactive_wait(self) -> None:
         candidate = {
             "confirmation_code": "123456",
@@ -53,7 +95,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                     timeout=30,
                     config=None,
                     role="administrator",
-                    action_id="pair",
+                    action_id="auth.controller.add",
                 )
                 config = {
                     "installation_id": "i" * 64,
@@ -683,7 +725,8 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             self.assertEqual(cli._benchmark_stop_timeout_seconds(), 3_600)
 
     def test_detached_benchmark_binds_resident_groups_into_worker_command(self) -> None:
-        arguments = cli.parser().parse_args(["benchmark", "model", "--c1"])
+        parsed = cli.parser().parse_args(["benchmark", "run", "model", "--c1"])
+        arguments = cli._benchmark_namespace(parsed, runtime=parsed.model)
         command = cli._benchmark_self_command(
             arguments,
             pathlib.Path("/core/bin/letsinfer"),
@@ -1168,7 +1211,34 @@ class RuntimeCandidateCliTests(unittest.TestCase):
 
     def test_legacy_commands_are_not_registered(self) -> None:
         parser = cli.parser()
-        for command in ("derive", "engines", "releases"):
+        for command in (
+            "setup",
+            "hardware",
+            "topology",
+            "child",
+            "alias",
+            "list",
+            "runtimes",
+            "pack",
+            "inspect",
+            "install",
+            "scale",
+            "serve",
+            "start",
+            "stop",
+            "restart",
+            "recover",
+            "upgrade",
+            "rollback",
+            "pair",
+            "controllers",
+            "key",
+            "expose",
+            "unexpose",
+            "derive",
+            "engines",
+            "releases",
+        ):
             with self.subTest(command=command), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     parser.parse_args([command])
@@ -1176,6 +1246,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
     def test_install_selects_runtime_not_engine(self) -> None:
         arguments = cli.parser().parse_args(
             [
+                "model",
                 "install",
                 "example-model",
                 "--runtime",

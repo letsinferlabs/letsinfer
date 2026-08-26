@@ -36,8 +36,9 @@ gated on an acknowledged disarmed generation. A missing descriptor is rebuilt
 as a fresh disarmed generation and acknowledged before the exit proceeds.
 A trip is durably latched. Automatic recovery
 handles ordinary crashes and unhealthy containers but refuses an OOM or safety
-trip until an operator inspects it and runs `letsinfer recover`. `start` and
-`restart` never clear a trip. `recover` explicitly clears the safety latch and
+trip until an operator inspects it and runs `letsinfer model recover MODEL`.
+`model resume` and `model restart` never clear a trip. `model recover`
+explicitly clears the safety latch and
 starts the affected placement again; controller UIs show that action only when
 a trip is actually latched.
 
@@ -115,7 +116,7 @@ The registry installation ID must also match the manifest-addressed Watchdog
 state descriptor; Watchdog fails closed before listening when either file is
 invalid, mismatched, symlinked, non-private, or not owned by the service user.
 
-`letsinfer pair` is a transient enrollment path, not another resident service.
+`letsinfer auth controller add` is a transient enrollment path, not another resident service.
 It resolves the installation identity, controller CA, and Watchdog endpoint
 from the core-owned node plane, so pairing works before any model is installed
 and does not depend on a legacy single-runtime configuration.
@@ -126,7 +127,7 @@ short-lived. Pressing Ctrl-C closes the listener, rejects any in-flight
 enrollment, and reports `Pairing cancelled` without a traceback. It never
 returns the controller CA key or a controller private key. Re-pair replaces
 the prior fingerprint for that stable controller ID;
-`letsinfer controllers forget` revokes a controller explicitly.
+`letsinfer auth controller revoke CONTROLLER` revokes a controller explicitly.
 
 The installed runtime manifest, Watchdog server, and controller must declare
 the same exact protocol version. Any protocol change creates new Watchdog and

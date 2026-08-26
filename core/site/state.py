@@ -658,7 +658,7 @@ class SiteStore:
         if self.path.is_symlink():
             raise SiteError("site database cannot be a symlink")
         if not initialize and not self.path.exists():
-            raise SiteError("site database is missing; run `letsinfer setup`")
+            raise SiteError("site database is missing; rerun the installer")
         self.connection = sqlite3.connect(str(self.path), isolation_level=None, timeout=5.0)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
@@ -1836,7 +1836,7 @@ class SiteStore:
                 raise SiteError("member changed concurrently")
             observed_state = str(observed["state"])
             if observed_state not in {allowed_state, desired_state}:
-                verb = "drained" if draining else "resumed"
+                verb = "paused" if draining else "resumed"
                 raise SiteError(f"member in state {observed_state!r} cannot be {verb}")
             if observed_state != desired_state:
                 changed = connection.execute(

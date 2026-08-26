@@ -439,7 +439,7 @@ def dashboard_lines(
                 terminal,
                 "Runtime",
                 "Not installed",
-                "letsinfer install <model>",
+                "letsinfer model install <model>",
                 width=width,
             )
         )

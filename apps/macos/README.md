@@ -29,7 +29,7 @@ replicas, or a runtime-qualified parallel engine group.
 - Browse credential-free `_letsinfer._tcp` DNS-SD records grouped by logical
   node identity. The record carries the main node's LAN inference scheme and
   port, never an API key.
-- Pair through `letsinfer pair`. The Mac creates a non-exportable P-256 key,
+- Pair through `letsinfer auth controller add`. The Mac creates a non-exportable P-256 key,
   proves possession, verifies the displayed comparison code, and stores the
   issued controller certificate in Keychain.
 - Use the pinned private CA, exact server leaf, and controller certificate for

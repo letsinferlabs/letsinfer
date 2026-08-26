@@ -491,7 +491,7 @@ class CatalogTests(unittest.TestCase):
             cli.list_available_runtimes(arguments)
         payload = json.loads(output.getvalue())
         self.assertEqual(
-            payload["runtimes"][0]["authors"],
+            payload["models"][0]["authors"],
             [
                 {"github_login": "MiaAI-Lab", "github_id": 1, "github_type": "User"},
                 {"github_login": "letsinferlabs", "github_id": 2, "github_type": "Organization"},
@@ -626,7 +626,7 @@ class CatalogTests(unittest.TestCase):
             contextlib.redirect_stdout(output),
         ):
             self.assertEqual(cli.list_available_runtimes(arguments), 0)
-        rows = json.loads(output.getvalue())["runtimes"]
+        rows = json.loads(output.getvalue())["models"]
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]["benchmark_id"])
         self.assertIsNone(rows[0]["benchmark_score"])

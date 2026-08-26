@@ -24,7 +24,7 @@ commands:
 
 ```bash
 curl -fsSL https://letsinfer.ai/install.sh | sh
-letsinfer install <logical-model>
+letsinfer model install <logical-model>
 ```
 
 If a README already exists, the onboarding helper prepends the block and
@@ -56,7 +56,7 @@ After source and supply-chain review marks the subject `benchmark-ready`, two
 eligible independent reviewers run:
 
 ```bash
-letsinfer benchmark verify <pull-request-url>
+letsinfer benchmark verification run <pull-request-url>
 ```
 
 The command resolves the finalizer artifact for that exact PR head. It never
