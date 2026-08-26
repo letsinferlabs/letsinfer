@@ -763,6 +763,18 @@ class RuntimePackTests(unittest.TestCase):
                 "seed": 42042,
             },
         }
+        value["ttft_cache"] = {
+            "prompt_tokens": 64_000,
+            "prompt_domain": "code",
+            "repetitions": 2,
+            "request": {
+                "output_tokens": 1,
+                "min_completion_tokens": 1,
+                "require_natural_stop": False,
+                "temperature": 0,
+                "seed": 42042,
+            },
+        }
         value["tokenizer"].pop("engine_image_sha256")  # type: ignore[union-attr]
         value["tokenizer"]["engine_payload_sha256"] = "8" * 64  # type: ignore[index]
         self.assertIs(runtime_packs.validate_benchmark_contract(value), value)

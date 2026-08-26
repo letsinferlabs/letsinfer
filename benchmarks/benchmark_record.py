@@ -563,10 +563,14 @@ def _validate_telemetry(result: dict[str, Any], where: str) -> None:
 def validate_record(value: Any) -> dict[str, Any]:
     schema_version = value.get("schema_version") if isinstance(value, dict) else None
     expected_fields = (
-        EXECUTION_PAYLOAD_RECORD_FIELDS
+        (
+            TTFT_CACHE_RECORD_FIELDS
+            if isinstance(value, dict) and "ttft_cache" in value
+            else EXECUTION_PAYLOAD_RECORD_FIELDS
+        )
         if schema_version == EXECUTION_PAYLOAD_SCHEMA_VERSION
         else TTFT_CACHE_RECORD_FIELDS
-        if schema_version in {TTFT_CACHE_SCHEMA_VERSION, EXECUTION_PAYLOAD_SCHEMA_VERSION}
+        if schema_version == TTFT_CACHE_SCHEMA_VERSION
         else SHARED_RECORD_FIELDS
         if schema_version == SHARED_SCHEMA_VERSION
         else RECORD_FIELDS
@@ -643,14 +647,22 @@ def validate_record(value: Any) -> dict[str, Any]:
         raise BenchmarkRecordError("timestamp must be the Unix-second form of timestamp_unix_ns")
     results = value.get("results")
     ttft_cache = value.get("ttft_cache")
+    has_ttft_cache = isinstance(ttft_cache, dict)
     actual_results_sha = (
         ttft_cache_results_sha256(results, ttft_cache)
         if schema_version == TTFT_CACHE_SCHEMA_VERSION
+        or (
+            schema_version == EXECUTION_PAYLOAD_SCHEMA_VERSION
+            and has_ttft_cache
+        )
         else results_sha256(results)
     )
     if value.get("results_sha256") != actual_results_sha:
         raise BenchmarkRecordError("benchmark record results_sha256 does not match results")
-    if schema_version == TTFT_CACHE_SCHEMA_VERSION:
+    if schema_version == TTFT_CACHE_SCHEMA_VERSION or (
+        schema_version == EXECUTION_PAYLOAD_SCHEMA_VERSION
+        and has_ttft_cache
+    ):
         validate_ttft_cache_result(ttft_cache)
     seen: set[tuple[str, str]] = set()
     for index, result in enumerate(results):
