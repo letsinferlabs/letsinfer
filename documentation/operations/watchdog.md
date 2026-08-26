@@ -122,8 +122,10 @@ and does not depend on a legacy single-runtime configuration.
 It uses a one-use eight-digit code, a public-key proof, and a separate
 six-digit comparison code that binds the human confirmation to the Mac's exact
 P-256 key. The setup listener is TLS 1.3, single-worker, size bounded, and
-short-lived. It never returns the controller CA key or a controller private
-key. Re-pair replaces the prior fingerprint for that stable controller ID;
+short-lived. Pressing Ctrl-C closes the listener, rejects any in-flight
+enrollment, and reports `Pairing cancelled` without a traceback. It never
+returns the controller CA key or a controller private key. Re-pair replaces
+the prior fingerprint for that stable controller ID;
 `letsinfer controllers forget` revokes a controller explicitly.
 
 The installed runtime manifest, Watchdog server, and controller must declare
