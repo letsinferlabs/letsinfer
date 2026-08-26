@@ -530,6 +530,149 @@ class BenchmarkVerificationTests(unittest.TestCase):
         self.assertEqual(identity["manifest_digest"], manifest_digest)
         self.assertEqual(converted_layer, layer_tar)
 
+    def test_thin_oci_layout_hydrates_verified_external_layers(self) -> None:
+        compact = lambda value: json.dumps(
+            value, sort_keys=True, separators=(",", ":")
+        ).encode()
+
+        def layer(payload: bytes) -> tuple[bytes, bytes, str, str]:
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w") as archive:
+                item = tarfile.TarInfo("opt/letsinfer/" + payload.decode())
+                item.size = len(payload)
+                archive.addfile(item, io.BytesIO(payload))
+            expanded = buffer.getvalue()
+            compressed = gzip.compress(expanded, mtime=0)
+            return (
+                expanded,
+                compressed,
+                "sha256:" + hashlib.sha256(expanded).hexdigest(),
+                "sha256:" + hashlib.sha256(compressed).hexdigest(),
+            )
+
+        base_tar, base_blob, base_diff, base_digest = layer(b"base")
+        patch_tar, patch_blob, patch_diff, patch_digest = layer(b"patch")
+        layers = [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "digest": base_digest,
+                "size": len(base_blob),
+            },
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "digest": patch_digest,
+                "size": len(patch_blob),
+            },
+        ]
+        config = compact(
+            {
+                "architecture": "arm64",
+                "os": "linux",
+                "rootfs": {"type": "layers", "diff_ids": [base_diff, patch_diff]},
+            }
+        )
+        config_digest = "sha256:" + hashlib.sha256(config).hexdigest()
+        manifest = compact(
+            {
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {
+                    "mediaType": "application/vnd.oci.image.config.v1+json",
+                    "digest": config_digest,
+                    "size": len(config),
+                },
+                "layers": layers,
+            }
+        )
+        manifest_digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
+        repository = "ghcr.io/letsinferlabs/engine-images"
+        source_reference = repository + "@sha256:" + "7" * 64
+        target_reference = repository + "@" + manifest_digest
+        inventory = compact(
+            {
+                "schema_version": 1,
+                "source_reference": source_reference,
+                "target_repository": repository,
+                "manifest_digest": manifest_digest,
+                "layers": [
+                    {
+                        "index": 0,
+                        **layers[0],
+                        "diff_id": base_diff,
+                    }
+                ],
+            }
+        )
+        index = compact(
+            {
+                "schemaVersion": 2,
+                "manifests": [
+                    {
+                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "digest": manifest_digest,
+                        "size": len(manifest),
+                        "platform": {"os": "linux", "architecture": "arm64"},
+                    }
+                ],
+            }
+        )
+        remote = verification._RemoteEngineImage(
+            layers=(layers[0],),
+            diff_ids=(base_diff,),
+        )
+        registry = mock.Mock()
+        registry.image.return_value = remote
+        registry.download_blob.side_effect = (
+            lambda _descriptor, destination: destination.write_bytes(base_blob)
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            oci = root / "engine.oci.tar"
+            with tarfile.open(oci, "w") as archive:
+                for name, data in (
+                    ("oci-layout", compact({"imageLayoutVersion": "1.0.0"})),
+                    ("index.json", index),
+                    (f"blobs/sha256/{config_digest[7:]}", config),
+                    (f"blobs/sha256/{patch_digest[7:]}", patch_blob),
+                    (f"blobs/sha256/{manifest_digest[7:]}", manifest),
+                    (verification.EXTERNAL_ENGINE_BLOBS_FILE, inventory),
+                ):
+                    item = tarfile.TarInfo(name)
+                    item.size = len(data)
+                    archive.addfile(item, io.BytesIO(data))
+            with mock.patch.object(
+                verification, "_PublicEngineRegistry", return_value=registry
+            ):
+                identity = verification._oci_archive_identity(
+                    oci,
+                    expected_manifest=manifest_digest,
+                    expected_config=config_digest,
+                    expected_platform="linux/arm64",
+                    expected_reference=target_reference,
+                )
+                docker = root / "engine.docker.tar"
+                verification._docker_archive_from_oci(
+                    oci,
+                    docker,
+                    expected_manifest=manifest_digest,
+                    expected_config=config_digest,
+                    expected_platform="linux/arm64",
+                    tag="letsinfer-verifier/test:thin",
+                    expected_reference=target_reference,
+                )
+            with tarfile.open(docker, "r") as archive:
+                docker_manifest = json.loads(archive.extractfile("manifest.json").read())
+                converted = [
+                    archive.extractfile(name).read()
+                    for name in docker_manifest[0]["Layers"]
+                ]
+
+        self.assertEqual(identity["manifest_digest"], manifest_digest)
+        self.assertEqual(converted, [base_tar, patch_tar])
+        registry.probe_blob.assert_called_once_with(layers[0])
+        registry.download_blob.assert_called_once()
+
     def test_local_engine_cleanup_preserves_preexisting_image(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

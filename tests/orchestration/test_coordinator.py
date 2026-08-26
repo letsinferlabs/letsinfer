@@ -371,5 +371,36 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         self.assertEqual(stopped[0], "task-0")
         self.assertEqual(set(stopped[1:]), {"task-1", "task-2"})
 
+    def test_cleanly_stopped_group_can_run_idempotent_recovery(self) -> None:
+        calls: list[str] = []
+
+        def submit(_member, job, _credential):
+            calls.append(job["action"])
+            return {
+                "protocol": PROTOCOL,
+                "operation_id": job["operation_id"],
+                "replayed": False,
+                "state": "succeeded",
+                "result": {"state": job["action"]},
+            }
+
+        orchestrator = self.orchestrator(submit)
+        orchestrator.stage()
+        orchestrator.start()
+        orchestrator.stop()
+        self.assertEqual(
+            {row["state"] for row in self.store.device_allocations()}, {"reserved"}
+        )
+        calls.clear()
+
+        result = orchestrator.recover(acknowledge_trips=False)
+
+        self.assertEqual(result["state"], "running")
+        self.assertIn("stop", calls)
+        self.assertIn("start", calls)
+        self.assertEqual(
+            {row["state"] for row in self.store.device_allocations()}, {"active"}
+        )
+
 if __name__ == "__main__":
     unittest.main()
