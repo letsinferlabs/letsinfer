@@ -35,10 +35,12 @@ installer; macOS installation never changes Docker.
 Before initialization, the installer also verifies Docker from a transient
 systemd user service. If Docker is healthy but the operator cannot access
 `/var/run/docker.sock`, the installer can add that account to the socket's
-group after warning that Docker group membership is root-equivalent. Linux
-requires a fresh login before the new group reaches the shell, so sign in again
-and rerun the installer. If an already-running user service manager still has
-stale groups, the rerun offers to restart it before initialization continues.
+group after warning that Docker group membership is root-equivalent. It then
+verifies a bounded `sg` process with the refreshed group and uses that context
+for this installation, so a new login is normally unnecessary. If the running
+systemd user manager still has stale groups, the installer offers one explicit
+restart before initialization continues; only a failed refreshed-group check
+asks the operator to close all sessions and sign in again.
 
 For an install without administrator access:
 
