@@ -6,6 +6,7 @@ from __future__ import annotations
 
 CLI_CASES = {
     "status": ("status", "--json"),
+    "topology": ("topology", "--json"),
     "doctor": ("doctor", "--json"),
     "node.info": ("node", "info", "--json"),
     "node.list": ("node", "list", "--json"),

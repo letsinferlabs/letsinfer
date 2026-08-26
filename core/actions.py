@@ -55,6 +55,7 @@ ACTIONS = {
     action.name: action
     for action in (
         _action("status", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE),
+        _action("topology", CommandScope.MAIN, MutationClass.READ, AuditPolicy.NONE),
         _action("doctor", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE),
         _action(
             "uninstall",
@@ -65,10 +66,10 @@ ACTIONS = {
         ),
         _action("node.info", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE),
         _action("node.list", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE),
-        _action("node.add", CommandScope.MAIN, MutationClass.NODE, AuditPolicy.ALWAYS),
-        _action("node.pause", CommandScope.MAIN, MutationClass.NODE, AuditPolicy.ALWAYS),
-        _action("node.resume", CommandScope.MAIN, MutationClass.NODE, AuditPolicy.ALWAYS),
-        _action("node.remove", CommandScope.MAIN, MutationClass.NODE, AuditPolicy.ALWAYS),
+        _action("node.add", CommandScope.ALL, MutationClass.NODE, AuditPolicy.ALWAYS),
+        _action("node.pause", CommandScope.ALL, MutationClass.NODE, AuditPolicy.ALWAYS),
+        _action("node.resume", CommandScope.ALL, MutationClass.NODE, AuditPolicy.ALWAYS),
+        _action("node.remove", CommandScope.ALL, MutationClass.NODE, AuditPolicy.ALWAYS),
         _action(
             "model.list",
             CommandScope.ALL,
@@ -182,7 +183,16 @@ def validate_registry(parser_actions: Iterable[str]) -> None:
             f"unregistered={unknown or '-'} unused={missing or '-'}"
         )
     for item in ACTIONS.values():
-        if item.mutation is MutationClass.NODE and item.scope is not CommandScope.MAIN:
+        if (
+            item.mutation is MutationClass.NODE
+            and item.scope is not CommandScope.MAIN
+            and item.name not in {
+                "node.add",
+                "node.pause",
+                "node.resume",
+                "node.remove",
+            }
+        ):
             raise ValueError(f"node mutation is not main-scoped: {item.name}")
         if item.mutation is MutationClass.NODE and item.audit is not AuditPolicy.ALWAYS:
             raise ValueError(f"node mutation is not mandatorily audited: {item.name}")

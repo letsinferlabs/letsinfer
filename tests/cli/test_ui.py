@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 
 from core import cli as letsinfer
-from core import status_ui, ui
+from core import status_ui, topology_ui, ui
 from core.actions import ACTIONS, AuditPolicy, CommandScope, MutationClass
 from core.ui_contracts import ProgressKind, UI_CONTRACTS
 
@@ -251,7 +251,7 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("0.11.0-rc.3", rendered)
         self.assertIn("557K context", rendered)
         self.assertIn("homeai.local:8000/v1", rendered)
-        self.assertIn("19.0 / 30 MiB", rendered)
+        self.assertIn("19.0 / 30 M", rendered)
         self.assertIn("Request path", rendered)
         self.assertNotIn("Scheduler", rendered)
         self.assertIn("Performance", rendered)
@@ -329,7 +329,7 @@ class TerminalTests(unittest.TestCase):
             environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
         )
         rendered = stream.getvalue()
-        self.assertIn("UPDATE AVAILABLE", rendered)
+        self.assertIn("Update available", rendered)
         self.assertIn("Core 0.11.0-rc.30", rendered)
         self.assertIn("qwen3.8-27b 0.1.0-rc.11", rendered)
 
@@ -500,9 +500,9 @@ class TerminalTests(unittest.TestCase):
         plain = ui.ANSI.sub("", rendered)
         self.assertIn("6% 900 MHz", plain)
         self.assertIn("7% 2.46 GHz", plain)
-        self.assertIn("8% 9 GiB / 122 GiB", plain)
-        self.assertIn("↑10 KiB/s ↓2 MiB/s", plain)
-        self.assertIn("2 MiB/s", plain)
+        self.assertIn("8% 9 G / 122 G", plain)
+        self.assertIn("↑10 K/s ↓2 M/s", plain)
+        self.assertIn("2 M/s", plain)
         self.assertIn(ui.BOLD + ui.DIM + " 900 MHz" + ui.RESET, rendered)
         self.assertIn(ui.BOLD + ui.DIM + " 2.46 GHz" + ui.RESET, rendered)
 
@@ -537,6 +537,10 @@ class TerminalTests(unittest.TestCase):
         system = rendered.partition("System")[2].partition("Temperature")[0]
         self.assertEqual(system.count(ui.BOLD + ui.RED + "↑" + ui.RESET), 2)
         self.assertEqual(system.count(ui.BOLD + ui.GREEN + "↓" + ui.RESET), 2)
+        gpu_line = ui.ANSI.sub(
+            "", next(line for line in system.splitlines() if "GPU" in line)
+        )
+        self.assertRegex(gpu_line, r"GPU\s+20% ↑")
         cpu_line = next(line for line in system.splitlines() if "CPU" in line)
         self.assertNotIn("↑", ui.ANSI.sub("", cpu_line))
         self.assertNotIn("↓", ui.ANSI.sub("", cpu_line))
@@ -552,6 +556,49 @@ class TerminalTests(unittest.TestCase):
         stale_system = ui.ANSI.sub("", stale).partition("System")[2].partition("Temperature")[0]
         self.assertNotIn("↑", stale_system)
         self.assertNotIn("↓", stale_system)
+
+    def test_status_history_headers_and_charts_share_the_right_edge(self) -> None:
+        stream = FakeStream(tty=True)
+        terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
+        rendered = "\n".join(
+            status_ui.dashboard_lines(
+                {
+                    "telemetry": {
+                        "fresh": True,
+                        "system": {
+                            "gpu_percent": 20,
+                            "gpu_temp_deci_c": 400,
+                        },
+                    }
+                },
+                terminal,
+                session_history={
+                    "gpu": [10, 20],
+                    "gpu_temp": [35, 40],
+                },
+            )
+        )
+        plain_rendered = ui.ANSI.sub("", rendered)
+        system = plain_rendered.partition("System")[2].partition("Temperature")[0]
+        temperature = plain_rendered.partition("Temperature")[2]
+        system_header = next(
+            line for line in plain_rendered.splitlines() if "System" in line
+        )
+        temperature_header = next(
+            line for line in plain_rendered.splitlines() if "Temperature" in line
+        )
+        self.assertTrue(system_header.rstrip(" │").endswith("last 5 min"))
+        self.assertTrue(temperature_header.rstrip(" │").endswith("last 5 min"))
+        self.assertNotIn("1 sec", plain_rendered)
+        system_gpu = next(line for line in system.splitlines() if "GPU" in line)
+        temperature_gpu = next(
+            line for line in temperature.splitlines() if "GPU" in line
+        )
+        chart = re.compile(r"[▁▂▃▄▅▆▇█]")
+        self.assertEqual(
+            chart.search(system_gpu).start(),
+            chart.search(temperature_gpu).start(),
+        )
 
     def test_status_temperature_history_uses_a_fixed_120_degree_scale(self) -> None:
         stream = FakeStream(tty=True)
@@ -896,6 +943,131 @@ class TerminalTests(unittest.TestCase):
         self.assertNotIn("\033[H\033[J", rendered)
         self.assertIn("fixture-model", rendered)
 
+    def test_live_topology_animates_traffic_until_control_c(self) -> None:
+        stream = FakeStream(tty=True)
+        payload = {
+            "topology_sha256": "a" * 64,
+            "nodes": [
+                {
+                    "member_id": "1" * 32,
+                    "name": "homeai",
+                    "role": "main",
+                    "health": "healthy",
+                    "traffic": {"rx_kib_s": 1, "tx_kib_s": 2, "fresh": True},
+                },
+                {
+                    "member_id": "2" * 32,
+                    "name": "homeai-node-2",
+                    "role": "child",
+                    "health": "healthy",
+                    "traffic": {"rx_kib_s": 3, "tx_kib_s": 4, "fresh": True},
+                },
+            ],
+            "links": [
+                {
+                    "members": ["1" * 32, "2" * 32],
+                    "kind": "connectx",
+                    "speed_mbps": 200000,
+                    "mtu": 9000,
+                    "rdma": True,
+                    "age_seconds": 0,
+                }
+            ],
+        }
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"TERM": "xterm-256color", "COLUMNS": "80"},
+                clear=True,
+            ),
+            mock.patch.object(topology_ui.sys, "stdout", stream),
+            mock.patch.object(topology_ui.time, "sleep", side_effect=KeyboardInterrupt),
+        ):
+            self.assertEqual(topology_ui.live_topology(lambda: payload), 0)
+        rendered = stream.getvalue()
+        self.assertIn("\033[?1049h", rendered)
+        self.assertIn("\033[?1049l", rendered)
+        self.assertIn("◆", rendered)
+        self.assertIn("200 Gbit/s", rendered)
+        self.assertIn("authenticated host-wide RX/TX", rendered)
+
+    def test_topology_distinguishes_membership_from_direct_link_evidence(self) -> None:
+        node = {
+            "member_id": "1" * 32,
+            "name": "homeai",
+            "role": "main",
+            "health": "healthy",
+            "models": [],
+            "traffic": {"fresh": False},
+        }
+        one = topology_ui.topology_text(
+            {"nodes": [node], "links": []},
+            stream=FakeStream(tty=True),
+            environ={"TERM": "xterm", "NO_COLOR": "1", "COLUMNS": "80"},
+        )
+        self.assertEqual(one.count("No verified direct node link"), 1)
+        two = topology_ui.topology_text(
+            {
+                "nodes": [
+                    node,
+                    {
+                        **node,
+                        "member_id": "2" * 32,
+                        "name": "homeai-node-2",
+                        "role": "child",
+                    },
+                ],
+                "links": [],
+            },
+            stream=FakeStream(tty=True),
+            environ={"TERM": "xterm", "NO_COLOR": "1", "COLUMNS": "80"},
+        )
+        self.assertEqual(two.count("No verified direct node link"), 2)
+
+    def test_topology_reflects_online_offline_membership_and_transport_changes(self) -> None:
+        main = {
+            "member_id": "1" * 32,
+            "name": "homeai",
+            "role": "main",
+            "state": "active",
+            "online": True,
+            "health": "healthy",
+            "models": [],
+            "traffic": {"fresh": False},
+        }
+        child = {
+            "member_id": "2" * 32,
+            "name": "node-2",
+            "role": "child",
+            "state": "offline",
+            "online": False,
+            "health": "offline",
+            "connection": "Wireless",
+            "models": [],
+            "traffic": {"fresh": False},
+        }
+        wireless = topology_ui.topology_text(
+            {"nodes": [main, child], "links": []},
+            stream=FakeStream(tty=True),
+            environ={"TERM": "xterm", "NO_COLOR": "1", "COLUMNS": "80"},
+        )
+        self.assertIn("homeai · MAIN · ONLINE", wireless)
+        self.assertIn("node-2 · OFFLINE", wireless)
+        self.assertIn("[Wireless]", wireless)
+        ethernet = topology_ui.topology_text(
+            {"nodes": [main, {**child, "connection": "Ethernet"}], "links": []},
+            stream=FakeStream(tty=True),
+            environ={"TERM": "xterm", "NO_COLOR": "1", "COLUMNS": "80"},
+        )
+        self.assertIn("[Ethernet]", ethernet)
+        removed = topology_ui.topology_text(
+            {"nodes": [main], "links": []},
+            stream=FakeStream(tty=True),
+            environ={"TERM": "xterm", "NO_COLOR": "1", "COLUMNS": "80"},
+        )
+        self.assertIn("1 node", removed)
+        self.assertNotIn("node-2", removed)
+
     def test_live_runtime_status_refreshes_request_performance_and_allocation(self) -> None:
         stream = FakeStream(tty=True)
         base = {
@@ -1212,7 +1384,7 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("Home", rendered)
         self.assertIn("Not installed", rendered)
         self.assertIn("http://homeai.local:8000/v1", rendered)
-        self.assertIn("UPDATE AVAILABLE", rendered)
+        self.assertIn("Update available", rendered)
         self.assertIn("Core 0.11.0-rc.30", rendered)
         self.assertNotIn("\033[", rendered)
 
@@ -1467,7 +1639,7 @@ class HelpTests(unittest.TestCase):
         self.assertIn("Commands:", value)
         self.assertIn("letsinfer [-h] COMMAND", value)
 
-    def test_subcommand_help_carries_a_quiet_breadcrumb(self) -> None:
+    def test_subcommand_help_keeps_function_left_and_brand_right(self) -> None:
         stream = FakeStream(tty=False)
         with contextlib.redirect_stdout(stream):
             root = letsinfer.parser()
@@ -1483,7 +1655,9 @@ class HelpTests(unittest.TestCase):
                 if isinstance(action, argparse._SubParsersAction)
             )
             value = model_subparsers.choices["install"].format_help()
-        self.assertIn("LET'S INFER  /  MODEL INSTALL", value)
+        first = value.splitlines()[0]
+        self.assertTrue(first.startswith("Model Install"))
+        self.assertTrue(first.endswith(" >  LET'S INFER "))
         self.assertNotIn("\033[", value)
         self.assertIn("Arguments:", value)
         self.assertNotIn("Commands:\n  model", value)
@@ -1551,6 +1725,124 @@ class MainOutputTests(unittest.TestCase):
             json.dumps(payload, separators=(",", ":")) + "\n",
         )
         self.assertEqual(stderr.getvalue(), "")
+
+    def test_control_c_is_quiet_cancellation_not_failure(self) -> None:
+        def action(_arguments: argparse.Namespace) -> int:
+            raise KeyboardInterrupt
+
+        arguments = argparse.Namespace(
+            command="node",
+            action=action,
+            action_id="node.info",
+            json=False,
+            port=1,
+            engine_port=None,
+            tail=0,
+        )
+        parser = mock.Mock()
+        parser.parse_args.return_value = arguments
+        stdout = FakeStream(tty=True)
+        stderr = FakeStream(tty=True)
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"TERM": "xterm-256color", "NO_COLOR": "1"},
+                clear=True,
+            ),
+            mock.patch.object(letsinfer, "parser", return_value=parser),
+            mock.patch.object(
+                letsinfer,
+                "_authorize_command",
+                return_value=(self._metadata(), None),
+            ),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = letsinfer.main(["node", "info"])
+        self.assertEqual(result, 130)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Cancelled", stderr.getvalue())
+        self.assertNotIn("FAILED", stderr.getvalue())
+
+    def test_peer_denial_is_muted_message_not_failure(self) -> None:
+        def action(_arguments: argparse.Namespace) -> int:
+            raise letsinfer.CommandDenied("homeai-node-2 denied the request")
+
+        arguments = argparse.Namespace(
+            command="node",
+            action=action,
+            action_id="node.add",
+            json=False,
+            port=1,
+            engine_port=None,
+            tail=0,
+        )
+        parser = mock.Mock()
+        parser.parse_args.return_value = arguments
+        stdout = FakeStream(tty=True)
+        stderr = FakeStream(tty=True)
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"TERM": "xterm-256color"},
+                clear=True,
+            ),
+            mock.patch.object(letsinfer, "parser", return_value=parser),
+            mock.patch.object(
+                letsinfer,
+                "_authorize_command",
+                return_value=(self._metadata("node.add"), None),
+            ),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = letsinfer.main(["node", "add"])
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        rendered = stderr.getvalue()
+        self.assertIn(
+            ui.DIM + "homeai-node-2 denied the request" + ui.RESET,
+            rendered,
+        )
+        self.assertNotIn("FAILED", rendered)
+
+    def test_control_transport_error_is_bounded_without_traceback(self) -> None:
+        def action(_arguments: argparse.Namespace) -> int:
+            raise letsinfer.ControlError("membership connection failed: closed")
+
+        arguments = argparse.Namespace(
+            command="node",
+            action=action,
+            action_id="node.add",
+            json=False,
+            port=1,
+            engine_port=None,
+            tail=0,
+        )
+        parser = mock.Mock()
+        parser.parse_args.return_value = arguments
+        stderr = FakeStream(tty=True)
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"TERM": "xterm-256color", "NO_COLOR": "1"},
+                clear=True,
+            ),
+            mock.patch.object(letsinfer, "parser", return_value=parser),
+            mock.patch.object(
+                letsinfer,
+                "_authorize_command",
+                return_value=(self._metadata("node.add"), None),
+            ),
+            contextlib.redirect_stdout(FakeStream(tty=True)),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = letsinfer.main(["node", "add"])
+        rendered = stderr.getvalue()
+        self.assertEqual(result, 1)
+        self.assertIn("FAILED", rendered)
+        self.assertIn("membership connection failed: closed", rendered)
+        self.assertNotIn("Traceback", rendered)
 
     def test_every_bounded_progress_contract_has_activity_language(self) -> None:
         mutations = {

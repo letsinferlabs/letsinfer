@@ -24,6 +24,52 @@ class SiteMoveTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def joined_child(self) -> tuple[state.SiteIdentity, state.SiteIdentity]:
+        with mock.patch.dict(os.environ, self.destination_environment):
+            destination = state.setup_site("Home", "destination.local")
+            with state.SiteStore(identity=destination) as store:
+                invite = store.create_invite("lan")
+            destination_control = control.SiteControlState(
+                destination, facts_provider=lambda: {}
+            )
+            challenge = destination_control.challenge(invite["invite_id"])
+        with mock.patch.dict(os.environ, self.source_environment):
+            source = state.setup_site("Source", "source.local")
+            candidate = state.existing_member_identity(source)
+            transcript = control.enrollment_transcript(
+                challenge,
+                candidate,
+                member_name="Source member",
+                member_address="source.local",
+            )
+            proof = state.member_proof(transcript)
+        with mock.patch.dict(os.environ, self.destination_environment):
+            response = destination_control.enroll(
+                {
+                    "protocol": control.PROTOCOL,
+                    "invite_id": invite["invite_id"],
+                    "code": invite["code"],
+                    "member_id": candidate["member_id"],
+                    "member_name": "Source member",
+                    "member_address": "source.local",
+                    "member_public_key": candidate["member_public_key"],
+                    "installation_id": candidate["installation_id"],
+                    "installation_created_at_unix": candidate["created_at_unix"],
+                    "proof_signature": proof,
+                }
+            )
+        with mock.patch.dict(os.environ, self.source_environment):
+            with move.LocalMoveTransaction(source) as transaction:
+                state.install_member_identity(
+                    response["document"],
+                    response["signature"],
+                    response["site_public_key"],
+                    response["site_ca_certificate"],
+                    response["member_certificate"],
+                )
+                child = transaction.commit()
+        return source, child
+
     def test_failed_move_restores_site_and_preserves_runtime_objects(self) -> None:
         with mock.patch.dict(os.environ, self.source_environment):
             source = state.setup_site("Source", "source.local")
@@ -114,11 +160,31 @@ class SiteMoveTests(unittest.TestCase):
             self.assertTrue((runtime / "runtime.json").is_file())
             self.assertFalse(state.database_path().exists())
 
+    def test_child_detach_preserves_physical_identity_and_rolls_back_before_commit(self) -> None:
+        source, child = self.joined_child()
+        with mock.patch.dict(os.environ, self.source_environment):
+            with self.assertRaisesRegex(RuntimeError, "cancel"):
+                with move.LocalDetachTransaction(child):
+                    detached = state.setup_site("Detached", "detached.local")
+                    self.assertEqual(detached.role, "main")
+                    raise RuntimeError("cancel")
+            self.assertEqual(state.read_identity(), child)
+
+            with move.LocalDetachTransaction(child) as transaction:
+                detached = state.setup_site("Detached", "detached.local")
+                replacement = transaction.commit()
+            self.assertEqual(replacement, detached)
+            self.assertEqual(replacement.role, "main")
+            self.assertNotEqual(replacement.site_id, child.site_id)
+            self.assertEqual(replacement.member_id, source.member_id)
+            self.assertEqual(replacement.installation_id, source.installation_id)
+            self.assertEqual(replacement.created_at_unix, source.created_at_unix)
+
     def test_prepared_move_requires_destination_approval_before_commit(self) -> None:
         with mock.patch.dict(os.environ, self.destination_environment):
             destination = state.setup_site("Home", "destination.local")
             with state.SiteStore(identity=destination) as store:
-                invite = store.create_invite("lan")
+                invite = store.create_invite("remote")
             destination_control = control.SiteControlState(
                 destination, facts_provider=lambda: {}
             )
