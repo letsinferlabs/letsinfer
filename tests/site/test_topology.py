@@ -70,6 +70,50 @@ def target(strategy: str, count: int) -> dict:
 
 
 class TopologyTests(unittest.TestCase):
+    def test_down_interface_cannot_poison_fresh_member_facts(self) -> None:
+        current = {
+            "name": "enp1s0f0np0",
+            "addresses": [],
+            "mtu": 1500,
+            "speed_mbps": 0,
+            "rdma": True,
+        }
+        retained = facts("1" * 32, "2" * 32)["network"]["links"][0]
+        retained["interface"] = current["name"]
+        retained["speed_mbps"] = 200_000
+        retained["mtu"] = 1500
+        self.assertEqual(inventory._publishable_links([current], [retained]), [])
+        current["speed_mbps"] = 200_000
+        self.assertEqual(
+            inventory._publishable_links([current], [retained]),
+            [retained],
+        )
+
+    def test_direct_link_evidence_expires_independently_of_member_facts(self) -> None:
+        now = int(time.time())
+        left_id = "1" * 32
+        right_id = "2" * 32
+        left = facts(left_id, right_id)
+        right = facts(right_id, left_id)
+        for document in (left, right):
+            document["observed_at_unix"] = now
+            document["network"]["links"][0]["observed_at_unix"] = now - 5
+        current = TopologyGraph(
+            [left, right],
+            now_unix=now,
+            member_certificates={left_id: "a" * 64, right_id: "a" * 64},
+        )
+        self.assertIn((left_id, right_id), current.links)
+        for document in (left, right):
+            document["network"]["links"][0]["observed_at_unix"] = now - 7
+        expired = TopologyGraph(
+            [left, right],
+            now_unix=now,
+            member_certificates={left_id: "a" * 64, right_id: "a" * 64},
+        )
+        self.assertEqual(expired.links, {})
+        self.assertEqual(set(expired.members), {left_id, right_id})
+
     def test_arm_cpu_model_uses_bounded_lscpu_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             proc_root = pathlib.Path(directory)

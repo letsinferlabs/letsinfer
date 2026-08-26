@@ -43,6 +43,47 @@ class NodeAddContractTests(unittest.TestCase):
             "expires_at_unix": int(time.time()) + 180,
         }
 
+    def test_node_add_uses_generic_platform_network_provider(self) -> None:
+        plan = mock.sentinel.plan
+        presenter = mock.Mock()
+        presenter.prompt.confirm.return_value = True
+        activity = mock.MagicMock()
+        activity.enabled = False
+        arguments = types.SimpleNamespace(action_id="node.add")
+        with (
+            mock.patch.object(cli.platform, "system", return_value="Linux"),
+            mock.patch.object(cli, "host_network_plan", return_value=plan),
+            mock.patch.object(cli, "_human_presenter", return_value=presenter),
+            mock.patch.object(cli.sys.stdin, "isatty", return_value=True),
+            mock.patch.object(cli, "_command_activity", return_value=activity),
+            mock.patch.object(
+                cli,
+                "apply_network_plan",
+                return_value={"state": "configured"},
+            ) as apply,
+        ):
+            cli._prepare_platform_network_for_node_add(arguments)
+        apply.assert_called_once_with(plan)
+        presenter.result.assert_called_once()
+
+    def test_node_add_preserves_declined_platform_network_setup(self) -> None:
+        presenter = mock.Mock()
+        presenter.prompt.confirm.return_value = False
+        with (
+            mock.patch.object(cli.platform, "system", return_value="Linux"),
+            mock.patch.object(
+                cli, "host_network_plan", return_value=mock.sentinel.plan
+            ),
+            mock.patch.object(cli, "_human_presenter", return_value=presenter),
+            mock.patch.object(cli.sys.stdin, "isatty", return_value=True),
+            mock.patch.object(cli, "apply_network_plan") as apply,
+        ):
+            cli._prepare_platform_network_for_node_add(
+                types.SimpleNamespace(action_id="node.add")
+            )
+        apply.assert_not_called()
+        presenter.result.assert_called_once()
+
     def test_request_store_is_private_exact_and_clearable(self) -> None:
         expected = self.request()
         self.assertEqual(node_add.store_request(expected), expected)

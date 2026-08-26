@@ -20,8 +20,9 @@ and telemetry state. Use `--json` when another program needs the result.
 
 Shows the authenticated main-and-child graph with verified links, node health,
 model placements, and current host network traffic. Its live terminal view
-animates directional traffic against measured RX/TX rates and verified link
-capacity, while `--json` returns one exact snapshot.
+animates independently of one-second state polling, reports standalone and
+engine-group placements, and pauses only groups that depend on a lost verified
+link, while `--json` returns one exact snapshot.
 
 ### `letsinfer doctor`
 
@@ -54,8 +55,9 @@ state. Use `--json` to consume the topology without parsing the human table.
 Shows incoming requests and discovers certificate-identified nodes that can be
 adopted as children. The main selects the pinned node and the candidate accepts
 that exact request locally, which activates the child without a second code;
-when run on a child, the command confirms coordinated detach and returns the
-machine to standalone discovery.
+provider-owned high-speed networking is prepared without overwriting an
+external plan, while child invocation confirms coordinated detach and returns
+the machine to standalone discovery.
 
 ### `letsinfer node pause [NODE]`
 
