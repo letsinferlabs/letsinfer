@@ -271,6 +271,18 @@ class BenchmarkRecordTests(unittest.TestCase):
                     "seed": 42042,
                 },
             },
+            "ttft_cache": {
+                "prompt_tokens": 64_000,
+                "prompt_domain": "code",
+                "repetitions": 2,
+                "request": {
+                    "output_tokens": 1,
+                    "min_completion_tokens": 1,
+                    "require_natural_stop": False,
+                    "temperature": 0,
+                    "seed": 42042,
+                },
+            },
             "tokenizer": {
                 "capability": "engine-rendered-chat-count-v1",
                 "model_sha256": "7" * 64,
@@ -311,6 +323,33 @@ class BenchmarkRecordTests(unittest.TestCase):
             value["results_sha256"],
         )
         self.assertIs(benchmark_record.validate_record(value), value)
+
+        with_ttft = json.loads(json.dumps(value))
+        ttft_cache = {
+            "workload": "pp64000,tg1,c1",
+            "prompt_domain": "code",
+            "prompt_suite": "letsinfer-code-prose-v1",
+            "prompt_sha256": "9" * 64,
+            "actual_prompt_tokens": 63_912,
+            "cold_ttft_seconds": 58.0,
+            "warm_ttft_seconds": 2.0,
+            "cold_cached_prompt_tokens": 0,
+            "warm_cached_prompt_tokens": 63_744,
+            "ttft_speedup_ratio": 29.0,
+            "ttft_reduction_percent": 96.55172413793103,
+        }
+        with_ttft["ttft_cache"] = ttft_cache
+        with_ttft["results_sha256"] = benchmark_record.ttft_cache_results_sha256(
+            with_ttft["results"], ttft_cache
+        )
+        with_ttft["id"] = benchmark_record.benchmark_id(
+            with_ttft["installation_id"],
+            with_ttft["timestamp_unix_ns"],
+            with_ttft["subject"],
+            with_ttft["benchmark_contract_sha256"],
+            with_ttft["results_sha256"],
+        )
+        self.assertIs(benchmark_record.validate_record(with_ttft), with_ttft)
 
         value["subject"]["engine_payload_sha256"] = "9" * 64
         with self.assertRaisesRegex(
