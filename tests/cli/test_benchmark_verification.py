@@ -22,6 +22,19 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class BenchmarkVerificationTests(unittest.TestCase):
+    def test_execution_payload_identity_matches_public_build_contract(self) -> None:
+        value = verification.engine_payload_digest(
+            "linux/arm64",
+            {"config": {"Env": ["A=1"], "Cmd": ["/engine"]}},
+            ("sha256:" + "1" * 64,),
+            base_reference="docker.io/example/base@sha256:" + "2" * 64,
+            overlay_digest="sha256:" + "3" * 64,
+        )
+        self.assertEqual(
+            value,
+            "sha256:9143d1f411e90f8c1f9564ae25f36a7db9ea7efad98d4ee0bf64b4da9a6d5920",
+        )
+
     def _pr(self) -> verification.PullRequest:
         return verification.PullRequest(
             123,

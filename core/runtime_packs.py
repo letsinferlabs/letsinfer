@@ -62,6 +62,7 @@ PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION = 4
 SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION = 5
 SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION = 6
 TTFT_CACHE_BENCHMARK_SCHEMA_VERSION = 7
+EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION = 8
 BENCHMARK_SUITE = "letsinfer-code-prose-v1"
 BENCHMARK_GENERATOR = "letsinfer-code-prose"
 BENCHMARK_GENERATOR_VERSION = 2
@@ -70,6 +71,7 @@ PREFIX_SHARED_BENCHMARK_GENERATOR_VERSION = 4
 SHORT_WORKLOAD_BENCHMARK_GENERATOR_VERSION = 5
 SHORT_CONCURRENCY_BENCHMARK_GENERATOR_VERSION = 6
 TTFT_CACHE_BENCHMARK_GENERATOR_VERSION = 7
+EXECUTION_PAYLOAD_BENCHMARK_GENERATOR_VERSION = 8
 BENCHMARK_TOKENIZER_CAPABILITY = "engine-rendered-chat-count-v1"
 BENCHMARK_RENDER_CONTRACT = "openai-chat-user-v1"
 SELECTION_SCHEMA_VERSION = 3
@@ -460,6 +462,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
     elif schema_version in {
         SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     }:
         required = common_fields | {"domains", "execution", "short"}
     elif schema_version == TTFT_CACHE_BENCHMARK_SCHEMA_VERSION:
@@ -480,6 +483,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
             SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
             TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+            EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
         }
     ):
         raise RuntimePackError(f"{where}.schema_version is unsupported")
@@ -502,6 +506,9 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             SHORT_CONCURRENCY_BENCHMARK_GENERATOR_VERSION
         ),
         TTFT_CACHE_BENCHMARK_SCHEMA_VERSION: TTFT_CACHE_BENCHMARK_GENERATOR_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION: (
+            EXECUTION_PAYLOAD_BENCHMARK_GENERATOR_VERSION
+        ),
     }[value["schema_version"]]
     if (
         generator.get("id") != BENCHMARK_GENERATOR
@@ -516,6 +523,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
         TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     }:
         domains = value.get("domains")
         if (
@@ -533,6 +541,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
             SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
             TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+            EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
         }:
             execution_fields.add("stream_prefix")
         if not isinstance(execution, dict) or set(execution) != execution_fields:
@@ -559,6 +568,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
                 SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
                 SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
                 TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+                EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
             }
             and execution.get("stream_prefix") != "shared-body"
         ):
@@ -567,10 +577,15 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             )
 
     tokenizer = value.get("tokenizer")
+    engine_identity_field = (
+        "engine_payload_sha256"
+        if value["schema_version"] == EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION
+        else "engine_image_sha256"
+    )
     tokenizer_fields = {
         "capability",
         "model_sha256",
-        "engine_image_sha256",
+        engine_identity_field,
         "render_contract",
     }
     if not isinstance(tokenizer, dict) or set(tokenizer) != tokenizer_fields:
@@ -582,7 +597,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         raise RuntimePackError(f"{where}.tokenizer.capability is unsupported")
     if tokenizer.get("render_contract") != BENCHMARK_RENDER_CONTRACT:
         raise RuntimePackError(f"{where}.tokenizer.render_contract is unsupported")
-    for field in ("model_sha256", "engine_image_sha256"):
+    for field in ("model_sha256", engine_identity_field):
         if not isinstance(tokenizer.get(field), str) or not SHA256_RE.fullmatch(
             tokenizer[field]
         ):
@@ -595,6 +610,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
         TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     }:
         short = value.get("short")
         short_fields = {
@@ -605,6 +621,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
         if value["schema_version"] in {
             SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
             TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+            EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
         }:
             short_fields.add("concurrencies")
         if not isinstance(short, dict) or set(short) != short_fields:
@@ -629,6 +646,7 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
             in {
                 SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
                 TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+                EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
             }
             and short.get("concurrencies") != [1, 2, 4]
         ):
@@ -853,6 +871,8 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(oci, dict) or set(oci) not in (
         {"reference", "immutable_id"},
         {"reference", "immutable_id", "base"},
+        {"reference", "immutable_id", "payload_id"},
+        {"reference", "immutable_id", "base", "payload_id"},
     ):
         raise RuntimePackError("runtime.engine.oci has invalid fields")
     if not REGISTRY_DIGEST_RE.fullmatch(oci.get("reference", "")):
@@ -861,6 +881,12 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
         raise RuntimePackError("runtime.engine.oci.immutable_id must be a SHA-256 image ID")
     if "base" in oci and not REGISTRY_DIGEST_RE.fullmatch(oci.get("base", "")):
         raise RuntimePackError("runtime.engine.oci.base must be digest-pinned")
+    if "payload_id" in oci and not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", oci.get("payload_id", "")
+    ):
+        raise RuntimePackError(
+            "runtime.engine.oci.payload_id must be a SHA-256 execution payload"
+        )
     for key in ("model_format", "cache_provider"):
         if not isinstance(engine.get(key), str) or not SAFE_NAME_RE.fullmatch(engine[key]):
             raise RuntimePackError(f"runtime.engine.{key} must be a lowercase safe name")
@@ -1010,8 +1036,23 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
     contract = benchmark.get("contract")
     if not isinstance(contract, dict):
         raise RuntimePackError("runtime.benchmark.contract must be an object")
-    if contract.get("schema_version") == BENCHMARK_SCHEMA_VERSION:
+    if contract.get("schema_version") in {
+        BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
+    }:
         validate_benchmark_contract(contract)
+    if contract.get("schema_version") == EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION:
+        payload_id = oci.get("payload_id")
+        tokenizer_payload = contract.get("tokenizer", {}).get(
+            "engine_payload_sha256"
+        )
+        if (
+            not isinstance(payload_id, str)
+            or tokenizer_payload != payload_id.removeprefix("sha256:")
+        ):
+            raise RuntimePackError(
+                "runtime benchmark Engine payload differs from runtime.engine.oci"
+            )
     try:
         validate_target_binding(value.get("orchestration"), target["placement"])
     except OrchestrationError as error:

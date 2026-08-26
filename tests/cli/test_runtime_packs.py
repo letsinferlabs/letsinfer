@@ -736,6 +736,51 @@ class RuntimePackTests(unittest.TestCase):
         ):
             runtime_packs.validate_benchmark_contract(changed)
 
+    def test_execution_payload_contract_binds_engine_payload(self) -> None:
+        value = self._benchmark()
+        value["schema_version"] = (
+            runtime_packs.EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION
+        )
+        value["generator"]["version"] = (  # type: ignore[index]
+            runtime_packs.EXECUTION_PAYLOAD_BENCHMARK_GENERATOR_VERSION
+        )
+        value["domains"] = ["code"]
+        value["execution"] = {
+            "isolation": "fresh-matrix",
+            "prefix_state": "shared",
+            "samples_per_cell": 1,
+            "stream_prefix": "shared-body",
+        }
+        value["short"] = {
+            "domains": ["code", "prose"],
+            "prompt_tokens": 256,
+            "concurrencies": [1, 2, 4],
+            "request": {
+                "output_tokens": 512,
+                "min_completion_tokens": 512,
+                "require_natural_stop": False,
+                "temperature": 0,
+                "seed": 42042,
+            },
+        }
+        value["tokenizer"].pop("engine_image_sha256")  # type: ignore[union-attr]
+        value["tokenizer"]["engine_payload_sha256"] = "8" * 64  # type: ignore[index]
+        self.assertIs(runtime_packs.validate_benchmark_contract(value), value)
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._source(pathlib.Path(directory))
+            runtime = json.loads(
+                (source / "runtime.json").read_text(encoding="utf-8")
+            )
+            runtime["engine"]["oci"]["payload_id"] = "sha256:" + "8" * 64
+            runtime["benchmark"]["contract"] = value
+            self.assertIs(runtime_packs.validate_runtime_config(runtime), runtime)
+            runtime["engine"]["oci"]["payload_id"] = "sha256:" + "9" * 64
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError, "payload differs"
+            ):
+                runtime_packs.validate_runtime_config(runtime)
+
     def test_ttft_cache_contract_requires_exact_64k_repeat(self) -> None:
         value = self._benchmark()
         value["schema_version"] = runtime_packs.TTFT_CACHE_BENCHMARK_SCHEMA_VERSION
