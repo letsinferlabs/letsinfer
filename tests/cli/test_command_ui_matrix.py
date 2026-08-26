@@ -514,7 +514,7 @@ class WholeCommandDispatchMatrixTests(unittest.TestCase):
                 self.assertEqual(call.kwargs["worker_context"], False)
                 self.assertEqual(
                     call.kwargs["explicit_check"],
-                    action_id in {"update", "update.check", "uninstall"},
+                    action_id in {"update.core", "update.check", "uninstall"},
                 )
 
     def test_dispatcher_progress_is_bounded_by_each_declared_policy(self) -> None:
@@ -523,11 +523,11 @@ class WholeCommandDispatchMatrixTests(unittest.TestCase):
             *cli.HANDLER_STEP_PROGRESS,
         }
         # Uninstall cannot animate before its confirmation prompt and therefore
-        # owns its two post-confirmation spinners. Topology probe owns truthful
-        # step boundaries. Their handler behavior has focused tests elsewhere.
-        self.assertEqual(handler_progress_owners, {"uninstall", "topology.probe"})
+        # owns its two post-confirmation spinners. Other public work uses one
+        # truthful bounded activity surface.
+        self.assertEqual(handler_progress_owners, {"uninstall"})
         special_progress_owners = {
-            "update",
+            "update.core",
             *handler_progress_owners,
         }
         for action_id, metadata in ACTIONS.items():
@@ -669,7 +669,7 @@ class WholeCommandDispatchMatrixTests(unittest.TestCase):
             OutputContract.FROZEN_STATUS,
             OutputContract.LIVE_DASHBOARD,
         }
-        excluded = {"update", "update.check", "uninstall"}
+        excluded = {"update.core", "update.check", "uninstall"}
         for action_id, metadata in ACTIONS.items():
             presentation = UI_CONTRACTS[action_id]
             if (
@@ -767,7 +767,7 @@ class DispatcherPresentationTests(unittest.TestCase):
     def test_logs_keep_stdout_raw_and_brand_only_the_control_channel(self) -> None:
         payload = "2026-08-23T12:00:00Z engine ready\n"
         namespace = argparse.Namespace(
-            action_id="logs",
+            action_id="model.logs",
             action=lambda _: sys.stdout.write(payload) and 0,
             json=False,
         )
@@ -804,7 +804,7 @@ class DispatcherPresentationTests(unittest.TestCase):
             return 0
 
         namespace = argparse.Namespace(
-            action_id="install",
+            action_id="model.install",
             action=handler,
             json=False,
         )
@@ -814,7 +814,9 @@ class DispatcherPresentationTests(unittest.TestCase):
             self._dispatch_streams(),
             mock.patch.object(cli, "parser", return_value=parser),
             mock.patch.object(
-                cli, "_authorize_command", return_value=(action("install"), None)
+                cli,
+                "_authorize_command",
+                return_value=(action("model.install"), None),
             ),
             mock.patch.object(cli, "_audit_marker", return_value=7),
             mock.patch.object(
@@ -831,7 +833,7 @@ class DispatcherPresentationTests(unittest.TestCase):
                 ),
             ),
         ):
-            self.assertEqual(cli.main(["install"]), 0)
+            self.assertEqual(cli.main(["model", "install"]), 0)
 
         self.assertEqual(
             events,
@@ -860,7 +862,7 @@ class DispatcherPresentationTests(unittest.TestCase):
             for action_id, presentation in UI_CONTRACTS.items()
             if presentation.output is OutputContract.RAW_STDOUT
         }
-        self.assertEqual(raw, {"logs"})
+        self.assertEqual(raw, {"model.logs"})
 
 
 class ChildFailurePresentationTests(unittest.TestCase):

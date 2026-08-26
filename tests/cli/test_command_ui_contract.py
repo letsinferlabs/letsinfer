@@ -105,9 +105,9 @@ class PresentationInventoryTests(unittest.TestCase):
             UI_CONTRACTS["status"].surface, SurfaceKind.FROZEN_STATUS
         )
         self.assertIs(
-            UI_CONTRACTS["benchmark"].output, OutputContract.LIVE_DASHBOARD
+            UI_CONTRACTS["benchmark.run"].output, OutputContract.LIVE_DASHBOARD
         )
-        self.assertIs(UI_CONTRACTS["logs"].output, OutputContract.RAW_STDOUT)
+        self.assertIs(UI_CONTRACTS["model.logs"].output, OutputContract.RAW_STDOUT)
         self.assertIs(
             UI_CONTRACTS["audit.export"].output,
             OutputContract.ARTIFACT_RESULT,
@@ -121,9 +121,9 @@ class PresentationInventoryTests(unittest.TestCase):
         }
         self.assertEqual(
             declared,
-            {"update"} | set(cli.HANDLER_STEP_PROGRESS),
+            {"update.core"} | set(cli.HANDLER_STEP_PROGRESS),
         )
-        self.assertEqual(cli.HANDLER_STEP_PROGRESS, {"topology.probe"})
+        self.assertEqual(cli.HANDLER_STEP_PROGRESS, set())
 
     def test_topology_probe_advances_each_truthful_stage(self) -> None:
         events: list[str] = []
@@ -194,12 +194,11 @@ class PresentationInventoryTests(unittest.TestCase):
         self.assertEqual(
             cli.POST_PROMPT_PROGRESS,
             {
-                "node.move",
-                "child.join",
-                "install",
-                "upgrade",
-                "rollback",
-                "pair",
+                "node.add",
+                "model.install",
+                "model.rollback",
+                "auth.controller.add",
+                "update.model",
                 "uninstall",
             },
         )
@@ -207,11 +206,11 @@ class PresentationInventoryTests(unittest.TestCase):
     def test_handler_owned_activity_is_silent_in_json_mode(self) -> None:
         stdout = FakeStream(tty=True)
         stderr = FakeStream(tty=True)
-        arguments = mock.Mock(action_id="install", json=True)
+        arguments = mock.Mock(action_id="model.install", json=True)
         with (
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
-            cli._command_activity(arguments, action_id="install"),
+            cli._command_activity(arguments, action_id="model.install"),
         ):
             pass
         self.assertEqual(stdout.getvalue(), "")
@@ -249,7 +248,7 @@ class PresentationInventoryTests(unittest.TestCase):
             timeout=30,
             config=None,
             role="administrator",
-            action_id="pair",
+            action_id="auth.controller.add",
         )
         config = {
             "installation_id": "i" * 64,
@@ -292,7 +291,7 @@ class CommandPrimitiveTests(unittest.TestCase):
         stream = FakeStream(tty=True)
         self.assertTrue(
             ui.command_header(
-                "key.create",
+                "auth.key.create",
                 stream=stream,
                 environ={"TERM": "xterm-256color"},
             )
@@ -306,7 +305,7 @@ class CommandPrimitiveTests(unittest.TestCase):
             + ui.RESET
             + " "
             + ui.DIM
-            + "/  KEY / CREATE"
+            + "/  AUTH / KEY / CREATE"
             + ui.RESET
             + "\n\n",
         )
@@ -314,12 +313,12 @@ class CommandPrimitiveTests(unittest.TestCase):
     def test_command_header_retains_layout_without_color(self) -> None:
         stream = FakeStream(tty=True)
         ui.command_header(
-            "child.join",
+            "node.add",
             stream=stream,
             environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
         )
         self.assertEqual(
-            stream.getvalue(), " ϟ  LET'S INFER  /  CHILD / JOIN\n\n"
+            stream.getvalue(), " ϟ  LET'S INFER  /  NODE / ADD\n\n"
         )
 
     def test_command_header_is_silent_for_redirected_and_dumb_terminals(self) -> None:
@@ -330,17 +329,17 @@ class CommandPrimitiveTests(unittest.TestCase):
         for stream, environ in cases:
             with self.subTest(tty=stream.isatty(), term=environ["TERM"]):
                 self.assertFalse(
-                    ui.command_header("install", stream=stream, environ=environ)
+                    ui.command_header("model.install", stream=stream, environ=environ)
                 )
                 self.assertEqual(stream.getvalue(), "")
 
     def test_ascii_terminal_uses_the_status_lockup_fallback(self) -> None:
         stream = FakeStream(tty=True, encoding="ascii")
         ui.command_header(
-            "install", stream=stream, environ={"TERM": "xterm-256color"}
+            "model.install", stream=stream, environ={"TERM": "xterm-256color"}
         )
         plain = ui.ANSI.sub("", stream.getvalue())
-        self.assertEqual(plain, " >  LET'S INFER  /  INSTALL\n\n")
+        self.assertEqual(plain, " >  LET'S INFER  /  MODEL / INSTALL\n\n")
         self.assertNotIn("ϟ", plain)
 
     def test_explicit_spinner_section_does_not_depend_on_message_wording(self) -> None:
@@ -426,7 +425,7 @@ class CommandPrimitiveTests(unittest.TestCase):
         )
 
     def test_parser_errors_are_branded_only_on_a_human_terminal(self) -> None:
-        parser = ui.ArgumentParser(prog="letsinfer key create")
+        parser = ui.ArgumentParser(prog="letsinfer auth key create")
         parser.add_argument("name")
         stream = FakeStream(tty=True)
         with (
@@ -437,7 +436,7 @@ class CommandPrimitiveTests(unittest.TestCase):
             parser.parse_args([])
         self.assertEqual(stopped.exception.code, 2)
         self.assertEqual(stream.getvalue().count("LET'S INFER"), 1)
-        self.assertIn("/  KEY CREATE", stream.getvalue())
+        self.assertIn("/  AUTH KEY CREATE", stream.getvalue())
         self.assertIn("FAILED", stream.getvalue())
         self.assertIn("the following arguments are required: name", stream.getvalue())
 

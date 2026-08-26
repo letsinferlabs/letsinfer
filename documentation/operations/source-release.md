@@ -94,7 +94,7 @@ curl -fsSL https://letsinfer.ai/install.sh \
 
 `install.sh` supports Linux and macOS on x86_64 and arm64. Immutable core files
 live under `$LETSINFER_HOME/core`; the default creates `/usr/local/bin`
-launchers and runs `letsinfer setup`. `--user`, `--prefix`, and `--no-setup`
+launchers and runs the private `core-setup` initializer. `--user`, `--prefix`, and `--no-setup`
 provide explicit alternatives. `--no-progress` lets `letsinfer update` own its
 three-stage TTY display; a direct curl install retains the single percentage
 indicator. The website build emits the reviewed core installer byte for

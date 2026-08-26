@@ -229,7 +229,7 @@ class CommandBackgroundRefreshTests(unittest.TestCase):
         cached = snapshot()
         manager.cached.return_value = cached
         result, request, _notice = self._run(
-            "hardware",
+            "node.info",
             manager=manager,
             json_output=True,
         )
@@ -274,7 +274,7 @@ class CommandBackgroundRefreshTests(unittest.TestCase):
         )
         manager = mock.Mock()
         manager.cached.side_effect = (initial, available)
-        result, request, notice = self._run("hardware", manager=manager)
+        result, request, notice = self._run("node.info", manager=manager)
         self.assertEqual(result, 0)
         request.assert_called_once()
         self.assertEqual(notice.call_count, 2)
@@ -305,7 +305,7 @@ class CommandBackgroundRefreshTests(unittest.TestCase):
         current = snapshot()
         manager = mock.Mock()
         manager.cached.side_effect = (initial, current)
-        result, request, notice = self._run("hardware", manager=manager)
+        result, request, notice = self._run("node.info", manager=manager)
         self.assertEqual(result, 0)
         request.assert_called_once()
         self.assertEqual(notice.call_count, 2)
@@ -327,7 +327,7 @@ class CommandBackgroundRefreshTests(unittest.TestCase):
         unresolved = snapshot(status="unknown")
         manager = mock.Mock()
         manager.cached.side_effect = (initial, unresolved)
-        result, request, notice = self._run("hardware", manager=manager)
+        result, request, notice = self._run("node.info", manager=manager)
         self.assertEqual(result, 0)
         request.assert_called_once()
         self.assertEqual(
