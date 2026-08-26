@@ -171,6 +171,33 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample["inference"]["output_tokens"], 12)
         self.assertEqual(sample["system"]["nvme_temp_deci_c"], -1)
 
+    def test_child_status_reads_its_own_watchdog_ring(self) -> None:
+        local = decode_watchdog_protocol_sample(
+            protocol_payload(sequence=9, unix_ms=int(time.time() * 1000)),
+            member_id=MEMBER,
+        )
+        local["system"]["gpu_percent"] = 67
+        identity = type("Identity", (), {"member_id": MEMBER})()
+        with mock.patch.object(
+            letsinfer,
+            "watchdog_live_samples",
+            return_value=iter((local,)),
+        ) as read:
+            telemetry = letsinfer._local_watchdog_telemetry(identity)
+        read.assert_called_once_with(
+            member_id=MEMBER,
+            port=letsinfer.WATCHDOG_TELEMETRY_PORT,
+            ca_file=letsinfer.default_watchdog_controller_ca_path(),
+            controller_cert_file=letsinfer.default_watchdog_local_controller_cert_path(),
+            controller_key_file=letsinfer.default_watchdog_local_controller_key_path(),
+            stop_event=mock.ANY,
+        )
+        self.assertIsNotNone(telemetry)
+        assert telemetry is not None
+        self.assertTrue(telemetry["fresh"])
+        self.assertEqual(telemetry["sample_member_id"], MEMBER)
+        self.assertEqual(telemetry["system"]["gpu_percent"], 67)
+
     def test_publisher_forwards_live_samples_without_reading_the_ring(self) -> None:
         samples = [
             decode_watchdog_protocol_sample(

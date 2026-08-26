@@ -18,6 +18,11 @@ from core.site import state
 from core.site.state import SiteIdentity
 
 
+class _TTY(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
 def member_identity() -> SiteIdentity:
     return SiteIdentity(
         site_id="1" * 32,
@@ -34,6 +39,37 @@ def member_identity() -> SiteIdentity:
 
 
 class ActionRegistryTests(unittest.TestCase):
+    def test_interactive_scope_denial_uses_not_allowed_chrome(self) -> None:
+        invoked = mock.Mock(return_value=0)
+        arguments = argparse.Namespace(
+            action_id="topology",
+            action=invoked,
+            command="topology",
+            json=False,
+            port=1,
+        )
+        stderr = _TTY()
+        with (
+            mock.patch.object(cli, "parser") as parser,
+            mock.patch.object(
+                cli, "read_site_identity", return_value=member_identity()
+            ),
+            mock.patch.object(cli, "site_identity_path") as identity_path,
+            mock.patch.object(cli.sys, "stderr", stderr),
+            mock.patch.dict(
+                os.environ,
+                {"TERM": "xterm", "NO_COLOR": "1"},
+                clear=True,
+            ),
+        ):
+            parser.return_value.parse_args.return_value = arguments
+            identity_path.return_value.exists.return_value = True
+            self.assertEqual(cli.main(["topology"]), 1)
+        invoked.assert_not_called()
+        self.assertIn("!  NOT ALLOWED", stderr.getvalue())
+        self.assertIn("Please run this from the main node.", stderr.getvalue())
+        self.assertNotIn("FAILED", stderr.getvalue())
+
     def test_every_leaf_is_registered_once_and_every_site_mutation_is_coordinator_audited(self) -> None:
         root = cli.parser()
         leaves = cli._parser_action_ids(root)
@@ -93,8 +129,11 @@ class ActionRegistryTests(unittest.TestCase):
             identity_path.return_value.exists.return_value = True
             self.assertEqual(cli.main(["auth", "key", "create", "fixture"]), 1)
         invoked.assert_not_called()
-        self.assertIn("command scope is main", stderr.getvalue())
+        self.assertIn("NOT ALLOWED: Please run this from the main node.", stderr.getvalue())
+        self.assertIn("Main node: coordinator · coordinator.local", stderr.getvalue())
         self.assertIn("coordinator.local", stderr.getvalue())
+        self.assertNotIn("command scope", stderr.getvalue())
+        self.assertNotIn("FAILED", stderr.getvalue())
 
     def test_node_management_targets_are_optional_for_interactive_selection(self) -> None:
         parser = cli.parser()
