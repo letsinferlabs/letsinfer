@@ -246,6 +246,78 @@ class BenchmarkRecordTests(unittest.TestCase):
         )
         self.assertIs(benchmark_record.validate_record(value), value)
 
+    def test_execution_payload_record_preserves_measured_oci_trace(self) -> None:
+        value = self.record()
+        contract = {
+            "schema_version": 8,
+            "suite": "letsinfer-code-prose-v1",
+            "generator": {"id": "letsinfer-code-prose", "version": 8},
+            "domains": ["code"],
+            "execution": {
+                "isolation": "fresh-matrix",
+                "prefix_state": "shared",
+                "samples_per_cell": 1,
+                "stream_prefix": "shared-body",
+            },
+            "short": {
+                "domains": ["code", "prose"],
+                "prompt_tokens": 256,
+                "concurrencies": [1, 2, 4],
+                "request": {
+                    "output_tokens": 512,
+                    "min_completion_tokens": 512,
+                    "require_natural_stop": False,
+                    "temperature": 0,
+                    "seed": 42042,
+                },
+            },
+            "tokenizer": {
+                "capability": "engine-rendered-chat-count-v1",
+                "model_sha256": "7" * 64,
+                "engine_payload_sha256": "8" * 64,
+                "render_contract": "openai-chat-user-v1",
+            },
+            "request": {
+                "output_tokens": 128,
+                "min_completion_tokens": 128,
+                "require_natural_stop": False,
+                "temperature": 0,
+                "seed": 42042,
+            },
+            "sample_interval_seconds": 5,
+            "cases": [
+                {"id": "32k", "prompt_tokens": 32768, "concurrencies": [1]}
+            ],
+        }
+        value["schema_version"] = benchmark_record.EXECUTION_PAYLOAD_SCHEMA_VERSION
+        value["subject"].pop("engine_oci")
+        value["subject"].update(
+            {
+                "engine_payload_sha256": "8" * 64,
+                "measured_engine_oci": (
+                    "ghcr.io/example/engine@sha256:" + "5" * 64
+                ),
+            }
+        )
+        value["benchmark_contract"] = contract
+        value["benchmark_contract_sha256"] = hashlib.sha256(
+            benchmark_record.canonical_bytes(contract)
+        ).hexdigest()
+        value["id"] = benchmark_record.benchmark_id(
+            value["installation_id"],
+            value["timestamp_unix_ns"],
+            value["subject"],
+            value["benchmark_contract_sha256"],
+            value["results_sha256"],
+        )
+        self.assertIs(benchmark_record.validate_record(value), value)
+
+        value["subject"]["engine_payload_sha256"] = "9" * 64
+        with self.assertRaisesRegex(
+            benchmark_record.BenchmarkRecordError, "id does not match"
+        ):
+            benchmark_record.validate_record(value)
+
     def test_ttft_cache_record_binds_cold_and_warm_results(self) -> None:
         value = self.record()
         contract = {

@@ -18,6 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from core.runtime_packs import (  # noqa: E402
+    EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
     RuntimePackError,
     SHARED_BENCHMARK_SCHEMA_VERSION,
@@ -33,7 +34,8 @@ WORKLOAD_RE = re.compile(r"pp[1-9][0-9]*,tg[1-9][0-9]*,c[1-9][0-9]*")
 SCHEMA_VERSION = 4
 SHARED_SCHEMA_VERSION = 5
 TTFT_CACHE_SCHEMA_VERSION = 6
-SUBJECT_FIELDS = {
+EXECUTION_PAYLOAD_SCHEMA_VERSION = 7
+LEGACY_SUBJECT_FIELDS = {
     "candidate_id",
     "runtime_version",
     "model_uri",
@@ -42,6 +44,17 @@ SUBJECT_FIELDS = {
     "target",
     "target_contract_sha256",
 }
+EXECUTION_PAYLOAD_SUBJECT_FIELDS = {
+    "candidate_id",
+    "runtime_version",
+    "model_uri",
+    "model_revision",
+    "engine_payload_sha256",
+    "measured_engine_oci",
+    "target",
+    "target_contract_sha256",
+}
+SUBJECT_FIELDS = LEGACY_SUBJECT_FIELDS | EXECUTION_PAYLOAD_SUBJECT_FIELDS
 RESULT_FIELDS = {
     "workload",
     "prompt_domain",
@@ -81,6 +94,7 @@ RECORD_FIELDS = {
 }
 SHARED_RECORD_FIELDS = RECORD_FIELDS | {"benchmark_contract"}
 TTFT_CACHE_RECORD_FIELDS = SHARED_RECORD_FIELDS | {"ttft_cache"}
+EXECUTION_PAYLOAD_RECORD_FIELDS = SHARED_RECORD_FIELDS
 TTFT_CACHE_FIELDS = {
     "workload",
     "prompt_domain",
@@ -155,10 +169,13 @@ def benchmark_id(
 
 
 def validate_subject(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != SUBJECT_FIELDS:
+    fields = set(value) if isinstance(value, dict) else set()
+    if fields not in {
+        frozenset(LEGACY_SUBJECT_FIELDS),
+        frozenset(EXECUTION_PAYLOAD_SUBJECT_FIELDS),
+    }:
         raise BenchmarkRecordError(
-            "benchmark subject must contain exactly "
-            + ", ".join(sorted(SUBJECT_FIELDS))
+            "benchmark subject must use the legacy OCI identity or execution payload identity"
         )
     candidate = value.get("candidate_id")
     if not isinstance(candidate, str) or re.fullmatch(
@@ -181,11 +198,25 @@ def validate_subject(value: Any) -> dict[str, Any]:
     revision = value.get("model_revision")
     if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
         raise BenchmarkRecordError("subject.model_revision must be a full commit SHA")
-    engine_oci = value.get("engine_oci")
-    if not isinstance(engine_oci, str) or re.fullmatch(
-        r"[^\s@]+@sha256:[0-9a-f]{64}", engine_oci
-    ) is None:
-        raise BenchmarkRecordError("subject.engine_oci must be digest-pinned")
+    if fields == LEGACY_SUBJECT_FIELDS:
+        engine_oci = value.get("engine_oci")
+        if not isinstance(engine_oci, str) or re.fullmatch(
+            r"[^\s@]+@sha256:[0-9a-f]{64}", engine_oci
+        ) is None:
+            raise BenchmarkRecordError("subject.engine_oci must be digest-pinned")
+    else:
+        payload = value.get("engine_payload_sha256")
+        measured = value.get("measured_engine_oci")
+        if not isinstance(payload, str) or SHA256_RE.fullmatch(payload) is None:
+            raise BenchmarkRecordError(
+                "subject.engine_payload_sha256 must be a SHA-256"
+            )
+        if not isinstance(measured, str) or re.fullmatch(
+            r"[^\s@]+@sha256:[0-9a-f]{64}", measured
+        ) is None:
+            raise BenchmarkRecordError(
+                "subject.measured_engine_oci must be digest-pinned"
+            )
     target = value.get("target")
     if not isinstance(target, str) or re.fullmatch(
         r"[a-z0-9][a-z0-9._-]*", target
@@ -532,8 +563,10 @@ def _validate_telemetry(result: dict[str, Any], where: str) -> None:
 def validate_record(value: Any) -> dict[str, Any]:
     schema_version = value.get("schema_version") if isinstance(value, dict) else None
     expected_fields = (
-        TTFT_CACHE_RECORD_FIELDS
-        if schema_version == TTFT_CACHE_SCHEMA_VERSION
+        EXECUTION_PAYLOAD_RECORD_FIELDS
+        if schema_version == EXECUTION_PAYLOAD_SCHEMA_VERSION
+        else TTFT_CACHE_RECORD_FIELDS
+        if schema_version in {TTFT_CACHE_SCHEMA_VERSION, EXECUTION_PAYLOAD_SCHEMA_VERSION}
         else SHARED_RECORD_FIELDS
         if schema_version == SHARED_SCHEMA_VERSION
         else RECORD_FIELDS
@@ -546,13 +579,23 @@ def validate_record(value: Any) -> dict[str, Any]:
     if (
         type(value.get("schema_version")) is not int
         or value.get("schema_version")
-        not in {SCHEMA_VERSION, SHARED_SCHEMA_VERSION, TTFT_CACHE_SCHEMA_VERSION}
+        not in {
+            SCHEMA_VERSION,
+            SHARED_SCHEMA_VERSION,
+            TTFT_CACHE_SCHEMA_VERSION,
+            EXECUTION_PAYLOAD_SCHEMA_VERSION,
+        }
     ):
         raise BenchmarkRecordError(
             f"benchmark record schema_version must be {SCHEMA_VERSION} or "
-            f"{SHARED_SCHEMA_VERSION} or {TTFT_CACHE_SCHEMA_VERSION}"
+            f"{SHARED_SCHEMA_VERSION}, {TTFT_CACHE_SCHEMA_VERSION}, or "
+            f"{EXECUTION_PAYLOAD_SCHEMA_VERSION}"
         )
-    if schema_version in {SHARED_SCHEMA_VERSION, TTFT_CACHE_SCHEMA_VERSION}:
+    if schema_version in {
+        SHARED_SCHEMA_VERSION,
+        TTFT_CACHE_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_SCHEMA_VERSION,
+    }:
         contract = value.get("benchmark_contract")
         if not isinstance(contract, dict):
             raise BenchmarkRecordError("benchmark_contract must be an object")
@@ -568,16 +611,22 @@ def validate_record(value: Any) -> dict[str, Any]:
             SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
             SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
             TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+            EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
         }:
             raise BenchmarkRecordError(
-                "benchmark_contract must use shared-matrix schema 3, 4, 5, 6, or 7"
+                "benchmark_contract must use shared-matrix schema 3 through 8"
             )
-        if (
-            schema_version == TTFT_CACHE_SCHEMA_VERSION
-            and contract.get("schema_version") != TTFT_CACHE_BENCHMARK_SCHEMA_VERSION
-        ):
+        expected_contract = (
+            EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION
+            if schema_version == EXECUTION_PAYLOAD_SCHEMA_VERSION
+            else TTFT_CACHE_BENCHMARK_SCHEMA_VERSION
+            if schema_version == TTFT_CACHE_SCHEMA_VERSION
+            else None
+        )
+        if expected_contract is not None and contract.get("schema_version") != expected_contract:
             raise BenchmarkRecordError(
-                "TTFT-cache benchmark records require benchmark contract schema 7"
+                f"benchmark record schema {schema_version} requires benchmark "
+                f"contract schema {expected_contract}"
             )
         contract_sha = hashlib.sha256(canonical_bytes(contract)).hexdigest()
         if value.get("benchmark_contract_sha256") != contract_sha:

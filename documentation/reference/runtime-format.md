@@ -117,6 +117,7 @@ Pin one Engine OCI and provide its opaque upstream settings:
     "oci": {
       "reference": "ghcr.io/org/image@sha256:<manifest-digest>",
       "immutable_id": "sha256:<image-config-digest>",
+      "payload_id": "sha256:<normalized-execution-payload>",
       "base": "registry/base@sha256:<digest>"
     },
     "model_format": "huggingface-snapshot",
@@ -132,7 +133,11 @@ The Engine OCI contains the upstream engine and its matching adapter.
 protected. `LETSINFER_*` environment names are reserved. Core has no
 engine-version registry or upstream flag schema.
 
-Changing the Engine OCI identity invalidates qualification.
+The manifest and configuration digests identify the distributed OCI object.
+The payload ID identifies the pinned base, normalized final overlay files, and
+runtime-relevant container configuration. Packaging-only OCI changes preserve
+benchmark evidence when the payload ID is unchanged; changing executable
+payload invalidates qualification.
 
 ## Target, capacity, and cache
 
