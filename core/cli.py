@@ -19840,6 +19840,25 @@ def _accept_node_add_request(
         )
     else:
         question = f"Move this node into {request['main_name']}?"
+    destination = urllib.parse.urlsplit(str(request["main_endpoint"]))
+    destination_host = str(destination.hostname or request["main_name"])
+    inference_host = (
+        f"[{destination_host}]" if ":" in destination_host else destination_host
+    )
+    warning = (
+        f"! This main node will become a child of {request['main_name']}.",
+        (
+            "OpenAI endpoint  Clients must switch to "
+            f"http://{inference_host}:8000/v1; this node will no longer own it."
+        ),
+        "Access  Local controller pairings and inference API keys will be replaced.",
+        (
+            "Models  Artifacts and caches stay local; stopped models must be "
+            f"placed again by {request['main_name']}."
+        ),
+    )
+    presenter.panel(warning, title="Main node authority will move")
+    presenter.wrapped("")
     if active_placements or not confirmed:
         try:
             accepted = presenter.prompt.confirm(
@@ -19851,15 +19870,19 @@ def _accept_node_add_request(
         if not accepted:
             raise CommandDenied("Node move cancelled")
     stopped_groups: tuple[str, ...] = ()
+    stopped_qualification: dict[str, Any] | None = None
     if active_placements:
-        group_ids = _node_move_running_group_ids(active_placements)
+        group_ids, qualification = _node_move_stop_targets(active_placements)
         activity = _command_activity(arguments, "Stopping models before node move")
         with activity, ui.protect_stdout(activity):
-            stopped_groups = _stop_node_move_groups(group_ids)
+            stopped_groups, stopped_qualification = _stop_node_move_models(
+                group_ids,
+                qualification,
+            )
         with _site_store() as store:
             remaining = plan_local_move(store)
         if remaining.blocking_reasons:
-            _restore_node_move_groups(stopped_groups)
+            _restore_node_move_models(stopped_groups, stopped_qualification)
             raise LetsInferError(
                 "node move remains blocked after stopping models: "
                 + "; ".join(remaining.blocking_reasons)
@@ -19885,7 +19908,7 @@ def _accept_node_add_request(
         ):
             arguments._mandatory_audit_satisfied = _MANDATORY_AUDIT_SATISFIED
     except BaseException as failure:
-        if stopped_groups:
+        if stopped_groups or stopped_qualification is not None:
             try:
                 current = read_site_identity()
             except SiteError:
@@ -19899,7 +19922,10 @@ def _accept_node_add_request(
                 arguments._mandatory_audit_satisfied = _MANDATORY_AUDIT_SATISFIED
             if current is not None and current.site_id == identity.site_id:
                 try:
-                    _restore_node_move_groups(stopped_groups)
+                    _restore_node_move_models(
+                        stopped_groups,
+                        stopped_qualification,
+                    )
                 except BaseException as restore_error:
                     raise LetsInferError(
                         "node move failed and stopped models could not be restored: "
@@ -19910,11 +19936,14 @@ def _accept_node_add_request(
     return result
 
 
-def _node_move_running_group_ids(
+def _node_move_stop_targets(
     active_placements: Sequence[Mapping[str, Any]],
-) -> tuple[str, ...]:
-    """Resolve active placements to exact, stable groups before an approved move."""
-    placement_ids = {str(row["placement_id"]) for row in active_placements}
+) -> tuple[tuple[str, ...], dict[str, Any] | None]:
+    """Resolve active placements to stable group or qualification owners."""
+    placements = {
+        str(row["placement_id"]): row for row in active_placements
+    }
+    placement_ids = set(placements)
     with _site_store() as store:
         groups = [
             dict(row)
@@ -19925,11 +19954,25 @@ def _node_move_running_group_ids(
         ]
     covered = {str(row["placement_id"]) for row in groups}
     missing = sorted(placement_ids - covered)
+    qualification: dict[str, Any] | None = None
     if missing:
-        raise LetsInferError(
-            "node move cannot safely stop placements without engine groups: "
-            + ",".join(missing)
-        )
+        path = qualification_service_config_path()
+        if len(missing) == 1 and path.is_file():
+            candidate = read_service_config(path)
+            placement = placements[missing[0]]
+            if (
+                candidate.get("qualification_mode") is True
+                and candidate.get("placement_id") == missing[0]
+                and candidate.get("model") == placement.get("model")
+            ):
+                qualification = candidate
+                covered.add(missing[0])
+        unresolved = sorted(placement_ids - covered)
+        if unresolved:
+            raise LetsInferError(
+                "node move cannot safely stop placements without an active owner: "
+                + ",".join(unresolved)
+            )
     unstable = sorted(
         str(row["group_id"])
         for row in groups
@@ -19940,7 +19983,22 @@ def _node_move_running_group_ids(
             "node move requires model groups to finish their current lifecycle: "
             + ",".join(unstable)
         )
-    return tuple(sorted(str(row["group_id"]) for row in groups))
+    return (
+        tuple(sorted(str(row["group_id"]) for row in groups)),
+        qualification,
+    )
+
+
+def _node_move_running_group_ids(
+    active_placements: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Resolve active placements only when engine groups own every one."""
+    groups, qualification = _node_move_stop_targets(active_placements)
+    if qualification is not None:
+        raise LetsInferError(
+            "node move placement belongs to the qualification candidate"
+        )
+    return groups
 
 
 def _restore_node_move_groups(group_ids: Sequence[str]) -> None:
@@ -19950,6 +20008,25 @@ def _restore_node_move_groups(group_ids: Sequence[str]) -> None:
             _start_engine_group_by_id(group_id)
         except BaseException as error:
             errors.append(f"{group_id}: {error}")
+    if errors:
+        raise LetsInferError("model restoration was incomplete: " + "; ".join(errors))
+
+
+def _restore_node_move_models(
+    group_ids: Sequence[str],
+    qualification: Mapping[str, Any] | None,
+) -> None:
+    """Restore every model owner after a pre-commit move failure."""
+    errors: list[str] = []
+    if qualification is not None:
+        try:
+            _qualification_candidate_lifecycle(dict(qualification), "start")
+        except BaseException as error:
+            errors.append(f"qualification: {error}")
+    try:
+        _restore_node_move_groups(group_ids)
+    except BaseException as error:
+        errors.append(f"groups: {error}")
     if errors:
         raise LetsInferError("model restoration was incomplete: " + "; ".join(errors))
 
@@ -19970,6 +20047,29 @@ def _stop_node_move_groups(group_ids: Sequence[str]) -> tuple[str, ...]:
             ) from failure
         raise
     return tuple(stopped)
+
+
+def _stop_node_move_models(
+    group_ids: Sequence[str],
+    qualification: Mapping[str, Any] | None,
+) -> tuple[tuple[str, ...], dict[str, Any] | None]:
+    """Stop all model owners and roll back a partial pre-move stop."""
+    stopped_groups = _stop_node_move_groups(group_ids)
+    if qualification is None:
+        return stopped_groups, None
+    candidate = dict(qualification)
+    try:
+        _qualification_candidate_lifecycle(candidate, "stop")
+    except BaseException as failure:
+        try:
+            _restore_node_move_models(stopped_groups, candidate)
+        except BaseException as restore_error:
+            raise LetsInferError(
+                "model stop failed and rollback was incomplete: "
+                f"{restore_error}"
+            ) from failure
+        raise
+    return stopped_groups, candidate
 
 
 def _approve_pending_child(
