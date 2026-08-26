@@ -33,8 +33,8 @@ administrative state. Trust is established separately:
 
 - `letsinfer node add` and the Mac app discover candidate nodes, send a
   certificate-pinned request, and show the pending request on the candidate.
-  Enrollment retains a short-lived invite and separate six-digit human
-  comparison beneath that single workflow.
+  Local acceptance on that candidate completes enrollment without a second
+  comparison code.
 - An already configured node is never adopted silently. The app offers
   **Connect to this node** or an explicit **Move into Home** transaction. A
   move preserves model and cache data but replaces node authority,
@@ -104,10 +104,11 @@ node verifies certificate identity, freshness, and physical-link proofs before
 using those facts. Routing health comes from fresh state, not a static install
 record.
 
-You can pause a child for maintenance. Pausing stops new admission to its
-groups while in-flight work finishes; it does not implicitly stop the Engine.
-Healthy replicas continue serving. Resuming the child restores admission
-without changing its runtime configuration.
+You can pause the main, a child, or the current node for maintenance. Pausing
+stops new admission while in-flight work finishes; it does not implicitly stop
+the Engine. A child sends its own pause/resume request to the authenticated
+main, healthy replicas continue serving, and resuming restores admission
+without changing runtime configuration.
 
 ## Network planes
 
@@ -130,8 +131,10 @@ controller, Watchdog, or Engine ports.
 letsinfer node info
 letsinfer node list
 letsinfer node add
-letsinfer node pause CHILD_ID
-letsinfer node resume CHILD_ID
+letsinfer node pause [NODE]
+letsinfer node resume [NODE]
+letsinfer node remove [NODE]
+letsinfer topology
 letsinfer model install
 letsinfer auth controller add --role administrator
 letsinfer auth key create NAME --model MODEL --concurrency N

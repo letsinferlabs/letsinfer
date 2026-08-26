@@ -22,13 +22,14 @@ from tests.regression.cli_cases import CLI_CASES
 
 PUBLIC_REFERENCE_COMMANDS = {
     "letsinfer status",
+    "letsinfer topology",
     "letsinfer doctor",
-    "letsinfer node info",
+    "letsinfer node info [NODE]",
     "letsinfer node list",
     "letsinfer node add",
-    "letsinfer node pause CHILD",
-    "letsinfer node resume CHILD",
-    "letsinfer node remove CHILD",
+    "letsinfer node pause [NODE]",
+    "letsinfer node resume [NODE]",
+    "letsinfer node remove [NODE]",
     "letsinfer model list [MODEL]",
     "letsinfer model install [MODEL]",
     "letsinfer model remove MODEL",

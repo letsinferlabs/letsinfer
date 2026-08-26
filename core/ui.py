@@ -143,6 +143,22 @@ class Terminal:
             return lockup
         return f"{lockup} {self.paint(f'/  {section.upper()}', DIM)}"
 
+    def command_header(self, title: str) -> tuple[str, ...]:
+        """Place command identity left and the exact product badge right."""
+
+        left = self.paint(title, BOLD)
+        brand = self.logo()
+        if len(ANSI.sub("", left)) + 2 + len(ANSI.sub("", brand)) <= self.width:
+            gap = " " * max(
+                2,
+                self.width
+                - len(ANSI.sub("", left))
+                - len(ANSI.sub("", brand)),
+            )
+            return (left + gap + brand,)
+        padding = " " * max(0, self.width - len(ANSI.sub("", brand)))
+        return (padding + brand, left)
+
     def command(self, command: str, description: str) -> str:
         command_width = min(34, max(24, self.width // 2))
         command_text = self.paint(command.ljust(command_width), BOLD, GREEN)
@@ -204,7 +220,8 @@ def command_header(
     terminal = Terminal(target, environ=environ)
     if not terminal.interactive:
         return False
-    target.write(f"{terminal.logo(_section(action))}\n\n")
+    title = _section(action).replace(" / ", " ").title()
+    target.write("\n".join(terminal.command_header(title)) + "\n\n")
     target.flush()
     return True
 
@@ -273,6 +290,79 @@ def update_labels(records: Iterable[object]) -> list[str]:
     return labels
 
 
+def _update_callout_lines(
+    terminal: Terminal,
+    headline: str,
+    detail: str,
+    *,
+    width: int | None = None,
+) -> list[str]:
+    outer_width = max(32, min(width or terminal.width, 76))
+    content_width = outer_width - 4
+    border = "─" * (outer_width - 2)
+    headline_lines = terminal.wrap(headline, content_width - 2)
+    detail_lines = terminal.wrap(detail, content_width - 2)
+    rendered: list[tuple[str, str]] = []
+    for index, line in enumerate(headline_lines):
+        if index == 0:
+            plain = "! " + line
+            styled = (
+                terminal.paint("!", BOLD, YELLOW)
+                + " "
+                + terminal.paint(line, BOLD)
+            )
+        else:
+            plain = "  " + line
+            styled = "  " + terminal.paint(line, BOLD)
+        rendered.append((plain, styled))
+    rendered.extend(
+        ("  " + line, "  " + terminal.paint(line, DIM))
+        for line in detail_lines
+    )
+    lines = [terminal.paint(f"┌{border}┐", YELLOW)]
+    for plain, styled in rendered:
+        padding = " " * max(0, content_width - len(plain))
+        lines.append(
+            terminal.paint("│", YELLOW)
+            + " "
+            + styled
+            + padding
+            + " "
+            + terminal.paint("│", YELLOW)
+        )
+    lines.append(terminal.paint(f"└{border}┘", YELLOW))
+    return lines
+
+
+def update_available_lines(
+    records: Iterable[object],
+    terminal: Terminal,
+    *,
+    width: int | None = None,
+) -> list[str]:
+    """Render one shared update-availability callout for owned UI surfaces."""
+    labels = update_labels(records)
+    if not labels:
+        return []
+    return _update_callout_lines(
+        terminal,
+        "Update available · " + " · ".join(labels),
+        "Run `letsinfer update check` for verified details.",
+        width=width,
+    )
+
+
+def _update_callout(
+    terminal: Terminal,
+    headline: str,
+    detail: str,
+) -> None:
+    for line in _update_callout_lines(terminal, headline, detail):
+        terminal.stream.write(line + "\n")
+    terminal.stream.write("\n")
+    terminal.stream.flush()
+
+
 def update_notice(
     records: Iterable[object],
     *,
@@ -293,24 +383,22 @@ def update_notice(
         return
     if cleared and attention:
         raise ValueError("an update refresh cannot be both current and unresolved")
-    labels = update_labels(records)
+    values = tuple(records)
+    labels = update_labels(values)
     if not labels:
         if cleared:
             terminal.success("Update state refreshed · installed components are current")
         elif attention:
-            terminal.warning("Update state changed · verification needs attention")
-            target.write(
-                terminal.paint(
-                    "  Run `letsinfer update check` for verified details.\n", DIM
-                )
+            _update_callout(
+                terminal,
+                "Update state changed · verification needs attention",
+                "Run `letsinfer update check` for verified details.",
             )
-            target.flush()
         return
-    terminal.warning("Update available · " + " · ".join(labels))
-    target.write(
-        terminal.paint("  Run `letsinfer update check` for verified details.\n", DIM)
-    )
-    target.flush()
+    for line in update_available_lines(values, terminal):
+        terminal.stream.write(line + "\n")
+    terminal.stream.write("\n")
+    terminal.stream.flush()
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -350,13 +438,13 @@ def node_status(
 
     target.write(f"{terminal.logo()}\n\n")
     updates = payload.get("updates")
-    if isinstance(updates, list) and updates:
-        labels = update_labels(updates)
-        if labels:
-            target.write(
-                f"{terminal.paint('↑ UPDATE AVAILABLE', BOLD, YELLOW)}"
-                f"{terminal.paint(' · ' + ' · '.join(labels), DIM)}\n\n"
-            )
+    update_lines = (
+        update_available_lines(updates, terminal)
+        if isinstance(updates, list)
+        else []
+    )
+    if update_lines:
+        target.write("\n".join(update_lines) + "\n\n")
     state_color = GREEN if ready else YELLOW
     state_mark = "●" if terminal.unicode else "*"
     state = "ONLINE" if ready else "ATTENTION"
@@ -726,8 +814,12 @@ class ArgumentParser(argparse.ArgumentParser):
             for action in self._actions
         )
         command = self.prog.removeprefix("letsinfer ").strip()
-        section = command if command and command != "letsinfer" else None
-        banner = f"{terminal.logo(section)}\n\n"
+        title = (
+            command.replace("-", " ").title()
+            if command and command != "letsinfer"
+            else "Commands"
+        )
+        banner = "\n".join(terminal.command_header(title)) + "\n\n"
         replacements = {
             "usage:": terminal.paint("Usage:", BOLD, CYAN),
             "positional arguments:": terminal.paint(
@@ -745,21 +837,22 @@ class ArgumentParser(argparse.ArgumentParser):
         if not terminal.interactive:
             super().error(message)
         command = self.prog.removeprefix("letsinfer ").strip()
-        section = command if command and command != "letsinfer" else "command"
+        title = (
+            command.replace("-", " ").title()
+            if command and command != "letsinfer"
+            else "Command"
+        )
         usage = super().format_usage().replace(
             "usage:", terminal.paint("Usage:", BOLD, CYAN), 1
         )
-        detail = "\n".join(
-            f"   {terminal.paint(line, DIM)}"
-            for line in terminal.wrap(message, terminal.width - 3)
-        )
-        sys.stderr.write(
-            f"{terminal.logo(_section(section))}\n\n"
-            f"{usage}\n"
-            f"{terminal.paint('✗' if terminal.unicode else 'ERROR', BOLD, RED)}  "
-            f"{terminal.paint('FAILED', BOLD, RED)}\n"
-            f"{detail}\n"
-        )
+        required = message.startswith("the following arguments are required:")
+        sys.stderr.write("\n".join(terminal.command_header(title)) + f"\n\n{usage}")
+        if not required:
+            detail = "\n".join(
+                f"   {terminal.paint(line, DIM)}"
+                for line in terminal.wrap(message, terminal.width - 3)
+            )
+            sys.stderr.write(f"\n{detail}\n")
         sys.stderr.flush()
         raise SystemExit(2)
 

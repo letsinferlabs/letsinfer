@@ -9,6 +9,7 @@ import contextlib
 import errno
 import hashlib
 import io
+import ipaddress
 import json
 import pathlib
 import tempfile
@@ -24,6 +25,99 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_link_monitor_discovers_connectx_from_live_signed_facts(self) -> None:
+        now = 1_800_000_000
+
+        def member(member_id: str, address: str, direct_address: str) -> dict:
+            return {
+                "member_id": member_id,
+                "address": address,
+                "certificate_sha256": member_id[0] * 64,
+                "state": "active",
+                "facts": {
+                    "observed_at_unix": now,
+                    "network": {
+                        "interfaces": [
+                            {
+                                "name": "enp1s0f0np0",
+                                "addresses": [direct_address],
+                                "rdma": True,
+                            }
+                        ],
+                        "links": [],
+                    },
+                },
+            }
+
+        main = member("a" * 32, "home.local", "10.44.0.1")
+        child = member("b" * 32, "child.local", "10.44.0.2")
+        store = mock.MagicMock()
+        store.__enter__.return_value.members.return_value = [main, child]
+        with (
+            mock.patch.object(
+                cli, "read_site_identity", return_value=types.SimpleNamespace(role="main")
+            ),
+            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(cli.time, "time", return_value=now),
+            mock.patch.object(cli, "request_member_link_probe") as probe,
+        ):
+            result = cli._refresh_site_links_once()
+
+        self.assertEqual(
+            result,
+            {
+                "refreshed": [f"{'a' * 32}->{'b' * 32}", f"{'b' * 32}->{'a' * 32}"],
+                "failed": [],
+            },
+        )
+        self.assertEqual(probe.call_count, 2)
+        calls = {call.kwargs["expected_member_id"]: call.kwargs for call in probe.call_args_list}
+        self.assertEqual(calls["a" * 32]["peer_endpoint"], "https://10.44.0.2:9770")
+        self.assertEqual(calls["b" * 32]["peer_endpoint"], "https://10.44.0.1:9770")
+        self.assertEqual(calls["a" * 32]["kind"], "connectx")
+
+    def test_link_monitor_ignores_stale_or_unusable_direct_addresses(self) -> None:
+        subject = {
+            "member_id": "a" * 32,
+            "address": "home.local",
+            "facts": {
+                "network": {
+                    "interfaces": [
+                        {"name": "mlx0", "addresses": ["192.0.2.1"], "rdma": True}
+                    ],
+                    "links": [],
+                }
+            },
+        }
+        peer = {
+            "member_id": "b" * 32,
+            "address": "child.local",
+            "facts": {
+                "network": {
+                    "interfaces": [
+                        {
+                            "name": "mlx0",
+                            "addresses": ["not-an-ip", "127.0.0.1", "fe80::2"],
+                            "rdma": True,
+                        }
+                    ],
+                    "links": [],
+                }
+            },
+        }
+        candidates = cli._member_link_probe_candidates(subject, peer)
+        self.assertEqual(
+            candidates,
+            [
+                {
+                    "interface": "mlx0",
+                    "kind": "connectx",
+                    "peer_endpoint": "https://[fe80::2%mlx0]:9770",
+                }
+            ],
+        )
+        self.assertTrue(ipaddress.ip_address("fe80::2").is_link_local)
+
     def test_interactive_model_install_turns_same_model_choices_into_replicas(self) -> None:
         members = [
             {"member_id": "a" * 32, "display_name": "Home", "state": "active"},
@@ -1214,7 +1308,6 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         for command in (
             "setup",
             "hardware",
-            "topology",
             "child",
             "alias",
             "list",

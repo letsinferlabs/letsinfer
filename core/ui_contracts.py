@@ -169,7 +169,7 @@ _LEGACY_UI_CONTRACTS: Mapping[str, UiContract] = {
         supports_json=True,
         raw_variants=(),
         branded=True,
-        show_cached_updates=False,
+        show_cached_updates=True,
     ),
     "topology.show": UiContract(
         action_id="topology.show",
@@ -377,7 +377,7 @@ _LEGACY_UI_CONTRACTS: Mapping[str, UiContract] = {
         supports_json=True,
         raw_variants=(),
         branded=True,
-        show_cached_updates=False,
+        show_cached_updates=True,
     ),
     "doctor": UiContract(
         action_id="doctor",
@@ -931,20 +931,48 @@ def _remap(
 
 UI_CONTRACTS: Mapping[str, UiContract] = {
     "status": _remap("status", "status", "Status"),
+    "topology": _remap(
+        "topology.show",
+        "topology",
+        "Topology",
+        surface=SurfaceKind.LIVE,
+        output=OutputContract.LIVE_DASHBOARD,
+        progress=ProgressKind.LIVE,
+        prompt=PromptKind.NONE,
+    ),
     "doctor": _remap("doctor", "doctor", "Doctor"),
     "uninstall": _remap("uninstall", "uninstall", "Uninstall"),
-    "node.info": _remap("node.status", "node.info", "Node Information"),
+    "node.info": _remap(
+        "node.status",
+        "node.info",
+        "Node Information",
+        surface=SurfaceKind.WORKFLOW,
+        prompt=PromptKind.WORKFLOW,
+    ),
     "node.list": _remap("child.list", "node.list", "Nodes"),
     "node.add": _remap(
         "child.invite",
         "node.add",
         "Add Node",
+        progress=ProgressKind.LIVE,
         prompt=PromptKind.WORKFLOW,
         supports_json=True,
     ),
-    "node.pause": _remap("child.drain", "node.pause", "Pause Node"),
-    "node.resume": _remap("child.resume", "node.resume", "Resume Node"),
-    "node.remove": _remap("child.remove", "node.remove", "Remove Node"),
+    "node.pause": _remap(
+        "child.drain", "node.pause", "Pause Node",
+        surface=SurfaceKind.WORKFLOW,
+        prompt=PromptKind.MIXED,
+    ),
+    "node.resume": _remap(
+        "child.resume", "node.resume", "Resume Node",
+        surface=SurfaceKind.WORKFLOW,
+        prompt=PromptKind.MIXED,
+    ),
+    "node.remove": _remap(
+        "child.remove", "node.remove", "Remove Node",
+        surface=SurfaceKind.WORKFLOW,
+        prompt=PromptKind.MIXED,
+    ),
     "model.list": _remap("list", "model.list", "Models"),
     "model.install": _remap(
         "install",

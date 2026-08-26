@@ -70,7 +70,7 @@ class CoreServiceTests(unittest.TestCase):
         identity = member_identity()
         arguments = argparse.Namespace(
             no_service=False,
-            name="Home",
+            name=None,
             address=None,
             json=True,
         )
@@ -78,7 +78,8 @@ class CoreServiceTests(unittest.TestCase):
         with (
             mock.patch.object(cli.platform, "system", return_value="Linux"),
             mock.patch.object(cli, "user_lingering_enabled", return_value=True),
-            mock.patch.object(cli, "setup_site", return_value=identity),
+            mock.patch.object(cli, "setup_site", return_value=identity) as setup,
+            mock.patch.object(cli.socket, "gethostname", return_value="homeai-node-2"),
             mock.patch.object(cli, "ensure_letsinfer_home"),
             mock.patch.object(cli, "ensure_core_watchdog_tls") as tls,
             mock.patch.object(cli, "refresh_local_member_facts"),
@@ -89,6 +90,7 @@ class CoreServiceTests(unittest.TestCase):
             self.assertEqual(cli.setup_command(arguments), 0)
 
         tls.assert_called_once_with()
+        setup.assert_called_once_with("homeai-node-2", None)
         install_services.assert_called_once_with(identity, include_gateway=False)
         site_store.assert_not_called()
         self.assertNotIn("api_key_file", output.getvalue())

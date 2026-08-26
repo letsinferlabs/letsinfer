@@ -100,12 +100,14 @@ independent runtime candidates—without adding model-specific code to core.
 
 | Task | Command |
 | --- | --- |
-| Inspect this node and hardware | `letsinfer node info` |
+| Inspect a node and its hardware | `letsinfer node info [NODE]` |
 | List catalog and installed models | `letsinfer model list` |
 | Install a model | `letsinfer model install MODEL` |
 | Assign models interactively | `letsinfer model install` |
 | Add a child node | `letsinfer node add` |
+| Pause work on a node | `letsinfer node pause [NODE]` |
 | Watch live status | `letsinfer status` |
+| Watch live topology and traffic | `letsinfer topology` |
 | Create an API key | `letsinfer auth key create my-app` |
 | Check for updates | `letsinfer update check` |
 | Update Core | `letsinfer update core` |

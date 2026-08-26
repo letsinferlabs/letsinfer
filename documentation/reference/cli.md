@@ -16,6 +16,13 @@ one responsibility and a two-sentence explanation directly beneath it.
 Shows the complete node, service, hardware, model, engine-group, protection,
 and telemetry state. Use `--json` when another program needs the result.
 
+### `letsinfer topology`
+
+Shows the authenticated main-and-child graph with verified links, node health,
+model placements, and current host network traffic. Its live terminal view
+animates directional traffic against measured RX/TX rates and verified link
+capacity, while `--json` returns one exact snapshot.
+
 ### `letsinfer doctor`
 
 Audits operational and publication readiness without changing state. Its
@@ -23,19 +30,19 @@ checks explain what is healthy, degraded, or blocking and support `--json`.
 
 ```text
 letsinfer node
-├── info
+├── info [NODE]
 ├── list
 ├── add
-├── pause CHILD
-├── resume CHILD
-└── remove CHILD
+├── pause [NODE]
+├── resume [NODE]
+└── remove [NODE]
 ```
 
-### `letsinfer node info`
+### `letsinfer node info [NODE]`
 
-Shows this node's identity, role, hardware, compatible targets, and observed
-links in one place. Link evidence is collected deterministically in the
-background instead of through a manual probe command.
+Shows a selected node's identity, role, online state, hardware, compatible
+targets, and observed links. Omit `NODE` for the role-aware selector, or use
+`--json` without a target to retain local-node automation.
 
 ### `letsinfer node list`
 
@@ -45,25 +52,28 @@ state. Use `--json` to consume the topology without parsing the human table.
 ### `letsinfer node add`
 
 Shows incoming requests and discovers certificate-identified nodes that can be
-adopted as children. The same workflow sends the request, displays the
-comparison code on the adoptable node, and approves it on the main.
+adopted as children. The main selects the pinned node and the candidate accepts
+that exact request locally, which activates the child without a second code;
+when run on a child, the command confirms coordinated detach and returns the
+machine to standalone discovery.
 
-### `letsinfer node pause CHILD`
+### `letsinfer node pause [NODE]`
 
-Stops assigning new work to the selected child while retaining its membership
-and current placement records. Existing admitted work continues without
-interruption.
+Stops assigning new work to the selected node while retaining membership and
+placement records. Omit `NODE` for the selector; a child can pause itself
+through the main, and self/main targets require interactive confirmation.
 
-### `letsinfer node resume CHILD`
+### `letsinfer node resume [NODE]`
 
-Makes a paused child eligible for new placement and request routing again. It
-does not reinstall models or erase the child's prior health history.
+Restores new-work admission to a paused selected node without recreating
+membership or model state. A child can resume itself through the main, and an
+explicit node keeps automation deterministic.
 
-### `letsinfer node remove CHILD`
+### `letsinfer node remove [NODE]`
 
-Removes a child from the main after safety checks prove it is no longer needed
-by a placement or lifecycle operation. The command refuses destructive
-removal while dependent work remains.
+On a main, removes a selected child after confirmation and refuses while a
+live placement depends on it. On a child, removes itself through authenticated
+coordinated detach and becomes a standalone addable main.
 
 ```text
 letsinfer model
