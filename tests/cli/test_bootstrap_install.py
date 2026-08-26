@@ -5,7 +5,12 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
+import tempfile
 import unittest
+
+from core.platform import dgx_spark
+from core.platform.network import NetworkPlan, apply_network_plan
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -15,6 +20,104 @@ WORKFLOW = REPOSITORY_ROOT / ".github/workflows/release-core.yml"
 
 
 class BootstrapInstallTests(unittest.TestCase):
+    def test_spark_network_provider_isolated_from_generic_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            etc = root / "etc"
+            sys_class = root / "sys/class"
+            etc.mkdir(parents=True)
+            (etc / "dgx-release").write_text(
+                "DGX_PLATFORM=GX10\n", encoding="ascii"
+            )
+            for name in dgx_spark.CONNECTX_INTERFACES:
+                interface = sys_class / "net" / name
+                interface.mkdir(parents=True)
+                (interface / "carrier").write_text("1\n", encoding="ascii")
+            plan = dgx_spark.network_plan(
+                etc_root=etc,
+                sys_class=sys_class,
+                addresses={},
+            )
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.provider, "nvidia-dgx-spark-connectx-v1")
+        self.assertEqual(plan.backend, "networkmanager")
+        self.assertEqual(dict(plan.settings)["ipv4.method"], "link-local")
+
+    def test_generic_network_applier_preserves_external_ownership(self) -> None:
+        plan = dgx_spark.network_plan(
+            etc_root=pathlib.Path("/missing"),
+            sys_class=pathlib.Path("/missing"),
+        )
+        self.assertIsNone(plan)
+
+        value = NetworkPlan(
+            provider="fixture-network-v1",
+            backend="networkmanager",
+            interfaces=("eth9",),
+            settings=(
+                ("ipv4.method", "link-local"),
+                ("ipv6.method", "disabled"),
+            ),
+        )
+        identifier = "11111111-2222-3333-4444-555555555555"
+
+        def runner(command):
+            output = (
+                identifier + "\n"
+                if command[1:5] == ("-t", "-f", "UUID", "connection")
+                else "eth9\nmanual\nauto\n"
+            )
+            return subprocess.CompletedProcess(command, 0, output, "")
+
+        result = apply_network_plan(value, runner=runner)
+        self.assertEqual(result["state"], "externally-managed")
+
+    def test_generic_network_applier_runs_only_bounded_backend_commands(self) -> None:
+        plan = NetworkPlan(
+            provider="fixture-network-v1",
+            backend="networkmanager",
+            interfaces=("eth9",),
+            settings=(
+                ("ipv4.method", "link-local"),
+                ("ipv6.method", "disabled"),
+            ),
+        )
+        commands: list[tuple[str, ...]] = []
+        identifier = "11111111-2222-3333-4444-555555555555"
+
+        def runner(command):
+            commands.append(tuple(command))
+            output = (
+                identifier + "\n"
+                if command[1:5] == ("-t", "-f", "UUID", "connection")
+                else "eth9\nauto\nauto\n"
+                if command[1:3] == ("-g", "connection.interface-name,ipv4.method,ipv6.method")
+                else ""
+            )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                output,
+                "",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            sys_class = pathlib.Path(directory) / "sys/class"
+            carrier = sys_class / "net/eth9/carrier"
+            carrier.parent.mkdir(parents=True)
+            carrier.write_text("1\n", encoding="ascii")
+            result = apply_network_plan(
+                plan,
+                runner=runner,
+                sys_class=sys_class,
+            )
+        self.assertEqual(result["state"], "configured")
+        self.assertEqual(
+            commands[-1],
+            ("sudo", "nmcli", "connection", "up", identifier, "ifname", "eth9"),
+        )
+
     def test_embedded_release_signer_matches_committed_trust_root(self) -> None:
         script = INSTALLER.read_text(encoding="utf-8")
         match = re.search(
@@ -39,9 +142,12 @@ class BootstrapInstallTests(unittest.TestCase):
         public_install_umask = script.index("umask 022", extraction)
         private_setup_umask = script.index("umask 077", public_install_umask)
         setup = script.index('"$command_path" core-setup')
+        network = script.index("python3 -m core.platform.network apply-if-detected")
         self.assertLess(signature, checksum)
         self.assertLess(checksum, extraction)
         self.assertLess(extraction, installation)
+        self.assertLess(extraction, network)
+        self.assertLess(network, installation)
         self.assertLess(public_install_umask, installation)
         self.assertLess(installation, private_setup_umask)
         self.assertLess(private_setup_umask, setup)
@@ -65,6 +171,7 @@ class BootstrapInstallTests(unittest.TestCase):
         )
         self.assertIn('preflight_linux_docker "$operator"', script)
         self.assertIn("preflight_linux_docker_service", script)
+        self.assertIn("Preparing platform networking", script)
         self.assertIn('sudo usermod -aG "$socket_group" "$operator"', script)
         self.assertIn('sudo systemctl restart "user@$(id -u).service"', script)
         self.assertIn("openssl_development_ready", script)

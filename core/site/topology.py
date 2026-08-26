@@ -23,6 +23,7 @@ SAFE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 INTERFACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,31}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_FACT_AGE_SECONDS = 30
+MAX_LINK_AGE_SECONDS = 6
 
 
 class TopologyError(ValueError):
@@ -345,7 +346,7 @@ class TopologyGraph:
                     peer not in self.members
                     or peer == member_id
                     or not link["verified"]
-                    or now - link["observed_at_unix"] > MAX_FACT_AGE_SECONDS
+                    or now - link["observed_at_unix"] > MAX_LINK_AGE_SECONDS
                     or link["observed_at_unix"] > now + 5
                 ):
                     continue
@@ -355,7 +356,7 @@ class TopologyGraph:
                         for candidate in self.members[peer]["network"]["links"]
                         if candidate["peer_member_id"] == member_id
                         and candidate["verified"]
-                        and now - candidate["observed_at_unix"] <= MAX_FACT_AGE_SECONDS
+                        and now - candidate["observed_at_unix"] <= MAX_LINK_AGE_SECONDS
                         and candidate["observed_at_unix"] <= now + 5
                     ),
                     None,

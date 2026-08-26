@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import threading
 import time
 import unittest
 from unittest import mock
@@ -987,11 +988,71 @@ class TerminalTests(unittest.TestCase):
         rendered = stream.getvalue()
         self.assertIn("\033[?1049h", rendered)
         self.assertIn("\033[?1049l", rendered)
-        self.assertIn("◆", rendered)
+        self.assertNotIn("Direct links", rendered)
+        self.assertIn("[ConnectX]", rendered)
         self.assertIn("200 Gbit/s", rendered)
-        self.assertIn("authenticated host-wide RX/TX", rendered)
+        self.assertIn("RDMA · MTU 9000", rendered)
 
-    def test_topology_distinguishes_membership_from_direct_link_evidence(self) -> None:
+    def test_topology_link_pulse_uses_the_reduced_speed(self) -> None:
+        self.assertEqual(
+            topology_ui.PULSE_STEP_SECONDS,
+            topology_ui.REFRESH_SECONDS * 2.5,
+        )
+
+    def test_topology_node_header_uses_independent_semantic_colors(self) -> None:
+        terminal = ui.Terminal(
+            FakeStream(tty=True),
+            environ={"TERM": "xterm-256color", "COLUMNS": "80"},
+        )
+        rendered = topology_ui._node_header(
+            terminal,
+            {
+                "member_id": "1" * 32,
+                "name": "homeai",
+                "role": "main",
+                "state": "active",
+                "online": True,
+            },
+            "⠋",
+            70,
+        )
+        self.assertIn(terminal.paint("⠋", ui.BOLD, ui.BLUE), rendered)
+        self.assertIn(terminal.paint("homeai", ui.BOLD, ui.LIGHT), rendered)
+        self.assertIn(terminal.paint(" · MAIN", ui.DIM), rendered)
+        self.assertIn(terminal.paint("ONLINE", ui.BOLD, ui.GREEN), rendered)
+
+    def test_slow_topology_poll_never_blocks_animation_reads(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_snapshot() -> dict[str, int]:
+            started.set()
+            release.wait(1)
+            return {"revision": 2}
+
+        with mock.patch.object(topology_ui, "SNAPSHOT_SECONDS", 0.01):
+            worker = topology_ui._TopologySnapshotWorker(
+                slow_snapshot,
+                {"revision": 1},
+            )
+            worker.start()
+            try:
+                self.assertTrue(started.wait(1))
+                before = time.monotonic()
+                revisions = [worker.current()["revision"] for _ in range(20)]
+                elapsed = time.monotonic() - before
+                self.assertEqual(revisions, [1] * 20)
+                self.assertLess(elapsed, 0.05)
+                release.set()
+                deadline = time.monotonic() + 1
+                while worker.current()["revision"] != 2:
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+            finally:
+                release.set()
+                worker.close()
+
+    def test_topology_omits_redundant_per_node_link_absence(self) -> None:
         node = {
             "member_id": "1" * 32,
             "name": "homeai",
@@ -1005,7 +1066,7 @@ class TerminalTests(unittest.TestCase):
             stream=FakeStream(tty=True),
             environ={"TERM": "xterm", "NO_COLOR": "1", "COLUMNS": "80"},
         )
-        self.assertEqual(one.count("No verified direct node link"), 1)
+        self.assertNotIn("verified direct node link", one.casefold())
         two = topology_ui.topology_text(
             {
                 "nodes": [
@@ -1015,6 +1076,9 @@ class TerminalTests(unittest.TestCase):
                         "member_id": "2" * 32,
                         "name": "homeai-node-2",
                         "role": "child",
+                        "state": "active",
+                        "online": True,
+                        "connection": "Ethernet",
                     },
                 ],
                 "links": [],
@@ -1022,7 +1086,35 @@ class TerminalTests(unittest.TestCase):
             stream=FakeStream(tty=True),
             environ={"TERM": "xterm", "NO_COLOR": "1", "COLUMNS": "80"},
         )
-        self.assertEqual(two.count("No verified direct node link"), 2)
+        self.assertNotIn("verified direct node link", two.casefold())
+        self.assertIn("homeai-node-2 · ONLINE", two)
+        self.assertIn("[Ethernet]", two)
+        self.assertNotIn("Direct links", two)
+
+    def test_topology_marks_only_the_affected_model_paused(self) -> None:
+        rendered = topology_ui.topology_text(
+            {
+                "nodes": [
+                    {
+                        "member_id": "1" * 32,
+                        "name": "homeai",
+                        "role": "main",
+                        "health": "healthy",
+                        "models": [
+                            {"model": "local-model", "state": "running"},
+                            {"model": "distributed-model", "state": "stopped"},
+                        ],
+                        "traffic": {"fresh": False},
+                    }
+                ],
+                "links": [],
+            },
+            stream=FakeStream(tty=True),
+            environ={"TERM": "xterm", "NO_COLOR": "1", "COLUMNS": "80"},
+        )
+        self.assertIn("1 model running", rendered)
+        self.assertIn("local-model", rendered)
+        self.assertIn("distributed-model · PAUSED", rendered)
 
     def test_topology_reflects_online_offline_membership_and_transport_changes(self) -> None:
         main = {

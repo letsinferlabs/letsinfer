@@ -464,6 +464,40 @@ def _network_interfaces(sys_class: pathlib.Path) -> list[dict[str, Any]]:
     return result
 
 
+def _publishable_links(
+    network_interfaces: Sequence[Mapping[str, Any]],
+    links: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Omit retained proofs that no longer fit the live local interface."""
+
+    interfaces = {
+        str(interface.get("name")): interface
+        for interface in network_interfaces
+        if isinstance(interface.get("name"), str)
+    }
+    result: list[dict[str, Any]] = []
+    for value in links:
+        link = dict(value)
+        interface = interfaces.get(str(link.get("interface", "")))
+        if interface is None:
+            continue
+        speed = interface.get("speed_mbps")
+        mtu = interface.get("mtu")
+        if (
+            not isinstance(speed, int)
+            or isinstance(speed, bool)
+            or speed <= 0
+            or not isinstance(mtu, int)
+            or isinstance(mtu, bool)
+            or mtu < int(link.get("mtu", mtu + 1))
+            or speed < int(link.get("speed_mbps", speed + 1))
+            or (link.get("rdma") is True and interface.get("rdma") is not True)
+        ):
+            continue
+        result.append(link)
+    return result
+
+
 def verify_direct_connectx_interface(
     name: str,
     *,
@@ -693,6 +727,7 @@ def collect_local_facts(
     protection_tripped = _protection_trip_exists(protection_trip_path)
     memory_pressure = available_kib * 1024 <= memory_pressure_available_bytes
     network_interfaces = _network_interfaces(sys_class)
+    published_links = _publishable_links(network_interfaces, links)
     facts = {
         "schema_version": 1,
         "member_id": member_id,
@@ -718,7 +753,7 @@ def collect_local_facts(
         },
         "network": {
             "interfaces": network_interfaces,
-            "links": [dict(link) for link in links],
+            "links": published_links,
         },
         "software": {
             "driver": driver,

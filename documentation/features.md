@@ -82,6 +82,15 @@ manual link-probe control. Membership changes appear on the next frame,
 online/offline state follows signed fact freshness, interface changes publish
 each second, and direct-link evidence refreshes every two seconds.
 
+Platform network setup is provider-owned rather than embedded in topology or
+orchestration. The DGX Spark provider prepares NVIDIA-compatible ConnectX
+link-local profiles, while future hardware adds independent providers behind
+the same generic boundary. If a verified physical link disappears, Core pauses
+only engine groups whose immutable plans require that link; unrelated local
+models, replicas, children, and gateway routes continue serving. Link evidence
+must be restored before an operator can resume the affected group, so reconnect
+never causes a silent model restart.
+
 ## Protection that understands unified memory
 
 Watchdog is an independent, bounded-memory native service. It monitors the

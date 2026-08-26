@@ -25,6 +25,167 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_group_link_health_applies_only_to_sealed_connections(self) -> None:
+        now = 1_800_000_000
+        main_id = "a" * 32
+        child_id = "b" * 32
+        row = {
+            "plan": {
+                "resources": [{"node_id": main_id}, {"node_id": child_id}],
+                "connections": [
+                    {
+                        "nodes": [main_id, child_id],
+                        "kind": "connectx",
+                        "speed_mbps": 200_000,
+                        "mtu": 1500,
+                        "rdma": True,
+                    }
+                ],
+            }
+        }
+        store = mock.Mock()
+        store.members.return_value = [
+            {
+                "member_id": member_id,
+                "state": "active",
+                "certificate_sha256": character * 64,
+                "facts": {"observed_at_unix": now},
+            }
+            for member_id, character in ((main_id, "c"), (child_id, "d"))
+        ]
+        graph = mock.Mock(links={})
+        with mock.patch.object(cli, "TopologyGraph", return_value=graph):
+            self.assertEqual(
+                cli._engine_group_required_link_failure(
+                    row,
+                    store,
+                    now_unix=now,
+                ),
+                "required_link_unavailable",
+            )
+            graph.links = {
+                (main_id, child_id): {
+                    "kind": "connectx",
+                    "speed_mbps": 200_000,
+                    "mtu": 1500,
+                    "rdma": True,
+                }
+            }
+            self.assertIsNone(
+                cli._engine_group_required_link_failure(
+                    row,
+                    store,
+                    now_unix=now,
+                )
+            )
+        store.reset_mock()
+        self.assertIsNone(
+            cli._engine_group_required_link_failure(
+                {"plan": {"connections": [], "resources": []}},
+                store,
+                now_unix=now,
+            )
+        )
+        store.members.assert_not_called()
+
+    def test_link_loss_pauses_only_the_affected_engine_group(self) -> None:
+        affected = {
+            "group_id": "a" * 32,
+            "desired_state": "running",
+            "state": "running",
+            "updated_at_unix": 1,
+        }
+        independent = {
+            "group_id": "b" * 32,
+            "desired_state": "running",
+            "state": "running",
+            "updated_at_unix": 1,
+        }
+        store = mock.MagicMock()
+        store.__enter__.return_value = store
+        store.engine_groups.return_value = [affected, independent]
+        affected_orchestrator = mock.Mock()
+        independent_orchestrator = mock.Mock(protection_trips={})
+        independent_orchestrator.reconcile.return_value = {
+            "state": "running",
+            "member_states": [],
+        }
+        with (
+            mock.patch.object(
+                cli,
+                "_engine_group_lifecycle_lock",
+                return_value=contextlib.nullcontext(),
+            ),
+            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(
+                cli,
+                "_restore_engine_group_orchestrator",
+                side_effect=(
+                    (affected_orchestrator, {}),
+                    (independent_orchestrator, {}),
+                ),
+            ),
+            mock.patch.object(
+                cli,
+                "_engine_group_required_link_failure",
+                side_effect=("required_link_unavailable", None),
+            ),
+            mock.patch.object(
+                cli, "_pause_engine_group_for_link_loss"
+            ) as pause,
+            mock.patch.object(cli, "_sync_group_placement"),
+            mock.patch.object(cli.time, "time", return_value=1000),
+        ):
+            summary = cli.reconcile_engine_groups_once()
+        pause.assert_called_once_with(
+            store,
+            affected,
+            affected_orchestrator,
+            "required_link_unavailable",
+        )
+        affected_orchestrator.reconcile.assert_not_called()
+        independent_orchestrator.reconcile.assert_called_once_with()
+        self.assertEqual(summary["paused"], [affected["group_id"]])
+        self.assertEqual(summary["healthy"], [independent["group_id"]])
+
+    def test_link_pause_persists_reason_without_touching_siblings(self) -> None:
+        row = {
+            "group_id": "a" * 32,
+            "placement_id": "b" * 32,
+            "source": "registry.example/runtime@sha256:" + "c" * 64,
+            "engine_credential_sha256": "d" * 64,
+            "plan": {"group_id": "a" * 32},
+            "members": [{"member_id": "e" * 32}],
+        }
+        stopped = {"member_states": [{"member_id": "e" * 32, "state": "stopped"}]}
+        paused = {"state": "stopped", "member_states": stopped["member_states"]}
+        orchestrator = mock.Mock()
+        orchestrator.stop.return_value = stopped
+        store = mock.Mock()
+        store.set_engine_group.return_value = paused
+        with mock.patch.object(cli, "_sync_group_placement") as sync:
+            result = cli._pause_engine_group_for_link_loss(
+                store,
+                row,
+                orchestrator,
+                "required_link_unavailable",
+            )
+        self.assertIs(result, paused)
+        orchestrator.stop.assert_called_once_with()
+        self.assertEqual(
+            store.set_engine_group.call_args.kwargs["action"],
+            "group.link-pause",
+        )
+        self.assertEqual(
+            store.set_engine_group.call_args.kwargs["desired_state"],
+            "stopped",
+        )
+        self.assertEqual(
+            store.set_engine_group.call_args.kwargs["error"],
+            "required_link_unavailable",
+        )
+        self.assertEqual(sync.call_count, 2)
+
     def test_link_monitor_discovers_connectx_from_live_signed_facts(self) -> None:
         now = 1_800_000_000
 
@@ -719,6 +880,35 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         orchestrator.recover.assert_not_called()
         sync.assert_called_once_with(store, started)
 
+    def test_stopped_group_cannot_resume_before_link_reverification(self) -> None:
+        group_id = "a" * 32
+        row = {
+            "group_id": group_id,
+            "state": "stopped",
+            "desired_state": "stopped",
+        }
+        store = mock.Mock()
+        store.engine_groups.return_value = [row]
+        store_context = mock.MagicMock()
+        store_context.__enter__.return_value = store
+        with (
+            mock.patch.object(
+                cli,
+                "_engine_group_lifecycle_lock",
+                return_value=contextlib.nullcontext(),
+            ),
+            mock.patch.object(cli, "_site_store", return_value=store_context),
+            mock.patch.object(
+                cli,
+                "_engine_group_required_link_failure",
+                return_value="required_link_unavailable",
+            ),
+            mock.patch.object(cli, "_restore_engine_group_orchestrator") as restore,
+            self.assertRaisesRegex(cli.LetsInferError, "required node link"),
+        ):
+            cli._start_engine_group_by_id(group_id)
+        restore.assert_not_called()
+
     def test_benchmark_failure_retains_original_error_when_restore_fails(self) -> None:
         group_id = "a" * 32
         with tempfile.TemporaryDirectory() as directory:
@@ -942,6 +1132,10 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         unit = cli.render_node_service(pathlib.Path("/opt/letsinfer"))
         self.assertIn("MemoryHigh=134217728\n", unit)
         self.assertIn("MemoryMax=201326592\n", unit)
+        self.assertIn(
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n",
+            unit,
+        )
 
     def test_startup_oom_has_a_concise_engine_error(self) -> None:
         inspection = {
