@@ -71,7 +71,7 @@ class QualifiedGroupUpdateTests(unittest.TestCase):
         self.old = _release("1.0.0", "7")
         self.new = _release("1.1.0", "8")
         self.arguments = argparse.Namespace(
-            action_id="upgrade",
+            action_id="update.model",
             runtime="example-model",
             to=None,
             catalog="catalog.json",
@@ -190,7 +190,7 @@ class QualifiedGroupUpdateTests(unittest.TestCase):
         self.assertEqual(restore.call_args.kwargs["release"], self.old)
 
     def test_rollback_uses_latest_removed_release_on_the_same_node(self) -> None:
-        self.arguments.action_id = "rollback"
+        self.arguments.action_id = "model.rollback"
         current = _group("1", "2", "a", self.new)
         previous = _group(
             "4",

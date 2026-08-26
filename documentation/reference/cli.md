@@ -2,228 +2,349 @@
 
 [Back to documentation](../README.md)
 
-Run `letsinfer COMMAND --help` for the exact options in your installed version.
-The commands below describe the stable public workflow.
+The installer initializes the node automatically. Run `letsinfer COMMAND
+--help` for exact options in the installed release; retired pre-launch command
+paths have no aliases.
 
-## Set up your node
+## Complete command tree
 
-```bash
-letsinfer setup
-letsinfer node status
-letsinfer hardware
+The following tree is the complete public command surface. Each command has
+one responsibility and a two-sentence explanation directly beneath it.
+
+### `letsinfer status`
+
+Shows the complete node, service, hardware, model, engine-group, protection,
+and telemetry state. Use `--json` when another program needs the result.
+
+### `letsinfer doctor`
+
+Audits operational and publication readiness without changing state. Its
+checks explain what is healthy, degraded, or blocking and support `--json`.
+
+```text
+letsinfer node
+├── info
+├── list
+├── add
+├── pause CHILD
+├── resume CHILD
+└── remove CHILD
 ```
 
-The first machine becomes the main node. It owns the stable inference gateway,
-runtime selection, API-key registry, audit chain, and replica scheduling.
+### `letsinfer node info`
 
-Use `topology` and `child` to inspect or manage additional nodes. Every
-command has an execution scope: `main`, `child`, or `all`.
+Shows this node's identity, role, hardware, compatible targets, and observed
+links in one place. Link evidence is collected deterministically in the
+background instead of through a manual probe command.
 
-## Install a model
+### `letsinfer node list`
 
-```bash
-letsinfer list
-letsinfer install qwen3.8-27b
+Lists the main and every child with role, availability, placement, and health
+state. Use `--json` to consume the topology without parsing the human table.
+
+### `letsinfer node add`
+
+Shows incoming requests and discovers certificate-identified nodes that can be
+adopted as children. The same workflow sends the request, displays the
+comparison code on the adoptable node, and approves it on the main.
+
+### `letsinfer node pause CHILD`
+
+Stops assigning new work to the selected child while retaining its membership
+and current placement records. Existing admitted work continues without
+interruption.
+
+### `letsinfer node resume CHILD`
+
+Makes a paused child eligible for new placement and request routing again. It
+does not reinstall models or erase the child's prior health history.
+
+### `letsinfer node remove CHILD`
+
+Removes a child from the main after safety checks prove it is no longer needed
+by a placement or lifecycle operation. The command refuses destructive
+removal while dependent work remains.
+
+```text
+letsinfer model
+├── list [MODEL]
+├── install [MODEL]
+├── remove MODEL
+├── pause MODEL
+├── resume MODEL
+├── restart MODEL
+├── recover MODEL
+├── rollback MODEL
+└── logs MODEL
 ```
 
-`letsinfer list` shows every qualified runtime compatible with your hardware,
-including all runtime authors and the recommended candidate. Use
-`letsinfer list MODEL --versions` to see retained releases, `--all-targets` to
-inspect other hardware, `--refresh` to require a fresh signed catalog, and
-`--json` for structured output.
+### `letsinfer model list [MODEL]`
 
-Let's Infer detects your target and installs the recommended qualified
-candidate from the signed catalog. The runtime downloads its exact model and
-Engine OCI automatically.
+Shows the signed catalog and installed models in one view, with installed and
+recommended versions clearly marked. Filters expose installed entries, exact
+versions, compatible targets, refreshed catalog state, and JSON output.
 
-On a main node with children, an interactive install can offer to replicate
-the model. You can also select nodes explicitly:
+### `letsinfer model install [MODEL]`
 
-```bash
-letsinfer install qwen3.8-27b --node Home --node Workshop
-letsinfer install qwen3.8-27b --all-nodes
-letsinfer scale qwen3.8-27b --replicas 3
-```
+Installs a named model through the signed catalog and target matcher, or opens
+the node/model selector when `MODEL` is omitted. Assigning the same model to
+multiple compatible nodes creates replicas automatically, while different
+selections create independent services.
 
-Each selected node independently resolves the fastest qualified runtime for
-its hardware. Let's Infer shows incompatible nodes and replacement impact
-before making changes. Use `--replace-existing` only after reviewing that
-impact.
+### `letsinfer model remove MODEL`
 
-To pin one exact candidate:
+Removes the selected model from one node or, with explicit confirmation, from
+all nodes that host it. Safety checks prevent ambiguous or dependency-breaking
+removal.
 
-```bash
-letsinfer install qwen3.8-27b \
-  --runtime sglang--radixark--qwen3.8-27b-nvfp4--dgx-spark
-```
+### `letsinfer model pause MODEL`
 
-There is no engine selector. If you want a different engine, checkpoint,
-quantization, or recipe, choose or build a different runtime candidate.
+Stops admitting new inference work for the selected logical model without
+deleting its immutable runtime or placement. The paused model remains visible
+in status and can be resumed later.
 
-Useful development controls:
+### `letsinfer model resume MODEL`
 
-- `--catalog LOCATION` uses an explicit catalog.
-- `--no-download` requires every model and OCI blob to exist already.
-- `--no-start` installs and enables services without starting inference.
-- `--no-service` skips user-service installation.
+Returns a paused logical model to service after its existing safety checks
+pass. Resume does not clear a protection trip or replace recovery.
 
-## Run and inspect
+### `letsinfer model restart MODEL`
 
-```bash
-letsinfer status
-letsinfer status --json
-letsinfer runtimes
-letsinfer inspect qwen3.8-27b
-letsinfer verify qwen3.8-27b
-letsinfer doctor
-letsinfer logs
-letsinfer logs --group GROUP_ID
-```
+Restarts the selected model's engine groups while preserving its chosen
+runtime and safety history. Use it for ordinary lifecycle recovery, not as an
+acknowledgement of a Watchdog protection event.
 
-Interactive `status` refreshes until you press Ctrl-C. Its API, runtime,
-admission, throughput, Watchdog, system, and temperature sections come from the
-same normalized state plane used by other consumers.
+### `letsinfer model recover MODEL`
 
-`letsinfer list` is discovery from the signed public catalog. `letsinfer
-runtimes` shows only immutable packs already installed on your machine.
-`letsinfer logs` follows the only local engine group automatically. When a node
-hosts more than one group, select the exact group shown by `letsinfer status`
-with `--group`.
+Explicitly acknowledges a protection trip and attempts recovery after its
+cause has been corrected. This is the only lifecycle command permitted to
+clear that protected state.
 
-Lifecycle commands:
+### `letsinfer model rollback MODEL`
 
-```bash
-letsinfer start
-letsinfer restart
-letsinfer stop
-letsinfer recover
-```
+Plans or applies a rollback to the retained prior immutable runtime for the
+selected model. Use `--dry-run` to review the exact groups and version change
+before mutation.
 
-`recover` is an explicit acknowledgement after you inspect a protection trip.
-Ordinary start or restart does not erase safety history.
+### `letsinfer model logs MODEL`
 
-## API keys
+Streams or tails logs for the selected model's local engine group. Specify a
+group only when more than one local group makes the model selection ambiguous.
 
-```bash
-letsinfer key create my-app
-letsinfer key list
-letsinfer key rotate KEY_ID
-letsinfer key revoke KEY_ID
-```
-
-Key mutations are main-only and enter the node audit chain. Secret key
-material is shown once. Do not place it in source, logs, benchmark evidence, or
-shell history.
-
-## Benchmark
-
-```bash
-letsinfer benchmark qwen3.8-27b --c1
+```text
 letsinfer benchmark
-letsinfer benchmark stop
-letsinfer benchmark clean
+├── run MODEL
+├── list MODEL
+├── status
+├── stop
+├── clean
+└── verification
+    ├── run PULL_REQUEST_URL
+    ├── status
+    └── stop
 ```
 
-Starting a benchmark creates a durable job. Ctrl-C detaches; it does not cancel
-the job. Running `letsinfer benchmark` attaches to live progress, and
-`benchmark stop` cancels the active job. Use context and concurrency switches
-such as `--32k`, `--64k`, `--c1`, or `--c8` to select cells.
+### `letsinfer benchmark run MODEL`
 
-`benchmark clean` asks for confirmation and removes only locally generated
-benchmark data.
+Starts or resumes the canonical benchmark matrix for an installed model and
+the requested workload options. The job is durable, so Ctrl-C detaches while
+`benchmark stop` performs cancellation.
 
-### Verify a runtime proposal
+### `letsinfer benchmark list MODEL`
 
-```bash
-letsinfer benchmark verify \
-  https://github.com/letsinferlabs/runtimes/pull/123
-letsinfer benchmark verify status
-letsinfer benchmark verify stop
+Lists the benchmark cells that would run for the selected model and workload
+options. It is a read-only way to inspect the matrix before consuming runtime
+capacity.
+
+### `letsinfer benchmark status`
+
+Shows the active or most recent benchmark job, progress, workload, and durable
+result state. Use `--json` for monitoring and CI integrations.
+
+### `letsinfer benchmark stop`
+
+Requests durable cancellation of the active ordinary benchmark and waits for
+its restoration boundary. It is distinct from Ctrl-C, which only detaches the
+terminal.
+
+### `letsinfer benchmark clean`
+
+Removes completed local benchmark working data after explicit confirmation.
+It does not delete installed models or reinterpret failed evidence as a pass.
+
+### `letsinfer benchmark verification run PULL_REQUEST_URL`
+
+Runs the public verification contract against the exact finalized artifact
+for an eligible runtimes pull request. It never executes pull-request source
+or promotes an author's local result into qualification.
+
+### `letsinfer benchmark verification status`
+
+Shows progress and outcome for the active or most recent pull-request
+verification job. Its JSON form is suitable for durable monitoring.
+
+### `letsinfer benchmark verification stop`
+
+Requests durable cancellation of the active verification job and restores the
+prior serving state. It does not edit the pull request or publish evidence.
+
+```text
+letsinfer auth
+├── controller
+│   ├── add
+│   ├── list
+│   └── revoke CONTROLLER
+└── key
+    ├── create NAME
+    ├── list
+    ├── show KEY
+    ├── rotate KEY
+    ├── revoke KEY
+    └── update KEY
 ```
 
-Verification accepts only an open `letsinferlabs/runtimes` pull request that
-has passed the `benchmark-ready` source and supply-chain gate. It runs the
-current recommended runtime and the exact trusted-finalizer artifact with the
-same sealed contract. It never downloads or packages PR source. For a changed
-Engine it validates the bundled OCI layout, proves every compressed layer and
-rootfs diff ID, converts it to a temporary Docker-load archive, and removes the
-temporary archive plus only the image it introduced. It restores your previous
-runtime and local Engine state. Before execution it also verifies GitHub build
-provenance for every bundle file against the trusted main-branch finalizer.
-It then posts the complete signed evidence through your authenticated GitHub
-identity. Ctrl-C detaches; `status` reattaches and `stop` cancels and restores.
+### `letsinfer auth controller add`
 
-GitHub CLI 2.97.0 or newer is required so attestation verification includes the
-upstream signer-matching security fix. If GitHub CLI is missing, the interactive
-command shows the supported package manager command and asks before running it.
-If authentication is missing, it
-starts GitHub CLI's official browser/device-code flow. Let's Infer never reads
-or stores the GitHub token and never exposes it to candidate code.
+Opens the transient TLS pairing listener and displays the human comparison
+code for one controller. Ctrl-C closes the listener and reports `Pairing
+cancelled` without persisting an unfinished enrollment.
 
-Runtime and PR authors may submit useful informational results, but their runs
-do not count toward the two independent verifier threshold. One GitHub user
-and one pseudonymous device identity can contribute at most one slot to an
-execution subject, regardless of reruns. A blocking correctness or safety
-failure remains terminal for that subject. Performance differences are shown
-for review but do not add a disagreement state or require more reviewers.
+### `letsinfer auth controller list`
 
-## Core and runtime updates
+Lists enrolled controllers and their non-secret identity and policy state.
+This sensitive read is audited and supports machine-readable output.
 
-```bash
-letsinfer update check
+### `letsinfer auth controller revoke CONTROLLER`
+
+Revokes the selected controller's authority to manage the main. The operation
+is audited and does not affect unrelated inference API keys.
+
+### `letsinfer auth key create NAME`
+
+Creates an inference API key and optional policy for the named application.
+The plaintext secret is shown exactly once and is never written to the audit
+chain.
+
+### `letsinfer auth key list`
+
+Lists API-key identities, policy summaries, and lifecycle state without
+revealing plaintext secrets. This sensitive read is audited and supports
+JSON.
+
+### `letsinfer auth key show KEY`
+
+Shows one key's metadata and effective policy without recovering its original
+secret. Use the key identifier or unambiguous name reported by `auth key
+list`.
+
+### `letsinfer auth key rotate KEY`
+
+Replaces a key's secret while preserving its application identity and current
+policy. The replacement secret is displayed once and the prior secret becomes
+invalid.
+
+### `letsinfer auth key revoke KEY`
+
+Permanently disables the selected inference API key. The audited revocation
+does not expose the key's plaintext value.
+
+### `letsinfer auth key update KEY`
+
+Updates the selected key's model scope, expiry, rate, concurrency, context,
+tenant, or application policy. Unspecified policy fields retain their current
+values rather than being silently reset.
+
+```text
+letsinfer exposure
+├── status
+├── enable
+└── disable
+```
+
+### `letsinfer exposure status`
+
+Shows whether the authenticated inference gateway is exposed beyond its local
+network boundary and reports the effective endpoint state. The command is
+read-only and supports JSON.
+
+### `letsinfer exposure enable`
+
+Enables the configured public exposure path for the authenticated inference
+gateway after readiness checks pass. It does not make node-control or pairing
+interfaces public.
+
+### `letsinfer exposure disable`
+
+Disables the configured public inference exposure while leaving local serving
+and model placement intact. The audited change does not revoke existing API
+keys.
+
+```text
+letsinfer audit
+├── list
+├── show EVENT
+├── verify
+└── export --output FILE
+```
+
+### `letsinfer audit list`
+
+Lists audit events in chain order with their non-secret summaries. Filters and
+JSON output support bounded operational review.
+
+### `letsinfer audit show EVENT`
+
+Shows the complete recorded fields for one audit event without exposing
+plaintext credentials, prompts, or responses. The event identifier comes from
+`audit list`.
+
+### `letsinfer audit verify`
+
+Verifies the append-only audit chain and reports the first integrity failure
+if one exists. It performs no repair or mutation.
+
+### `letsinfer audit export --output FILE`
+
+Writes the bounded audit export to the explicitly selected file. Exported
+records preserve chain evidence while excluding prompts, responses, and
+plaintext credentials.
+
+```text
 letsinfer update
-letsinfer upgrade qwen3.8-27b
-letsinfer rollback qwen3.8-27b
+├── check
+├── core [VERSION]
+└── model [MODEL]
 ```
 
-`update check` refreshes core and every distinct installed engine-group release.
-Replica groups on the same exact release are deduplicated, while mixed targets
-or versions remain visible independently. Every
-interactive command can show the cached update notice without blocking on the
-network.
+### `letsinfer update check`
 
-`update` changes core and leaves installed runtimes unchanged. `upgrade`
-changes the runtime and leaves core unchanged. `rollback` reinstalls the
-retained previous runtime. No catalog change silently moves a running model.
+Checks Core and installed-model update availability without applying changes.
+It works before full node initialization and supports JSON.
 
-Use `--dry-run` on upgrade or rollback to inspect the transition first.
+### `letsinfer update core [VERSION]`
 
-## Runtime development
+Stages, verifies, and activates the recommended Core release or the explicitly
+selected version. Core updates do not silently change installed model
+runtimes.
 
-```bash
-letsinfer pack ./candidate --output /tmp/candidate.letsinfer
-letsinfer install /tmp/candidate.letsinfer
-letsinfer inspect <candidate-id> --json
-letsinfer serve <candidate-id> --qualification-mode \
-  --evidence-dir /new/empty/evidence
-```
+### `letsinfer update model [MODEL]`
 
-Local candidates are unqualified. Qualification mode never promotes a
-candidate automatically or makes it boot-persistent.
+Plans or applies a qualified runtime update for one installed model, or opens
+the installed-model selector when `MODEL` is omitted. Use `--dry-run` to
+inspect every affected engine group before activation.
 
-Schema checks, README generation, Engine builds, OCI planning, and `/shipit`
-live in the runtimes repository's contributor tooling and skills. They are not
-a second public `letsinfer runtime ...` command namespace.
+### `letsinfer uninstall`
 
-## Local data and removal
-
-```bash
-letsinfer uninstall
-letsinfer uninstall --keep-models
-```
-
-Uninstall asks for confirmation, removes Let's Infer-managed services and
-containers by exact identity, and removes `$LETSINFER_HOME`.
-`--keep-models` preserves only the model directory.
-
-## Public exposure
-
-Your LAN endpoint is advertised through mDNS. Use `exposure` to inspect public
-state, `expose` to publish only the inference gateway through the configured
-secure transport, and `unexpose` to disable it. Public exposure never publishes
-the controller or Watchdog endpoints.
+Removes Let’s Infer-owned services, containers, images, and data after explicit
+confirmation. Use `--keep-models` to preserve model storage within the stated
+uninstall boundary.
 
 ## Machine-readable output
 
-Prefer `--json` for automation. Human output, progress animation, and update
-notices may evolve; JSON fields and exit status are the automation contract.
+Use `--json` where declared for automation. Human presentation may evolve,
+while JSON documents, raw log streams, exported artifacts, and exit status are
+the durable contracts.
+
+Runtime development and deterministic pack authoring are intentionally absent
+from the product CLI. Those workflows live in the public
+`letsinfer-runtime-authoring` skill.

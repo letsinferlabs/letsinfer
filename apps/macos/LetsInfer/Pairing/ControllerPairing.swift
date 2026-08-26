@@ -37,7 +37,7 @@ enum ControllerPairingError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidCode:
-            "Enter the eight-digit code shown by `letsinfer pair`."
+            "Enter the eight-digit code shown by `letsinfer auth controller add`."
         case .invalidHost:
             "Enter a valid Let's Infer hostname or IP address."
         case .invalidName:

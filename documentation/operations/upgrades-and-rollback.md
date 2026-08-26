@@ -27,7 +27,7 @@ last verified snapshot without changing a running runtime.
 ## Update core
 
 ```bash
-letsinfer update
+letsinfer update core
 ```
 
 Core update installs the new immutable version beside the active one, rebinds
@@ -39,26 +39,19 @@ If the handoff fails, the previous core remains available. Core cleanup never
 removes runtime rollback objects, models, benchmark evidence, or runtime
 selection history.
 
-## Upgrade a runtime
+## Update a model runtime
 
 Your installation records one policy:
 
 - `recommended` follows the current catalog recommendation;
 - `runtime:CANDIDATE_ID` stays on that exact candidate line;
-- `pinned` and `local` move only when you provide `--to`.
+- pinned or local development artifacts are not updated by the product CLI.
 
 Preview and apply:
 
 ```bash
-letsinfer upgrade qwen3.8-27b --dry-run
-letsinfer upgrade qwen3.8-27b
-```
-
-Choose an exact immutable source:
-
-```bash
-letsinfer upgrade qwen3.8-27b \
-  --to ghcr.io/example/runtime@sha256:<digest>
+letsinfer update model qwen3.8-27b --dry-run
+letsinfer update model qwen3.8-27b
 ```
 
 Let's Infer verifies and stages the candidate before replacing the active
@@ -69,8 +62,8 @@ the previous configuration and running service.
 ## Roll back
 
 ```bash
-letsinfer rollback qwen3.8-27b --dry-run
-letsinfer rollback qwen3.8-27b
+letsinfer model rollback qwen3.8-27b --dry-run
+letsinfer model rollback qwen3.8-27b
 ```
 
 Rollback uses the retained immutable object and receipt. It never resolves a

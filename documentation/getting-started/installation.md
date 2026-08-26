@@ -13,7 +13,7 @@ curl -fsSL https://letsinfer.ai/install.sh | sh
 The installer detects your OS and architecture, downloads the signed release,
 verifies its checksum and complete source manifest, installs immutable core
 files below `$LETSINFER_HOME/core`, exposes `letsinfer` in
-`/usr/local/bin`, and runs `letsinfer setup`.
+`/usr/local/bin`, and initializes the node through a private installer action.
 
 On Linux, setup checks for its compiler, CMake, and OpenSSL requirements and
 uses the system package manager to install any that are missing before services
@@ -30,7 +30,7 @@ access `/var/run/docker.sock`, the installer can add that account to the
 socket's group after warning that Docker group membership is root-equivalent.
 Linux requires a fresh login before the new group reaches the shell, so sign in
 again and rerun the installer. If an already-running user service manager still
-has stale groups, the rerun offers to restart it before setup continues.
+has stale groups, the rerun offers to restart it before initialization continues.
 
 For an install without administrator access:
 
@@ -77,10 +77,10 @@ by your account and cannot be a symlink, `/`, or your home directory itself.
 
 ## Install a model
 
-After setup:
+After installation:
 
 ```bash
-letsinfer install qwen3.8-27b
+letsinfer model install qwen3.8-27b
 ```
 
 You only provide the model name. Let's Infer detects your hardware,
@@ -103,19 +103,13 @@ A normal model install is complete only when the local API is ready:
 On Linux, the selected runtime starts again after reboot. The recovery
 controller also handles ordinary engine failures. A protection or OOM trip is
 different: it stays latched so an automatic restart cannot hide the cause. Run
-`letsinfer status` or `letsinfer doctor`, then use `letsinfer recover` when it
+`letsinfer status` or `letsinfer doctor`, then use `letsinfer model recover MODEL` when it
 is safe to continue.
-
-For a staged install that should not start inference yet:
-
-```bash
-letsinfer install qwen3.8-27b --no-start
-```
 
 To install one exact candidate:
 
 ```bash
-letsinfer install qwen3.8-27b \
+letsinfer model install qwen3.8-27b \
   --runtime sglang--radixark--qwen3.8-27b-nvfp4--dgx-spark
 ```
 
@@ -124,7 +118,7 @@ letsinfer install qwen3.8-27b \
 ```bash
 letsinfer status
 letsinfer doctor
-letsinfer key create my-app
+letsinfer auth key create my-app
 ```
 
 Your main node advertises its LAN endpoint with mDNS:
@@ -133,15 +127,15 @@ Your main node advertises its LAN endpoint with mDNS:
 http://<hostname>.local:8000/v1
 ```
 
-Use the API key returned by `letsinfer key create my-app` as a bearer token. Key
+Use the API key returned by `letsinfer auth key create my-app` as a bearer token. Key
 material is shown once.
 
 ## Updates
 
 ```bash
 letsinfer update check
-letsinfer update
-letsinfer upgrade qwen3.8-27b
+letsinfer update core
+letsinfer update model qwen3.8-27b
 ```
 
 Core and runtime updates are independent. Updating core does not change your

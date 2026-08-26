@@ -38,7 +38,7 @@ class BootstrapInstallTests(unittest.TestCase):
         installation = script.index('"$unpacked/letsinfer/bin/letsinfer-install"')
         public_install_umask = script.index("umask 022", extraction)
         private_setup_umask = script.index("umask 077", public_install_umask)
-        setup = script.index('"$command_path" setup')
+        setup = script.index('"$command_path" core-setup')
         self.assertLess(signature, checksum)
         self.assertLess(checksum, extraction)
         self.assertLess(extraction, installation)
@@ -53,7 +53,7 @@ class BootstrapInstallTests(unittest.TestCase):
         self.assertIn('(?:-rc\\.([0-9]+))?', script)
         self.assertIn('release.get("draft") is not False', script)
         self.assertIn('archive_name="letsinfer-$platform_os-$platform_arch.tar.gz"', script)
-        self.assertIn('"$command_path" setup', script)
+        self.assertIn('"$command_path" core-setup', script)
         self.assertIn('letsinfer_home="$HOME/.local/share/letsinfer"', script)
         self.assertIn('--home "$LETSINFER_HOME"', script)
         self.assertIn('$LETSINFER_HOME/core/current/bin/$launcher_name', script)
@@ -75,7 +75,7 @@ class BootstrapInstallTests(unittest.TestCase):
         self.assertIn('progress 80 "Initializing services"', script)
         self.assertIn('finish_progress', script)
         self.assertIn(
-            '"$command_path" setup --json >"$setup_json" 2>"$setup_log"',
+            '"$command_path" core-setup --json >"$setup_json" 2>"$setup_log"',
             script,
         )
         self.assertLess(

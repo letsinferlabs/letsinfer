@@ -695,9 +695,9 @@ class UpdateCommandTests(unittest.TestCase):
 
     def test_parser_preserves_core_update_and_adds_explicit_check(self):
         parser = cli.parser()
-        applying = parser.parse_args(["update", "--version", "0.11.0-rc.30"])
+        applying = parser.parse_args(["update", "core", "0.11.0-rc.30"])
         checking = parser.parse_args(["update", "check", "--json"])
-        self.assertIs(applying.action, cli.update_core)
+        self.assertIs(applying.action, cli.update_core_command)
         self.assertEqual(applying.version, "0.11.0-rc.30")
         self.assertIs(checking.action, cli.check_updates)
         self.assertTrue(checking.json)
