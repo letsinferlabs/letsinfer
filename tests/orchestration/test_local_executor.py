@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import copy
-import contextlib
 import pathlib
 import tempfile
 import unittest
@@ -134,17 +133,10 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         executor = cli.LocalEngineGroupExecutor(self.member_id)
         with (
             mock.patch.object(cli, "_read_engine_group_config", return_value=self.config),
-            mock.patch.object(
-                cli, "storage_lock", return_value=contextlib.nullcontext()
-            ),
             mock.patch.object(cli, "verify_active_core_watchdog"),
             mock.patch.object(cli, "authorize_serving_launch"),
             mock.patch.object(cli, "verify_host_target"),
-            mock.patch.object(
-                cli,
-                "ensure_install_dependencies",
-                return_value=("owner/model@revision",),
-            ) as dependencies,
+            mock.patch.object(cli, "ensure_image"),
             mock.patch.object(cli, "verify_installed_runtime"),
             mock.patch.object(cli, "require_memory_reserve"),
             mock.patch.object(cli, "docker_command", return_value=["docker", "run"]) as command,
@@ -158,10 +150,6 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "running")
         self.assertIsNone(result["endpoint"])
-        self.assertEqual(
-            result["model_artifacts_downloaded"], ["owner/model@revision"]
-        )
-        self.assertTrue(dependencies.call_args.kwargs["download"])
         run.assert_called_once_with(["docker", "run"])
         ready.assert_called_once_with(self.config["container_name"], self.task["readiness"])
         self.assertEqual([call.args[2] for call in protect.call_args_list], ["pending", "starting", "armed"])
@@ -389,14 +377,8 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         with (
             mock.patch.object(cli.platform, "system", return_value="Darwin"),
             mock.patch.object(cli, "_read_engine_group_config", return_value=native),
-            mock.patch.object(
-                cli, "storage_lock", return_value=contextlib.nullcontext()
-            ),
             mock.patch.object(cli, "authorize_serving_launch"),
             mock.patch.object(cli, "verify_host_target"),
-            mock.patch.object(
-                cli, "ensure_install_dependencies", return_value=()
-            ),
             mock.patch.object(cli, "verify_installed_runtime"),
             mock.patch.object(cli, "require_memory_reserve"),
             mock.patch.object(cli, "health_ready", return_value=True),

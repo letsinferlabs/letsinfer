@@ -66,7 +66,6 @@ ACTIONS = {
         ),
         _action("node.info", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE),
         _action("node.list", CommandScope.ALL, MutationClass.READ, AuditPolicy.NONE),
-        _action("node.usage", CommandScope.ALL, MutationClass.LOCAL, AuditPolicy.ALWAYS),
         _action("node.add", CommandScope.ALL, MutationClass.NODE, AuditPolicy.ALWAYS),
         _action("node.pause", CommandScope.ALL, MutationClass.NODE, AuditPolicy.ALWAYS),
         _action("node.resume", CommandScope.ALL, MutationClass.NODE, AuditPolicy.ALWAYS),

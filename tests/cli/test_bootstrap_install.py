@@ -6,7 +6,6 @@ from __future__ import annotations
 import pathlib
 import re
 import subprocess
-import sys
 import tempfile
 import unittest
 
@@ -20,188 +19,7 @@ RELEASE_ALLOWED_SIGNERS = REPOSITORY_ROOT / "core/trust/release-allowed-signers"
 WORKFLOW = REPOSITORY_ROOT / ".github/workflows/release-core.yml"
 
 
-def _write_executable(path: pathlib.Path, source: str) -> None:
-    path.write_text(source, encoding="utf-8")
-    path.chmod(0o755)
-
-
-def _docker_installer_harness(
-    *,
-    distribution: str = "ubuntu",
-    platform: str = "linux",
-    docker_present: bool = False,
-    docker_version_exit: int = 0,
-    docker_info_exit: int = 0,
-    package_install_exit: int = 0,
-    include_preflight: bool = True,
-) -> tuple[subprocess.CompletedProcess[str], str]:
-    script = INSTALLER.read_text(encoding="utf-8")
-    function_prefix, marker, _remainder = script.partition('\nwhile [ "$#" -gt 0 ]; do')
-    if not marker:
-        raise AssertionError("installer function boundary is missing")
-
-    with tempfile.TemporaryDirectory() as directory:
-        root = pathlib.Path(directory)
-        fake_bin = root / "bin"
-        fake_bin.mkdir()
-        command_log = root / "commands.log"
-        os_release = root / "os-release"
-        os_release.write_text(f'ID="{distribution}"\n', encoding="utf-8")
-        (fake_bin / "python3").symlink_to(sys.executable)
-
-        docker_template = root / "docker-template"
-        _write_executable(
-            docker_template,
-            """#!/bin/sh
-case "$1" in
-    --version) exit "${FAKE_DOCKER_VERSION_EXIT:-0}" ;;
-    info) exit "${FAKE_DOCKER_INFO_EXIT:-0}" ;;
-    *) exit 0 ;;
-esac
-""",
-        )
-        if docker_present:
-            (fake_bin / "docker").write_bytes(docker_template.read_bytes())
-            (fake_bin / "docker").chmod(0o755)
-
-        _write_executable(
-            fake_bin / "sudo",
-            """#!/bin/sh
-printf 'sudo %s\n' "$*" >>"$FAKE_COMMAND_LOG"
-if [ "$1" = "env" ]; then
-    shift
-    exec /usr/bin/env "$@"
-fi
-exec "$@"
-""",
-        )
-        _write_executable(
-            fake_bin / "systemctl",
-            """#!/bin/sh
-printf 'systemctl %s\n' "$*" >>"$FAKE_COMMAND_LOG"
-exit "${FAKE_SYSTEMCTL_EXIT:-0}"
-""",
-        )
-        for manager in ("apt-get", "dnf", "zypper", "pacman"):
-            _write_executable(
-                fake_bin / manager,
-                f"""#!/bin/sh
-printf '{manager} %s\n' "$*" >>"$FAKE_COMMAND_LOG"
-if [ "{manager}" = "apt-get" ] && [ "$1" = "update" ]; then
-    exit 0
-fi
-[ "${{FAKE_PACKAGE_INSTALL_EXIT:-0}}" -eq 0 ] || exit "$FAKE_PACKAGE_INSTALL_EXIT"
-/bin/cp "$FAKE_DOCKER_TEMPLATE" "$FAKE_BIN/docker"
-/bin/chmod 0755 "$FAKE_BIN/docker"
-exit 0
-""",
-            )
-
-        preflight = 'preflight_linux_docker "fixture-operator"' if include_preflight else ":"
-        harness = (
-            function_prefix
-            + '\nensure_platform_docker "$1" "$2"\n'
-            + preflight
-            + "\n"
-        )
-        environment = {
-            "PATH": str(fake_bin),
-            "HOME": str(root),
-            "TERM": "dumb",
-            "FAKE_BIN": str(fake_bin),
-            "FAKE_COMMAND_LOG": str(command_log),
-            "FAKE_DOCKER_TEMPLATE": str(docker_template),
-            "FAKE_DOCKER_VERSION_EXIT": str(docker_version_exit),
-            "FAKE_DOCKER_INFO_EXIT": str(docker_info_exit),
-            "FAKE_PACKAGE_INSTALL_EXIT": str(package_install_exit),
-        }
-        result = subprocess.run(
-            ["/bin/sh", "-c", harness, "docker-installer-test", platform, str(os_release)],
-            text=True,
-            capture_output=True,
-            env=environment,
-            check=False,
-        )
-        log = command_log.read_text(encoding="utf-8") if command_log.exists() else ""
-        return result, log
-
-
 class BootstrapInstallTests(unittest.TestCase):
-    def test_existing_usable_docker_is_left_unchanged(self) -> None:
-        result, log = _docker_installer_harness(docker_present=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(log, "")
-
-    def test_missing_docker_uses_supported_ubuntu_packages_and_starts_daemon(
-        self,
-    ) -> None:
-        result, log = _docker_installer_harness()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Docker is not installed; installing it with sudo", result.stderr)
-        self.assertIn("sudo apt-get update", log)
-        self.assertIn(
-            "sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io",
-            log,
-        )
-        self.assertIn("sudo systemctl enable --now docker.service", log)
-        self.assertIn("sudo docker info", log)
-
-    def test_non_linux_platform_does_not_inspect_or_install_docker(self) -> None:
-        result, log = _docker_installer_harness(
-            platform="macos",
-            include_preflight=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(log, "")
-
-    def test_supported_distributions_use_declared_native_packages(self) -> None:
-        scenarios = {
-            "debian": "apt-get install -y docker.io",
-            "fedora": "dnf install -y moby-engine",
-            "opensuse-leap": "zypper --non-interactive install docker",
-            "arch": "pacman --sync --needed --noconfirm docker",
-        }
-        for distribution, package_command in scenarios.items():
-            with self.subTest(distribution=distribution):
-                result, log = _docker_installer_harness(
-                    distribution=distribution,
-                    include_preflight=False,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(package_command, log)
-                self.assertIn("systemctl enable --now docker.service", log)
-
-    def test_missing_docker_fails_closed_on_unsupported_distribution(self) -> None:
-        result, log = _docker_installer_harness(
-            distribution="alpine",
-            include_preflight=False,
-        )
-        self.assertEqual(result.returncode, 1)
-        self.assertIn(
-            "automatic Docker installation is unsupported on Linux distribution: alpine",
-            result.stderr,
-        )
-        self.assertNotIn("install", log)
-
-    def test_docker_package_installation_failure_is_explicit(self) -> None:
-        result, log = _docker_installer_harness(
-            package_install_exit=9,
-            include_preflight=False,
-        )
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("apt could not install Docker", result.stderr)
-        self.assertIn("apt-get install -y docker.io", log)
-        self.assertNotIn("systemctl enable --now docker.service", log)
-
-    def test_installed_cli_with_unhealthy_daemon_is_not_reinstalled(self) -> None:
-        result, log = _docker_installer_harness(
-            docker_present=True,
-            docker_info_exit=1,
-        )
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("the Docker daemon is unavailable or unhealthy", result.stderr)
-        self.assertNotIn("apt-get", log)
-
     def test_spark_network_provider_isolated_from_generic_setup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -348,18 +166,9 @@ class BootstrapInstallTests(unittest.TestCase):
         self.assertIn('launcher_dir="/usr/local/bin"', script)
         self.assertIn('prefix="$HOME/.local"', script)
         self.assertIn(
-            'for setup_command in loginctl systemctl systemd-run stat',
+            'for setup_command in docker loginctl systemctl systemd-run stat',
             script,
         )
-        self.assertIn('ensure_platform_docker "$platform_os"', script)
-        self.assertIn(
-            "sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io",
-            script,
-        )
-        self.assertIn("sudo dnf install -y moby-engine", script)
-        self.assertIn("sudo zypper --non-interactive install docker", script)
-        self.assertIn("sudo pacman --sync --needed --noconfirm docker", script)
-        self.assertNotIn("get.docker.com", script)
         self.assertIn('preflight_linux_docker "$operator"', script)
         self.assertIn("preflight_linux_docker_service", script)
         self.assertIn("Preparing platform networking", script)

@@ -33,7 +33,6 @@ checks explain what is healthy, degraded, or blocking and support `--json`.
 letsinfer node
 ├── info [NODE]
 ├── list
-├── usage
 ├── add
 ├── pause [NODE]
 ├── resume [NODE]
@@ -50,14 +49,6 @@ targets, and observed links. Omit `NODE` for the role-aware selector, or use
 
 Lists the main and every child with role, availability, placement, and health
 state. Use `--json` to consume the topology without parsing the human table.
-
-### `letsinfer node usage`
-
-Shows local Let’s Infer storage by category, filesystem free space, and the
-exact inactive data that can be reclaimed. Use `--clean` to remove reviewed
-completed benchmarks, inactive model data, and rebuildable caches; `--category`
-limits the plan, `--yes` enables non-interactive cleanup, and removed model data
-is downloaded and verified again before any affected runtime starts.
 
 ### `letsinfer node add`
 

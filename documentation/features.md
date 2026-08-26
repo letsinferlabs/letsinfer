@@ -22,11 +22,6 @@ engine, lifecycle, API, safety, telemetry, and updates.
 - **One home directory.** Core releases, configuration, secrets, runtime
   packs, models, benchmark evidence, and rebuildable caches live below
   `$LETSINFER_HOME` (normally `~/.local/share/letsinfer`).
-- **Auditable storage cleanup.** `letsinfer node usage` breaks down owned space
-  and can remove only reviewed inactive models, rebuildable caches, and
-  completed benchmark data. Running models and rollback inputs stay protected;
-  a cleaned model is downloaded and verified again on each replica or parallel
-  member before that runtime starts.
 
 ## One stable API
 

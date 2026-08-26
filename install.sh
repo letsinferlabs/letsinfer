@@ -111,114 +111,6 @@ gid_list_contains() {
     esac
 }
 
-linux_distribution_id() {
-    os_release_path=$1
-    [ -f "$os_release_path" ] || return 1
-    python3 - "$os_release_path" <<'PY'
-import pathlib
-import re
-import shlex
-import sys
-
-try:
-    document = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-except (OSError, UnicodeError):
-    raise SystemExit(1)
-if len(document) > 64 * 1024:
-    raise SystemExit(1)
-distribution = None
-for line in document.splitlines():
-    key, separator, raw_value = line.partition("=")
-    if separator != "=" or key != "ID":
-        continue
-    try:
-        values = shlex.split(raw_value, comments=True, posix=True)
-    except ValueError:
-        raise SystemExit(1)
-    if len(values) != 1 or re.fullmatch(r"[a-z0-9._-]+", values[0]) is None:
-        raise SystemExit(1)
-    distribution = values[0]
-    break
-if distribution is None:
-    raise SystemExit(1)
-print(distribution)
-PY
-}
-
-install_linux_docker() {
-    os_release_path=$1
-    command -v sudo >/dev/null 2>&1 \
-        || fail "Docker is not installed and sudo is required to install it"
-    [ -f "$os_release_path" ] \
-        || fail "Linux distribution metadata is unavailable: $os_release_path"
-    distribution=$(linux_distribution_id "$os_release_path") \
-        || fail "Linux distribution metadata is invalid: $os_release_path"
-
-    clear_progress
-    printf 'letsinfer install: Docker is not installed; installing it with sudo for %s.\n' \
-        "$distribution" >&2
-    case "$distribution" in
-        ubuntu|debian)
-            command -v apt-get >/dev/null 2>&1 \
-                || fail "$distribution Docker installation requires apt-get"
-            sudo apt-get update \
-                || fail "apt could not refresh package metadata for Docker"
-            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io \
-                || fail "apt could not install Docker"
-            ;;
-        fedora)
-            command -v dnf >/dev/null 2>&1 \
-                || fail "Fedora Docker installation requires dnf"
-            sudo dnf install -y moby-engine \
-                || fail "dnf could not install Docker"
-            ;;
-        opensuse-leap|opensuse-tumbleweed|sles)
-            command -v zypper >/dev/null 2>&1 \
-                || fail "$distribution Docker installation requires zypper"
-            sudo zypper --non-interactive install docker \
-                || fail "zypper could not install Docker"
-            ;;
-        arch|manjaro)
-            command -v pacman >/dev/null 2>&1 \
-                || fail "$distribution Docker installation requires pacman"
-            sudo pacman --sync --needed --noconfirm docker \
-                || fail "pacman could not install Docker"
-            ;;
-        *)
-            fail "automatic Docker installation is unsupported on Linux distribution: $distribution"
-            ;;
-    esac
-
-    # POSIX shells may cache a prior failed Docker lookup. Refresh command
-    # discovery before validating the package that was just installed.
-    hash -r 2>/dev/null || :
-    command -v docker >/dev/null 2>&1 \
-        || fail "the Docker package installed, but its CLI remains unavailable"
-    docker --version >/dev/null 2>&1 \
-        || fail "the Docker package installed, but its CLI is unusable"
-    sudo systemctl enable --now docker.service \
-        || fail "Docker installed, but docker.service could not be enabled and started"
-    sudo docker info >/dev/null 2>&1 \
-        || fail "Docker installed, but its daemon did not become healthy"
-}
-
-ensure_linux_docker() {
-    os_release_path=${1:-/etc/os-release}
-    if command -v docker >/dev/null 2>&1; then
-        docker --version >/dev/null 2>&1 \
-            || fail "Docker is installed, but its CLI is unusable"
-        return 0
-    fi
-    install_linux_docker "$os_release_path"
-}
-
-ensure_platform_docker() {
-    target_platform=$1
-    os_release_path=${2:-/etc/os-release}
-    [ "$target_platform" = "linux" ] || return 0
-    ensure_linux_docker "$os_release_path"
-}
-
 preflight_linux_docker() {
     operator=$1
     if docker info >/dev/null 2>&1; then
@@ -412,11 +304,10 @@ if [ "$user_install" -eq 0 ]; then
 fi
 
 if [ "$run_setup" -eq 1 ] && [ "$platform_os" = "linux" ]; then
-    for setup_command in loginctl systemctl systemd-run stat; do
+    for setup_command in docker loginctl systemctl systemd-run stat; do
         command -v "$setup_command" >/dev/null 2>&1 \
             || fail "automatic Linux setup requires: $setup_command"
     done
-    ensure_platform_docker "$platform_os"
     operator=$(id -un)
     preflight_linux_docker "$operator"
 fi

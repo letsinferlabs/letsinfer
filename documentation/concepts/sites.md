@@ -84,19 +84,6 @@ by exact GPU UUID and only those devices are exposed to the Engine container.
 Starting, stopping, or failing one replica does not implicitly stop the other
 replicas.
 
-## Local storage lifecycle
-
-`letsinfer node usage` runs on either role and accounts only for the local
-node’s Let’s Infer home. Cleanup never crosses into a child remotely, follows a
-symlink, removes active model data, or invokes a broad Docker prune.
-
-Stopped replicas and stopped members of a parallel runtime may release their
-local model snapshots and rebuildable caches after an explicit cleanup review.
-Their sealed runtime plans remain installed; the next start downloads and
-verifies the exact declared revisions on each affected node before admitting
-the group, and the lifecycle result names every node that downloaded data
-again.
-
 The main gateway chooses a healthy replica using capacity, queue depth,
 pressure, temperature, and bounded prefix-affinity hints. It retries another
 group only before response streaming begins. If every compatible group is

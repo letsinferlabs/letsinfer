@@ -26,7 +26,6 @@ PUBLIC_REFERENCE_COMMANDS = {
     "letsinfer doctor",
     "letsinfer node info [NODE]",
     "letsinfer node list",
-    "letsinfer node usage",
     "letsinfer node add",
     "letsinfer node pause [NODE]",
     "letsinfer node resume [NODE]",

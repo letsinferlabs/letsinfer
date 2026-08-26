@@ -65,7 +65,6 @@ esac
         self._executable(
             self.fake_bin / "docker",
             """#!/bin/sh
-[ "$1" = "--version" ] && exit 0
 case "${FAKE_DOCKER_MODE:-allowed}" in
     allowed) exit 0 ;;
     denied) [ "${FAKE_DOCKER_AS_ROOT:-0}" = 1 ] ;;

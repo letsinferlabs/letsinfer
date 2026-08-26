@@ -373,50 +373,6 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         orchestrator.recover.assert_not_called()
         sync.assert_called_once_with(store, result)
 
-    def test_resume_reports_each_member_that_downloaded_model_data_again(self) -> None:
-        store = _Store()
-        store.group.update({"state": "stopped", "desired_state": "stopped"})
-        member_id = "5" * 32
-        started = {
-            "group_id": store.group_id,
-            "placement_id": store.placement_id,
-            "desired_state": "running",
-            "state": "running",
-            "member_states": [],
-        }
-        orchestrator = mock.Mock()
-        orchestrator.start.return_value = started
-        orchestrator.results = {
-            member_id: {
-                "model_artifacts_downloaded": ["owner/model@revision"]
-            }
-        }
-        with (
-            mock.patch.object(
-                cli,
-                "read_site_identity",
-                return_value=types.SimpleNamespace(role="main"),
-            ),
-            mock.patch.object(cli, "_site_store", return_value=store),
-            mock.patch.object(
-                cli,
-                "_restore_engine_group_orchestrator",
-                return_value=(orchestrator, {}),
-            ),
-            mock.patch.object(cli, "_sync_group_placement"),
-        ):
-            result = cli._engine_group_lifecycle("example-model", "start")
-        self.assertEqual(
-            result["model_artifact_downloads"],
-            [
-                {
-                    "member_id": member_id,
-                    "name": member_id,
-                    "artifacts": ["owner/model@revision"],
-                }
-            ],
-        )
-
     def test_resume_does_not_restart_an_already_running_sibling(self) -> None:
         store = _Store()
         store.group["plan"] = {"group_id": store.group_id}

@@ -62,18 +62,6 @@ class MockProductEnvironment:
             "uninstall": {"removed": True, "models_preserved": False},
             "node.info": {"node": node, "hardware": self.state["hardware"]},
             "node.list": {"nodes": nodes},
-            "node.usage": {
-                "home": "/mock/letsinfer",
-                "total_allocated_bytes": 150000000000,
-                "total_reclaimable_bytes": 12000000000,
-                "categories": [
-                    {
-                        "id": "models",
-                        "allocated_bytes": 140000000000,
-                        "reclaimable_bytes": 12000000000,
-                    }
-                ],
-            },
             "node.add": {"discovered": self.state["discovered"], "pending": []},
             "node.pause": {"node_id": "child-1", "state": "paused"},
             "node.resume": {"node_id": "child-1", "state": "active"},
