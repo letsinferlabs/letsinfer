@@ -1271,6 +1271,20 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         self.assertEqual(execution["engine"]["name"], "future-engine")
         self.assertEqual(execution["image"]["reference"], runtime["engine"]["oci"]["reference"])
 
+    def test_execution_manifest_accepts_normalized_engine_payload_identity(self) -> None:
+        runtime = runtime_candidate()
+        payload = "sha256:" + "8" * 64
+        runtime["engine"]["oci"]["payload_id"] = payload
+        execution = cli.runtime_execution_manifest(runtime, qualified=True)
+        self.assertEqual(execution["image"]["payload_id"], payload)
+        cli.validate_manifest(execution)
+
+        execution["image"]["payload_id"] = "not-a-payload"
+        with self.assertRaisesRegex(
+            cli.LetsInferError, "must be a SHA-256 execution payload"
+        ):
+            cli.validate_manifest(execution)
+
     def test_model_store_mirrors_exact_hugging_face_identity_and_revision(self) -> None:
         execution = cli.runtime_execution_manifest(runtime_candidate(), qualified=False)
         artifact = execution["artifacts"][0]
