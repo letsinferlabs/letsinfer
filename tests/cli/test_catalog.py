@@ -60,7 +60,10 @@ def catalog() -> dict:
         "license": "AGPL-3.0-only",
         "source": "ghcr.io/letsinferlabs/runtimes/qwen@sha256:" + "1" * 64,
         "engine": "sglang",
-        "engine_oci": "ghcr.io/letsinferlabs/engines/qwen@sha256:" + "2" * 64,
+        "engine_distribution": {
+            "kind": "oci-container",
+            "reference": "ghcr.io/letsinferlabs/engines/qwen@sha256:" + "2" * 64,
+        },
         "model_uri": "hf://RadixArk/Qwen3.8-27B-NVFP4",
         "benchmark": {
             "id": "3" * 64,
@@ -120,7 +123,10 @@ class CatalogTests(unittest.TestCase):
             "logical_model": "qwen3.8-27b",
             "engine": {
                 "id": release["engine"],
-                "oci": {"reference": release["engine_oci"]},
+                "distribution": {
+                    **release["engine_distribution"],
+                    "immutable_id": "sha256:" + "7" * 64,
+                },
             },
             "model": {"uri": release["model_uri"]},
             "artifacts": [
@@ -176,7 +182,10 @@ class CatalogTests(unittest.TestCase):
             "logical_model": "qwen3.8-27b",
             "engine": {
                 "id": release["engine"],
-                "oci": {"reference": release["engine_oci"]},
+                "distribution": {
+                    **release["engine_distribution"],
+                    "immutable_id": "sha256:" + "7" * 64,
+                },
             },
             "model": {"uri": release["model_uri"]},
             "artifacts": [
@@ -372,7 +381,7 @@ class CatalogTests(unittest.TestCase):
                 runtime_packs.load_catalog(str(path))
 
     def test_cache_identity_binds_catalog_and_revocation_bytes(self) -> None:
-        catalog_data = b'{"schema_version":6}\n'
+        catalog_data = b'{"schema_version":7}\n'
         self.assertNotEqual(
             _snapshot_identity(catalog_data, b'{"sequence":0}\n'),
             _snapshot_identity(catalog_data, b'{"sequence":1}\n'),

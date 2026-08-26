@@ -95,6 +95,9 @@ NVIDIA DGX Spark is the first qualified target. The signed production catalog
 currently includes qualified Qwen3.8 27B NVFP4 and DeepSeek V4 Flash runtimes.
 New models, quantizations, engines, kernels, and hardware targets ship as
 independent runtime candidates—without adding model-specific code to core.
+Unqualified Apple candidates provide native llama.cpp and MLX-LM lanes on
+Apple Silicon macOS plus embedded llama.cpp and MLC Metal lanes on iOS; they
+are not catalog recommendations until physical-device qualification passes.
 
 ## Common commands
 
@@ -130,13 +133,13 @@ model name + verified node topology
        signed runtime catalog
               │
               ▼
- exact model + runtime pack + Engine OCI
+ exact model + runtime pack + Engine distribution
               │
               ▼
  OpenAI-compatible gateway + Watchdog
 ```
 
-Each immutable runtime binds an exact model, Engine OCI, hardware target,
+Each immutable runtime binds an exact model, Engine distribution, hardware target,
 serving recipe, optional optimizations, and benchmark evidence. Core stays
 model- and engine-agnostic.
 
@@ -151,6 +154,7 @@ model- and engine-agnostic.
 - [Watchdog](documentation/operations/watchdog.md)
 - [Benchmark framework](benchmarks/README.md)
 - [macOS controller](apps/macos/README.md)
+- [iOS inference node](apps/ios/README.md)
 
 ## Contributing
 

@@ -15,13 +15,18 @@ engine, lifecycle, API, safety, telemetry, and updates.
   selects the fastest qualified runtime from the signed catalog. Use
   `--runtime` when you want to pin an exact candidate.
 - **Exact, deduplicated downloads.** The selected runtime brings its pinned
-  model revision, Engine OCI, adapter, dependencies, and optional sidecars.
+  model revision, Engine distribution, adapter, dependencies, and optional sidecars.
   Content-addressed stores avoid downloading identical content twice.
 - **Ready means ready.** A normal install starts inference and waits for the
   API to become usable. Pause and resume are explicit model lifecycle actions.
 - **One home directory.** Core releases, configuration, secrets, runtime
   packs, models, benchmark evidence, and rebuildable caches live below
   `$LETSINFER_HOME` (normally `~/.local/share/letsinfer`).
+- **Auditable storage cleanup.** `letsinfer node usage` breaks down owned space
+  and can remove only reviewed inactive models, rebuildable caches, and
+  completed benchmark data. Running models and rollback inputs stay protected;
+  a cleaned model is downloaded and verified again on each replica or parallel
+  member before that runtime starts.
 
 ## One stable API
 
@@ -111,7 +116,7 @@ explicit recovery.
 
 - **Signed catalog.** Runtime selection begins from an exact-byte Ed25519-
   signed catalog.
-- **Immutable identities.** Runtimes pin the Hugging Face revision, Engine OCI
+- **Immutable identities.** Runtimes pin the Hugging Face revision, Engine distribution
   digest and configuration, runtime-pack OCI, tokenizer identity, serving
   recipe, and qualification evidence.
 - **Deterministic runtime packs.** The release pipeline builds twice and
@@ -150,7 +155,7 @@ every runtime:
 - validated JSON with throughput, TTFT, cache state, utilization, clocks,
   temperatures, memory, NVMe, power, network, and a telemetry timeline.
 
-Benchmark records are bound to the runtime, model, Engine OCI, target,
+Benchmark records are bound to the runtime, model, Engine distribution, target,
 installation, prompt set, and contract. They are evidence, not a prose claim.
 
 ## Nodes, replication, controllers, and exposure
@@ -182,7 +187,7 @@ full control over ranks, stages, transports, kernels, and engine configuration.
 ## A runtime platform, not an engine fork
 
 Core owns the stable gateway, lifecycle, catalog, stores, benchmarking,
-security, and Engine protocol. An Engine OCI contains one engine version and
+security, and Engine protocol. An Engine distribution contains one engine version and
 its matching adapter. A runtime candidate can then supply the exact model,
 target configuration, kernels, patches, sidecars, cache integration, and
 benchmark evidence.
@@ -204,7 +209,7 @@ to disk.
 - [Install Let's Infer](getting-started/installation.md)
 - [Use the CLI](reference/cli.md)
 - [Understand runtime candidates](concepts/runtime-packs.md)
-- [Develop an Engine OCI](concepts/engine-adapters.md)
+- [Develop an Engine distribution](concepts/engine-adapters.md)
 - [Operate Watchdog](operations/watchdog.md)
 - [Run benchmarks](../benchmarks/README.md)
 - [Use the macOS controller](../apps/macos/README.md)

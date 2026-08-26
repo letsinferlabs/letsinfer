@@ -27,23 +27,30 @@ import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
+from core.engine_distribution import (
+    OCI_KIND,
+    EngineDistributionError,
+    distribution_payload_sha256,
+    validate_distribution_projection,
+    validate_engine_distribution,
+)
 from core.orchestration import OrchestrationError, validate_target_binding
 from core.paths import config_root, data_root, runtime_root
 
 
 RUNTIME_CONFIG = "runtime.json"
 RUNTIME_DESCRIPTOR = "letsinfer-runtime.json"
-RUNTIME_SCHEMA_VERSION = 5
+RUNTIME_SCHEMA_VERSION = 6
 ENGINE_PROTOCOL_VERSION = 2
-ARTIFACT_SCHEMA_VERSION = 5
-CATALOG_SCHEMA_VERSION = 6
+ARTIFACT_SCHEMA_VERSION = 6
+CATALOG_SCHEMA_VERSION = 7
 DEFAULT_CATALOG_URL = (
     "https://github.com/letsinferlabs/runtimes/releases/latest/download/catalog.json"
 )
 BUILTIN_CATALOG_PUBLIC_KEY = (
     pathlib.Path(__file__).resolve().parent / "trust" / "catalog-public-key.pem"
 )
-PACK_MEDIA_TYPE = "application/vnd.letsinfer.runtime.v5+tar"
+PACK_MEDIA_TYPE = "application/vnd.letsinfer.runtime.v6+tar"
 REGISTRY_DIGEST_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
@@ -851,7 +858,7 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
     required_engine = {
         "id",
         "protocol",
-        "oci",
+        "distribution",
         "model_format",
         "cache_provider",
         "arguments",
@@ -859,7 +866,7 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
     }
     if not isinstance(engine, dict) or set(engine) != required_engine:
         raise RuntimePackError(
-            "runtime.engine must contain exactly id, protocol, oci, model_format, "
+            "runtime.engine must contain exactly id, protocol, distribution, model_format, "
             "cache_provider, arguments, and environment"
         )
     engine_id = engine.get("id")
@@ -872,26 +879,13 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
         raise RuntimePackError(
             f"runtime.engine.protocol.version must be {ENGINE_PROTOCOL_VERSION}"
         )
-    oci = engine.get("oci")
-    if not isinstance(oci, dict) or set(oci) not in (
-        {"reference", "immutable_id"},
-        {"reference", "immutable_id", "base"},
-        {"reference", "immutable_id", "payload_id"},
-        {"reference", "immutable_id", "base", "payload_id"},
-    ):
-        raise RuntimePackError("runtime.engine.oci has invalid fields")
-    if not REGISTRY_DIGEST_RE.fullmatch(oci.get("reference", "")):
-        raise RuntimePackError("runtime.engine.oci.reference must be digest-pinned")
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", oci.get("immutable_id", "")):
-        raise RuntimePackError("runtime.engine.oci.immutable_id must be a SHA-256 image ID")
-    if "base" in oci and not REGISTRY_DIGEST_RE.fullmatch(oci.get("base", "")):
-        raise RuntimePackError("runtime.engine.oci.base must be digest-pinned")
-    if "payload_id" in oci and not re.fullmatch(
-        r"sha256:[0-9a-f]{64}", oci.get("payload_id", "")
-    ):
-        raise RuntimePackError(
-            "runtime.engine.oci.payload_id must be a SHA-256 execution payload"
+    try:
+        distribution = validate_engine_distribution(
+            engine.get("distribution"),
+            target_platform=target["platform"],
         )
+    except EngineDistributionError as error:
+        raise RuntimePackError(str(error)) from error
     for key in ("model_format", "cache_provider"):
         if not isinstance(engine.get(key), str) or not SAFE_NAME_RE.fullmatch(engine[key]):
             raise RuntimePackError(f"runtime.engine.{key} must be a lowercase safe name")
@@ -915,8 +909,28 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
         raise RuntimePackError("runtime.model must contain exactly uri, artifact, and acquisition")
     normalize_hf_uri(model.get("uri"), "runtime.model.uri")
     acquisition = model.get("acquisition")
-    if not isinstance(acquisition, dict) or set(acquisition) != {"image"} or not REGISTRY_DIGEST_RE.fullmatch(acquisition.get("image", "")):
-        raise RuntimePackError("runtime.model.acquisition.image must be digest-pinned")
+    if not isinstance(acquisition, dict) or acquisition.get("kind") not in {
+        "oci-container",
+        "huggingface-http",
+    }:
+        raise RuntimePackError("runtime.model.acquisition.kind is unsupported")
+    if acquisition["kind"] == "oci-container":
+        if set(acquisition) != {"kind", "image"} or not REGISTRY_DIGEST_RE.fullmatch(
+            str(acquisition.get("image", ""))
+        ):
+            raise RuntimePackError(
+                "runtime.model.acquisition OCI image must be digest-pinned"
+            )
+    elif set(acquisition) != {"kind", "client"} or acquisition.get(
+        "client"
+    ) != "huggingface-http-v1":
+        raise RuntimePackError(
+            "native runtime model acquisition must use huggingface-http-v1"
+        )
+    if distribution["kind"] == OCI_KIND and acquisition["kind"] != "oci-container":
+        raise RuntimePackError("OCI Engines require OCI model acquisition")
+    if distribution["kind"] != OCI_KIND and acquisition["kind"] != "huggingface-http":
+        raise RuntimePackError("native Engines require native Hugging Face acquisition")
 
     artifacts = value.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
@@ -981,9 +995,10 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
         raise RuntimePackError(
             "runtime.artifacts must put the primary artifact first and sort the rest by name"
         )
-    primary_format = next(
-        artifact["format"] for artifact in artifacts if artifact["name"] == model["artifact"]
+    primary_artifact = next(
+        artifact for artifact in artifacts if artifact["name"] == model["artifact"]
     )
+    primary_format = primary_artifact["format"]
     if primary_format != engine["model_format"]:
         raise RuntimePackError(
             "runtime primary artifact format must match runtime.engine.model_format"
@@ -1041,22 +1056,43 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
     contract = benchmark.get("contract")
     if not isinstance(contract, dict):
         raise RuntimePackError("runtime.benchmark.contract must be an object")
-    if contract.get("schema_version") in {
-        BENCHMARK_SCHEMA_VERSION,
-        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
-    }:
-        validate_benchmark_contract(contract)
-    if contract.get("schema_version") == EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION:
-        payload_id = oci.get("payload_id")
-        tokenizer_payload = contract.get("tokenizer", {}).get(
-            "engine_payload_sha256"
+    validate_benchmark_contract(contract)
+    tokenizer = contract["tokenizer"]
+    if primary_format == "gguf-file":
+        expected_model_sha256 = primary_artifact["sha256"]
+    else:
+        owner, repository, _slug = normalize_hf_uri(primary_artifact["uri"])
+        expected_model_sha256 = hashlib.sha256(
+            canonical_bytes(
+                {
+                    "repository": f"{owner}/{repository}",
+                    "revision": primary_artifact["revision"],
+                }
+            )
+        ).hexdigest()
+    if tokenizer.get("model_sha256") != expected_model_sha256:
+        raise RuntimePackError(
+            "runtime benchmark model identity differs from the primary artifact"
         )
+    if contract.get("schema_version") == EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION:
+        payload_id = distribution_payload_sha256(distribution)
+        tokenizer_payload = tokenizer.get("engine_payload_sha256")
         if (
             not isinstance(payload_id, str)
-            or tokenizer_payload != payload_id.removeprefix("sha256:")
+            or tokenizer_payload != payload_id
         ):
             raise RuntimePackError(
-                "runtime benchmark Engine payload differs from runtime.engine.oci"
+                "runtime benchmark Engine payload differs from runtime.engine.distribution"
+            )
+    else:
+        expected_engine_sha256 = (
+            distribution_payload_sha256(distribution)
+            if distribution["kind"] != OCI_KIND
+            else str(distribution["immutable_id"]).removeprefix("sha256:")
+        )
+        if tokenizer.get("engine_image_sha256") != expected_engine_sha256:
+            raise RuntimePackError(
+                "runtime benchmark Engine identity differs from runtime.engine.distribution"
             )
     try:
         validate_target_binding(value.get("orchestration"), target["placement"])
@@ -1066,7 +1102,7 @@ def _runtime_metadata(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_runtime_config(value: dict[str, Any]) -> dict[str, Any]:
-    """Validate one authoritative schema-v5 execution configuration in memory."""
+    """Validate one authoritative schema-v6 execution configuration in memory."""
 
     return _runtime_metadata(value)
 
@@ -2398,7 +2434,7 @@ def load_catalog(
                             "license",
                             "source",
                             "engine",
-                            "engine_oci",
+                            "engine_distribution",
                             "model_uri",
                             "benchmark",
                             "provenance",
@@ -2430,10 +2466,22 @@ def load_catalog(
                     engine = release.get("engine")
                     if not isinstance(engine, str) or not SAFE_NAME_RE.fullmatch(engine):
                         raise RuntimePackError(f"catalog engine for {where} is invalid")
-                    if not REGISTRY_DIGEST_RE.fullmatch(release.get("engine_oci", "")):
-                        raise RuntimePackError(
-                            f"catalog Engine OCI for {where} must be digest-pinned"
+                    try:
+                        projection = validate_distribution_projection(
+                            release.get("engine_distribution")
                         )
+                        if (
+                            projection["kind"] != OCI_KIND
+                            and projection["platform"]
+                            != targets[target_id]["match"]["platform"]
+                        ):
+                            raise EngineDistributionError(
+                                "native catalog Engine platform differs from target"
+                            )
+                    except EngineDistributionError as error:
+                        raise RuntimePackError(
+                            f"catalog Engine distribution for {where} is invalid: {error}"
+                        ) from error
                     normalize_hf_uri(
                         release.get("model_uri"), f"catalog model URI for {where}"
                     )
