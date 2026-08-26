@@ -11,6 +11,9 @@ live status view); it never turns unverified network data into UI state.
 from __future__ import annotations
 
 import os
+import pathlib
+import sys
+import threading
 import time
 from collections.abc import Callable, Mapping
 
@@ -20,6 +23,16 @@ from .manager import UpdateManager, UpdateSnapshot
 BACKGROUND_REFRESH_INTERVAL_SECONDS = 60
 DISABLE_BACKGROUND_UPDATE_ENV = "LETSINFER_DISABLE_BACKGROUND_UPDATE_CHECK"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_SPAWNED_REFRESH = """
+import sys
+
+sys.path.insert(0, sys.argv.pop(1))
+try:
+    from core.cli import _update_manager
+    _update_manager().refresh()
+except Exception:
+    pass
+"""
 
 
 def snapshot_is_fresh(
@@ -99,6 +112,56 @@ def _launch_detached(callback: Callable[[], None]) -> bool:
     return True
 
 
+def _reap_spawned_refresh(pid: int) -> None:
+    try:
+        os.waitpid(pid, 0)
+    except OSError:
+        pass
+
+
+def _launch_macos_refresh() -> bool:
+    """Spawn a fresh interpreter without running Python after ``fork``."""
+
+    if not hasattr(os, "posix_spawn"):
+        return False
+    root = pathlib.Path(__file__).resolve().parents[2]
+    arguments = (
+        sys.executable,
+        "-I",
+        "-B",
+        "-c",
+        _SPAWNED_REFRESH,
+        str(root),
+    )
+    environment = dict(os.environ)
+    environment[DISABLE_BACKGROUND_UPDATE_ENV] = "1"
+    null_fd = os.open(os.devnull, os.O_RDWR)
+    try:
+        file_actions = (
+            (os.POSIX_SPAWN_DUP2, null_fd, 0),
+            (os.POSIX_SPAWN_DUP2, null_fd, 1),
+            (os.POSIX_SPAWN_DUP2, null_fd, 2),
+            (os.POSIX_SPAWN_CLOSE, null_fd),
+        )
+        pid = os.posix_spawn(
+            sys.executable,
+            arguments,
+            environment,
+            file_actions=file_actions,
+        )
+    except (AttributeError, OSError):
+        return False
+    finally:
+        os.close(null_fd)
+    threading.Thread(
+        target=_reap_spawned_refresh,
+        args=(pid,),
+        daemon=True,
+        name="letsinfer-update-reaper",
+    ).start()
+    return True
+
+
 def request_background_refresh(
     manager: UpdateManager,
     *,
@@ -149,6 +212,8 @@ def request_background_refresh(
             )
         if fresh:
             return False
+        if launcher is None and sys.platform == "darwin":
+            return _launch_macos_refresh()
         launch = _launch_detached if launcher is None else launcher
         return bool(launch(lambda: _refresh_silently(manager)))
     except Exception:

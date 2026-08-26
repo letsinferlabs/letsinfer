@@ -5,4 +5,5 @@ SCRIPT_DIR=$(CDPATH= cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -P -- "${SCRIPT_DIR}/.." && pwd)
 cd "$PROJECT_ROOT"
 export PYTHONDONTWRITEBYTECODE=1
-exec python3 -m tools.install_core --source "$PROJECT_ROOT" "$@"
+PYTHON_COMMAND=${LETSINFER_PYTHON:-python3}
+exec "$PYTHON_COMMAND" -m tools.install_core --source "$PROJECT_ROOT" "$@"
