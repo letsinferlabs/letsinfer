@@ -20,14 +20,17 @@ validated public `benchmark.json`.
   short-prose C1 workloads with 512-token completions before the declared
   context matrix. Schema-6 expands both short domains to C1, C2, and C4.
   Schema-7 adds a dedicated 64K cold/warm TTFT pair that reloads one exact
-  prompt with a one-token response budget.
+  prompt with a one-token response budget. Schema-8 keeps the short C1/C2/C4
+  matrix and binds tokenization and results to the Engine execution payload
+  instead of container packaging metadata.
 - **Durable jobs** — Ctrl-C detaches, `letsinfer benchmark` reattaches to live
   progress, and an explicit stop safely restores prior inference.
 - **Full-system evidence** — JSON records throughput, TTFT, prefix state,
   clocks, utilization, temperatures, memory, NVMe, power, network, and a
   telemetry timeline.
 - **Cryptographic identity** — results bind the installation, hardware,
-  runtime, model, Engine OCI, prompt set, and benchmark contract.
+  runtime, model, normalized Engine execution payload, prompt set, and
+  benchmark contract while retaining the measured OCI digest for traceability.
 - **Fail-closed validation** — unsafe memory headroom, unsupported workloads,
   incomplete output, and unavailable required metrics invalidate the run.
 
