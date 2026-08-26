@@ -8484,7 +8484,10 @@ def _engine_group_lifecycle(
                 if action == "stop":
                     result = orchestrator.stop()
                 elif action == "start":
-                    result = orchestrator.recover(acknowledge_trips=False)
+                    if row["state"] == "stopped" and row["desired_state"] == "stopped":
+                        result = orchestrator.start()
+                    else:
+                        result = orchestrator.recover(acknowledge_trips=False)
                 elif action == "restart":
                     stopped = orchestrator.stop()
                     _sync_group_placement(store, stopped)

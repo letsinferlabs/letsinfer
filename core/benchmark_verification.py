@@ -27,12 +27,16 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, BinaryIO
 
 from benchmarks.benchmark_record import BenchmarkRecordError, validate_record
 
+from . import runtime_packs
 from .paths import ensure_private_directory, secrets_root
 from .runtime_packs import PACK_MEDIA_TYPE, canonical_bytes
 
@@ -58,6 +62,10 @@ FAILURE_CATEGORIES = {
 }
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 OCI_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+OCI_REFERENCE_RE = re.compile(
+    r"(?P<registry>[A-Za-z0-9.-]+(?::[0-9]+)?)/"
+    r"(?P<repository>[A-Za-z0-9._/-]+)@(?P<digest>sha256:[0-9a-f]{64})"
+)
 OCI_MANIFEST_MEDIA_TYPES = {
     "application/vnd.oci.image.manifest.v1+json",
     "application/vnd.docker.distribution.manifest.v2+json",
@@ -81,6 +89,9 @@ OCI_TAR_LAYER_MEDIA_TYPES = {
 MAX_ENGINE_LAYOUT_BYTES = 16 << 30
 MAX_ENGINE_ROOTFS_BYTES = 64 << 30
 MAX_GHCR_LAYER_BYTES = 10_000_000_000
+MAX_ENGINE_DOCUMENT_BYTES = 4 << 20
+EXTERNAL_ENGINE_BLOBS_FILE = "letsinfer-external-blobs.json"
+EXTERNAL_ENGINE_BLOBS_SCHEMA_VERSION = 1
 PR_URL_RE = re.compile(
     r"https://github\.com/letsinferlabs/runtimes/pull/([1-9][0-9]*)(?:/)?"
 )
@@ -141,6 +152,224 @@ class VerifierBundle:
     @property
     def subject(self) -> dict[str, Any]:
         return dict(self.document["subject"])
+
+
+@dataclasses.dataclass(frozen=True)
+class _RemoteEngineImage:
+    layers: tuple[dict[str, Any], ...]
+    diff_ids: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class _ExternalEngineLayers:
+    source_reference: str
+    indices: frozenset[int]
+
+
+class _PublicEngineRegistry:
+    """Bounded anonymous OCI access for one immutable Engine image."""
+
+    def __init__(self, reference: str) -> None:
+        match = OCI_REFERENCE_RE.fullmatch(reference)
+        if match is None or any(
+            part in {"", ".", ".."} for part in match["repository"].split("/")
+        ):
+            raise VerificationError("external Engine reference is invalid")
+        self.reference = reference
+        self.registry = match["registry"]
+        self.repository = match["repository"]
+        self.manifest_digest = match["digest"]
+        self.repository_reference = f"{self.registry}/{self.repository}"
+        self.token: str | None = None
+
+    def _request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        accept: str = "application/octet-stream",
+    ) -> Any:
+        repository_path = urllib.parse.quote(self.repository, safe="/")
+        url = f"https://{self.registry}/v2/{repository_path}/{path}"
+
+        def request() -> urllib.request.Request:
+            headers = {
+                "Accept": accept,
+                "User-Agent": "letsinfer/engine-verifier",
+            }
+            if self.token is not None:
+                headers["Authorization"] = f"Bearer {self.token}"
+            return urllib.request.Request(url, headers=headers, method=method)
+
+        try:
+            return runtime_packs._oci_open(request())
+        except urllib.error.HTTPError as error:
+            if error.code not in {401, 403} or self.token is not None:
+                error.close()
+                raise VerificationError(
+                    f"cannot read external Engine registry object: HTTP {error.code}"
+                ) from error
+            challenge = error.headers.get("WWW-Authenticate")
+            error.close()
+        try:
+            self.token = runtime_packs._public_bearer_token(
+                challenge, self.repository
+            )
+            return runtime_packs._oci_open(request())
+        except (runtime_packs.RuntimePackError, urllib.error.HTTPError, OSError) as error:
+            raise VerificationError(
+                f"cannot authenticate external Engine registry: {error}"
+            ) from error
+
+    def _read(
+        self,
+        path: str,
+        *,
+        accept: str,
+        limit: int,
+        label: str,
+    ) -> bytes:
+        try:
+            with self._request(path, accept=accept) as response:
+                return runtime_packs._read_oci_response(
+                    response, limit=limit, label=label
+                )
+        except (runtime_packs.RuntimePackError, OSError) as error:
+            raise VerificationError(
+                f"cannot read external Engine {label}: {error}"
+            ) from error
+
+    def image(self, expected_platform: str) -> _RemoteEngineImage:
+        manifest_data = self._read(
+            f"manifests/{self.manifest_digest}",
+            accept=", ".join(sorted(OCI_MANIFEST_MEDIA_TYPES)),
+            limit=MAX_ENGINE_DOCUMENT_BYTES,
+            label="manifest",
+        )
+        if "sha256:" + hashlib.sha256(manifest_data).hexdigest() != self.manifest_digest:
+            raise VerificationError("external Engine manifest digest differs")
+        manifest = _oci_object(manifest_data, "external image manifest")
+        config = _oci_descriptor(
+            manifest.get("config"), "external image configuration"
+        )
+        layers = manifest.get("layers")
+        if (
+            manifest.get("schemaVersion") != 2
+            or manifest.get("mediaType") not in OCI_MANIFEST_MEDIA_TYPES
+            or config["mediaType"] not in OCI_CONFIG_MEDIA_TYPES
+            or not isinstance(layers, list)
+            or not layers
+        ):
+            raise VerificationError("external Engine image manifest is invalid")
+        config_data = self._read(
+            f"blobs/{config['digest']}",
+            accept=str(config["mediaType"]),
+            limit=MAX_ENGINE_DOCUMENT_BYTES,
+            label="configuration",
+        )
+        if (
+            len(config_data) != config["size"]
+            or "sha256:" + hashlib.sha256(config_data).hexdigest()
+            != config["digest"]
+        ):
+            raise VerificationError("external Engine configuration differs")
+        image_config = _oci_object(config_data, "external image configuration")
+        try:
+            expected_os, expected_architecture = expected_platform.split("/", 1)
+        except ValueError as error:
+            raise VerificationError("external Engine platform is invalid") from error
+        if (image_config.get("os"), image_config.get("architecture")) != (
+            expected_os,
+            expected_architecture,
+        ):
+            raise VerificationError("external Engine platform differs")
+        rootfs = image_config.get("rootfs")
+        diff_ids = rootfs.get("diff_ids") if isinstance(rootfs, Mapping) else None
+        if (
+            not isinstance(rootfs, Mapping)
+            or rootfs.get("type") != "layers"
+            or not isinstance(diff_ids, list)
+            or len(diff_ids) != len(layers)
+            or any(OCI_DIGEST_RE.fullmatch(str(value)) is None for value in diff_ids)
+        ):
+            raise VerificationError("external Engine rootfs identity is invalid")
+        validated: list[dict[str, Any]] = []
+        for offset, raw in enumerate(layers):
+            layer = _oci_descriptor(raw, f"external image layer {offset}")
+            if (
+                layer["mediaType"]
+                not in OCI_GZIP_LAYER_MEDIA_TYPES | OCI_TAR_LAYER_MEDIA_TYPES
+                or layer["size"] > MAX_GHCR_LAYER_BYTES
+            ):
+                raise VerificationError(
+                    f"external Engine layer {offset} is unsupported"
+                )
+            validated.append(layer)
+        return _RemoteEngineImage(
+            layers=tuple(validated),
+            diff_ids=tuple(map(str, diff_ids)),
+        )
+
+    def probe_blob(self, descriptor: Mapping[str, Any]) -> None:
+        layer = _oci_descriptor(descriptor, "external image layer")
+        try:
+            with self._request(f"blobs/{layer['digest']}", method="HEAD") as response:
+                final = urllib.parse.urlsplit(response.geturl())
+                if final.scheme != "https":
+                    raise VerificationError(
+                        "external Engine blob redirected away from HTTPS"
+                    )
+                length = response.headers.get("Content-Length")
+                if length is not None and int(length) != layer["size"]:
+                    raise VerificationError("external Engine blob size differs")
+        except (OSError, ValueError) as error:
+            raise VerificationError(
+                f"external Engine blob is unavailable: {layer['digest']}"
+            ) from error
+
+    def download_blob(
+        self, descriptor: Mapping[str, Any], destination: pathlib.Path
+    ) -> None:
+        layer = _oci_descriptor(descriptor, "external image layer")
+        temporary = destination.with_name(
+            f".{destination.name}.{os.getpid()}.partial"
+        )
+        digest = hashlib.sha256()
+        total = 0
+        try:
+            with self._request(f"blobs/{layer['digest']}") as response:
+                final = urllib.parse.urlsplit(response.geturl())
+                if final.scheme != "https":
+                    raise VerificationError(
+                        "external Engine blob redirected away from HTTPS"
+                    )
+                length = response.headers.get("Content-Length")
+                if length is not None and int(length) != layer["size"]:
+                    raise VerificationError("external Engine blob size differs")
+                with temporary.open("xb") as output:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > layer["size"]:
+                            raise VerificationError(
+                                "external Engine blob exceeds its declared size"
+                            )
+                        digest.update(chunk)
+                        output.write(chunk)
+            if total != layer["size"]:
+                raise VerificationError("external Engine blob size differs")
+            if "sha256:" + digest.hexdigest() != layer["digest"]:
+                raise VerificationError("external Engine blob digest differs")
+            temporary.chmod(0o600)
+            temporary.replace(destination)
+        except (OSError, ValueError) as error:
+            raise VerificationError(
+                f"cannot download external Engine blob: {layer['digest']}"
+            ) from error
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -575,6 +804,144 @@ def _bundle_object(path: pathlib.Path) -> dict[str, Any]:
     return value
 
 
+def _external_engine_layers(
+    root: pathlib.Path,
+    *,
+    manifest_digest: str,
+    layers: Sequence[dict[str, Any]],
+    diff_ids: Sequence[str],
+    expected_platform: str,
+    expected_reference: str | None,
+    probe_blobs: bool,
+) -> _ExternalEngineLayers | None:
+    path = root / EXTERNAL_ENGINE_BLOBS_FILE
+    if not path.exists():
+        return None
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.stat().st_size > MAX_ENGINE_DOCUMENT_BYTES
+    ):
+        raise VerificationError("external Engine blob inventory is invalid")
+    value = _oci_object(path.read_bytes(), "external blob inventory")
+    if (
+        set(value)
+        != {
+            "schema_version",
+            "source_reference",
+            "target_repository",
+            "manifest_digest",
+            "layers",
+        }
+        or value.get("schema_version") != EXTERNAL_ENGINE_BLOBS_SCHEMA_VERSION
+        or value.get("manifest_digest") != manifest_digest
+        or not isinstance(value.get("layers"), list)
+    ):
+        raise VerificationError("external Engine blob inventory schema is invalid")
+    source_reference = value.get("source_reference")
+    target_repository = value.get("target_repository")
+    source_match = (
+        OCI_REFERENCE_RE.fullmatch(source_reference)
+        if isinstance(source_reference, str)
+        else None
+    )
+    expected_match = (
+        OCI_REFERENCE_RE.fullmatch(expected_reference)
+        if isinstance(expected_reference, str)
+        else None
+    )
+    if (
+        source_match is None
+        or expected_match is None
+        or expected_match["digest"] != manifest_digest
+        or not isinstance(target_repository, str)
+        or target_repository
+        != f"{expected_match['registry']}/{expected_match['repository']}"
+        or target_repository
+        != f"{source_match['registry']}/{source_match['repository']}"
+    ):
+        raise VerificationError("external Engine blob inventory identity is invalid")
+
+    registry = _PublicEngineRegistry(source_reference)
+    remote = registry.image(expected_platform)
+    remote_records = {
+        (
+            str(layer["digest"]),
+            int(layer["size"]),
+            str(layer["mediaType"]),
+            remote.diff_ids[offset],
+        )
+        for offset, layer in enumerate(remote.layers)
+    }
+    indices: set[int] = set()
+    descriptors: dict[str, dict[str, Any]] = {}
+    for offset, raw in enumerate(value["layers"]):
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "index",
+            "digest",
+            "size",
+            "mediaType",
+            "diff_id",
+        }:
+            raise VerificationError(
+                f"external Engine layer record {offset} is invalid"
+            )
+        index = raw.get("index")
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or index < 0
+            or index >= len(layers)
+            or index in indices
+        ):
+            raise VerificationError(
+                f"external Engine layer record {offset} index is invalid"
+            )
+        layer = layers[index]
+        expected = {
+            "index": index,
+            "digest": layer["digest"],
+            "size": layer["size"],
+            "mediaType": layer["mediaType"],
+            "diff_id": diff_ids[index],
+        }
+        if dict(raw) != expected or (
+            str(layer["digest"]),
+            int(layer["size"]),
+            str(layer["mediaType"]),
+            diff_ids[index],
+        ) not in remote_records:
+            raise VerificationError(
+                f"external Engine layer record {offset} differs from its source"
+            )
+        blob = root / "blobs" / "sha256" / str(layer["digest"]).removeprefix(
+            "sha256:"
+        )
+        if blob.exists():
+            raise VerificationError(
+                f"external Engine layer record {offset} is redundantly materialized"
+            )
+        indices.add(index)
+        descriptors[str(layer["digest"])] = layer
+    if not indices:
+        raise VerificationError("external Engine blob inventory is empty")
+    for offset, layer in enumerate(layers):
+        blob = root / "blobs" / "sha256" / str(layer["digest"]).removeprefix(
+            "sha256:"
+        )
+        if offset not in indices and not blob.is_file():
+            raise VerificationError(
+                f"verifier Engine layer {offset} blob is unavailable"
+            )
+    if probe_blobs:
+        for descriptor in descriptors.values():
+            registry.probe_blob(descriptor)
+    return _ExternalEngineLayers(
+        source_reference=source_reference,
+        indices=frozenset(indices),
+    )
+
+
 def _oci_descriptor(value: Any, where: str) -> dict[str, Any]:
     if (
         not isinstance(value, Mapping)
@@ -660,8 +1027,18 @@ def _oci_blob(
 
 
 def _inspect_engine_layout(
-    root: pathlib.Path, expected_platform: str
-) -> tuple[dict[str, Any], bytes, tuple[dict[str, Any], ...], tuple[str, ...]]:
+    root: pathlib.Path,
+    expected_platform: str,
+    *,
+    expected_reference: str | None = None,
+    probe_external_blobs: bool = True,
+) -> tuple[
+    dict[str, Any],
+    bytes,
+    tuple[dict[str, Any], ...],
+    tuple[str, ...],
+    _ExternalEngineLayers | None,
+]:
     try:
         expected_os, expected_architecture = expected_platform.split("/", 1)
     except ValueError as error:
@@ -755,16 +1132,38 @@ def _inspect_engine_layout(
             raise VerificationError("verifier Engine layer compression is unsupported")
         if layer["size"] > MAX_GHCR_LAYER_BYTES:
             raise VerificationError("verifier Engine layer exceeds GHCR's 10 GB limit")
-        _oci_blob(root, layer, f"layer {offset}")
         layer_descriptors.append(layer)
+    external = _external_engine_layers(
+        root,
+        manifest_digest=str(manifest_descriptor["digest"]),
+        layers=layer_descriptors,
+        diff_ids=tuple(map(str, diff_ids)),
+        expected_platform=expected_platform,
+        expected_reference=expected_reference,
+        probe_blobs=probe_external_blobs,
+    )
+    external_indices = frozenset() if external is None else external.indices
+    for offset, layer in enumerate(layer_descriptors):
+        if offset not in external_indices:
+            _oci_blob(root, layer, f"layer {offset}")
     identity = {
         "platform": expected_platform,
         "manifest_digest": manifest_descriptor["digest"],
         "manifest_bytes": len(manifest_data),
         "config_digest": config_descriptor["digest"],
         "layer_digests": [value["digest"] for value in layer_descriptors],
+        "local_layer_count": len(layer_descriptors) - len(external_indices),
+        "external_layer_count": len(external_indices),
     }
-    return identity, config_data, tuple(layer_descriptors), tuple(map(str, diff_ids))
+    if external is not None:
+        identity["external_reference"] = external.source_reference
+    return (
+        identity,
+        config_data,
+        tuple(layer_descriptors),
+        tuple(map(str, diff_ids)),
+        external,
+    )
 
 
 def _oci_archive_identity(
@@ -773,12 +1172,15 @@ def _oci_archive_identity(
     expected_manifest: str,
     expected_config: str,
     expected_platform: str,
+    expected_reference: str | None = None,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="letsinfer-engine-oci-") as temporary:
         root = pathlib.Path(temporary)
         _extract_engine_layout(archive, root)
-        identity, _config, _layers, _diff_ids = _inspect_engine_layout(
-            root, expected_platform
+        identity, _config, _layers, _diff_ids, _external = _inspect_engine_layout(
+            root,
+            expected_platform,
+            expected_reference=expected_reference,
         )
     if (
         identity["manifest_digest"] != expected_manifest
@@ -804,18 +1206,47 @@ def _docker_archive_from_oci(
     expected_config: str,
     expected_platform: str,
     tag: str,
+    expected_reference: str | None = None,
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="letsinfer-engine-convert-") as temporary:
         root = pathlib.Path(temporary)
         _extract_engine_layout(source_archive, root)
-        identity, config_data, layers, diff_ids = _inspect_engine_layout(
-            root, expected_platform
+        identity, config_data, layers, diff_ids, external = _inspect_engine_layout(
+            root,
+            expected_platform,
+            expected_reference=expected_reference,
+            probe_external_blobs=False,
         )
         if (
             identity["manifest_digest"] != expected_manifest
             or identity["config_digest"] != expected_config
         ):
             raise VerificationError("verifier Engine OCI identity changed before import")
+        if external is not None:
+            unique: dict[str, dict[str, Any]] = {
+                str(layers[index]["digest"]): layers[index]
+                for index in external.indices
+            }
+            existing_bytes = sum(
+                path.stat().st_size for path in root.rglob("*") if path.is_file()
+            )
+            hydrated_bytes = existing_bytes + sum(
+                int(item["size"]) for item in unique.values()
+            )
+            if hydrated_bytes > MAX_ENGINE_LAYOUT_BYTES:
+                raise VerificationError(
+                    "hydrated verifier Engine OCI layout exceeds 16 GiB"
+                )
+            registry = _PublicEngineRegistry(external.source_reference)
+            for descriptor in unique.values():
+                blob = (
+                    root
+                    / "blobs"
+                    / "sha256"
+                    / str(descriptor["digest"]).removeprefix("sha256:")
+                )
+                if not blob.exists():
+                    registry.download_blob(descriptor, blob)
         layer_names: list[str] = []
         expanded = 0
         try:
@@ -1021,6 +1452,7 @@ def validate_verifier_bundle(
             expected_manifest=str(engine["manifest_digest"]),
             expected_config=engine_config,
             expected_platform=runtime_platform,
+            expected_reference=str(engine["reference"]),
         )
         if any(engine.get(key) != value for key, value in identity.items()):
             raise VerificationError("verifier Engine OCI metadata differs")
@@ -1088,6 +1520,7 @@ def download_verifier_bundle(
         extract_verifier_artifact(archive, root)
     finally:
         archive.unlink(missing_ok=True)
+    verify_bundle_attestations(root, gh=gh)
     bundle = validate_verifier_bundle(root, pr=pr, candidate=candidate)
     finalizer_identity = bundle.document.get("finalizer_workflow")
     if (
@@ -1111,7 +1544,6 @@ def download_verifier_bundle(
         or build_identity.get("workflow_sha") != pr.base_sha
     ):
         raise VerificationError("verifier artifact untrusted build identity differs")
-    verify_bundle_attestations(root, gh=gh)
     return bundle
 
 
@@ -1177,6 +1609,7 @@ def load_local_engine(
                 expected_config=config,
                 expected_platform=str(bundle.document["engine"]["platform"]),
                 tag=bundle.engine_tag,
+                expected_reference=str(bundle.document["engine"]["reference"]),
             )
             result = _run(
                 [docker, "load", "--input", str(docker_archive)],

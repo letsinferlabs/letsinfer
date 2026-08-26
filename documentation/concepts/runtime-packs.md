@@ -78,6 +78,16 @@ source tree. A runtime that does not change Engine inputs
 simply reuses the existing immutable Engine pin and publishes no duplicate
 Engine object.
 
+When a changed Engine shares layers with a prior public Engine in the same
+repository, the finalizer may keep the verifier archive thin. Its signed
+external-layer inventory binds every omitted compressed digest, size, media
+type, uncompressed rootfs digest, layer index, source manifest, and target
+manifest. Core verifies the immutable public source and blob availability
+before accepting the bundle, then anonymously hydrates those exact layers only
+when the verifier loads the Engine locally. Mutable tags, different
+repositories, missing blobs, mismatched rootfs identities, or unbounded
+downloads fail closed.
+
 ## Parallel candidates
 
 Parallelism stays inside an exact runtime. The target declares its required

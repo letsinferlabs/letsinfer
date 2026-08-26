@@ -299,6 +299,39 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         self.assertFalse(store.placement["endpoints"][0]["healthy"])
         self.assertNotIn("updated_at_unix", store.placement)
 
+    def test_start_of_cleanly_stopped_group_skips_recovery_stop(self) -> None:
+        store = _Store()
+        store.group.update({"state": "stopped", "desired_state": "stopped"})
+        result = {
+            "group_id": store.group_id,
+            "placement_id": store.placement_id,
+            "desired_state": "running",
+            "state": "running",
+            "member_states": [],
+        }
+        orchestrator = mock.Mock()
+        orchestrator.start.return_value = result
+        with (
+            mock.patch.object(
+                cli,
+                "read_site_identity",
+                return_value=types.SimpleNamespace(role="main"),
+            ),
+            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(
+                cli,
+                "_restore_engine_group_orchestrator",
+                return_value=(orchestrator, {}),
+            ),
+            mock.patch.object(cli, "_sync_group_placement") as sync,
+        ):
+            self.assertEqual(
+                cli._engine_group_lifecycle("example-model", "start"), result
+            )
+        orchestrator.start.assert_called_once_with()
+        orchestrator.recover.assert_not_called()
+        sync.assert_called_once_with(store, result)
+
     def test_restart_stops_then_starts_without_acknowledging_trips(self) -> None:
         store = _Store()
         result = {
