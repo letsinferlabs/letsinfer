@@ -20,7 +20,15 @@ done
 SCRIPT_DIR=$(CDPATH= cd -P -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -P -- "${SCRIPT_DIR}/.." && pwd)
 export PYTHONDONTWRITEBYTECODE=1
-exec python3 -I -B -c '
+PYTHON_COMMAND=${LETSINFER_PYTHON:-}
+if [[ -z "$PYTHON_COMMAND" && -x "$LETSINFER_HOME/core/python" ]]; then
+    PYTHON_COMMAND=$LETSINFER_HOME/core/python
+fi
+if [[ -z "$PYTHON_COMMAND" ]]; then
+    PYTHON_COMMAND=python3
+fi
+export LETSINFER_PYTHON=$PYTHON_COMMAND
+exec "$PYTHON_COMMAND" -I -B -c '
 import runpy
 import sys
 

@@ -7,6 +7,7 @@ import argparse
 import contextlib
 import io
 import pathlib
+import sys
 import tempfile
 import types
 import unittest
@@ -32,6 +33,23 @@ def member_identity() -> SiteIdentity:
 
 
 class CoreServiceTests(unittest.TestCase):
+    def test_macos_node_agent_pins_the_running_python(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            executable = root / "bin/letsinfer"
+            executable.parent.mkdir()
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            with (
+                mock.patch.object(cli.platform, "system", return_value="Darwin"),
+                mock.patch.object(cli, "user_lingering_enabled", return_value=True),
+                mock.patch.object(
+                    cli.macos_services, "install_launch_agent"
+                ) as install_agent,
+            ):
+                cli.install_node_service_only(executable_root=root)
+        agent = install_agent.call_args.args[0]
+        self.assertEqual(agent.environment["LETSINFER_PYTHON"], sys.executable)
+
     def test_gateway_unit_is_lan_http_without_client_certificate_flags(self) -> None:
         config = {
             "gateway_listen": "0.0.0.0",

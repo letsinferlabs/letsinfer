@@ -100,6 +100,7 @@ exit 0
         preflight = 'preflight_linux_docker "fixture-operator"' if include_preflight else ":"
         harness = (
             function_prefix
+            + "\npython_command=python3\n"
             + '\nensure_platform_docker "$1" "$2"\n'
             + preflight
             + "\n"
@@ -318,13 +319,17 @@ class BootstrapInstallTests(unittest.TestCase):
         script = INSTALLER.read_text(encoding="utf-8")
         self.assertTrue(INSTALLER.stat().st_mode & 0o111)
         signature = script.index("ssh-keygen -Y verify")
-        checksum = script.index('python3 - "$checksums" "$archive_name" "$archive"')
+        checksum = script.index(
+            '"$python_command" - "$checksums" "$archive_name" "$archive"'
+        )
         extraction = script.index('tar -xzf "$archive"')
         installation = script.index('"$unpacked/letsinfer/bin/letsinfer-install"')
         public_install_umask = script.index("umask 022", extraction)
         private_setup_umask = script.index("umask 077", public_install_umask)
         setup = script.index('"$command_path" core-setup')
-        network = script.index("python3 -m core.platform.network apply-if-detected")
+        network = script.index(
+            '"$python_command" -m core.platform.network apply-if-detected'
+        )
         self.assertLess(signature, checksum)
         self.assertLess(checksum, extraction)
         self.assertLess(extraction, installation)
@@ -369,6 +374,11 @@ class BootstrapInstallTests(unittest.TestCase):
         self.assertIn("build-essential cmake openssl libssl-dev", script)
         self.assertIn("gcc gcc-c++ make cmake openssl openssl-devel", script)
         self.assertIn('launchctl print "gui/$(id -u)"', script)
+        self.assertIn("select_macos_python", script)
+        self.assertIn("import plistlib", script)
+        self.assertIn('sqlite3.connect(":memory:").close()', script)
+        self.assertIn('export LETSINFER_PYTHON=$python_command', script)
+        self.assertIn('--python "$python_command"', script)
         self.assertIn('progress 5 "Resolving release"', script)
         self.assertIn('progress 80 "Initializing services"', script)
         self.assertIn('finish_progress', script)
