@@ -1002,6 +1002,8 @@ class SiteControlState:
         | None = None,
         adoption_completed_provider: Callable[[Mapping[str, Any]], None]
         | None = None,
+        node_add_provider: Callable[[Mapping[str, Any]], Mapping[str, Any]]
+        | None = None,
     ) -> None:
         self.identity = identity
         self.facts_provider = facts_provider
@@ -1010,11 +1012,22 @@ class SiteControlState:
         self.member_agent = member_agent
         self.adoption_provider = adoption_provider
         self.adoption_completed_provider = adoption_completed_provider
+        self.node_add_provider = node_add_provider
         self.certificate_sha256 = hashlib.sha256(
             ssl.PEM_cert_to_DER_cert(
                 member_certificate_path().read_text(encoding="ascii")
             )
         ).hexdigest()
+
+    def node_add_request(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        if self.node_add_provider is None:
+            raise ControlError("node-add requests are unavailable")
+        from .node_add import NodeAddError
+
+        try:
+            return self.node_add_provider(value)
+        except NodeAddError as error:
+            raise ControlError(str(error)) from error
 
     def discovery(self) -> dict[str, Any]:
         direct_connectx = False
@@ -1436,12 +1449,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if self.path not in {
             "/node/v1/enroll", "/node/v1/link-challenge", "/node/v1/link-probe",
             "/node/v1/telemetry", "/node/v1/facts", "/node/v1/group-job",
-            "/node/v1/adopt",
+            "/node/v1/adopt", "/node/v1/add-request",
         }:
             self._respond(404, {"error": "not found"})
             return
         try:
-            if self.path in {"/node/v1/enroll", "/node/v1/adopt"}:
+            if self.path in {
+                "/node/v1/enroll",
+                "/node/v1/adopt",
+                "/node/v1/add-request",
+            }:
                 self._require_enrollment_capacity()
             content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
             if content_type != "application/json":
@@ -1460,6 +1477,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 response = self.state.adopt(
                     value, peer_address=str(self.client_address[0])
                 )
+            elif self.path == "/node/v1/add-request":
+                response = self.state.node_add_request(value)
             elif self.path == "/node/v1/link-challenge":
                 response = self.state.link_challenge(
                     value, requester_member_id=self._require_site_member()

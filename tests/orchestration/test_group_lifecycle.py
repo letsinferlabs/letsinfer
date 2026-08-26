@@ -79,6 +79,8 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         group = {
             "group_id": "1" * 32,
             "model": "example-model",
+            "runtime": "runtime-a",
+            "target": "target-a",
             "strategy": "single",
             "state": "failed",
             "desired_state": "stopped",
@@ -118,7 +120,16 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                         "display_name": "Example",
                     },
                 ),
-                mock.patch.object(cli, "_local_status_node", return_value={}),
+                mock.patch.object(
+                    cli,
+                    "_complete_local_node_status",
+                    return_value={
+                        "node": {},
+                        "nodes": [{"member_id": identity.member_id, "state": "active"}],
+                        "hardware": {},
+                        "links": [],
+                    },
+                ),
                 mock.patch.object(
                     cli, "_local_controller_telemetry", return_value=telemetry
                 ),
@@ -135,10 +146,12 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         self.assertEqual(payload["telemetry"], telemetry)
         self.assertEqual(payload["engine_groups"], [group])
 
-    def test_plain_status_renders_runtime_task_without_retired_role(self) -> None:
+    def test_plain_status_renders_all_models_without_retired_role(self) -> None:
         group = {
             "group_id": "1" * 32,
             "model": "example-model",
+            "runtime": "runtime-a",
+            "target": "target-a",
             "strategy": "single",
             "state": "failed",
             "desired_state": "stopped",
@@ -158,23 +171,47 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             config=None,
             _single_snapshot=True,
         )
-        with (
-            mock.patch.object(cli, "site_identity_path") as identity_path,
-            mock.patch.object(
-                cli,
-                "read_site_identity",
-                return_value=types.SimpleNamespace(role="main"),
-            ),
-            mock.patch.object(cli, "_engine_group_status", return_value=[group]),
-            mock.patch("sys.stdout", output),
-        ):
-            identity_path.return_value.exists.return_value = True
-            self.assertEqual(cli.status(arguments), 0)
+        identity = types.SimpleNamespace(role="main", member_id="5" * 32)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with (
+                mock.patch.object(cli, "site_identity_path") as identity_path,
+                mock.patch.object(cli, "read_site_identity", return_value=identity),
+                mock.patch.object(cli, "_engine_group_status", return_value=[group]),
+                mock.patch.object(
+                    cli, "active_service_config_path", return_value=root / "missing.json"
+                ),
+                mock.patch.object(cli, "site_config_root", return_value=root),
+                mock.patch.object(
+                    cli, "_service_state", return_value=("enabled", "active", 1024)
+                ),
+                mock.patch.object(cli, "api_status", side_effect=[200, 401, 200]),
+                mock.patch.object(
+                    cli,
+                    "identity_json",
+                    return_value={"role": "main", "member_id": identity.member_id},
+                ),
+                mock.patch.object(
+                    cli,
+                    "_complete_local_node_status",
+                    return_value={
+                        "node": {},
+                        "nodes": [{"member_id": identity.member_id, "state": "active"}],
+                        "hardware": {},
+                        "links": [],
+                    },
+                ),
+                mock.patch.object(cli, "_local_controller_telemetry", return_value={}),
+                mock.patch.object(
+                    cli, "runtime_lifecycle", return_value={"state": "ready"}
+                ),
+                mock.patch("sys.stdout", output),
+            ):
+                identity_path.return_value.exists.return_value = True
+                self.assertEqual(cli.status(arguments), 0)
 
-        self.assertIn(
-            f"MEMBER {'5' * 32} task=task-0 state=failed",
-            output.getvalue(),
-        )
+        self.assertIn("model=example-model state=failed replicas=1", output.getvalue())
+        self.assertNotIn("MEMBER", output.getvalue())
 
     def test_restore_uses_current_control_bundle_manifest_path(self) -> None:
         member_id = "5" * 32

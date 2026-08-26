@@ -31,11 +31,10 @@ The node service advertises `_letsinfer._tcp` with public identity and pairing
 hints only. It never advertises credentials, models, telemetry, or private
 administrative state. Trust is established separately:
 
-- A fresh machine on a verified direct ConnectX route can be added from the
-  Mac app with **Add to Home**. Both sides bind the exact route, certificates,
-  signed adoption document, lifetime, and one-use nonce.
-- A LAN or remote child uses a short-lived eight-digit invite followed by a
-  separate six-digit human comparison.
+- `letsinfer node add` and the Mac app discover candidate nodes, send a
+  certificate-pinned request, and show the pending request on the candidate.
+  Enrollment retains a short-lived invite and separate six-digit human
+  comparison beneath that single workflow.
 - An already configured node is never adopted silently. The app offers
   **Connect to this node** or an explicit **Move into Home** transaction. A
   move preserves model and cache data but replaces node authority,
@@ -59,10 +58,9 @@ catalog contains a qualified runtime for every selected node.
 From the main node, install on one or more exact nodes:
 
 ```text
-letsinfer install MODEL --node NODE
-letsinfer install MODEL --node NODE_A --node NODE_B
-letsinfer install MODEL --all-nodes
-letsinfer scale MODEL --replicas 3
+letsinfer model install MODEL --node NODE
+letsinfer model install MODEL --node NODE_A --node NODE_B
+letsinfer model install
 ```
 
 An interactive install can offer replication across active nodes. Before any
@@ -106,7 +104,7 @@ node verifies certificate identity, freshness, and physical-link proofs before
 using those facts. Routing health comes from fresh state, not a static install
 record.
 
-You can drain a child for maintenance. Draining stops new admission to its
+You can pause a child for maintenance. Pausing stops new admission to its
 groups while in-flight work finishes; it does not implicitly stop the Engine.
 Healthy replicas continue serving. Resuming the child restores admission
 without changing its runtime configuration.
@@ -122,26 +120,21 @@ The control and inference planes stay separate:
   and exposes only the OpenAI-compatible gateway plus health.
 
 LAN inference uses HTTP for compatibility with standard clients, so use it on
-a trusted local network. `letsinfer expose` can publish only the inference
+a trusted local network. `letsinfer exposure enable` can publish only the inference
 gateway through the configured secure transport; it never publishes the
 controller, Watchdog, or Engine ports.
 
 ## Commands
 
 ```text
-letsinfer setup --name Home
-letsinfer node status
-letsinfer child list
-letsinfer child invite --mode lan
-letsinfer child approve CHILD_ID COMPARISON_CODE
-letsinfer child sync
-letsinfer child drain CHILD_ID
-letsinfer child resume CHILD_ID
-letsinfer topology show
-letsinfer install MODEL --all-nodes
-letsinfer scale MODEL --replicas N
-letsinfer pair --role administrator
-letsinfer key create NAME --model MODEL --concurrency N
+letsinfer node info
+letsinfer node list
+letsinfer node add
+letsinfer node pause CHILD_ID
+letsinfer node resume CHILD_ID
+letsinfer model install
+letsinfer auth controller add --role administrator
+letsinfer auth key create NAME --model MODEL --concurrency N
 letsinfer audit verify
 ```
 

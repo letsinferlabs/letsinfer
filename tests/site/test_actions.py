@@ -42,7 +42,7 @@ class ActionRegistryTests(unittest.TestCase):
         validate_registry(leaves)
         for action in ACTIONS.values():
             self.assertIsInstance(action.scope, CommandScope)
-            if action.mutation is MutationClass.NODE and action.name != "setup":
+            if action.mutation is MutationClass.NODE:
                 self.assertIs(action.scope, CommandScope.MAIN)
                 self.assertIs(action.audit, AuditPolicy.ALWAYS)
 
@@ -72,7 +72,7 @@ class ActionRegistryTests(unittest.TestCase):
     def test_member_cannot_execute_or_proxy_a_coordinator_command(self) -> None:
         invoked = mock.Mock(return_value=0)
         arguments = argparse.Namespace(
-            action_id="key.create", action=invoked, command="key", port=1,
+            action_id="auth.key.create", action=invoked, command="auth", port=1,
         )
         stderr = io.StringIO()
         with (
@@ -83,7 +83,7 @@ class ActionRegistryTests(unittest.TestCase):
         ):
             parser.return_value.parse_args.return_value = arguments
             identity_path.return_value.exists.return_value = True
-            self.assertEqual(cli.main(["key", "create", "fixture"]), 1)
+            self.assertEqual(cli.main(["auth", "key", "create", "fixture"]), 1)
         invoked.assert_not_called()
         self.assertIn("command scope is main", stderr.getvalue())
         self.assertIn("coordinator.local", stderr.getvalue())
@@ -120,9 +120,9 @@ class ActionRegistryTests(unittest.TestCase):
                     raise cli.LetsInferError("prevalidation rejected")
 
                 arguments = argparse.Namespace(
-                    action_id="child.invite",
+                    action_id="node.add",
                     action=reject,
-                    command="child",
+                    command="node",
                     port=1,
                 )
                 parsed = mock.MagicMock()
@@ -132,12 +132,12 @@ class ActionRegistryTests(unittest.TestCase):
                     mock.patch.object(cli, "parser", return_value=parsed),
                     contextlib.redirect_stderr(stderr),
                 ):
-                    self.assertEqual(cli.main(["child", "invite"]), 1)
+                    self.assertEqual(cli.main(["node", "add"]), 1)
                 with state.SiteStore(identity=identity) as store:
                     events = [
                         row
                         for row in store.audit_rows(limit=10)
-                        if row["action"] == "child.invite"
+                        if row["action"] == "node.add"
                     ]
                 self.assertEqual(len(events), 1)
                 self.assertEqual(events[0]["outcome"], "failed")
@@ -157,9 +157,9 @@ class ActionRegistryTests(unittest.TestCase):
                     raise cli.LetsInferError("mutation rejected")
 
                 arguments = argparse.Namespace(
-                    action_id="child.invite",
+                    action_id="node.add",
                     action=reject,
-                    command="child",
+                    command="node",
                     port=1,
                 )
                 parsed = mock.MagicMock()
@@ -168,7 +168,7 @@ class ActionRegistryTests(unittest.TestCase):
                     mock.patch.object(cli, "parser", return_value=parsed),
                     contextlib.redirect_stderr(io.StringIO()),
                 ):
-                    self.assertEqual(cli.main(["child", "invite"]), 1)
+                    self.assertEqual(cli.main(["node", "add"]), 1)
                 with state.SiteStore(identity=identity) as store:
                     events = [
                         row

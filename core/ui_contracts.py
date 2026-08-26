@@ -92,7 +92,7 @@ class UiContract:
 
 # Every Action has one literal entry.  Repetition here is intentional: neither
 # authorization class nor command spelling is allowed to silently select a UI.
-UI_CONTRACTS: Mapping[str, UiContract] = {
+_LEGACY_UI_CONTRACTS: Mapping[str, UiContract] = {
     "setup": UiContract(
         action_id="setup",
         title="Set Up",
@@ -915,6 +915,125 @@ UI_CONTRACTS: Mapping[str, UiContract] = {
 }
 
 
+def _remap(
+    source: str,
+    action_id: str,
+    title: str,
+    **changes: object,
+) -> UiContract:
+    return dataclasses.replace(
+        _LEGACY_UI_CONTRACTS[source],
+        action_id=action_id,
+        title=title,
+        **changes,
+    )
+
+
+UI_CONTRACTS: Mapping[str, UiContract] = {
+    "status": _remap("status", "status", "Status"),
+    "doctor": _remap("doctor", "doctor", "Doctor"),
+    "uninstall": _remap("uninstall", "uninstall", "Uninstall"),
+    "node.info": _remap("node.status", "node.info", "Node Information"),
+    "node.list": _remap("child.list", "node.list", "Nodes"),
+    "node.add": _remap(
+        "child.invite",
+        "node.add",
+        "Add Node",
+        prompt=PromptKind.WORKFLOW,
+        supports_json=True,
+    ),
+    "node.pause": _remap("child.drain", "node.pause", "Pause Node"),
+    "node.resume": _remap("child.resume", "node.resume", "Resume Node"),
+    "node.remove": _remap("child.remove", "node.remove", "Remove Node"),
+    "model.list": _remap("list", "model.list", "Models"),
+    "model.install": _remap(
+        "install",
+        "model.install",
+        "Install Model",
+        prompt=PromptKind.WORKFLOW,
+    ),
+    "model.remove": _remap("scale", "model.remove", "Remove Model"),
+    "model.pause": _remap("stop", "model.pause", "Pause Model"),
+    "model.resume": _remap("start", "model.resume", "Resume Model"),
+    "model.restart": _remap("restart", "model.restart", "Restart Model"),
+    "model.recover": _remap("recover", "model.recover", "Recover Model"),
+    "model.rollback": _remap("rollback", "model.rollback", "Roll Back Model"),
+    "model.logs": _remap("logs", "model.logs", "Model Logs"),
+    "benchmark.run": _remap("benchmark", "benchmark.run", "Run Benchmark"),
+    "benchmark.list": _remap(
+        "benchmark",
+        "benchmark.list",
+        "Benchmark Cells",
+        surface=SurfaceKind.LIST,
+        output=OutputContract.TABLE,
+        progress=ProgressKind.NONE,
+        prompt=PromptKind.NONE,
+    ),
+    "benchmark.status": _remap(
+        "benchmark", "benchmark.status", "Benchmark Status"
+    ),
+    "benchmark.stop": _remap("benchmark", "benchmark.stop", "Stop Benchmark"),
+    "benchmark.clean": _remap(
+        "benchmark",
+        "benchmark.clean",
+        "Clean Benchmarks",
+        prompt=PromptKind.CONFIRM,
+    ),
+    "benchmark.verification.run": _remap(
+        "benchmark", "benchmark.verification.run", "Verify Runtime Proposal"
+    ),
+    "benchmark.verification.status": _remap(
+        "benchmark",
+        "benchmark.verification.status",
+        "Verification Status",
+    ),
+    "benchmark.verification.stop": _remap(
+        "benchmark", "benchmark.verification.stop", "Stop Verification"
+    ),
+    "auth.controller.add": _remap(
+        "pair", "auth.controller.add", "Add Controller"
+    ),
+    "auth.controller.list": _remap(
+        "controllers.list", "auth.controller.list", "Controllers"
+    ),
+    "auth.controller.revoke": _remap(
+        "controllers.forget", "auth.controller.revoke", "Revoke Controller"
+    ),
+    "auth.key.create": _remap("key.create", "auth.key.create", "Create API Key"),
+    "auth.key.list": _remap("key.list", "auth.key.list", "API Keys"),
+    "auth.key.show": _remap("key.show", "auth.key.show", "API Key"),
+    "auth.key.rotate": _remap("key.rotate", "auth.key.rotate", "Rotate API Key"),
+    "auth.key.revoke": _remap("key.revoke", "auth.key.revoke", "Revoke API Key"),
+    "auth.key.update": _remap(
+        "key.policy", "auth.key.update", "Update API Key"
+    ),
+    "exposure.status": _remap("exposure.status", "exposure.status", "Exposure"),
+    "exposure.enable": _remap("expose", "exposure.enable", "Enable Exposure"),
+    "exposure.disable": _remap(
+        "unexpose", "exposure.disable", "Disable Exposure"
+    ),
+    "audit.list": _remap("audit.list", "audit.list", "Audit Events"),
+    "audit.show": _remap("audit.show", "audit.show", "Audit Event"),
+    "audit.verify": _remap("audit.verify", "audit.verify", "Verify Audit Chain"),
+    "audit.export": _remap("audit.export", "audit.export", "Export Audit Chain"),
+    "update.check": _remap("update.check", "update.check", "Check for Updates"),
+    "update.core": _remap("update", "update.core", "Update Core"),
+    "update.model": _remap("upgrade", "update.model", "Update Model"),
+    "core-setup": _remap(
+        "core-rebind",
+        "core-setup",
+        "Core Setup",
+        supports_json=True,
+    ),
+    "service-start": _remap("service-start", "service-start", "Service Start"),
+    "service-stop": _remap("service-stop", "service-stop", "Service Stop"),
+    "gateway": _remap("gateway", "gateway", "Gateway"),
+    "node-agent": _remap("node-agent", "node-agent", "Node Agent"),
+    "core-rebind": _remap("core-rebind", "core-rebind", "Core Rebind"),
+    "core-prune": _remap("core-prune", "core-prune", "Core Prune"),
+}
+
+
 def validate_contracts(
     actions: Mapping[str, Action], contracts: Mapping[str, UiContract]
 ) -> None:
@@ -1036,8 +1155,8 @@ def validate_contracts(
             raise ValueError(f"non-status action uses frozen output: {action_id}")
 
         if item.output is OutputContract.ONE_TIME_SECRET and action_id not in {
-            "key.create",
-            "key.rotate",
+            "auth.key.create",
+            "auth.key.rotate",
         }:
             raise ValueError(f"unexpected one-time-secret output: {action_id}")
         if item.progress is ProgressKind.LIVE and item.surface not in {

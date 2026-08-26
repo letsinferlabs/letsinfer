@@ -563,8 +563,8 @@ class CoreUpdateTests(unittest.TestCase):
             run.assert_called_with(["systemctl", "--user", "daemon-reload"])
 
     def test_parser_exposes_only_the_public_update_command(self) -> None:
-        parsed = letsinfer.parser().parse_args(["update", "--version", "1.2.3"])
-        self.assertEqual(parsed.action_id, "update")
+        parsed = letsinfer.parser().parse_args(["update", "core", "1.2.3"])
+        self.assertEqual(parsed.action_id, "update.core")
         help_text = letsinfer.parser().format_help()
         self.assertIn("update", help_text)
         self.assertNotIn("core-rebind", help_text)

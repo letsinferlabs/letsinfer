@@ -391,7 +391,7 @@ def _command_output(command: list[str], what: str) -> str:
 def resolve_runtime(
     value: str, letsinfer_bin: pathlib.Path
 ) -> tuple[pathlib.Path, str]:
-    """Resolve a manifest path and an exact selector accepted by `letsinfer serve`."""
+    """Resolve a manifest path and exact selector for Core qualification launch."""
     candidate = pathlib.Path(value).expanduser()
     if candidate.is_file():
         manifest_path = candidate.resolve()
@@ -1651,7 +1651,7 @@ def run_isolated_matrix(
     assert output is not None
     if output.exists():
         raise RuntimeMatrixError(f"refusing existing output directory: {output}")
-    # ``letsinfer serve --qualification-mode`` owns the single candidate-slot
+    # Core qualification launch owns the single candidate-slot
     # replacement transaction.  Do not reject its currently active container
     # here: the outer benchmark lifecycle records whether inference was active
     # and restores the final isolated candidate after the matrix exits.
