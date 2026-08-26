@@ -3677,13 +3677,28 @@ class _ControllerPairingState:
         self.candidate: dict[str, Any] | None = None
         self.approved: bool | None = None
         self.completed = False
+        self.cancelled = False
         self.error: str | None = None
         self.attempted = False
         self.role = role
 
+    def cancel(self) -> bool:
+        with self.condition:
+            if self.completed:
+                return False
+            self.cancelled = True
+            self.approved = False
+            self.error = "controller pairing was cancelled"
+            self.condition.notify_all()
+            return True
+
     def hello(self) -> dict[str, Any]:
         with self.condition:
-            if self.attempted or time.monotonic() >= self.deadline:
+            if (
+                self.cancelled
+                or self.attempted
+                or time.monotonic() >= self.deadline
+            ):
                 raise LetsInferError("pairing session is unavailable")
         return {
             "protocol": CONTROLLER_PAIRING_PROTOCOL,
@@ -3711,8 +3726,14 @@ class _ControllerPairingState:
         with self.condition:
             self.candidate = candidate
             self.condition.notify_all()
-            while self.approved is None and time.monotonic() < self.deadline:
+            while (
+                self.approved is None
+                and not self.cancelled
+                and time.monotonic() < self.deadline
+            ):
                 self.condition.wait(timeout=max(0.1, self.deadline - time.monotonic()))
+            if self.cancelled:
+                raise LetsInferError("controller pairing was cancelled")
             if self.approved is not True:
                 raise LetsInferError("controller pairing was not approved")
         certificate_pem, fingerprint = issue_controller_certificate(
@@ -3720,13 +3741,18 @@ class _ControllerPairingState:
             expanded_path(self.config["watchdog_controller_ca_file"]),
             expanded_path(self.config["watchdog_controller_ca_key_file"]),
         )
-        _replace_controller(
-            self.config, candidate, certificate_pem, fingerprint, self.role
-        )
+        with self.condition:
+            if self.cancelled:
+                raise LetsInferError("controller pairing was cancelled")
         ca_pem = expanded_path(self.config["watchdog_controller_ca_file"]).read_text(
             encoding="ascii"
         )
         with self.condition:
+            if self.cancelled:
+                raise LetsInferError("controller pairing was cancelled")
+            _replace_controller(
+                self.config, candidate, certificate_pem, fingerprint, self.role
+            )
             self.completed = True
             self.condition.notify_all()
         return {
@@ -3972,19 +3998,42 @@ def pair_controller(arguments: argparse.Namespace) -> int:
                     raise LetsInferError(
                         state.error or "controller pairing was not completed"
                     )
-        if presenter is not None:
-            presenter.result(
-                f"Paired {candidate['name']}",
-                semantic=command_ui.Semantic.SUCCESS,
-                detail=candidate["id"],
-            )
+        _present_paired_controller(presenter, candidate)
+        return 0
+    except KeyboardInterrupt:
+        if state.cancel():
+            if presenter is not None:
+                presenter.result(
+                    "Pairing cancelled",
+                    semantic=command_ui.Semantic.INFO,
+                )
+            else:
+                print("Pairing cancelled")
         else:
-            print(f"PAIRED {candidate['name']} controller={candidate['id']}")
+            completed_candidate = state.candidate
+            if completed_candidate is None:
+                raise LetsInferError("controller pairing completion state is invalid")
+            _present_paired_controller(presenter, completed_candidate)
+        arguments.suppress_completion = True
         return 0
     finally:
         server.shutdown()
         server.server_close()
         worker.join(timeout=5)
+
+
+def _present_paired_controller(
+    presenter: command_ui.CommandUI | None,
+    candidate: Mapping[str, Any],
+) -> None:
+    if presenter is not None:
+        presenter.result(
+            f"Paired {candidate['name']}",
+            semantic=command_ui.Semantic.SUCCESS,
+            detail=str(candidate["id"]),
+        )
+    else:
+        print(f"PAIRED {candidate['name']} controller={candidate['id']}")
 
 
 def controllers(arguments: argparse.Namespace) -> int:

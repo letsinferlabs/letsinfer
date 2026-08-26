@@ -23,6 +23,134 @@ from tests.runtime_fixture import runtime_candidate
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_pairing_interrupts_are_graceful_at_each_interactive_wait(self) -> None:
+        candidate = {
+            "confirmation_code": "123456",
+            "name": "Mac",
+            "id": "controller-id",
+        }
+
+        for stage in ("controller", "confirmation", "completion"):
+            with self.subTest(stage=stage):
+                state = mock.Mock()
+                state.condition = threading.Condition()
+                state.candidate = None if stage == "controller" else candidate
+                state.error = None
+                state.deadline = cli.time.monotonic() + 30
+                state.completed = False
+                state.approved = None
+
+                if stage in {"controller", "completion"}:
+                    wait = mock.patch.object(
+                        state.condition,
+                        "wait",
+                        side_effect=KeyboardInterrupt,
+                    )
+                else:
+                    wait = contextlib.nullcontext()
+
+                arguments = types.SimpleNamespace(
+                    timeout=30,
+                    config=None,
+                    role="administrator",
+                    action_id="pair",
+                )
+                config = {
+                    "installation_id": "i" * 64,
+                    "watchdog_controller_allowlist_file": "/tmp/allowlist",
+                    "watchdog_controller_ca_key_file": "/tmp/ca-key",
+                    "watchdog_cert_file": "/tmp/cert",
+                    "watchdog_key_file": "/tmp/key",
+                    "watchdog_listen": "127.0.0.1",
+                }
+                server = mock.Mock()
+                presenter = mock.Mock()
+                confirmation = (
+                    mock.patch.object(
+                        cli.ui,
+                        "confirm",
+                        side_effect=KeyboardInterrupt,
+                    )
+                    if stage == "confirmation"
+                    else mock.patch.object(cli.ui, "confirm", return_value=True)
+                )
+
+                with (
+                    wait,
+                    mock.patch.object(
+                        cli, "_controller_management_config", return_value=config
+                    ),
+                    mock.patch.object(cli, "_reload_controller_authorization"),
+                    mock.patch.object(
+                        cli, "_ControllerPairingState", return_value=state
+                    ),
+                    mock.patch.object(cli, "_controller_pairing_tls_context"),
+                    mock.patch.object(
+                        cli, "_ControllerPairingServer", return_value=server
+                    ),
+                    mock.patch.object(cli, "_human_presenter", return_value=presenter),
+                    mock.patch.object(
+                        cli, "_command_activity", return_value=contextlib.nullcontext()
+                    ),
+                    mock.patch.object(
+                        cli.ui,
+                        "protect_stdout",
+                        side_effect=lambda _owner: contextlib.nullcontext(),
+                    ),
+                    confirmation,
+                    mock.patch.object(cli.secrets, "randbelow", return_value=12345678),
+                ):
+                    self.assertEqual(cli.pair_controller(arguments), 0)
+
+                state.cancel.assert_called_once_with()
+                presenter.result.assert_any_call(
+                    "Pairing cancelled",
+                    semantic=cli.command_ui.Semantic.INFO,
+                )
+                self.assertTrue(arguments.suppress_completion)
+                server.shutdown.assert_called_once_with()
+                server.server_close.assert_called_once_with()
+
+    def test_cancelled_pairing_cannot_commit_a_controller(self) -> None:
+        config = {
+            "installation_id": "i" * 64,
+            "watchdog_controller_ca_file": "/tmp/ca",
+            "watchdog_controller_ca_key_file": "/tmp/ca-key",
+        }
+        state = cli._ControllerPairingState(
+            config,
+            "12345678",
+            30,
+            "administrator",
+        )
+        state.approved = True
+        candidate = {
+            "confirmation_code": "123456",
+            "name": "Mac",
+            "id": "controller-id",
+        }
+
+        def cancel_after_issuance(*_args: object) -> tuple[str, str]:
+            state.cancel()
+            return "certificate", "f" * 64
+
+        with (
+            mock.patch.object(
+                cli, "_decode_controller_enrollment", return_value=candidate
+            ),
+            mock.patch.object(cli, "_verify_controller_key"),
+            mock.patch.object(
+                cli,
+                "issue_controller_certificate",
+                side_effect=cancel_after_issuance,
+            ),
+            mock.patch.object(cli, "_replace_controller") as replace,
+            self.assertRaisesRegex(cli.LetsInferError, "pairing was cancelled"),
+        ):
+            state.enroll({})
+
+        replace.assert_not_called()
+
     def test_controller_management_uses_core_plane_without_legacy_service(self) -> None:
         identity = types.SimpleNamespace(
             role="main",
