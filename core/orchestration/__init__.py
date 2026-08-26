@@ -6,10 +6,12 @@ from .contracts import (
     GroupPlan,
     OrchestrationError,
     TaskAssignment,
+    bind_endpoint_member,
     build_group_plan,
     build_single_group_plan,
     validate_orchestration_contract,
     validate_group_document,
+    validate_group_target_interconnect,
     validate_target_binding,
     orchestration_contract_sha256,
 )
@@ -25,6 +27,7 @@ __all__ = [
     "GroupPlan",
     "OrchestrationError",
     "TaskAssignment",
+    "bind_endpoint_member",
     "build_group_plan",
     "build_single_group_plan",
     "MemberAgent",
@@ -37,6 +40,7 @@ __all__ = [
     "ensure_group_credential_master",
     "validate_orchestration_contract",
     "validate_group_document",
+    "validate_group_target_interconnect",
     "validate_target_binding",
     "orchestration_contract_sha256",
 ]

@@ -13,9 +13,10 @@ import platform
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from ..state_plane import member_health_state
@@ -27,6 +28,8 @@ class InventoryError(RuntimeError):
 
 
 INTERFACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,31}$")
+RDMA_DEVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+RDMA_VERBS_RE = re.compile(r"^uverbs(?:0|[1-9][0-9]*)$")
 
 
 def _read_text(path: pathlib.Path, *, maximum_bytes: int = 4096) -> str | None:
@@ -233,16 +236,188 @@ def _command(command: Sequence[str]) -> str:
     return result.stdout.strip()
 
 
-def _rdma_interfaces(sys_class: pathlib.Path) -> set[str]:
-    result: set[str] = set()
+def _rdma_interface_devices(sys_class: pathlib.Path) -> dict[str, tuple[str, ...]]:
+    result: dict[str, list[str]] = {}
     root = sys_class / "infiniband"
     if not root.is_dir():
-        return result
-    for device in root.iterdir():
+        return {}
+    try:
+        devices = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return {}
+    for device in devices:
+        if not RDMA_DEVICE_RE.fullmatch(device.name):
+            continue
         net = device / "device/net"
         if net.is_dir():
-            result.update(item.name for item in net.iterdir() if item.is_dir())
-    return result
+            try:
+                interfaces = sorted(net.iterdir(), key=lambda item: item.name)
+            except OSError:
+                continue
+            for interface in interfaces:
+                if interface.is_dir() and INTERFACE_RE.fullmatch(interface.name):
+                    result.setdefault(interface.name, []).append(device.name)
+    return {
+        name: tuple(sorted(set(device_names)))
+        for name, device_names in result.items()
+    }
+
+
+def _rdma_interfaces(sys_class: pathlib.Path) -> set[str]:
+    return set(_rdma_interface_devices(sys_class))
+
+
+def _rdma_verbs_devices(sys_class: pathlib.Path, device: str) -> tuple[str, ...]:
+    """Resolve userspace verbs names for one HCA across supported sysfs layouts."""
+    result: set[str] = set()
+    device_root = sys_class / "infiniband" / device
+    direct = device_root / "device/infiniband_verbs"
+    try:
+        result.update(
+            item.name
+            for item in direct.iterdir()
+            if RDMA_VERBS_RE.fullmatch(item.name)
+        )
+    except OSError:
+        pass
+    global_root = sys_class / "infiniband_verbs"
+    try:
+        candidates = list(global_root.iterdir())
+    except OSError:
+        candidates = []
+    try:
+        hca_device = (device_root / "device").resolve(strict=True)
+    except OSError:
+        hca_device = None
+    for item in candidates:
+        if not RDMA_VERBS_RE.fullmatch(item.name):
+            continue
+        ibdev = item / "ibdev"
+        try:
+            linked_name = ibdev.resolve(strict=True).name if ibdev.is_symlink() else None
+        except OSError:
+            linked_name = None
+        text_name = _read_text(ibdev, maximum_bytes=128)
+        try:
+            same_device = (
+                hca_device is not None
+                and (item / "device").resolve(strict=True) == hca_device
+            )
+        except OSError:
+            same_device = False
+        if linked_name == device or text_name == device or same_device:
+            result.add(item.name)
+    return tuple(sorted(result))
+
+
+def resolve_connectx_rdma_binding(
+    name: str,
+    local_address: str,
+    peer_addresses: Sequence[str],
+    *,
+    minimum_speed_mbps: int,
+    minimum_mtu: int,
+    sys_class: pathlib.Path = pathlib.Path("/sys/class"),
+    dev_root: pathlib.Path = pathlib.Path("/dev"),
+    lstat: Callable[[pathlib.Path], os.stat_result] = os.lstat,
+    access: Callable[[pathlib.Path, int], bool] = os.access,
+) -> dict[str, Any]:
+    """Resolve one sealed ConnectX interface to exact usable verbs devices."""
+    if (
+        not isinstance(minimum_speed_mbps, int)
+        or isinstance(minimum_speed_mbps, bool)
+        or minimum_speed_mbps <= 0
+        or not isinstance(minimum_mtu, int)
+        or isinstance(minimum_mtu, bool)
+        or minimum_mtu <= 0
+    ):
+        raise InventoryError("RDMA link requirements are invalid")
+    verified = verify_direct_connectx_interface(name, sys_class=sys_class)
+    if (
+        verified["speed_mbps"] < minimum_speed_mbps
+        or verified["mtu"] < minimum_mtu
+    ):
+        raise InventoryError("live ConnectX link no longer meets its sealed contract")
+    try:
+        local = str(ipaddress.ip_address(local_address.strip("[]")))
+    except (AttributeError, ValueError) as error:
+        raise InventoryError("RDMA local address is invalid") from error
+    try:
+        rows = json.loads(
+            _command(["ip", "-json", "address", "show", "dev", name])
+        )
+    except (json.JSONDecodeError, TypeError) as error:
+        raise InventoryError("RDMA interface address inventory is unavailable") from error
+    current_addresses: set[str] = set()
+    if not isinstance(rows, list):
+        raise InventoryError("RDMA interface address inventory is unavailable")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for item in row.get("addr_info", []):
+            if not isinstance(item, dict) or not isinstance(item.get("local"), str):
+                continue
+            try:
+                current_addresses.add(str(ipaddress.ip_address(item["local"])))
+            except ValueError:
+                continue
+    if local not in current_addresses:
+        raise InventoryError("sealed RDMA address is not assigned to its interface")
+    if (
+        not isinstance(peer_addresses, Sequence)
+        or isinstance(peer_addresses, (str, bytes))
+        or not peer_addresses
+    ):
+        raise InventoryError("RDMA peer addresses are unavailable")
+    normalized_peers: list[str] = []
+    for value in peer_addresses:
+        if not isinstance(value, str):
+            raise InventoryError("RDMA peer address is invalid")
+        try:
+            peer = str(ipaddress.ip_address(value.strip("[]")))
+        except ValueError as error:
+            raise InventoryError("RDMA peer address is invalid") from error
+        if peer == local or peer in normalized_peers:
+            raise InventoryError("RDMA peer addresses are invalid")
+        proof = verify_direct_connectx_peer(name, peer, sys_class=sys_class)
+        if proof.get("local_address") not in {None, local}:
+            raise InventoryError("RDMA peer route selected a different local address")
+        normalized_peers.append(peer)
+
+    devices = _rdma_interface_devices(sys_class).get(name, ())
+    if len(devices) != 1:
+        raise InventoryError("ConnectX interface does not map to exactly one RDMA device")
+    device = devices[0]
+    verbs = _rdma_verbs_devices(sys_class, device)
+    if not verbs:
+        raise InventoryError("ConnectX RDMA device has no userspace verbs device")
+    device_nodes = [dev_root / "infiniband/rdma_cm"] + [
+        dev_root / "infiniband" / verb for verb in verbs
+    ]
+    resolved_nodes: list[dict[str, Any]] = []
+    for path in device_nodes:
+        try:
+            details = lstat(path)
+        except OSError as error:
+            raise InventoryError(f"RDMA device node is unavailable: {path.name}") from error
+        if stat.S_ISLNK(details.st_mode) or not stat.S_ISCHR(details.st_mode):
+            raise InventoryError(f"RDMA device node is not a character device: {path.name}")
+        if not access(path, os.R_OK | os.W_OK):
+            raise InventoryError(f"RDMA device node is not usable: {path.name}")
+        resolved_nodes.append(
+            {
+                "path": str(path),
+                "major": os.major(details.st_rdev),
+                "minor": os.minor(details.st_rdev),
+            }
+        )
+    return {
+        "interface": name,
+        "device": device,
+        "local_address": local,
+        "peer_addresses": normalized_peers,
+        "device_nodes": resolved_nodes,
+    }
 
 
 def _network_interfaces(sys_class: pathlib.Path) -> list[dict[str, Any]]:

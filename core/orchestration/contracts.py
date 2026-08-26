@@ -21,6 +21,7 @@ SCHEMA_VERSION = 3
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+INTERFACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,31}$")
 CANDIDATE_ID_RE = re.compile(
     r"^[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*--"
     r"[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*$"
@@ -63,6 +64,7 @@ class TaskAssignment:
     endpoint_owner: bool
     readiness: Mapping[str, Any]
     device_uuids: tuple[str, ...]
+    rdma_interface: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -105,6 +107,11 @@ class GroupPlan:
                     "port_base": assignment.port_base,
                     "port_count": assignment.port_count,
                     "device_uuids": list(assignment.device_uuids),
+                    **(
+                        {"rdma_interface": assignment.rdma_interface}
+                        if assignment.rdma_interface is not None
+                        else {}
+                    ),
                 }
                 for assignment in self.assignments
             ],
@@ -267,12 +274,17 @@ def validate_group_document(value: Any) -> dict[str, Any]:
     if (
         not isinstance(resources, list)
         or len(resources) not in range(1, 65)
-        or any(not isinstance(item, dict) or set(item) != resource_fields for item in resources)
+        or any(
+            not isinstance(item, dict)
+            or set(item) not in (resource_fields, resource_fields | {"rdma_interface"})
+            for item in resources
+        )
     ):
         raise OrchestrationError("engine-group resources are invalid")
     node_ids: list[str] = []
     task_ids: list[str] = []
     all_devices: list[str] = []
+    rdma_nodes: list[str] = []
     for item in resources:
         node_id = item.get("node_id")
         task_id = item.get("task_id")
@@ -280,6 +292,7 @@ def validate_group_document(value: Any) -> dict[str, Any]:
         port_base = item.get("port_base")
         port_count = item.get("port_count")
         devices = item.get("device_uuids")
+        rdma_interface = item.get("rdma_interface")
         if not isinstance(node_id, str) or not ID_RE.fullmatch(node_id):
             raise OrchestrationError("engine-group resource node identity is invalid")
         if not isinstance(task_id, str) or re.fullmatch(r"task-(?:0|[1-9][0-9]*)", task_id) is None:
@@ -305,6 +318,14 @@ def validate_group_document(value: Any) -> dict[str, Any]:
         node_ids.append(node_id)
         task_ids.append(task_id)
         all_devices.extend(devices)
+        if rdma_interface is not None:
+            if not isinstance(rdma_interface, str) or not INTERFACE_RE.fullmatch(
+                rdma_interface
+            ):
+                raise OrchestrationError(
+                    "engine-group resource RDMA interface is invalid"
+                )
+            rdma_nodes.append(node_id)
     expected_tasks = [f"task-{index}" for index in range(len(resources))]
     if (
         len(node_ids) != len(set(node_ids))
@@ -356,6 +377,30 @@ def validate_group_document(value: Any) -> dict[str, Any]:
             reached = expanded
         if reached != set(node_ids):
             raise OrchestrationError("engine-group connections do not join every node")
+    if rdma_nodes:
+        if strategy != "parallel" or sorted(rdma_nodes) != sorted(node_ids):
+            raise OrchestrationError(
+                "engine-group RDMA interfaces must bind every parallel node"
+            )
+        rdma_pairs = [
+            (item["nodes"][0], item["nodes"][1])
+            for item in connections
+            if item["rdma"] is True
+        ]
+        reached = {node_ids[0]}
+        while True:
+            expanded = reached | {
+                right if left in reached else left
+                for left, right in rdma_pairs
+                if left in reached or right in reached
+            }
+            if expanded == reached:
+                break
+            reached = expanded
+        if reached != set(node_ids):
+            raise OrchestrationError(
+                "engine-group RDMA connections do not join every node"
+            )
     endpoint_owner = value.get("endpoint_owner")
     if endpoint_owner not in task_ids:
         raise OrchestrationError("engine-group endpoint owner is not an assigned task")
@@ -537,6 +582,114 @@ def validate_target_binding(value: Any, placement: Mapping[str, Any]) -> dict[st
     return contract
 
 
+def bind_endpoint_member(
+    value: Any,
+    member_ids: Sequence[str],
+    endpoint_member_id: str,
+) -> tuple[str, ...]:
+    """Map the opaque endpoint-owner task to the main node deterministically."""
+    contract = validate_orchestration_contract(value)
+    members = tuple(member_ids)
+    if (
+        len(members) != len(contract["tasks"])
+        or len(set(members)) != len(members)
+        or any(not isinstance(item, str) or not ID_RE.fullmatch(item) for item in members)
+        or not isinstance(endpoint_member_id, str)
+        or endpoint_member_id not in members
+    ):
+        raise OrchestrationError(
+            "engine-group endpoint owner requires the selected main node"
+        )
+    endpoint_index = next(
+        index
+        for index, task in enumerate(contract["tasks"])
+        if task["task_id"] == contract["endpoint_owner"]
+    )
+    current_index = members.index(endpoint_member_id)
+    ordered = list(members)
+    ordered[endpoint_index], ordered[current_index] = (
+        ordered[current_index],
+        ordered[endpoint_index],
+    )
+    return tuple(ordered)
+
+
+def validate_group_target_interconnect(
+    value: Any,
+    placement: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind generated group resources to the runtime target's link contract."""
+    group = validate_group_document(value)
+    if not isinstance(placement, Mapping) or set(placement) != {
+        "strategy", "node_count", "interconnect"
+    }:
+        raise OrchestrationError("runtime target placement is invalid")
+    if (
+        group["strategy"] != placement["strategy"]
+        or len(group["resources"]) != placement["node_count"]
+    ):
+        raise OrchestrationError("engine-group plan differs from the release target")
+    interconnect = placement["interconnect"]
+    if not isinstance(interconnect, Mapping) or set(interconnect) != {
+        "kind", "rdma_required", "minimum_speed_mbps", "minimum_mtu"
+    }:
+        raise OrchestrationError("runtime target interconnect is invalid")
+    if (
+        interconnect["kind"] not in {"any", "connectx", "ethernet", "wifi", "other"}
+        or not isinstance(interconnect["rdma_required"], bool)
+        or not isinstance(interconnect["minimum_speed_mbps"], int)
+        or isinstance(interconnect["minimum_speed_mbps"], bool)
+        or interconnect["minimum_speed_mbps"] < 0
+        or not isinstance(interconnect["minimum_mtu"], int)
+        or isinstance(interconnect["minimum_mtu"], bool)
+        or interconnect["minimum_mtu"] < 0
+    ):
+        raise OrchestrationError("runtime target interconnect is invalid")
+    matching_pairs: list[tuple[str, str]] = []
+    for connection in group["connections"]:
+        if (
+            (interconnect["kind"] == "any" or connection["kind"] == interconnect["kind"])
+            and (
+                not interconnect["rdma_required"]
+                or connection["rdma"] is True
+            )
+            and connection["speed_mbps"] >= interconnect["minimum_speed_mbps"]
+            and connection["mtu"] >= interconnect["minimum_mtu"]
+        ):
+            matching_pairs.append(tuple(connection["nodes"]))
+    node_ids = [resource["node_id"] for resource in group["resources"]]
+    if len(node_ids) > 1:
+        reached = {node_ids[0]}
+        while True:
+            expanded = reached | {
+                right if left in reached else left
+                for left, right in matching_pairs
+                if left in reached or right in reached
+            }
+            if expanded == reached:
+                break
+            reached = expanded
+        if reached != set(node_ids):
+            raise OrchestrationError(
+                "engine-group connections do not satisfy the release target"
+            )
+    bound_nodes = {
+        resource["node_id"]
+        for resource in group["resources"]
+        if "rdma_interface" in resource
+    }
+    if interconnect["rdma_required"]:
+        if bound_nodes != set(node_ids):
+            raise OrchestrationError(
+                "RDMA target requires one sealed interface on every node"
+            )
+    elif bound_nodes:
+        raise OrchestrationError(
+            "non-RDMA target cannot receive RDMA device resources"
+        )
+    return group
+
+
 def orchestration_contract_sha256(value: Mapping[str, Any] | None) -> str:
     """Bind the runtime-owned execution bytes without assigning them semantics."""
     document: Any = {"contract": "letsinfer-single-task-v1"}
@@ -558,6 +711,8 @@ def build_group_plan(
     member_port_bases: Mapping[str, int],
     member_device_uuids: Mapping[str, Sequence[str]],
     connections: Sequence[Mapping[str, Any]],
+    member_rdma_interfaces: Mapping[str, str] | None = None,
+    endpoint_member_id: str | None = None,
 ) -> GroupPlan:
     """Expand one validated runtime contract across an authenticated placement."""
     contract = validate_orchestration_contract(value)
@@ -594,6 +749,15 @@ def build_group_plan(
         raise OrchestrationError("group member port assignments are incomplete")
     if set(member_device_uuids) != set(members):
         raise OrchestrationError("group member device assignments are incomplete")
+    rdma_interfaces = dict(member_rdma_interfaces or {})
+    if rdma_interfaces and (
+        set(rdma_interfaces) != set(members)
+        or any(
+            not isinstance(name, str) or not INTERFACE_RE.fullmatch(name)
+            for name in rdma_interfaces.values()
+        )
+    ):
+        raise OrchestrationError("group member RDMA assignments are invalid")
     if any(
         not isinstance(member_device_uuids[item], Sequence)
         or isinstance(member_device_uuids[item], (str, bytes))
@@ -641,8 +805,15 @@ def build_group_plan(
                     f"runtime.orchestration.tasks[{index}].readiness",
                 ),
                 device_uuids=tuple(member_device_uuids[member_id]),
+                rdma_interface=rdma_interfaces.get(member_id),
             )
         )
+    if endpoint_member_id is not None:
+        owners = [item for item in assignments if item.endpoint_owner]
+        if len(owners) != 1 or owners[0].member_id != endpoint_member_id:
+            raise OrchestrationError(
+                "engine-group endpoint owner is not assigned to the main node"
+            )
     safe_connections = [dict(item) for item in connections]
     identity = {
         "contract": "letsinfer-execution-group-v3",
@@ -663,6 +834,11 @@ def build_group_plan(
                 "task_id": item.task_id, "port_base": item.port_base,
                 "port_count": item.port_count,
                 "device_uuids": list(item.device_uuids),
+                **(
+                    {"rdma_interface": item.rdma_interface}
+                    if item.rdma_interface is not None
+                    else {}
+                ),
             }
             for item in assignments
         ],
