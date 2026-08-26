@@ -10,6 +10,7 @@ launcher_dir="/usr/local/bin"
 user_install=0
 run_setup=1
 repair_docker_access=0
+docker_exec_group=""
 progress_active=0
 progress_enabled=1
 interactive_output=0
@@ -95,7 +96,10 @@ approve_docker_repair() {
         answer=
         IFS= read -r answer </dev/tty || true
         case "$answer" in
-            y|Y|yes|YES|Yes) return 0 ;;
+            y|Y|yes|YES|Yes)
+                repair_docker_access=1
+                return 0
+                ;;
         esac
         fail "Docker access repair was not approved"
     fi
@@ -109,6 +113,22 @@ gid_list_contains() {
         *" $wanted_gid "*) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+activate_docker_group_for_install() {
+    operator=$1
+    socket_group=$2
+    command -v sg >/dev/null 2>&1 \
+        || pause_for_login_refresh \
+            "$operator belongs to $socket_group, but this login has stale groups and sg is unavailable. Close every session for this account, sign in again, and rerun install.sh."
+    if ! sg "$socket_group" -c 'docker info >/dev/null 2>&1'; then
+        pause_for_login_refresh \
+            "$operator belongs to $socket_group, but a refreshed group process cannot reach Docker. Close every session for this account, sign in again, and rerun install.sh."
+    fi
+    docker_exec_group=$socket_group
+    clear_progress
+    printf 'letsinfer install: using refreshed %s group access for this installation.\n' \
+        "$socket_group" >&2
 }
 
 linux_distribution_id() {
@@ -254,8 +274,8 @@ preflight_linux_docker() {
     fi
     account_gids=$(id -G "$operator")
     if gid_list_contains "$socket_gid" "$account_gids"; then
-        pause_for_login_refresh \
-            "$operator belongs to $socket_group, but this login has stale groups. Start a new login session and rerun install.sh."
+        activate_docker_group_for_install "$operator" "$socket_group"
+        return 0
     fi
 
     command -v usermod >/dev/null 2>&1 \
@@ -266,8 +286,7 @@ preflight_linux_docker() {
     account_gids=$(id -G "$operator")
     gid_list_contains "$socket_gid" "$account_gids" \
         || fail "Docker group enrollment did not take effect"
-    pause_for_login_refresh \
-        "Added $operator to $socket_group. Start a new login session and rerun install.sh; the installer will also repair a stale user service manager if needed."
+    activate_docker_group_for_install "$operator" "$socket_group"
 }
 
 docker_user_service_access() {
@@ -700,7 +719,23 @@ if [ "$run_setup" -eq 1 ]; then
     setup_log="$temporary/setup.stderr"
     setup_summary="$temporary/setup.summary"
     progress 80 "Initializing services"
-    if ! "$command_path" core-setup --json >"$setup_json" 2>"$setup_log"; then
+    if [ -n "$docker_exec_group" ]; then
+        LETSINFER_SETUP_COMMAND=$command_path
+        export LETSINFER_SETUP_COMMAND
+        if ! sg "$docker_exec_group" \
+            -c 'exec "$LETSINFER_SETUP_COMMAND" core-setup --json' \
+            >"$setup_json" 2>"$setup_log"; then
+            setup_failed=1
+        else
+            setup_failed=0
+        fi
+        unset LETSINFER_SETUP_COMMAND
+    elif ! "$command_path" core-setup --json >"$setup_json" 2>"$setup_log"; then
+        setup_failed=1
+    else
+        setup_failed=0
+    fi
+    if [ "$setup_failed" -ne 0 ]; then
         clear_progress
         progress_active=0
         if [ -s "$setup_log" ]; then
