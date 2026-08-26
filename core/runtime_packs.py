@@ -462,10 +462,12 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
     elif schema_version in {
         SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
-        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     }:
         required = common_fields | {"domains", "execution", "short"}
-    elif schema_version == TTFT_CACHE_BENCHMARK_SCHEMA_VERSION:
+    elif schema_version in {
+        TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
+    }:
         required = common_fields | {"domains", "execution", "short", "ttft_cache"}
     else:
         required = common_fields
@@ -654,7 +656,10 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
                 f"{where}.short.concurrencies must be exactly 1, 2, and 4"
             )
 
-    if value["schema_version"] == TTFT_CACHE_BENCHMARK_SCHEMA_VERSION:
+    if value["schema_version"] in {
+        TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
+    }:
         ttft_cache = value.get("ttft_cache")
         if not isinstance(ttft_cache, dict) or set(ttft_cache) != {
             "prompt_tokens",
