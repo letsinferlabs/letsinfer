@@ -2202,7 +2202,10 @@ class SiteStore:
         if not current:
             raise SiteError("engine group has no device allocation")
         allowed = {
-            "reserved": {"reserved", "active", "released"},
+            # Recovery deliberately stops every member before starting it.
+            # A cleanly stopped group keeps its devices reserved, so that
+            # idempotent stop must be allowed to enter the draining phase.
+            "reserved": {"reserved", "active", "draining", "released"},
             "active": {"active", "draining"},
             "draining": {"draining", "reserved", "released"},
             "released": {"released"},
