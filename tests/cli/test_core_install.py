@@ -82,17 +82,12 @@ class CoreInstallTests(unittest.TestCase):
             home = prefix / "share/letsinfer"
             self.addCleanup(self._restore_directory_modes, prefix)
             install(REPOSITORY_ROOT, home, launcher_root=prefix / "bin")
-            runtime = root / "work" / "runtime"
-            runtime.mkdir(parents=True)
-            (runtime / "runtime.json").write_text(
-                json.dumps(runtime_candidate()),
-                encoding="utf-8",
-            )
-            output = root / "runtime.letsinfer"
+            work = root / "work"
+            work.mkdir()
 
             completed = subprocess.run(
-                [str(prefix / "bin/letsinfer"), "pack", "runtime", "--output", str(output)],
-                cwd=runtime.parent,
+                [str(prefix / "bin/letsinfer"), "--help"],
+                cwd=work,
                 check=False,
                 capture_output=True,
                 text=True,
@@ -103,7 +98,7 @@ class CoreInstallTests(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertTrue(output.is_file())
+            self.assertIn("letsinfer", completed.stdout)
 
 
 if __name__ == "__main__":

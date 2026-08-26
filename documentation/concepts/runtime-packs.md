@@ -12,7 +12,7 @@ configuration, and capacity limits inside a runtime without changing core.
 When you run:
 
 ```bash
-letsinfer install qwen3.8-27b
+letsinfer model install qwen3.8-27b
 ```
 
 Let's Infer:
@@ -51,7 +51,7 @@ the catalog recommends for your target.
 The candidate directory contains `runtime.json`, `release.json`, and its
 README. `release.json` records a non-empty array of runtime authors plus the
 SPDX license. Those values are versioned in the signed catalog and shown by
-`letsinfer list`. The directory may also contain `engine/`, `adapter/`, `image/`,
+`letsinfer model list`. The directory may also contain `engine/`, `adapter/`, `image/`,
 `kernels/`, `patches/`, `scripts/`, and `tests/` beside `runtime.json`.
 Keep only the candidate's implementation closure there. Shared gateway,
 Watchdog, benchmark, prompt, and node-orchestration code stays in core.
@@ -73,7 +73,7 @@ reviewable source closure in one PR. A no-code PR sentinel triggers a
 secretless default-branch builder, and a separate trusted default-branch
 finalizer gives verifiers the exact Engine and runtime bytes without executing
 proposal code.
-`letsinfer benchmark verify` downloads that head-bound artifact, not the PR
+`letsinfer benchmark verification run` downloads that head-bound artifact, not the PR
 source tree. A runtime that does not change Engine inputs
 simply reuses the existing immutable Engine pin and publishes no duplicate
 Engine object.
@@ -122,15 +122,15 @@ publishes them together from the runtimes repository.
 Discover compatible releases before installing:
 
 ```bash
-letsinfer list
-letsinfer list qwen3.8-27b --versions
+letsinfer model list
+letsinfer model list qwen3.8-27b --versions
 ```
 
 Catalog changes do not silently alter a running installation:
 
-- `letsinfer update` updates core only;
-- `letsinfer upgrade MODEL` explicitly updates the installed runtime;
-- `letsinfer rollback MODEL` reinstalls its retained previous runtime.
+- `letsinfer update core` updates Core only;
+- `letsinfer update model MODEL` explicitly updates the installed runtime;
+- `letsinfer model rollback MODEL` reinstalls its retained previous runtime.
 
 ## Storage
 
@@ -139,7 +139,7 @@ Installed packs are content-addressed below
 `$LETSINFER_HOME/models/<owner>--<repository>/<revision>/`. OCI download state
 lives below `$LETSINFER_HOME/oci/`, while the container runtime retains its
 native content store. The last verified signed catalog lives below
-`$LETSINFER_HOME/state/catalog/` and is shared by list, install, upgrade, and
+`$LETSINFER_HOME/state/catalog/` and is shared by model list, install, update, and
 update checks.
 
 Receipts bind the candidate ID, version, pack digest, target contract, model,
@@ -148,20 +148,22 @@ supports explicit rollback.
 
 ## Building a candidate
 
-Validate and package your source with:
+Validate candidate source with the runtimes repository tools:
 
 ```bash
 python3 tools/generate_manifest.py --validate-only
 python3 tools/readme_onboarding.py --candidate <candidate> --write
-letsinfer pack <candidate-directory> --output /tmp/runtime.letsinfer
 ```
 
-Pack the same source twice and require byte-identical output. After engine,
+Deterministic local packing belongs to the public
+`letsinfer-runtime-authoring` skill, which imports the exact checked-out Core
+packing contract, builds twice, and requires byte-identical output. Runtime
+pack development is intentionally absent from the product CLI. After engine,
 safety, restart, pressure, crash, and API review, wait for the PR's
 `benchmark-ready` gate. Independent users then run:
 
 ```bash
-letsinfer benchmark verify <runtime-pr-url>
+letsinfer benchmark verification run <runtime-pr-url>
 ```
 
 Two eligible independent reviewers must pass the exact PR artifact. One

@@ -8,7 +8,7 @@ engine, lifecycle, API, safety, telemetry, and updates.
 
 ## Install a model, not a deployment stack
 
-- **Model-first installation.** Run `letsinfer install MODEL`. You never need
+- **Model-first installation.** Run `letsinfer model install MODEL`. You never need
   to choose an engine, locate weights, or write a hardware-specific launch
   command.
 - **Automatic hardware matching.** Let's Infer identifies the local target and
@@ -18,7 +18,7 @@ engine, lifecycle, API, safety, telemetry, and updates.
   model revision, Engine OCI, adapter, dependencies, and optional sidecars.
   Content-addressed stores avoid downloading identical content twice.
 - **Ready means ready.** A normal install starts inference and waits for the
-  API to become usable. `--no-start` is available for staged deployments.
+  API to become usable. Pause and resume are explicit model lifecycle actions.
 - **One home directory.** Core releases, configuration, secrets, runtime
   packs, models, benchmark evidence, and rebuildable caches live below
   `$LETSINFER_HOME` (normally `~/.local/share/letsinfer`).
@@ -49,17 +49,18 @@ engine, lifecycle, API, safety, telemetry, and updates.
   restart loop.
 - **Safety stays authoritative.** OOM and protection trips remain latched.
   They are never hidden by an automatic restart; inspect the cause and run
-  `letsinfer recover` when it is safe to continue.
-- **Atomic lifecycle changes.** Start, stop, restart, recover, install, update,
-  upgrade, and rollback use one state model rather than competing scripts.
+  `letsinfer model recover MODEL` when it is safe to continue.
+- **Atomic lifecycle changes.** Pause, resume, restart, recover, install,
+  update, and rollback use one state model rather than competing scripts.
 - **Clean uninstall.** `letsinfer uninstall` previews and confirms removal of
   the complete Let's Infer home. `--keep-models` preserves downloaded weights.
 
 ## Live, normalized observability
 
 `letsinfer status` is a continuously refreshed view of the whole request path,
-not a container snapshot. It combines the main node, gateway, Engine
-adapter, and Watchdog into one state plane.
+not a container snapshot. It combines the main and child nodes, hardware,
+links, every logical model and replica group, gateway, Engine adapters, and
+Watchdog into one state plane.
 
 Depending on what the Engine adapter and hardware expose, it shows:
 
@@ -108,11 +109,11 @@ explicit recovery.
 
 - `letsinfer update check` checks core and all distinct installed engine-group
   releases.
-- `letsinfer update` changes core without silently moving your runtime or
+- `letsinfer update core` changes Core without silently moving your runtime or
   model.
-- `letsinfer upgrade MODEL` installs a newer qualified runtime without changing
+- `letsinfer update model MODEL` installs a newer qualified runtime without changing
   core.
-- `letsinfer rollback MODEL` restores the retained previous runtime.
+- `letsinfer model rollback MODEL` restores the retained previous runtime.
 
 Every CLI command can surface a cached update notice. Online checks update one
 durable update state; transient network failures do not erase the last known
@@ -121,7 +122,7 @@ models and the active rollback target remain intact.
 
 ## Benchmarks are a product feature
 
-`letsinfer benchmark MODEL` runs the same model-neutral workload contract for
+`letsinfer benchmark run MODEL` runs the same model-neutral workload contract for
 every runtime:
 
 - canonical code and prose prompts at fixed context and concurrency cells;

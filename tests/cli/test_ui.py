@@ -1216,6 +1216,38 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("Core 0.11.0-rc.30", rendered)
         self.assertNotIn("\033[", rendered)
 
+    def test_node_status_shows_all_models_nodes_and_verified_links(self) -> None:
+        stream = FakeStream(tty=True)
+        ui.node_status(
+            {
+                "identity": {"display_name": "Home", "role": "main"},
+                "services": {
+                    "node_active": "active",
+                    "gateway_active": "active",
+                    "gateway_health": True,
+                    "gateway_auth_required": True,
+                    "gateway_authenticated": True,
+                },
+                "nodes": [
+                    {"state": "active"},
+                    {"state": "paused"},
+                ],
+                "links": [{"verified": True}],
+                "models": [
+                    {"model": "ling-3-flash", "state": "running", "replicas": 2},
+                    {"model": "qwen3.8-27b", "state": "failed", "replicas": 1},
+                ],
+            },
+            stream=stream,
+            environ={"TERM": "xterm-256color", "NO_COLOR": "1"},
+        )
+        rendered = stream.getvalue()
+        self.assertIn("2 node(s)", rendered)
+        self.assertIn("1/1 verified", rendered)
+        self.assertIn("ling-3-flash · 2 replica(s)", rendered)
+        self.assertIn("qwen3.8-27b · 1 replica(s)", rendered)
+        self.assertNotIn("Not installed", rendered)
+
     def test_no_runtime_dashboard_keeps_device_and_monitoring_visible(self) -> None:
         stream = FakeStream(tty=True)
         payload = {
@@ -1417,7 +1449,7 @@ class HelpTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("LET'S INFER", stdout.getvalue())
         self.assertIn("Your inference node is ready", stdout.getvalue())
-        self.assertIn("letsinfer install <model>", stdout.getvalue())
+        self.assertIn("letsinfer model install <model>", stdout.getvalue())
         self.assertNotIn("Usage:", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
 
@@ -1444,8 +1476,14 @@ class HelpTests(unittest.TestCase):
                 for action in root._actions
                 if isinstance(action, argparse._SubParsersAction)
             )
-            value = subparsers.choices["install"].format_help()
-        self.assertIn("LET'S INFER  /  INSTALL", value)
+            model = subparsers.choices["model"]
+            model_subparsers = next(
+                action
+                for action in model._actions
+                if isinstance(action, argparse._SubParsersAction)
+            )
+            value = model_subparsers.choices["install"].format_help()
+        self.assertIn("LET'S INFER  /  MODEL INSTALL", value)
         self.assertNotIn("\033[", value)
         self.assertIn("Arguments:", value)
         self.assertNotIn("Commands:\n  model", value)
@@ -1468,7 +1506,7 @@ class HelpTests(unittest.TestCase):
 
 
 class MainOutputTests(unittest.TestCase):
-    def _metadata(self, name: str = "setup") -> object:
+    def _metadata(self, name: str = "node.info") -> object:
         return argparse.Namespace(
             name=name,
             scope=CommandScope.MAIN,
@@ -1484,9 +1522,9 @@ class MainOutputTests(unittest.TestCase):
             return 0
 
         arguments = argparse.Namespace(
-            command="setup",
+            command="node",
             action=action,
-            action_id="setup",
+            action_id="node.info",
             json=True,
             port=1,
             engine_port=None,
@@ -1506,7 +1544,7 @@ class MainOutputTests(unittest.TestCase):
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
-            result = letsinfer.main(["setup", "--json"])
+            result = letsinfer.main(["node", "info", "--json"])
         self.assertEqual(result, 0)
         self.assertEqual(
             stdout.getvalue(),
@@ -1523,8 +1561,8 @@ class MainOutputTests(unittest.TestCase):
         }
         language = set(letsinfer.ACTION_PROGRESS) | set(letsinfer.READ_PROGRESS)
         self.assertEqual(mutations, language & mutations)
-        self.assertNotIn("key.list", mutations)
-        self.assertNotIn("key.show", mutations)
+        self.assertNotIn("auth.key.list", mutations)
+        self.assertNotIn("auth.key.show", mutations)
 
     def test_key_secret_and_warning_keep_their_stream_contracts(self) -> None:
         token = "li_once_secret"
@@ -1536,9 +1574,9 @@ class MainOutputTests(unittest.TestCase):
             return 0
 
         arguments = argparse.Namespace(
-            command="key",
+            command="auth",
             action=action,
-            action_id="key.create",
+            action_id="auth.key.create",
             json=False,
             port=1,
             engine_port=None,
@@ -1554,12 +1592,12 @@ class MainOutputTests(unittest.TestCase):
             mock.patch.object(
                 letsinfer,
                 "_authorize_command",
-                return_value=(self._metadata("key.create"), None),
+                return_value=(self._metadata("auth.key.create"), None),
             ),
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
-            result = letsinfer.main(["key", "create", "app"])
+            result = letsinfer.main(["auth", "key", "create", "app"])
         self.assertEqual(result, 0)
         self.assertEqual(stdout.getvalue(), f"{token}\n")
         self.assertIn("KEY app id=fixture", stderr.getvalue())
@@ -1571,8 +1609,8 @@ class MainOutputTests(unittest.TestCase):
 
     def test_read_result_is_unadorned_and_non_tty_mutation_is_byte_stable(self) -> None:
         for name, output in (
-            ("key.list", "fixture\tactive\n"),
-            ("child.approve", "APPROVED fixture\n"),
+            ("auth.key.list", "fixture\tactive\n"),
+            ("node.pause", "PAUSED fixture\n"),
         ):
             with self.subTest(name=name):
                 arguments = argparse.Namespace(
@@ -1610,9 +1648,9 @@ class MainOutputTests(unittest.TestCase):
             return 0
 
         arguments = argparse.Namespace(
-            command="install",
+            command="model",
             action=action,
-            action_id="install",
+            action_id="model.install",
             json=False,
             port=1,
             engine_port=None,
@@ -1628,26 +1666,26 @@ class MainOutputTests(unittest.TestCase):
             mock.patch.object(
                 letsinfer,
                 "_authorize_command",
-                return_value=(self._metadata("install"), None),
+                return_value=(self._metadata("model.install"), None),
             ),
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
-            result = letsinfer.main(["install", "fixture"])
+            result = letsinfer.main(["model", "install", "fixture"])
         self.assertEqual(result, 0)
         self.assertEqual(stdout.getvalue(), "INSTALLED RUNTIME fixture\n")
-        self.assertIn("Installing the runtime", stderr.getvalue())
+        self.assertIn("Installing models", stderr.getvalue())
         header = ui.ANSI.sub("", stderr.getvalue()).splitlines()[0]
-        self.assertIn("Install Runtime", header)
+        self.assertIn("Install Model", header)
         self.assertIn("LET'S INFER", header)
-        self.assertIn("Runtime installed", stderr.getvalue())
+        self.assertIn("Models installed", stderr.getvalue())
         self.assertIn(ui.CLEAR_LINE, stderr.getvalue())
 
     def test_update_leaves_the_installer_as_the_only_interactive_progress_owner(self) -> None:
         arguments = argparse.Namespace(
             command="update",
             action=lambda _arguments: 0,
-            action_id="update",
+            action_id="update.core",
             json=False,
             port=1,
             engine_port=None,
@@ -1661,21 +1699,21 @@ class MainOutputTests(unittest.TestCase):
             mock.patch.object(
                 letsinfer,
                 "_authorize_command",
-                return_value=(self._metadata("update"), None),
+                return_value=(self._metadata("update.core"), None),
             ),
             mock.patch.object(ui, "progress", progress),
             mock.patch.object(
                 ui, "protect_stdout", return_value=contextlib.nullcontext()
             ),
         ):
-            self.assertEqual(letsinfer.main(["update"]), 0)
+            self.assertEqual(letsinfer.main(["update", "core"]), 0)
         progress.assert_not_called()
 
     def test_non_tty_error_contract_is_unchanged(self) -> None:
         arguments = argparse.Namespace(
-            command="setup",
+            command="node",
             action=lambda _arguments: 0,
-            action_id="setup",
+            action_id="node.info",
             json=False,
             port=0,
             engine_port=None,
@@ -1693,7 +1731,7 @@ class MainOutputTests(unittest.TestCase):
             ),
             contextlib.redirect_stderr(stderr),
         ):
-            result = letsinfer.main(["setup"])
+            result = letsinfer.main(["node", "info"])
         self.assertEqual(result, 1)
         self.assertEqual(stderr.getvalue(), "FATAL: port must be between 1 and 65535\n")
 

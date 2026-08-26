@@ -291,7 +291,7 @@ exit "${FAKE_SETUP_STATUS:-0}"
             pathlib.Path(environment["FAKE_SETUP_ARGS_FILE"]).read_text(
                 encoding="utf-8"
             ),
-            "setup --json\n",
+            "core-setup --json\n",
         )
 
     def test_term_dumb_disables_progress_even_on_a_tty(self) -> None:
@@ -441,7 +441,7 @@ exit "${FAKE_SETUP_STATUS:-0}"
             pathlib.Path(environment["FAKE_SETUP_ARGS_FILE"]).read_text(
                 encoding="utf-8"
             ),
-            "setup --json\n",
+            "core-setup --json\n",
         )
 
 

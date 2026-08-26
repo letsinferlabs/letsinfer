@@ -307,9 +307,9 @@ struct AddSiteView: View {
             return "Add this fresh node to Home over its verified direct ConnectX link."
         }
         if isCustomConfiguration {
-            return "Enter the node address and the one-time code from `letsinfer pair`."
+            return "Enter the node address and the one-time code from `letsinfer auth controller add`."
         }
-        return "Enter the one-time code shown by `letsinfer pair` on this node."
+        return "Enter the one-time code shown by `letsinfer auth controller add` on this node."
     }
 
     private var selectedDiscovery: DiscoveredSite? {
@@ -376,7 +376,7 @@ struct AddSiteView: View {
                     LabeledContent("Verify") {
                         Text(verificationCode).font(.title3.monospacedDigit().weight(.semibold))
                     }
-                    Text("Confirm that this code matches the terminal running `letsinfer pair`.")
+                    Text("Confirm that this code matches the terminal running `letsinfer auth controller add`.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {

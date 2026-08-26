@@ -15,7 +15,7 @@ manifest. After verification and installation, core generates its private
 `runtime-execution.json` view automatically.
 
 The candidate `README.md` begins with the canonical Let's Infer link,
-installer command, and `letsinfer install <logical_model>` command. Prepend
+installer command, and `letsinfer model install <logical_model>` command. Prepend
 that block to an existing README without replacing its content; the runtimes
 repository's `tools/readme_onboarding.py` owns the exact template.
 
@@ -63,7 +63,7 @@ runtime pack:
 List every person or organization that materially authored the runtime. The
 numeric GitHub ID is authoritative across account renames. Authors leave
 `provenance` null; trusted qualification automation owns that field. The signed
-catalog versions this metadata with the runtime release, and `letsinfer list`
+catalog versions this metadata with the runtime release, and `letsinfer model list`
 shows the authors.
 
 ## Model artifacts
@@ -226,7 +226,8 @@ schema-4 benchmark records. The trusted bot aggregates accepted records into
 
 ## Deterministic runtime artifact
 
-`letsinfer pack CANDIDATE --output FILE` creates a deterministic artifact using
+The public `letsinfer-runtime-authoring` skill creates a deterministic artifact
+through the exact checked-out Core packing contract, using
 runtime artifact schema 5 and media type
 `application/vnd.letsinfer.runtime.v5+tar`. The generated
 `letsinfer-runtime.json` descriptor records every path, byte length, normalized

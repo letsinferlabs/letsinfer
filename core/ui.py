@@ -248,7 +248,7 @@ def home(
         f"{terminal.logo()}\n\n"
         f"{terminal.paint('Your inference node is ready', BOLD)}\n"
         f"{terminal.paint('Install a model to start serving on one local endpoint.', DIM)}\n\n"
-        f"{terminal.command('letsinfer install <model>', 'Install a model')}\n"
+        f"{terminal.command('letsinfer model install <model>', 'Install a model')}\n"
         f"{terminal.command('letsinfer status', 'View node health')}\n"
         f"{terminal.command('letsinfer --help', 'Explore commands')}\n\n"
     )
@@ -323,11 +323,20 @@ def node_status(
     stream: TextIO | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> None:
-    """Render a fresh node's control-plane health before a runtime is installed."""
+    """Render complete node and model health from one status snapshot."""
     target = sys.stdout if stream is None else stream
     terminal = Terminal(target, environ=environ)
     identity = _mapping(payload.get("identity"))
     services = _mapping(payload.get("services"))
+    models = payload.get("models")
+    model_rows = [item for item in models if isinstance(item, Mapping)] \
+        if isinstance(models, list) else []
+    nodes = payload.get("nodes")
+    node_rows = [item for item in nodes if isinstance(item, Mapping)] \
+        if isinstance(nodes, list) else []
+    links = payload.get("links")
+    link_rows = [item for item in links if isinstance(item, Mapping)] \
+        if isinstance(links, list) else []
     role = str(identity.get("role") or "node")
     node_ready = services.get("node_active") == "active"
     gateway_expected = role == "main"
@@ -378,6 +387,22 @@ def node_status(
         )
 
     row("Node", node_ready, "Active" if node_ready else "Unavailable", role)
+    if node_rows:
+        paused = sum(item.get("state") == "paused" for item in node_rows)
+        row(
+            "Topology",
+            all(item.get("state") in {"active", "paused"} for item in node_rows),
+            f"{len(node_rows)} node(s)",
+            f"{paused} paused" if paused else "all active",
+        )
+    if link_rows:
+        verified = sum(item.get("verified") is True for item in link_rows)
+        row(
+            "Links",
+            verified == len(link_rows),
+            f"{verified}/{len(link_rows)} verified",
+            "background evidence",
+        )
     if gateway_expected:
         row(
             "API",
@@ -385,7 +410,21 @@ def node_status(
             "Ready" if gateway_ready else "Unavailable",
             str(payload.get("endpoint") or "LAN HTTP · API key"),
         )
-    row("Runtime", True, "Not installed", "use `letsinfer install <model>`")
+    if model_rows:
+        for model in model_rows:
+            model_state = str(model.get("state") or "unknown")
+            replicas = model.get("replicas")
+            detail_text = str(model.get("model") or "unknown model")
+            if isinstance(replicas, int):
+                detail_text += f" · {replicas} replica(s)"
+            row(
+                "Model",
+                model_state == "running",
+                model_state.title(),
+                detail_text,
+            )
+    else:
+        row("Runtime", True, "Not installed", "use `letsinfer model install <model>`")
     target.flush()
 
 
