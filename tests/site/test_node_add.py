@@ -859,7 +859,11 @@ class NodeAddContractTests(unittest.TestCase):
         )
         warning = presenter.panel.call_args.args[0]
         self.assertIn("This main node will become a child of Home", warning[0])
-        self.assertEqual(warning[1], "OpenAI endpoint  http://home.local:8000/v1")
+        self.assertEqual(
+            warning[1],
+            "OpenAI endpoint  Clients must switch to http://home.local:8000/v1; "
+            "this node will no longer own it.",
+        )
         self.assertIn("controller pairings", warning[2])
         self.assertIn("must be placed again by Home", warning[3])
         self.assertEqual(

@@ -19847,7 +19847,10 @@ def _accept_node_add_request(
     )
     warning = (
         f"! This main node will become a child of {request['main_name']}.",
-        f"OpenAI endpoint  http://{inference_host}:8000/v1",
+        (
+            "OpenAI endpoint  Clients must switch to "
+            f"http://{inference_host}:8000/v1; this node will no longer own it."
+        ),
         "Access  Local controller pairings and inference API keys will be replaced.",
         (
             "Models  Artifacts and caches stay local; stopped models must be "
