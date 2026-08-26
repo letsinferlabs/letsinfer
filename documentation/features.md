@@ -74,6 +74,14 @@ Depending on what the Engine adapter and hardware expose, it shows:
 Engine-specific metrics enter through the versioned Engine protocol. Core and
 the UI consume the same normalized meanings, regardless of the engine.
 
+`letsinfer topology` provides the companion live graph for multi-node systems.
+It renders the main-and-child membership tree using each child's authenticated
+control-network transport, then animates directional host RX/TX measurements
+for separately verified direct links and shows model groups without exposing a
+manual link-probe control. Membership changes appear on the next frame,
+online/offline state follows signed fact freshness, interface changes publish
+each second, and direct-link evidence refreshes every two seconds.
+
 ## Protection that understands unified memory
 
 Watchdog is an independent, bounded-memory native service. It monitors the

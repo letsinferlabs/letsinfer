@@ -639,11 +639,33 @@ class UpdateNoticeTests(unittest.TestCase):
         self.assertIn("Update available", rendered)
         self.assertIn("Core 0.11.0-rc.30", rendered)
         self.assertIn("qwen3.8-27b 0.1.0-rc.11", rendered)
+        self.assertIn("┌", rendered)
+        self.assertIn("└", rendered)
+        self.assertTrue(rendered.endswith("\n\n"))
 
     def test_non_tty_notice_is_byte_silent(self):
         stream = io.StringIO()
         ui.update_notice((mock.sentinel.record,), stream=stream)
         self.assertEqual(stream.getvalue(), "")
+
+    def test_interactive_notice_accepts_one_pass_record_iterables(self):
+        stream = TTY()
+        records = (
+            record
+            for record in (
+                types.SimpleNamespace(
+                    kind="core",
+                    subject="core",
+                    available_version="0.11.0-rc.30",
+                ),
+            )
+        )
+        ui.update_notice(
+            records,
+            stream=stream,
+            environ={"TERM": "xterm", "NO_COLOR": "1"},
+        )
+        self.assertIn("Update available · Core 0.11.0-rc.30", stream.getvalue())
 
     def test_cleared_notice_corrects_stale_interactive_advice(self):
         stream = TTY()

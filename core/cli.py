@@ -15,6 +15,7 @@ import getpass
 import hashlib
 import hmac
 import http.server
+import ipaddress
 import io
 import json
 import os
@@ -153,16 +154,19 @@ from .site.state import (
     identity_path as site_identity_path,
     has_active_engine_groups_for_cleanup,
     member_certificate_path as site_member_certificate_path,
+    member_key_path as site_member_key_path,
     member_proof,
     prepare_member_identity,
     read_exposure_for_cleanup,
     read_identity as read_site_identity,
+    site_ca_certificate_path as site_ca_certificate_path,
     setup_site,
 )
 from .site.control import (
     DEFAULT_PORT as SITE_CONTROL_PORT,
     ControlError,
     FactsPublisher,
+    fetch_coordinator_node_inventory,
     fetch_member_job_status,
     SiteControlServer,
     SiteControlState,
@@ -170,6 +174,8 @@ from .site.control import (
     fetch_member_facts,
     join_site,
     request_member_link_probe,
+    request_self_detach,
+    request_self_member_state,
     submit_member_group_job,
 )
 from .site.discovery import Publisher as DiscoveryPublisher
@@ -183,6 +189,7 @@ from .site.inventory import (
     verify_direct_connectx_interface,
 )
 from .site.move import (
+    LocalDetachTransaction,
     LocalMoveTransaction,
     PreparedMove,
     apply_prepared_move,
@@ -220,8 +227,11 @@ from .site.node_add import (
     NodeAddError,
     PROTOCOL as NODE_ADD_PROTOCOL,
     clear_request as clear_node_add_request,
+    deny_request as deny_node_add_request,
     discover_nodes as discover_addable_nodes,
     pending_request as pending_node_add_request,
+    query_request_status as query_node_add_request_status,
+    request_status as node_add_request_status,
     send_request as send_node_add_request,
     store_request as store_node_add_request,
 )
@@ -232,6 +242,8 @@ IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 MANIFEST_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 REGISTRY_DIGEST_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 WATCHDOG_PROTOCOL_VERSION = 3
+TOPOLOGY_ONLINE_SECONDS = 5
+MAX_AUTOMATIC_LINK_CANDIDATES_PER_PAIR = 16
 WATCHDOG_CONTROLLER_STREAM_FLOOR = 16
 WATCHDOG_CONTROLLER_STREAM_LIMIT = 16
 MANAGED_LABEL = "io.letsinfer.managed"
@@ -456,6 +468,13 @@ def _command_activity(
 
 class LetsInferError(RuntimeError):
     """A user-actionable release or launch error."""
+
+
+class CommandDenied(RuntimeError):
+    """An expected peer or policy denial, not an execution failure."""
+
+
+_MANDATORY_AUDIT_SATISFIED = object()
 
 
 def normalize_platform(value: str) -> str:
@@ -10161,12 +10180,10 @@ def runtime_lifecycle(payload: Mapping[str, Any]) -> dict[str, Any]:
     return derive_runtime_lifecycle(payload)
 
 
-def _local_controller_telemetry(
+def _local_controller_telemetry_document(
     config: Mapping[str, Any] | None = None,
-    *,
-    preferred_member_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Read the node agent's live aggregate without consuming a Watchdog slot."""
+    """Read the node agent's live member document without a Watchdog slot."""
 
     controller_ca = expanded_path(
         str(config.get("watchdog_controller_ca_file"))
@@ -10207,39 +10224,7 @@ def _local_controller_telemetry(
         aggregate = telemetry.get("aggregate") if isinstance(telemetry, dict) else None
         if not isinstance(aggregate, dict):
             return None
-        result = dict(aggregate)
-        result["updated_unix_ms"] = telemetry.get("unix_ms")
-        result["fresh"] = False
-        members = telemetry.get("members")
-        if isinstance(members, list):
-            fresh_rows = [
-                row
-                for row in members
-                if isinstance(row, dict)
-                and row.get("stale") is False
-                and isinstance(row.get("sample"), dict)
-            ]
-            fresh = (
-                next(
-                    (
-                        row
-                        for row in fresh_rows
-                        if row["sample"].get("member_id") == preferred_member_id
-                    ),
-                    None,
-                )
-                if preferred_member_id is not None
-                else next(iter(fresh_rows), None)
-            )
-            if fresh is not None:
-                sample = fresh["sample"]
-                result["fresh"] = True
-                result["sample_member_id"] = sample.get("member_id")
-                result["sample_sequence"] = sample.get("sequence")
-                result["sample_unix_ms"] = sample.get("unix_ms")
-                result["system"] = sample.get("system")
-                result["workload"] = sample.get("workload")
-        return result
+        return dict(telemetry)
     except (
         OSError,
         UnicodeDecodeError,
@@ -10251,6 +10236,52 @@ def _local_controller_telemetry(
     finally:
         if connection is not None:
             connection.close()
+
+
+def _local_controller_telemetry(
+    config: Mapping[str, Any] | None = None,
+    *,
+    preferred_member_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Read the node agent's live aggregate without consuming a Watchdog slot."""
+
+    telemetry = _local_controller_telemetry_document(config)
+    aggregate = telemetry.get("aggregate") if isinstance(telemetry, dict) else None
+    if not isinstance(aggregate, dict):
+        return None
+    result = dict(aggregate)
+    result["updated_unix_ms"] = telemetry.get("unix_ms")
+    result["fresh"] = False
+    members = telemetry.get("members")
+    if isinstance(members, list):
+        fresh_rows = [
+            row
+            for row in members
+            if isinstance(row, dict)
+            and row.get("stale") is False
+            and isinstance(row.get("sample"), dict)
+        ]
+        fresh = (
+            next(
+                (
+                    row
+                    for row in fresh_rows
+                    if row["sample"].get("member_id") == preferred_member_id
+                ),
+                None,
+            )
+            if preferred_member_id is not None
+            else next(iter(fresh_rows), None)
+        )
+        if fresh is not None:
+            sample = fresh["sample"]
+            result["fresh"] = True
+            result["sample_member_id"] = sample.get("member_id")
+            result["sample_sequence"] = sample.get("sequence")
+            result["sample_unix_ms"] = sample.get("unix_ms")
+            result["system"] = sample.get("system")
+            result["workload"] = sample.get("workload")
+    return result
 
 
 def _local_status_node(identity: Any) -> dict[str, Any]:
@@ -13523,30 +13554,18 @@ def _benchmark_dashboard(
     active = state.get("state") in benchmark_jobs.ACTIVE_STATES
     color = ui.GREEN if active or status == "COMPLETED" else ui.RED
     mark = "●" if terminal.unicode else "*"
-    lines = [
-        terminal.logo("benchmark"),
-        "",
-        f"{terminal.paint(mark, ui.BOLD, color)} "
-        f"{terminal.paint(status, ui.BOLD, color)}  "
-        f"{terminal.paint(str(state.get('runtime') or 'unknown runtime'), ui.BOLD)}",
-    ]
-    update_labels = ui.update_labels(updates)
-    if update_labels:
-        update_text = " · ".join(update_labels)
-        wrapped_updates = terminal.wrap(
-            update_text,
-            max(1, terminal.width - 22),
-        )
-        lines.extend(
-            [
-                f"  {terminal.paint('↑ UPDATE AVAILABLE', ui.BOLD, ui.YELLOW)}  "
-                f"{terminal.paint(wrapped_updates[0], ui.DIM)}",
-                *(
-                    f"                      {terminal.paint(part, ui.DIM)}"
-                    for part in wrapped_updates[1:]
-                ),
-            ]
-        )
+    lines = [terminal.logo("benchmark")]
+    update_lines = ui.update_available_lines(updates, terminal)
+    if update_lines:
+        lines.extend(("", *update_lines))
+    lines.extend(
+        [
+            "",
+            f"{terminal.paint(mark, ui.BOLD, color)} "
+            f"{terminal.paint(status, ui.BOLD, color)}  "
+            f"{terminal.paint(str(state.get('runtime') or 'unknown runtime'), ui.BOLD)}",
+        ]
+    )
     message = progress.get("message")
     if not isinstance(message, str) or not message:
         message = "Waiting for benchmark worker"
@@ -14143,7 +14162,7 @@ def _interactive_github_identity() -> benchmark_verification.GitHubIdentity:
             ):
                 raise LetsInferError("GitHub CLI installation was cancelled")
             benchmark_verification.ensure_gh(interactive=True, install=True)
-        except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+        except command_ui.PromptUnavailable as error:
             raise LetsInferError("GitHub CLI installation was cancelled") from error
         except benchmark_verification.VerificationError as error:
             raise LetsInferError(str(error)) from error
@@ -14167,7 +14186,7 @@ def _interactive_github_identity() -> benchmark_verification.GitHubIdentity:
         identity = benchmark_verification.github_identity(
             interactive=True, authenticate=True
         )
-    except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+    except command_ui.PromptUnavailable as error:
         raise LetsInferError("GitHub authentication was cancelled") from error
     except benchmark_verification.VerificationError as error:
         raise LetsInferError(str(error)) from error
@@ -15841,7 +15860,7 @@ def setup_command(arguments: argparse.Namespace) -> int:
                 "user-systemd lingering is required before creating a persistent site"
             )
     try:
-        identity = setup_site(arguments.name, arguments.address)
+        identity = setup_site(arguments.name or socket.gethostname(), arguments.address)
     except SiteError as error:
         raise LetsInferError(str(error)) from error
     if identity.role == "child":
@@ -16060,7 +16079,7 @@ def site_move_command(arguments: argparse.Namespace) -> int:
                 "Destination membership code",
                 require_tty=True,
             )
-        except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+        except command_ui.PromptUnavailable as error:
             raise LetsInferError("node move code entry was cancelled") from error
     code = re.sub(r"[- ]", "", code)
     if re.fullmatch(r"[0-9]{8}", code) is None:
@@ -16102,6 +16121,7 @@ def site_move_command(arguments: argparse.Namespace) -> int:
             "success",
             "source_authorized_membership_replacement",
         )
+    arguments._mandatory_audit_satisfied = _MANDATORY_AUDIT_SATISFIED
     try:
         if not arguments.no_service:
             for unit in (
@@ -16215,20 +16235,150 @@ def _site_store() -> SiteStore:
         raise LetsInferError(str(error)) from error
 
 
+def _node_command_rows(identity: Any) -> list[dict[str, Any]]:
+    if identity.role == "main":
+        with _site_store() as store:
+            rows = [dict(row) for row in store.members()]
+    else:
+        try:
+            rows = fetch_coordinator_node_inventory(identity)
+        except ControlError as error:
+            raise LetsInferError(str(error)) from error
+    now = int(time.time())
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        facts = row.get("facts") if isinstance(row.get("facts"), Mapping) else None
+        observed = (
+            facts.get("observed_at_unix")
+            if isinstance(facts, Mapping)
+            else row.get("observed_at_unix")
+        )
+        online = (
+            row.get("state") in {"active", "draining"}
+            and isinstance(observed, int)
+            and 0 <= now - observed <= TOPOLOGY_ONLINE_SECONDS
+        )
+        state = _public_node_state(row.get("state")) if online else "offline"
+        result.append({**row, "state": state, "online": online})
+    return sorted(
+        result,
+        key=lambda row: (row.get("role") != "main", str(row.get("display_name"))),
+    )
+
+
+def _node_target_label(row: Mapping[str, Any]) -> str:
+    return (
+        f"{row.get('display_name') or str(row.get('member_id'))[:8]} · "
+        f"{row.get('role')} · {row.get('state')}"
+    )
+
+
+def _show_child_coordinator(
+    presenter: command_ui.CommandUI,
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    coordinator = next((row for row in rows if row.get("role") == "main"), None)
+    if coordinator is None:
+        return
+    presenter.stream.write(
+        presenter.terminal.paint("Coordinator", ui.BOLD) + "\n"
+    )
+    presenter.stream.write(
+        f"  {coordinator.get('display_name')} · {coordinator.get('address')} · "
+        + presenter.terminal.paint(str(coordinator.get("state")), ui.DIM)
+        + "\n\n"
+    )
+    presenter.stream.flush()
+
+
+def _resolve_node_target(
+    arguments: argparse.Namespace,
+    identity: Any,
+    *,
+    operation: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    rows = _node_command_rows(identity)
+    if operation == "remove":
+        candidates = [
+            row
+            for row in rows
+            if (
+                identity.role == "main" and row.get("role") == "child"
+            )
+            or (
+                identity.role == "child"
+                and row.get("member_id") == identity.member_id
+            )
+        ]
+    elif operation == "pause":
+        candidates = [
+            row
+            for row in rows
+            if row.get("state") == "active"
+            and (
+                identity.role == "main"
+                or row.get("member_id") == identity.member_id
+            )
+        ]
+    elif operation == "resume":
+        candidates = [
+            row
+            for row in rows
+            if row.get("state") == "paused"
+            and (
+                identity.role == "main"
+                or row.get("member_id") == identity.member_id
+            )
+        ]
+    else:
+        candidates = rows
+    requested = getattr(arguments, "node", None) or getattr(arguments, "member", None)
+    if isinstance(requested, str):
+        aliases = {
+            "self": identity.member_id,
+            "main": identity.coordinator_id,
+            "coordinator": identity.coordinator_id,
+        }
+        wanted = aliases.get(requested.casefold(), requested)
+        matches = [
+            row
+            for row in candidates
+            if wanted == row.get("member_id")
+            or str(wanted).casefold()
+            == str(row.get("display_name", "")).casefold()
+        ]
+        if len(matches) != 1:
+            raise LetsInferError(f"node target is unavailable: {requested}")
+        return matches[0], rows
+    if getattr(arguments, "json", False):
+        local = [row for row in candidates if row.get("member_id") == identity.member_id]
+        if len(local) == 1:
+            return local[0], rows
+        raise LetsInferError("node target is required for machine-readable output")
+    presenter = _human_presenter()
+    if presenter is None or not sys.stdin.isatty():
+        raise LetsInferError(f"node {operation} requires NODE in non-interactive use")
+    if identity.role == "child":
+        _show_child_coordinator(presenter, rows)
+    if len(candidates) == 1:
+        return candidates[0], rows
+    if not candidates:
+        raise LetsInferError(f"no nodes are available to {operation}")
+    labels = [_node_target_label(row) for row in candidates]
+    try:
+        selected = presenter.prompt.choose(
+            "Node",
+            labels,
+            require_tty=True,
+        )
+    except command_ui.PromptUnavailable as error:
+        raise LetsInferError(f"node {operation} was cancelled") from error
+    return candidates[labels.index(selected)], rows
+
+
 def member_list_command(arguments: argparse.Namespace) -> int:
     identity = read_site_identity()
-    if identity.role != "main":
-        rows = [{
-            "member_id": identity.member_id,
-            "display_name": socket.gethostname(),
-            "role": identity.role,
-            "address": identity.coordinator_address,
-            "state": "active",
-        }]
-    else:
-        with _site_store() as store:
-            rows = store.members()
-    rows = [_public_node_record(row) for row in rows]
+    rows = _node_command_rows(identity)
     if arguments.json:
         print(json.dumps(rows, sort_keys=True))
     else:
@@ -16300,7 +16450,7 @@ def member_join_command(arguments: argparse.Namespace) -> int:
                     "Membership code",
                     require_tty=True,
                 )
-            except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+            except command_ui.PromptUnavailable as error:
                 raise LetsInferError("membership code entry was cancelled") from error
         code = re.sub(r"[- ]", "", code)
         if re.fullmatch(r"[0-9]{8}", code) is None:
@@ -16549,9 +16699,23 @@ def _synchronize_member_facts() -> dict[str, list[str]]:
 
 
 def member_remove_command(arguments: argparse.Namespace) -> int:
+    identity = read_site_identity()
+    target, _rows = _resolve_node_target(arguments, identity, operation="remove")
+    if identity.role == "child":
+        _detach_child_for_node_add(arguments, identity)
+        return 0
+    presenter = _human_presenter()
+    if not getattr(arguments, "yes", False):
+        if presenter is None or not sys.stdin.isatty():
+            raise LetsInferError("node removal requires --yes in non-interactive use")
+        if not presenter.prompt.confirm(
+            f"Remove {target['display_name']} from this site?",
+            require_tty=True,
+        ):
+            raise CommandDenied("Node removal cancelled")
     with _site_store() as store:
         try:
-            result = store.remove_member(arguments.member)
+            result = store.remove_member(str(target["member_id"]))
         except SiteError as error:
             raise LetsInferError(str(error)) from error
     if arguments.json:
@@ -16562,19 +16726,37 @@ def member_remove_command(arguments: argparse.Namespace) -> int:
             presenter.result(
                 "Node removed",
                 semantic=command_ui.Semantic.SUCCESS,
-                detail=arguments.member,
+                detail=target["member_id"],
             )
         else:
-            print(f"REMOVED {arguments.member}")
+            print(f"REMOVED {target['member_id']}")
     return 0
 
 
 def member_drain_command(arguments: argparse.Namespace) -> int:
-    with _site_store() as store:
-        try:
-            result = store.set_member_draining(arguments.member, True)
-        except SiteError as error:
-            raise LetsInferError(str(error)) from error
+    identity = read_site_identity()
+    target, _rows = _resolve_node_target(arguments, identity, operation="pause")
+    presenter = _human_presenter()
+    if not getattr(arguments, "yes", False):
+        if presenter is None or not sys.stdin.isatty():
+            raise LetsInferError("node pause requires --yes in non-interactive use")
+        warning = (
+            "Pause the main node? New site requests will stop being admitted."
+            if target["member_id"] == identity.coordinator_id
+            else "Pause this node? New requests will stop being admitted."
+            if target["member_id"] == identity.member_id
+            else f"Pause {target['display_name']}? New requests will stop being admitted."
+        )
+        if not presenter.prompt.confirm(warning, require_tty=True):
+            raise CommandDenied("Node pause cancelled")
+    try:
+        if identity.role == "child":
+            result = request_self_member_state(identity, paused=True)
+        else:
+            with _site_store() as store:
+                result = store.set_member_draining(str(target["member_id"]), True)
+    except (ControlError, SiteError) as error:
+        raise LetsInferError(str(error)) from error
     result = {**result, "state": "paused"}
     if arguments.json:
         print(json.dumps(result, sort_keys=True))
@@ -16584,19 +16766,33 @@ def member_drain_command(arguments: argparse.Namespace) -> int:
             presenter.result(
                 "Node is paused",
                 semantic=command_ui.Semantic.WARNING,
-                detail=arguments.member,
+                detail=target["member_id"],
             )
         else:
-            print(f"PAUSED {arguments.member}")
+            print(f"PAUSED {target['member_id']}")
     return 0
 
 
 def member_resume_command(arguments: argparse.Namespace) -> int:
-    with _site_store() as store:
-        try:
-            result = store.set_member_draining(arguments.member, False)
-        except SiteError as error:
-            raise LetsInferError(str(error)) from error
+    identity = read_site_identity()
+    target, _rows = _resolve_node_target(arguments, identity, operation="resume")
+    presenter = _human_presenter()
+    if not getattr(arguments, "yes", False):
+        if presenter is None or not sys.stdin.isatty():
+            raise LetsInferError("node resume requires --yes in non-interactive use")
+        if not presenter.prompt.confirm(
+            f"Resume {target['display_name']} for new requests?",
+            require_tty=True,
+        ):
+            raise CommandDenied("Node resume cancelled")
+    try:
+        if identity.role == "child":
+            result = request_self_member_state(identity, paused=False)
+        else:
+            with _site_store() as store:
+                result = store.set_member_draining(str(target["member_id"]), False)
+    except (ControlError, SiteError) as error:
+        raise LetsInferError(str(error)) from error
     if arguments.json:
         print(json.dumps(result, sort_keys=True))
     else:
@@ -16605,10 +16801,10 @@ def member_resume_command(arguments: argparse.Namespace) -> int:
             presenter.result(
                 "Node is active",
                 semantic=command_ui.Semantic.SUCCESS,
-                detail=arguments.member,
+                detail=target["member_id"],
             )
         else:
-            print(f"ACTIVE {arguments.member}")
+            print(f"ACTIVE {target['member_id']}")
     return 0
 
 
@@ -17221,52 +17417,145 @@ class LocalEngineGroupExecutor:
         return result
 
 
+def _member_link_probe_candidates(
+    subject: Mapping[str, Any],
+    peer: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    """Derive bounded direct-link probes from authenticated live member facts."""
+
+    def interfaces(member: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        facts = member.get("facts")
+        network = facts.get("network") if isinstance(facts, Mapping) else None
+        rows = network.get("interfaces") if isinstance(network, Mapping) else None
+        return [row for row in rows or () if isinstance(row, Mapping)]
+
+    subject_interfaces = interfaces(subject)
+    peer_interfaces = interfaces(peer)
+    candidates: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(interface: str, kind: str, peer_endpoint: str) -> None:
+        key = (interface, kind, peer_endpoint)
+        if (
+            key not in seen
+            and interface
+            and len(candidates) < MAX_AUTOMATIC_LINK_CANDIDATES_PER_PAIR
+        ):
+            seen.add(key)
+            candidates.append(
+                {
+                    "interface": interface,
+                    "kind": kind,
+                    "peer_endpoint": peer_endpoint,
+                }
+            )
+
+    # A live RDMA interface is sufficient reason to attempt a certificate-bound
+    # direct probe. The subject still proves carrier, mlx5, and a gateway-free
+    # route, so signed inventory is discovery input rather than link evidence.
+    for subject_interface in subject_interfaces:
+        subject_name = subject_interface.get("name")
+        if subject_interface.get("rdma") is not True or not isinstance(
+            subject_name, str
+        ):
+            continue
+        for peer_interface in peer_interfaces:
+            if peer_interface.get("rdma") is not True:
+                continue
+            for address in peer_interface.get("addresses", ()):
+                if not isinstance(address, str):
+                    continue
+                raw_address = address.split("%", 1)[0]
+                try:
+                    parsed = ipaddress.ip_address(raw_address)
+                except ValueError:
+                    continue
+                if parsed.is_unspecified or parsed.is_loopback or parsed.is_multicast:
+                    continue
+                endpoint_address = str(parsed)
+                if parsed.version == 6 and parsed.is_link_local:
+                    endpoint_address = f"{endpoint_address}%{subject_name}"
+                add(
+                    subject_name,
+                    "connectx",
+                    _site_control_endpoint(endpoint_address),
+                )
+
+    # Preserve renewal for already configured non-ConnectX proofs. ConnectX
+    # candidates intentionally precede this fallback so a newly connected
+    # high-speed path replaces ordinary direct-link evidence for the same peer.
+    facts = subject.get("facts")
+    network = facts.get("network") if isinstance(facts, Mapping) else None
+    links = network.get("links") if isinstance(network, Mapping) else None
+    if not isinstance(links, list):
+        raise LetsInferError(
+            f"child {subject.get('member_id', 'unknown')} link facts are invalid"
+        )
+    for link in links:
+        if not isinstance(link, Mapping):
+            raise LetsInferError(
+                f"child {subject.get('member_id', 'unknown')} link facts are invalid"
+            )
+        if link.get("peer_member_id") != peer.get("member_id"):
+            continue
+        add(
+            str(link.get("interface", "")),
+            str(link.get("kind", "")),
+            _site_control_endpoint(str(peer["address"])),
+        )
+    return candidates
+
+
 def _refresh_site_links_once() -> dict[str, list[str]]:
-    """Renew every configured directional link proof without changing topology."""
+    """Discover and renew directional link proofs from current signed facts."""
     identity = read_site_identity()
     if identity.role != "main":
         raise LetsInferError("node link renewal runs on the main node")
+    now = int(time.time())
     with _site_store() as store:
         members = {
             row["member_id"]: row
             for row in store.members()
-            if row["state"] == "active"
+            if row["state"] in {"active", "draining"}
+            and isinstance(row.get("facts"), Mapping)
+            and isinstance(row["facts"].get("observed_at_unix"), int)
+            and 0
+            <= now - int(row["facts"]["observed_at_unix"])
+            <= TOPOLOGY_ONLINE_SECONDS
         }
-    tasks: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+    tasks: list[
+        tuple[dict[str, Any], dict[str, Any], list[dict[str, str]]]
+    ] = []
     for subject_id in sorted(members):
         subject = members[subject_id]
-        facts = subject.get("facts")
-        if not isinstance(facts, dict):
-            continue
-        links = facts.get("network", {}).get("links", [])
-        if not isinstance(links, list):
-            raise LetsInferError(f"child {subject_id} link facts are invalid")
-        for link in links:
-            if not isinstance(link, dict):
-                raise LetsInferError(f"child {subject_id} link facts are invalid")
-            peer = members.get(link.get("peer_member_id"))
-            if peer is not None:
-                tasks.append((subject, peer, link))
+        for peer_id in sorted(members):
+            if subject_id == peer_id:
+                continue
+            peer = members[peer_id]
+            candidates = _member_link_probe_candidates(subject, peer)
+            if candidates:
+                tasks.append((subject, peer, candidates))
     refreshed: list[str] = []
     failed: list[str] = []
-    for subject, peer, link in tasks:
+    for subject, peer, candidates in tasks:
         label = f"{subject['member_id']}->{peer['member_id']}"
-        if link.get("peer_certificate_sha256") != peer["certificate_sha256"]:
-            failed.append(label)
-            continue
-        try:
-            request_member_link_probe(
-                _site_control_endpoint(subject["address"]),
-                expected_member_id=subject["member_id"],
-                expected_certificate_sha256=subject["certificate_sha256"],
-                peer_endpoint=_site_control_endpoint(peer["address"]),
-                peer_member_id=peer["member_id"],
-                peer_certificate_sha256=peer["certificate_sha256"],
-                interface=str(link.get("interface", "")),
-                kind=str(link.get("kind", "")),
-            )
+        for candidate in candidates:
+            try:
+                request_member_link_probe(
+                    _site_control_endpoint(subject["address"]),
+                    expected_member_id=subject["member_id"],
+                    expected_certificate_sha256=subject["certificate_sha256"],
+                    peer_endpoint=candidate["peer_endpoint"],
+                    peer_member_id=peer["member_id"],
+                    peer_certificate_sha256=peer["certificate_sha256"],
+                    interface=candidate["interface"],
+                    kind=candidate["kind"],
+                )
+            except ControlError:
+                continue
             refreshed.append(label)
-        except ControlError:
+            break
+        else:
             failed.append(label)
     return {"refreshed": refreshed, "failed": failed}
 
@@ -17446,6 +17735,7 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
             adoption_completed if identity.role == "main" else None
         ),
         node_add_provider=receive_node_add,
+        node_add_status_provider=node_add_request_status,
     )
 
     def controller_site_document() -> dict[str, Any]:
@@ -17752,7 +18042,7 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
     def monitor_site_links() -> None:
         if identity.role != "main":
             return
-        while not stopped.wait(10.0):
+        while not stopped.wait(2.0):
             try:
                 # Per-link network failures are returned, not raised. Their
                 # proofs expire naturally and distributed admission fails
@@ -17855,18 +18145,233 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _topology_status_snapshot() -> dict[str, Any]:
+    """Build one authenticated topology and host-traffic presentation document."""
+
+    identity = read_site_identity()
+    if identity.role != "main":
+        raise LetsInferError(
+            "site topology is main-node-owned; "
+            f"main={identity.coordinator_id}@{identity.coordinator_address}"
+        )
+    now = int(time.time())
+    with _site_store() as store:
+        members = [
+            dict(row)
+            for row in store.members()
+            if row["state"] in {"pending", "active", "draining", "offline"}
+        ]
+        allocations = store.device_allocations(active_only=True)
+        placements = {row["placement_id"]: dict(row) for row in store.placements()}
+        groups = [
+            dict(row)
+            for row in store.engine_groups()
+            if row["state"] != "removed" and row["desired_state"] != "removed"
+        ]
+    online_members = [
+        row
+        for row in members
+        if row["state"] in {"active", "draining"}
+        and isinstance(row.get("facts"), Mapping)
+        and isinstance(row["facts"].get("observed_at_unix"), int)
+        and 0 <= now - int(row["facts"]["observed_at_unix"]) <= TOPOLOGY_ONLINE_SECONDS
+    ]
+    graph: TopologyGraph | None = None
+    topology_error: str | None = None
+    try:
+        if online_members:
+            graph = TopologyGraph(
+                [row["facts"] for row in online_members],
+                member_certificates={
+                    row["member_id"]: row["certificate_sha256"]
+                    for row in online_members
+                },
+                allocated_devices={
+                    member_id: [
+                        row["device_uuid"]
+                        for row in allocations
+                        if row["member_id"] == member_id
+                    ]
+                    for member_id in (
+                        row["member_id"] for row in online_members
+                    )
+                },
+            )
+    except TopologyError as error:
+        topology_error = str(error)
+
+    models_by_member: dict[str, list[dict[str, Any]]] = {
+        str(row["member_id"]): [] for row in members
+    }
+    for group in groups:
+        placement = placements.get(group["placement_id"])
+        resources = group.get("plan", {}).get("resources")
+        if placement is None or not isinstance(resources, list):
+            raise LetsInferError("engine-group topology record is incomplete")
+        for resource in resources:
+            if not isinstance(resource, Mapping):
+                raise LetsInferError("engine-group topology resource is invalid")
+            member_id = str(resource.get("node_id", ""))
+            if member_id not in models_by_member:
+                continue
+            models_by_member[member_id].append(
+                {
+                    "model": placement["model"],
+                    "state": group["state"],
+                    "group_id": group["group_id"],
+                    "runtime": placement["runtime"],
+                    "target": placement["target"],
+                }
+            )
+
+    telemetry = _local_controller_telemetry_document()
+    traffic_by_member: dict[str, dict[str, Any]] = {}
+    telemetry_members = telemetry.get("members") if isinstance(telemetry, dict) else None
+    if isinstance(telemetry_members, list):
+        for row in telemetry_members:
+            if not isinstance(row, Mapping) or not isinstance(row.get("sample"), Mapping):
+                continue
+            sample = row["sample"]
+            system = sample.get("system")
+            member_id = sample.get("member_id")
+            if not isinstance(member_id, str) or not isinstance(system, Mapping):
+                continue
+            traffic_by_member[member_id] = {
+                "rx_kib_s": system.get("network_rx_kib_s"),
+                "tx_kib_s": system.get("network_tx_kib_s"),
+                "fresh": row.get("stale") is False,
+                "sample_unix_ms": sample.get("unix_ms"),
+            }
+
+    nodes: list[dict[str, Any]] = []
+    online_ids = {
+        str(row["member_id"])
+        for row in online_members
+        if graph is not None and str(row["member_id"]) in graph.members
+    }
+    for member in sorted(members, key=lambda row: str(row["member_id"])):
+        member_id = str(member["member_id"])
+        facts = member.get("facts") if isinstance(member.get("facts"), Mapping) else {}
+        inventory = facts.get("inventory")
+        accelerator = (
+            facts.get("accelerator")
+            if isinstance(facts.get("accelerator"), Mapping)
+            else {}
+        )
+        accelerator_name = (
+            inventory.get("gpu_name")
+            if isinstance(inventory, Mapping) and inventory.get("gpu_name")
+            else " ".join(
+                str(accelerator.get(key) or "")
+                for key in ("vendor", "architecture")
+            ).strip()
+            or "Accelerator unavailable"
+        )
+        default_interface = (
+            str(inventory.get("default_network_interface") or "")
+            if isinstance(inventory, Mapping)
+            else ""
+        )
+        lowered_interface = default_interface.casefold()
+        connection = (
+            "Wireless"
+            if lowered_interface.startswith(("wl", "wlan", "wifi"))
+            else "Tailscale"
+            if lowered_interface.startswith("tailscale")
+            else "Ethernet"
+            if lowered_interface.startswith(("en", "eth"))
+            else default_interface or "Network"
+        )
+        nodes.append(
+            {
+                "member_id": member_id,
+                "name": member["display_name"],
+                "role": member["role"],
+                "state": (
+                    _public_node_state(member["state"])
+                    if member_id in online_ids
+                    else "offline"
+                ),
+                "online": member_id in online_ids,
+                "address": member["address"],
+                "health": (
+                    facts.get("health", {}).get("state", "offline")
+                    if member_id in online_ids
+                    else "offline"
+                ),
+                "platform": facts.get("platform"),
+                "accelerator": accelerator_name,
+                "connection": connection,
+                "accelerator_count": accelerator.get("count"),
+                "memory_total_gib": (
+                    facts.get("memory", {}).get("total_gib")
+                    if isinstance(facts.get("memory"), Mapping)
+                    else None
+                ),
+                "models": sorted(
+                    models_by_member[member_id],
+                    key=lambda row: (str(row["model"]), str(row["group_id"])),
+                ),
+                "traffic": traffic_by_member.get(
+                    member_id,
+                    {
+                        "rx_kib_s": None,
+                        "tx_kib_s": None,
+                        "fresh": False,
+                        "sample_unix_ms": None,
+                    },
+                ),
+            }
+        )
+    links = (
+        [
+            {
+                **link,
+                "age_seconds": max(0, now - int(link["observed_at_unix"])),
+            }
+            for _key, link in sorted(graph.links.items())
+        ]
+        if graph is not None
+        else []
+    )
+    return {
+        "schema_version": 1,
+        "site_id": identity.site_id,
+        "topology_sha256": graph.sha256() if graph is not None else None,
+        "topology_error": topology_error,
+        "observed_at_unix": now,
+        "nodes": nodes,
+        "links": links,
+    }
+
+
 def topology_command(arguments: argparse.Namespace) -> int:
-    _identity, graph = _fresh_site_topology()
-    document = graph.document()
-    document["topology_sha256"] = graph.sha256()
+    from . import topology_ui
+
+    synchronized: dict[str, list[str]] = {"refreshed": [], "failed": []}
     if arguments.json:
-        print(json.dumps(document, sort_keys=True))
-    else:
-        presenter = _human_presenter()
-        if presenter is not None:
-            presenter.object(document, title="Verified topology")
-        else:
-            print(json.dumps(document, sort_keys=True, indent=2))
+        value = _topology_status_snapshot()
+        value["refresh_failures"] = synchronized["failed"]
+        print(json.dumps(value, sort_keys=True))
+        return 0
+    if ui.Terminal(sys.stdout).interactive:
+        def snapshot() -> dict[str, Any]:
+            value = _topology_status_snapshot()
+            value["refresh_failures"] = synchronized["failed"]
+            value["updates"] = [
+                {
+                    "kind": record.kind,
+                    "subject": record.label,
+                    "version": record.available_version,
+                }
+                for record in _update_manager().cached().available
+            ]
+            return value
+
+        return topology_ui.live_topology(snapshot)
+    value = _topology_status_snapshot()
+    value["refresh_failures"] = synchronized["failed"]
+    print(json.dumps(value, sort_keys=True, indent=2))
     return 0
 
 
@@ -18844,23 +19349,50 @@ def _audit_command_result(
 
 
 def node_info_command(arguments: argparse.Namespace) -> int:
-    """Show one complete local-node identity and hardware document."""
+    """Show one selected node identity and hardware document."""
     try:
         identity = read_site_identity()
-        node = identity_json(identity)
-        node["state"] = "active"
-        if identity.role == "main":
-            with SiteStore(identity=identity) as store:
-                node["state"] = next(
-                    (
-                        row["state"]
-                        for row in store.members()
-                        if row["member_id"] == identity.member_id
-                    ),
-                    "active",
-                )
-        node["state"] = _public_node_state(node["state"])
-        fingerprint = host_device_fingerprint()
+        target, _rows = _resolve_node_target(
+            arguments,
+            identity,
+            operation="inspect",
+        )
+        local = target.get("member_id") == identity.member_id
+        if local:
+            node = identity_json(identity)
+            node["state"] = target["state"]
+            fingerprint = host_device_fingerprint()
+            try:
+                links = LinkStore(identity).facts()
+            except LinkError:
+                links = []
+        else:
+            facts = (
+                target.get("facts")
+                if isinstance(target.get("facts"), Mapping)
+                else target
+            )
+            fingerprint = {
+                "platform": facts.get("platform"),
+                "accelerator": facts.get("accelerator") or {},
+                "memory": facts.get("memory") or {},
+            }
+            node = {
+                "machine_id": target["member_id"],
+                "display_name": target["display_name"],
+                "role": target["role"],
+                "main_id": identity.coordinator_id,
+                "main_address": identity.coordinator_address,
+                "state": target["state"],
+                "address": target["address"],
+            }
+            network = facts.get("network") if isinstance(facts, Mapping) else None
+            links = (
+                list(network.get("links", []))
+                if isinstance(network, Mapping)
+                and isinstance(network.get("links"), list)
+                else []
+            )
         location = resolved_catalog_location(arguments.catalog)
         targets = (
             compatible_catalog_targets(
@@ -18868,12 +19400,9 @@ def node_info_command(arguments: argparse.Namespace) -> int:
                 fingerprint,
             )
             if location is not None
+            and fingerprint.get("platform") is not None
             else []
         )
-        try:
-            links = LinkStore(identity).facts()
-        except LinkError:
-            links = []
     except (CatalogError, RuntimePackError, SiteError) as error:
         raise LetsInferError(str(error)) from error
     payload = {
@@ -18888,7 +19417,7 @@ def node_info_command(arguments: argparse.Namespace) -> int:
     else:
         presenter = _human_presenter()
         if presenter is not None:
-            presenter.object(payload, title="Node information")
+            presenter.object(payload, borderless=True)
         else:
             print(json.dumps(payload, sort_keys=True, indent=2))
     return 0
@@ -18896,15 +19425,159 @@ def node_info_command(arguments: argparse.Namespace) -> int:
 
 def node_add_command(arguments: argparse.Namespace) -> int:
     """Run the unified discovery, request, and approval workflow."""
+    identity = read_site_identity()
+    if identity.role == "child":
+        _detach_child_for_node_add(arguments, identity)
     return _node_add_workflow(arguments)
+
+
+def _detach_child_for_node_add(
+    arguments: argparse.Namespace,
+    identity: Any,
+) -> None:
+    presenter = _human_presenter()
+    assume_yes = bool(getattr(arguments, "yes", False))
+    if not assume_yes and (presenter is None or not sys.stdin.isatty()):
+        raise LetsInferError("detaching a child requires an interactive terminal")
+    main_name = str(identity.coordinator_address).removesuffix(".localdomain")
+    confirmed = assume_yes
+    if not confirmed:
+        assert presenter is not None
+        try:
+            confirmed = presenter.prompt.confirm(
+                f"Detach this node from {main_name} and make it standalone?",
+                require_tty=True,
+            )
+        except command_ui.PromptUnavailable as error:
+            raise LetsInferError("node detach confirmation was cancelled") from error
+    if not confirmed:
+        raise CommandDenied("Node detach cancelled")
+    if platform.system().lower() != "linux":
+        raise LetsInferError("persistent node detach requires Linux user systemd")
+    if not user_lingering_enabled():
+        raise LetsInferError("user-systemd lingering is required before node detach")
+
+    units = (
+        SERVICE_NAME,
+        NODE_SERVICE_NAME,
+        ENGINE_SERVICE_NAME,
+        GATEWAY_SERVICE_NAME,
+        RECOVERY_TIMER_NAME,
+    )
+    unit_root = pathlib.Path.home() / ".config/systemd/user"
+    prior_units = {unit: _unit_enabled_active(unit) for unit in units}
+    prior_files = {
+        unit: _snapshot_user_file(unit_root / unit) for unit in units
+    }
+    endpoint_address = str(identity.coordinator_address)
+    endpoint_host = (
+        f"[{endpoint_address}]" if ":" in endpoint_address else endpoint_address
+    )
+    activity = _command_activity(arguments, "Detaching from the current main")
+    try:
+        for unit in (
+            RECOVERY_TIMER_NAME,
+            GATEWAY_SERVICE_NAME,
+            ENGINE_SERVICE_NAME,
+            NODE_SERVICE_NAME,
+            SERVICE_NAME,
+        ):
+            if prior_units[unit][1] == "active":
+                run_passthrough(["systemctl", "--user", "stop", unit])
+        with activity, ui.protect_stdout(activity):
+            with LocalDetachTransaction(identity) as transaction:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    setup_command(
+                        argparse.Namespace(
+                            name=socket.gethostname(),
+                            address=socket.getfqdn() or socket.gethostname(),
+                            no_service=True,
+                            json=True,
+                        )
+                    )
+                replacement = read_site_identity()
+                install_core_plane_services(replacement, include_gateway=True)
+                wait_for_core_plane_ready(include_gateway=True)
+                transaction.validate()
+                request_self_detach(
+                    f"https://{endpoint_host}:{SITE_CONTROL_PORT}",
+                    source=identity,
+                    ca_file=(
+                        transaction.config_backup
+                        / site_ca_certificate_path().relative_to(site_config_root())
+                    ),
+                    certificate_file=(
+                        transaction.config_backup
+                        / site_member_certificate_path().relative_to(
+                            site_config_root()
+                        )
+                    ),
+                    key_file=(
+                        transaction.secrets_backup
+                        / site_member_key_path().relative_to(secrets_root())
+                    ),
+                )
+                replacement = transaction.commit()
+    except BaseException as failure:
+        rollback_errors: list[str] = []
+        try:
+            current = read_site_identity()
+        except SiteError:
+            current = None
+        if current is not None and current.site_id == identity.site_id:
+            for unit in units:
+                run(["systemctl", "--user", "stop", unit], check=False)
+            try:
+                for unit, snapshot in prior_files.items():
+                    _restore_user_file(unit_root / unit, snapshot)
+                run(["systemctl", "--user", "daemon-reload"])
+                for unit, (enabled, active) in prior_units.items():
+                    _restore_unit_enablement(unit, enabled)
+                    if active == "active":
+                        run_passthrough(["systemctl", "--user", "start", unit])
+            except BaseException as rollback_error:
+                rollback_errors.append(str(rollback_error))
+        if rollback_errors:
+            raise LetsInferError(
+                "node detach failed and service rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from failure
+        raise
+    if presenter is not None:
+        presenter.result(
+            f"Detached from {main_name}",
+            semantic=command_ui.Semantic.SUCCESS,
+            detail="This node is now standalone",
+        )
+    else:
+        print(f"DETACHED main={main_name} state=standalone")
 
 
 def _node_add_snapshot(
     identity: Any,
     discovered: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
+    children = _node_add_children()
+    pending_children = [row for row in children if row["state"] == "pending"]
+    request = pending_node_add_request()
+    existing_member_ids = {str(row["member_id"]) for row in children}
+    return {
+        "schema_version": 1,
+        "local_node_id": identity.site_id,
+        "incoming_request": request,
+        "pending_children": pending_children,
+        "discovered_nodes": [
+            dict(row)
+            for row in discovered
+            if row.get("node_id") != identity.site_id
+            and str(row.get("machine_id")) not in existing_member_ids
+        ],
+    }
+
+
+def _node_add_children() -> list[dict[str, Any]]:
     with _site_store() as store:
-        pending_children = [
+        return [
             {
                 "member_id": row["member_id"],
                 "display_name": row["display_name"],
@@ -18913,37 +19586,284 @@ def _node_add_snapshot(
                 "approval_expires_at_unix": row.get("approval_expires_at_unix"),
             }
             for row in store.members()
-            if row["state"] == "pending"
+            if row["role"] == "child" and row["state"] in {"pending", "active"}
         ]
-    request = pending_node_add_request()
-    return {
-        "schema_version": 1,
-        "local_node_id": identity.site_id,
-        "incoming_request": request,
-        "pending_children": pending_children,
-        "discovered_nodes": [
-            dict(row) for row in discovered if row.get("node_id") != identity.site_id
-        ],
-    }
+
+
+def _pending_node_add_children() -> list[dict[str, Any]]:
+    return [row for row in _node_add_children() if row["state"] == "pending"]
+
+
+def _node_add_action_keys(snapshot: Mapping[str, Any]) -> list[tuple[str, str]]:
+    keys: list[tuple[str, str]] = []
+    request = snapshot.get("incoming_request")
+    if isinstance(request, Mapping):
+        request_id = str(request["request_id"])
+        keys.extend((("accept", request_id), ("deny", request_id)))
+    keys.extend(
+        ("node", str(row["node_id"]))
+        for row in snapshot.get("discovered_nodes", [])
+    )
+    return keys
+
+
+def _node_add_surface(
+    presenter: command_ui.CommandUI,
+    snapshot: Mapping[str, Any],
+    selected: tuple[str, str] | None,
+) -> list[str]:
+    terminal = presenter.terminal
+    lines: list[str] = []
+    request = snapshot.get("incoming_request")
+    if isinstance(request, Mapping):
+        lines.append(
+            terminal.paint("!", ui.BOLD, ui.YELLOW)
+            + " "
+            + terminal.paint(
+                f"Adoption request from {request['main_name']}", ui.BOLD
+            )
+        )
+
+        def button(label: str, key: tuple[str, str]) -> str:
+            value = f"[{label}]"
+            if selected == key:
+                return terminal.paint(
+                    value, ui.BOLD, ui.DARK, ui.LIGHT_BACKGROUND
+                )
+            return terminal.paint(value, ui.BOLD)
+
+        request_id = str(request["request_id"])
+        lines.append(
+            button("Accept", ("accept", request_id))
+            + " "
+            + button("Deny", ("deny", request_id))
+        )
+        lines.append("")
+    lines.append(terminal.paint("Discovered Nodes", ui.BOLD))
+    nodes = snapshot.get("discovered_nodes", [])
+    if isinstance(nodes, list) and nodes:
+        for index, row in enumerate(nodes, 1):
+            plain = f"  {str(index).rjust(2)}  {row['name']} · {row['address']}"
+            if selected == ("node", str(row["node_id"])):
+                lines.append(
+                    terminal.paint(
+                        plain + " ", ui.BOLD, ui.DARK, ui.LIGHT_BACKGROUND
+                    )
+                )
+            else:
+                ordinal = terminal.paint(str(index).rjust(2), ui.DIM)
+                lines.append(f"  {ordinal}  {row['name']} · {row['address']}")
+    else:
+        lines.append(terminal.paint("  Searching for nodes…", ui.DIM))
+    lines.append(terminal.paint("'Enter' to select", ui.DIM))
+    return lines
+
+
+def _replace_node_add_surface(
+    stream: Any,
+    previous: Sequence[str],
+    current: Sequence[str],
+) -> None:
+    if previous:
+        stream.write(f"\033[{len(previous)}F")
+        for _line in previous:
+            stream.write(ui.CLEAR_LINE + "\n")
+        stream.write(f"\033[{len(previous)}F")
+    stream.write("\n".join(current) + "\n")
+    stream.flush()
+
+
+class _NodeAddDiscoveryWorker:
+    def __init__(self, arguments: argparse.Namespace) -> None:
+        self.arguments = arguments
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.rows: list[dict[str, Any]] = []
+        self.error: str | None = None
+        self.thread = threading.Thread(
+            target=self._run,
+            name="letsinfer-node-discovery",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def _run(self) -> None:
+        while not self.stop_event.is_set():
+            started = time.monotonic()
+            try:
+                rows = discover_addable_nodes(
+                    timeout_seconds=1,
+                    address=self.arguments.address,
+                    certificate_sha256=getattr(
+                        self.arguments, "certificate_sha256", None
+                    ),
+                )
+                error = None
+            except (NodeAddError, SiteError) as failure:
+                rows = None
+                error = str(failure)
+            with self.lock:
+                if rows is not None:
+                    self.rows = [dict(row) for row in rows]
+                self.error = error
+            elapsed = time.monotonic() - started
+            self.stop_event.wait(max(0.05, 1.0 - elapsed))
+
+    def snapshot(self) -> tuple[list[dict[str, Any]], str | None]:
+        with self.lock:
+            return ([dict(row) for row in self.rows], self.error)
+
+    def close(self) -> None:
+        self.stop_event.set()
+        self.thread.join(timeout=2.0)
+
+
+def _live_node_add_choice(
+    arguments: argparse.Namespace,
+    identity: Any,
+) -> tuple[str, Any]:
+    presenter = _human_presenter()
+    if presenter is None or not sys.stdin.isatty():
+        raise LetsInferError("live node discovery requires an interactive terminal")
+    snapshot = _node_add_snapshot(identity, [])
+    selected: tuple[str, str] | None = None
+    observed_request_id: str | None = None
+    surface: list[str] = []
+    next_state_refresh = 0.0
+    discovery = _NodeAddDiscoveryWorker(arguments)
+    discovery.start()
+    try:
+        with presenter.prompt.navigation_mode():
+            while True:
+                now = time.monotonic()
+                if now >= next_state_refresh:
+                    discovered, discovery_error = discovery.snapshot()
+                    if discovery_error is not None and not discovered:
+                        discovered = snapshot.get("discovered_nodes", [])
+                    try:
+                        snapshot = _node_add_snapshot(identity, discovered)
+                    except (NodeAddError, SiteError) as error:
+                        raise LetsInferError(str(error)) from error
+                    next_state_refresh = now + 0.2
+                request = snapshot.get("incoming_request")
+                request_id = (
+                    str(request["request_id"])
+                    if isinstance(request, Mapping)
+                    else None
+                )
+                keys = _node_add_action_keys(snapshot)
+                pending = snapshot.get("pending_children")
+                if isinstance(pending, list) and pending:
+                    return ("pending", pending)
+                if request_id is not None and request_id != observed_request_id:
+                    selected = ("accept", request_id)
+                elif selected not in keys:
+                    selected = keys[0] if keys else None
+                observed_request_id = request_id
+                updated = _node_add_surface(presenter, snapshot, selected)
+                if updated != surface:
+                    _replace_node_add_surface(presenter.stream, surface, updated)
+                    surface = updated
+                key = presenter.prompt.poll_navigation_key(0.05)
+                if key is None or not keys:
+                    continue
+                if key == "up":
+                    selected = keys[(keys.index(selected) - 1) % len(keys)]
+                elif key == "down":
+                    selected = keys[(keys.index(selected) + 1) % len(keys)]
+                elif key in {"left", "right"} and request_id is not None:
+                    if selected == ("accept", request_id):
+                        selected = ("deny", request_id)
+                    elif selected == ("deny", request_id):
+                        selected = ("accept", request_id)
+                elif key == "home":
+                    selected = keys[0]
+                elif key == "end":
+                    selected = keys[-1]
+                elif key.isdecimal():
+                    node_keys = [item for item in keys if item[0] == "node"]
+                    if 1 <= int(key) <= min(9, len(node_keys)):
+                        selected = node_keys[int(key) - 1]
+                elif key == "enter" and selected is not None:
+                    if selected[0] == "deny":
+                        try:
+                            deny_node_add_request(selected[1])
+                            snapshot = _node_add_snapshot(
+                                identity, snapshot.get("discovered_nodes", [])
+                            )
+                        except (NodeAddError, SiteError) as error:
+                            raise LetsInferError(str(error)) from error
+                        next_state_refresh = 0.0
+                        continue
+                    if selected[0] == "accept":
+                        return ("accept", snapshot["incoming_request"])
+                    candidate = next(
+                        row
+                        for row in snapshot["discovered_nodes"]
+                        if str(row["node_id"]) == selected[1]
+                    )
+                    return ("node", candidate)
+    finally:
+        discovery.close()
 
 
 def _accept_node_add_request(
     arguments: argparse.Namespace,
     identity: Any,
     request: Mapping[str, Any],
+    *,
+    confirmed: bool = False,
 ) -> int:
     presenter = _human_presenter()
     if presenter is None:
         raise LetsInferError("accepting a node request requires an interactive terminal")
-    try:
-        accepted = presenter.prompt.confirm(
-            f"Move this node into {request['main_name']}?",
-            require_tty=True,
+    with _site_store() as store:
+        plan = plan_local_move(store)
+    placement_blocker = "all source-site placements must be stopped before the move"
+    other_blockers = tuple(
+        reason for reason in plan.blocking_reasons if reason != placement_blocker
+    )
+    if other_blockers:
+        raise LetsInferError("node move is blocked: " + "; ".join(other_blockers))
+    active_placements = tuple(plan.active_placements)
+    if active_placements:
+        models = sorted({str(row["model"]) for row in active_placements})
+        if len(models) == 1:
+            stop_description = f"model {models[0]}"
+        else:
+            stop_description = f"{len(models)} models ({', '.join(models)})"
+        question = (
+            f"Stop {stop_description} and move this node into "
+            f"{request['main_name']}?"
         )
-    except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
-        raise LetsInferError("node-add approval was cancelled") from error
-    if not accepted:
-        raise LetsInferError("node-add request was not approved")
+    else:
+        question = f"Move this node into {request['main_name']}?"
+    if active_placements or not confirmed:
+        try:
+            accepted = presenter.prompt.confirm(
+                question,
+                require_tty=True,
+            )
+        except command_ui.PromptUnavailable as error:
+            raise LetsInferError("node-add approval was cancelled") from error
+        if not accepted:
+            raise CommandDenied("Node move cancelled")
+    stopped_groups: tuple[str, ...] = ()
+    if active_placements:
+        group_ids = _node_move_running_group_ids(active_placements)
+        activity = _command_activity(arguments, "Stopping models before node move")
+        with activity, ui.protect_stdout(activity):
+            stopped_groups = _stop_node_move_groups(group_ids)
+        with _site_store() as store:
+            remaining = plan_local_move(store)
+        if remaining.blocking_reasons:
+            _restore_node_move_groups(stopped_groups)
+            raise LetsInferError(
+                "node move remains blocked after stopping models: "
+                + "; ".join(remaining.blocking_reasons)
+            )
     move_arguments = argparse.Namespace(
         action_id=arguments.action_id,
         apply=True,
@@ -18957,9 +19877,99 @@ def _accept_node_add_request(
         no_service=False,
         json=False,
     )
-    result = site_move_command(move_arguments)
+    try:
+        result = site_move_command(move_arguments)
+        if (
+            getattr(move_arguments, "_mandatory_audit_satisfied", None)
+            is _MANDATORY_AUDIT_SATISFIED
+        ):
+            arguments._mandatory_audit_satisfied = _MANDATORY_AUDIT_SATISFIED
+    except BaseException as failure:
+        if stopped_groups:
+            try:
+                current = read_site_identity()
+            except SiteError:
+                current = None
+            if (
+                current is not None
+                and current.site_id != identity.site_id
+                and getattr(move_arguments, "_mandatory_audit_satisfied", None)
+                is _MANDATORY_AUDIT_SATISFIED
+            ):
+                arguments._mandatory_audit_satisfied = _MANDATORY_AUDIT_SATISFIED
+            if current is not None and current.site_id == identity.site_id:
+                try:
+                    _restore_node_move_groups(stopped_groups)
+                except BaseException as restore_error:
+                    raise LetsInferError(
+                        "node move failed and stopped models could not be restored: "
+                        f"{restore_error}"
+                    ) from failure
+        raise
     clear_node_add_request(str(request["request_id"]))
     return result
+
+
+def _node_move_running_group_ids(
+    active_placements: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Resolve active placements to exact, stable groups before an approved move."""
+    placement_ids = {str(row["placement_id"]) for row in active_placements}
+    with _site_store() as store:
+        groups = [
+            dict(row)
+            for row in store.engine_groups()
+            if str(row["placement_id"]) in placement_ids
+            and row["state"] != "removed"
+            and row["desired_state"] != "removed"
+        ]
+    covered = {str(row["placement_id"]) for row in groups}
+    missing = sorted(placement_ids - covered)
+    if missing:
+        raise LetsInferError(
+            "node move cannot safely stop placements without engine groups: "
+            + ",".join(missing)
+        )
+    unstable = sorted(
+        str(row["group_id"])
+        for row in groups
+        if (row["state"], row["desired_state"]) != ("running", "running")
+    )
+    if unstable:
+        raise LetsInferError(
+            "node move requires model groups to finish their current lifecycle: "
+            + ",".join(unstable)
+        )
+    return tuple(sorted(str(row["group_id"]) for row in groups))
+
+
+def _restore_node_move_groups(group_ids: Sequence[str]) -> None:
+    errors: list[str] = []
+    for group_id in reversed(tuple(group_ids)):
+        try:
+            _start_engine_group_by_id(group_id)
+        except BaseException as error:
+            errors.append(f"{group_id}: {error}")
+    if errors:
+        raise LetsInferError("model restoration was incomplete: " + "; ".join(errors))
+
+
+def _stop_node_move_groups(group_ids: Sequence[str]) -> tuple[str, ...]:
+    stopped: list[str] = []
+    try:
+        for group_id in group_ids:
+            _stop_engine_group_by_id(group_id)
+            stopped.append(group_id)
+    except BaseException as failure:
+        try:
+            _restore_node_move_groups(stopped)
+        except BaseException as restore_error:
+            raise LetsInferError(
+                "model stop failed and rollback was incomplete: "
+                f"{restore_error}"
+            ) from failure
+        raise
+    return tuple(stopped)
 
 
 def _approve_pending_child(
@@ -18969,29 +19979,32 @@ def _approve_pending_child(
     presenter = _human_presenter()
     if presenter is None:
         raise LetsInferError("approving a child requires an interactive terminal")
-    labels = [
-        f"{row['display_name']} · {row['member_id']}" for row in children
-    ]
-    try:
-        selected_label = presenter.prompt.choose(
-            "Pending child",
-            labels,
-            require_tty=True,
-        )
+    if len(children) == 1:
+        selected = children[0]
+    else:
+        labels = [
+            f"{row['display_name']} · {row['member_id']}" for row in children
+        ]
+        try:
+            selected_label = presenter.prompt.choose(
+                "Pending child",
+                labels,
+                require_tty=True,
+            )
+        except command_ui.PromptUnavailable as error:
+            raise LetsInferError("child approval was cancelled") from error
         selected = children[labels.index(selected_label)]
-        code = presenter.prompt.secret(
-            f"Comparison code shown on {selected['display_name']}",
-            require_tty=True,
-        )
-    except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
-        raise LetsInferError("child approval was cancelled") from error
-    return member_approve_command(
-        argparse.Namespace(
-            member=selected["member_id"],
-            comparison_code=code,
-            json=False,
-        )
+    try:
+        with _site_store() as store:
+            result = store.approve_member_locally(str(selected["member_id"]))
+    except SiteError as error:
+        raise LetsInferError(str(error)) from error
+    presenter.result(
+        f"Added {selected['display_name']}",
+        semantic=command_ui.Semantic.SUCCESS,
+        detail=result["member_id"],
     )
+    return 0
 
 
 def _send_node_add_request(
@@ -19002,18 +20015,25 @@ def _send_node_add_request(
     presenter = _human_presenter()
     if presenter is None:
         raise LetsInferError("selecting a node requires an interactive terminal")
-    labels = [
-        f"{row['name']} · {row['address']} · {row['node_id']}" for row in candidates
-    ]
+    labels = [f"{row['name']} · {row['address']}" for row in candidates]
     try:
         selected_label = presenter.prompt.choose(
             "Node to add",
             labels,
             require_tty=True,
         )
-    except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+    except command_ui.PromptUnavailable as error:
         raise LetsInferError("node selection was cancelled") from error
     selected = candidates[labels.index(selected_label)]
+    return _send_selected_node(arguments, identity, selected)
+
+
+def _send_selected_node(
+    arguments: argparse.Namespace,
+    identity: Any,
+    selected: Mapping[str, Any],
+) -> int:
+    existing_members = {str(row["member_id"]) for row in _node_add_children()}
     with _site_store() as store:
         invite = store.create_invite("lan", lifetime_seconds=180)
     endpoint_address = identity.coordinator_address
@@ -19024,7 +20044,11 @@ def _send_node_add_request(
         "protocol": NODE_ADD_PROTOCOL,
         "request_id": uuid.uuid4().hex,
         "main_node_id": identity.site_id,
-        "main_name": identity.display_name,
+        "main_name": (
+            socket.gethostname()
+            if str(identity.display_name).casefold() == "home"
+            else identity.display_name
+        ),
         "main_endpoint": f"https://{endpoint_host}:{SITE_CONTROL_PORT}",
         "main_certificate_sha256": certificate_sha256(
             site_member_certificate_path()
@@ -19041,16 +20065,87 @@ def _send_node_add_request(
         )
     except NodeAddError as error:
         raise LetsInferError(str(error)) from error
-    presenter.result(
-        f"Request sent to {selected['name']}",
-        semantic=command_ui.Semantic.SUCCESS,
-        detail=acknowledgement["request_id"],
+    if acknowledgement["request_id"] != document["request_id"]:
+        raise LetsInferError("node-add acknowledgement changed identity")
+    return _wait_for_node_add_response(
+        arguments,
+        identity,
+        selected,
+        document,
+        existing_members,
     )
-    return 0
+
+
+def _wait_for_node_add_response(
+    arguments: argparse.Namespace,
+    identity: Any,
+    selected: Mapping[str, Any],
+    document: Mapping[str, Any],
+    existing_members: set[str],
+) -> int:
+    new_children: list[dict[str, Any]] = []
+    with _command_activity(
+        arguments,
+        f"Please accept request on {selected['name']}",
+    ):
+        while int(time.time()) < int(document["expires_at_unix"]):
+            new_children = [
+                row
+                for row in _node_add_children()
+                if str(row["member_id"]) not in existing_members
+            ]
+            if new_children:
+                break
+            try:
+                status = query_node_add_request_status(
+                    str(selected["endpoint"]),
+                    str(selected["certificate_sha256"]),
+                    str(document["request_id"]),
+                )["status"]
+            except NodeAddError:
+                status = "unknown"
+            if status == "denied":
+                raise CommandDenied(f"{selected['name']} denied the request")
+            time.sleep(1.0)
+    if not new_children:
+        raise LetsInferError(f"{selected['name']} did not accept the request in time")
+    if len(new_children) != 1:
+        raise LetsInferError("node-add acceptance produced ambiguous child membership")
+    expected_member_id = str(selected.get("machine_id", ""))
+    if (
+        re.fullmatch(r"[0-9a-f]{32}", expected_member_id)
+        and str(new_children[0]["member_id"]) != expected_member_id
+    ):
+        raise LetsInferError("node-add acceptance changed physical machine identity")
+    active = [row for row in new_children if row["state"] == "active"]
+    if active:
+        presenter = _human_presenter()
+        if presenter is not None:
+            presenter.result(
+                f"Added {active[0]['display_name']}",
+                semantic=command_ui.Semantic.SUCCESS,
+                detail=active[0]["member_id"],
+            )
+        else:
+            print(f"ADDED {active[0]['member_id']}")
+        return 0
+    return _approve_pending_child(arguments, new_children)
 
 
 def _node_add_workflow(arguments: argparse.Namespace) -> int:
     identity = read_site_identity()
+    if not arguments.json and _human_presenter() is not None:
+        try:
+            action, value = _live_node_add_choice(arguments, identity)
+            if action == "accept":
+                return _accept_node_add_request(
+                    arguments, identity, value, confirmed=True
+                )
+            if action == "pending":
+                return _approve_pending_child(arguments, value)
+            return _send_selected_node(arguments, identity, value)
+        except command_ui.PromptUnavailable as error:
+            raise LetsInferError("node selection was cancelled") from error
     try:
         discovered = discover_addable_nodes(
             timeout_seconds=arguments.timeout,
@@ -19111,7 +20206,7 @@ def _choose_installed_model(message: str) -> str:
         raise LetsInferError("multiple models are installed; specify one explicitly")
     try:
         return presenter.prompt.choose(message, models, require_tty=True)
-    except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+    except command_ui.PromptUnavailable as error:
         raise LetsInferError("model selection was cancelled") from error
 
 
@@ -19198,7 +20293,7 @@ def _interactive_model_install(arguments: argparse.Namespace) -> int:
                 default="Skip",
                 require_tty=True,
             )
-        except (command_ui.PromptUnavailable, KeyboardInterrupt) as error:
+        except command_ui.PromptUnavailable as error:
             raise LetsInferError("model installation was cancelled") from error
         if selected != "Skip":
             assignments.setdefault(selected, []).append(member["member_id"])
@@ -19479,6 +20574,12 @@ def parser() -> argparse.ArgumentParser:
         config=None,
     )
 
+    topology_parser = subcommands.add_parser(
+        "topology", help="show live verified nodes, links, traffic, and placements"
+    )
+    topology_parser.add_argument("--json", action="store_true")
+    topology_parser.set_defaults(action=topology_command, action_id="topology")
+
     diagnosing = subcommands.add_parser(
         "doctor", help="audit complete operational and publication readiness"
     )
@@ -19498,8 +20599,9 @@ def parser() -> argparse.ArgumentParser:
     node_command = subcommands.add_parser("node", help="inspect and manage nodes")
     node_operations = node_command.add_subparsers(dest="node_operation", required=True)
     node_info = node_operations.add_parser(
-        "info", help=help_label("show this node identity and hardware", "node.info")
+        "info", help=help_label("show a node identity and hardware", "node.info")
     )
+    node_info.add_argument("node", nargs="?", metavar="NODE")
     node_info.add_argument("--catalog")
     node_info.add_argument("--json", action="store_true")
     node_info.set_defaults(action=node_info_command, action_id="node.info")
@@ -19517,18 +20619,20 @@ def parser() -> argparse.ArgumentParser:
     node_add.add_argument("--json", action="store_true")
     node_add.set_defaults(action=node_add_command, action_id="node.add")
     node_pause = node_operations.add_parser(
-        "pause", help=help_label("pause new work on a child", "node.pause")
+        "pause", help=help_label("pause new work on a node", "node.pause")
     )
-    node_pause.add_argument("member", metavar="CHILD")
+    node_pause.add_argument("member", nargs="?", metavar="NODE")
+    node_pause.add_argument("--yes", action="store_true")
     node_pause.add_argument("--json", action="store_true")
     node_pause.set_defaults(
         action=member_drain_command,
         action_id="node.pause",
     )
     node_resume = node_operations.add_parser(
-        "resume", help=help_label("resume work on a paused child", "node.resume")
+        "resume", help=help_label("resume work on a paused node", "node.resume")
     )
-    node_resume.add_argument("member", metavar="CHILD")
+    node_resume.add_argument("member", nargs="?", metavar="NODE")
+    node_resume.add_argument("--yes", action="store_true")
     node_resume.add_argument("--json", action="store_true")
     node_resume.set_defaults(
         action=member_resume_command,
@@ -19537,7 +20641,8 @@ def parser() -> argparse.ArgumentParser:
     node_remove = node_operations.add_parser(
         "remove", help=help_label("remove an inactive child", "node.remove")
     )
-    node_remove.add_argument("member", metavar="CHILD")
+    node_remove.add_argument("member", nargs="?", metavar="NODE")
+    node_remove.add_argument("--yes", action="store_true")
     node_remove.add_argument("--json", action="store_true")
     node_remove.set_defaults(
         action=member_remove_command,
@@ -19865,7 +20970,7 @@ def parser() -> argparse.ArgumentParser:
     uninstalling.set_defaults(action=uninstall, action_id="uninstall", config=None)
 
     core_setup = subcommands.add_parser("core-setup", help=argparse.SUPPRESS)
-    core_setup.add_argument("--name", default="Home")
+    core_setup.add_argument("--name")
     core_setup.add_argument("--address")
     core_setup.add_argument("--no-service", action="store_true")
     core_setup.add_argument("--json", action="store_true")
@@ -20039,7 +21144,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         generic_progress = (
             has_bounded_progress
-            and metadata.name not in {"update.core", "uninstall"}
+            and metadata.name not in {"node.add", "update.core", "uninstall"}
             and metadata.name not in HANDLER_STEP_PROGRESS
         )
 
@@ -20047,13 +21152,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             nonlocal audit_recorded
             result = arguments.action(arguments)
             succeeded = result in (None, 0)
-            _audit_command_result(
-                metadata,
-                identity,
-                outcome="success" if succeeded else "failed",
-                reason=None if succeeded else f"exit_{result}",
-                after_sequence=audit_sequence,
-            )
+            if (
+                succeeded
+                and getattr(arguments, "_mandatory_audit_satisfied", None)
+                is _MANDATORY_AUDIT_SATISFIED
+            ):
+                audit_recorded = True
+            else:
+                _audit_command_result(
+                    metadata,
+                    identity,
+                    outcome="success" if succeeded else "failed",
+                    reason=None if succeeded else f"exit_{result}",
+                    after_sequence=audit_sequence,
+                )
             audit_recorded = True
             after_audit = getattr(arguments, "after_audit", None)
             if succeeded and after_audit is not None:
@@ -20122,7 +21234,48 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                 )
         return result
-    except (LetsInferError, PathContractError, RuntimePackError, SiteError) as error:
+    except CommandDenied as error:
+        if metadata is not None and not audit_recorded:
+            _audit_command_result(
+                metadata,
+                identity,
+                outcome="denied",
+                reason=type(error).__name__,
+                after_sequence=audit_sequence,
+            )
+        terminal = ui.Terminal(sys.stderr)
+        message = str(error)
+        if terminal.interactive and not (machine_output or raw_output):
+            message = terminal.paint(message, ui.DIM)
+        terminal.stream.write(message + "\n")
+        terminal.stream.flush()
+        return 1
+    except KeyboardInterrupt:
+        if metadata is not None and not audit_recorded:
+            _audit_command_result(
+                metadata,
+                identity,
+                outcome="denied",
+                reason="cancelled",
+                after_sequence=audit_sequence,
+            )
+        internal = bool(
+            presentation is not None
+            and presentation.surface is SurfaceKind.INTERNAL
+        )
+        if not (machine_output or raw_output or internal):
+            terminal = ui.Terminal(sys.stderr)
+            if terminal.interactive:
+                terminal.stream.write(terminal.paint("Cancelled", ui.DIM) + "\n")
+                terminal.stream.flush()
+        return 130
+    except (
+        LetsInferError,
+        PathContractError,
+        RuntimePackError,
+        SiteError,
+        ControlError,
+    ) as error:
         if metadata is not None and not audit_recorded:
             _audit_command_result(
                 metadata,

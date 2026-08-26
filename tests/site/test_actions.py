@@ -43,7 +43,15 @@ class ActionRegistryTests(unittest.TestCase):
         for action in ACTIONS.values():
             self.assertIsInstance(action.scope, CommandScope)
             if action.mutation is MutationClass.NODE:
-                self.assertIs(action.scope, CommandScope.MAIN)
+                self.assertIn(
+                    action.scope,
+                    {CommandScope.MAIN, CommandScope.ALL},
+                )
+                if action.scope is CommandScope.ALL:
+                    self.assertIn(
+                        action.name,
+                        {"node.add", "node.pause", "node.resume", "node.remove"},
+                    )
                 self.assertIs(action.audit, AuditPolicy.ALWAYS)
 
         def assert_help_and_no_aliases(parser: argparse.ArgumentParser) -> None:
@@ -87,6 +95,13 @@ class ActionRegistryTests(unittest.TestCase):
         invoked.assert_not_called()
         self.assertIn("command scope is main", stderr.getvalue())
         self.assertIn("coordinator.local", stderr.getvalue())
+
+    def test_node_management_targets_are_optional_for_interactive_selection(self) -> None:
+        parser = cli.parser()
+        self.assertIsNone(parser.parse_args(["node", "info"]).node)
+        self.assertIsNone(parser.parse_args(["node", "pause"]).member)
+        self.assertIsNone(parser.parse_args(["node", "resume"]).member)
+        self.assertIsNone(parser.parse_args(["node", "remove"]).member)
 
     def test_connectx_invite_fails_before_site_mutation_without_verified_link(self) -> None:
         arguments = argparse.Namespace(
@@ -177,6 +192,41 @@ class ActionRegistryTests(unittest.TestCase):
                     ]
                 self.assertEqual(len(events), 1)
                 self.assertEqual(events[0]["outcome"], "failed")
+
+    def test_pre_transfer_audit_satisfies_the_outer_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with mock.patch.dict(os.environ, {"LETSINFER_HOME": str(root)}):
+                identity = state.setup_site("Home", "127.0.0.1")
+
+                def moved(arguments: argparse.Namespace) -> int:
+                    with state.SiteStore(identity=identity) as store:
+                        store.record_action("node.move", "destination", "success")
+                    arguments._mandatory_audit_satisfied = (
+                        cli._MANDATORY_AUDIT_SATISFIED
+                    )
+                    return 0
+
+                arguments = argparse.Namespace(
+                    action_id="node.add",
+                    action=moved,
+                    command="node",
+                    port=1,
+                )
+                parsed = mock.MagicMock()
+                parsed.parse_args.return_value = arguments
+                with (
+                    mock.patch.object(cli, "parser", return_value=parsed),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(cli.main(["node", "add"]), 0)
+                with state.SiteStore(identity=identity) as store:
+                    events = store.audit_rows(limit=10)
+                self.assertEqual(
+                    [row["action"] for row in events if row["action"] == "node.move"],
+                    ["node.move"],
+                )
+                self.assertFalse(any(row["action"] == "node.add" for row in events))
 
     def test_audit_export_is_complete_private_verified_and_itself_audited(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

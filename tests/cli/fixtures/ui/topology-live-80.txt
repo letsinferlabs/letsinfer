@@ -1,0 +1,33 @@
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Topology                                               ϟ  LET'S INFER   │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │ ! Update available · Core 0.11.0-rc.77                             │  │
+│  │   Run `letsinfer update check` for verified details.               │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ● 2 nodes · 0 model running                                             │
+│                                                                          │
+│  ⠹ homeai · MAIN · ONLINE                                                │
+│  NVIDIA GB10 · 119 G                                                     │
+│  nemotron-3.5-lightning                                                  │
+│  Verified direct link · Connectx · 200 Gbit/s · RDMA                     │
+│  │                                                                       │
+│  [Wireless]                                                              │
+│  │                                                                       │
+│  └── ⠹ homeai-node-2 · ONLINE                                            │
+│      NVIDIA GB10 · 121 G                                                 │
+│      deepseek-v4-flash                                                   │
+│      Verified direct link · Connectx · 200 Gbit/s · RDMA                 │
+│                                                                          │
+│  Direct links                                                            │
+│                                                                          │
+│  ⠹ homeai · MAIN · ONLINE             ⠹ homeai-node-2 · ONLINE           │
+│  NVIDIA GB10 · 119 G                  NVIDIA GB10 · 121 G                │
+│  nemotron-3.5-lightning               deepseek-v4-flash                  │
+│                                                                          │
+│  TX 34 K/s ───◆─────────────────────────────────────────────▶ RX 56 K/s  │
+│  RX 12 K/s ◀─────────────────────────────────────────────◆─── TX 78 K/s  │
+│  CONNECTX · 200 Gbit/s · RDMA · MTU 9000 · verified now                  │
+│  Node traffic · authenticated host-wide RX/TX                            │
+└──────────────────────────────────────────────────────────────────────────┘

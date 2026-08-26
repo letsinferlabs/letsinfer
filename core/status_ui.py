@@ -71,12 +71,12 @@ def _scaled_decimal(value: object, prefixes: tuple[str, ...] = ("", "K", "M", "G
 
 
 def _binary_rate_kib(value: object) -> str:
-    """Render an underlying KiB/s gauge without changing bytes into bits."""
+    """Render an underlying KiB/s gauge with compact K/s–T/s labels."""
 
     amount = _number(value)
     if amount < 0:
         return "—"
-    units = ("KiB/s", "MiB/s", "GiB/s", "TiB/s")
+    units = ("K/s", "M/s", "G/s", "T/s")
     index = 0
     while amount >= 1024 and index < len(units) - 1:
         amount /= 1024
@@ -90,18 +90,18 @@ def _mib_size(value: object) -> str:
     if amount < 0:
         return "—"
     if amount >= 1024:
-        return f"{_compact(amount / 1024, decimals=1)} GiB"
-    return f"{_compact(amount, decimals=0)} MiB"
+        return f"{_compact(amount / 1024, decimals=1)} G"
+    return f"{_compact(amount, decimals=0)} M"
 
 
 def _bytes_gib(value: object) -> str:
     amount = _number(value)
-    return "—" if amount < 0 else f"{amount / 1024**3:.1f} GiB"
+    return "—" if amount < 0 else f"{amount / 1024**3:.1f} G"
 
 
 def _mib(value: object) -> str:
     amount = _number(value)
-    return "—" if amount < 0 else f"{amount / 1024**2:.1f} MiB"
+    return "—" if amount < 0 else f"{amount / 1024**2:.1f} M"
 
 
 def _rate(value: object) -> str:
@@ -200,10 +200,10 @@ def _trend(
 ) -> str:
     points = list(values)
     if not fresh or len(points) < 2 or points[-1] == points[-2]:
-        return "  "
+        return ""
     rising = points[-1] > points[-2]
     symbol = "↑" if terminal.unicode and rising else "↓" if terminal.unicode else "+" if rising else "-"
-    return terminal.paint(symbol, ui.BOLD, ui.RED if rising else ui.GREEN) + " "
+    return " " + terminal.paint(symbol, ui.BOLD, ui.RED if rising else ui.GREEN)
 
 
 def _metric_row(
@@ -219,24 +219,34 @@ def _metric_row(
     label_text = terminal.paint(label.ljust(13), ui.DIM)
     chart_width = len(ANSI.sub("", chart))
     trend_width = len(ANSI.sub("", trend))
-    metric_width = max(1, width - 13 - chart_width - trend_width)
-    clipped_primary = terminal.clip(primary, metric_width)
-    remaining = metric_width - len(ANSI.sub("", clipped_primary))
+    metric_width = max(1, width - 13 - chart_width)
+    clipped_primary = terminal.clip(primary, max(1, metric_width - trend_width))
+    remaining = metric_width - len(ANSI.sub("", clipped_primary)) - trend_width
     clipped_secondary = (
         terminal.clip(" " + secondary, remaining)
         if secondary and remaining > 1
         else ""
     )
-    used = len(ANSI.sub("", clipped_primary)) + len(ANSI.sub("", clipped_secondary))
+    used = (
+        len(ANSI.sub("", clipped_primary))
+        + trend_width
+        + len(ANSI.sub("", clipped_secondary))
+    )
     padding = " " * max(0, metric_width - used)
     return (
         label_text
         + terminal.paint(clipped_primary, ui.BOLD)
+        + trend
         + terminal.paint(clipped_secondary, ui.BOLD, ui.DIM)
         + padding
-        + trend
         + chart
     ).rstrip()
+
+
+def _history_heading(terminal: ui.Terminal, title: str, width: int) -> str:
+    hint = "last 5 min"
+    gap = " " * max(1, width - len(title) - len(hint))
+    return title + gap + terminal.paint(hint, ui.DIM)
 
 
 def _health_row(
@@ -382,13 +392,13 @@ def dashboard_lines(
     role = str(site.get("role") or "node")
     lines.append(terminal.paint(f"{hardware} · {hostname} · {role}", ui.DIM))
     updates = payload.get("updates")
-    if isinstance(updates, list) and updates:
-        labels = ui.update_labels(updates)
-        if labels:
-            lines.append(
-                terminal.paint("↑  UPDATE AVAILABLE", ui.BOLD, ui.YELLOW)
-                + terminal.paint(" · " + " · ".join(labels), ui.DIM)
-            )
+    update_lines = (
+        ui.update_available_lines(updates, terminal, width=width)
+        if isinstance(updates, list)
+        else []
+    )
+    if update_lines:
+        lines.extend(("", *update_lines))
     lines.append("")
     state_symbol = (
         "✓" if terminal.unicode and control_ready
@@ -610,7 +620,7 @@ def dashboard_lines(
     watchdog_usage = (
         "—"
         if min(watchdog_current, watchdog_limit) < 0
-        else f"{watchdog_current / 1024**2:.1f} / {watchdog_limit / 1024**2:.0f} MiB"
+        else f"{watchdog_current / 1024**2:.1f} / {watchdog_limit / 1024**2:.0f} M"
     )
     telemetry_display_state = str(telemetry.get("display_state") or "live")
     telemetry_detail = (
@@ -710,7 +720,7 @@ def dashboard_lines(
         ("Power", "power", power_value, "", None, True),
         ("Network", "network", network_value, network_detail, None, False),
     )
-    lines.extend(("", f"System  {terminal.paint('last 5 min · 1 sec', ui.DIM)}"))
+    lines.extend(("", _history_heading(terminal, "System", width)))
     fresh_sample = telemetry_display_state == "live"
     for index, (label, key, value, detail, scale_maximum, show_trend) in enumerate(system_rows):
         values = history.get(key, [])
@@ -737,13 +747,14 @@ def dashboard_lines(
         ("CPU", "cpu_temp", system.get("system_temp_deci_c"), ui.ORANGE),
         ("NVMe", "nvme_temp", system.get("nvme_temp_deci_c"), ui.RED),
     )
-    lines.extend(("", f"Temperature  {terminal.paint('last 5 min · 1 sec', ui.DIM)}"))
+    lines.extend(("", _history_heading(terminal, "Temperature", width)))
     for label, key, value, color in temperature_rows:
         lines.append(
-            _row(
+            _metric_row(
                 terminal,
                 label,
                 _temperature(value),
+                "",
                 _sparkline(
                     terminal,
                     history.get(key, []),
@@ -751,7 +762,7 @@ def dashboard_lines(
                     color=color,
                     scale_maximum=120.0,
                 ),
-                dim_detail=False,
+                "",
                 width=width,
             )
         )
