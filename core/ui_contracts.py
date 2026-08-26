@@ -950,6 +950,16 @@ UI_CONTRACTS: Mapping[str, UiContract] = {
         prompt=PromptKind.WORKFLOW,
     ),
     "node.list": _remap("child.list", "node.list", "Nodes"),
+    "node.usage": _remap(
+        "child.list",
+        "node.usage",
+        "Node Usage",
+        surface=SurfaceKind.WORKFLOW,
+        output=OutputContract.RECORD,
+        progress=ProgressKind.NONE,
+        prompt=PromptKind.MIXED,
+        supports_json=True,
+    ),
     "node.add": _remap(
         "child.invite",
         "node.add",

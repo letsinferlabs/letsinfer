@@ -135,6 +135,18 @@ from .runtime_packs import (
     verify_descriptor,
     write_selection,
 )
+from .storage_usage import (
+    RECLAIMABLE_CATEGORIES,
+    RuntimeStorageReference,
+    StorageUsageError,
+    cleanup_plan,
+    container_runtime_usage,
+    execute_cleanup,
+    format_bytes as _storage_size,
+    managed_container_running,
+    storage_lock,
+    usage_report,
+)
 from .updates import (
     Component,
     UpdateManager,
@@ -143,7 +155,7 @@ from .updates import (
 )
 from .updates.manager import UpdateError, compare_versions
 from .catalog import CatalogError, CatalogManager
-from . import benchmark_jobs, benchmark_verification, command_ui, ui
+from . import benchmark_jobs, benchmark_verification, command_ui, node_usage_ui, ui
 from .ui_contracts import OutputContract, ProgressKind, SurfaceKind, contract as ui_contract
 from .state_plane import runtime_lifecycle as derive_runtime_lifecycle
 from .platform import macos as macos_services
@@ -322,9 +334,9 @@ ACTION_PROGRESS: Mapping[str, tuple[str, str]] = {
     "model.install": ("Installing models", "Models installed"),
     "model.remove": ("Removing the model", "Model removed"),
     "model.pause": ("Pausing inference", "Model paused"),
-    "model.resume": ("Resuming inference", "Model active"),
-    "model.restart": ("Restarting inference", "Model active"),
-    "model.recover": ("Recovering inference", "Model recovered"),
+    "model.resume": ("Checking model data and resuming inference", "Model active"),
+    "model.restart": ("Checking model data and restarting inference", "Model active"),
+    "model.recover": ("Checking model data and recovering inference", "Model recovered"),
     "model.rollback": ("Restoring the previous runtime", "Model restored"),
     "benchmark.stop": ("Stopping the benchmark", "Benchmark stopped"),
     "benchmark.clean": ("Cleaning benchmark data", "Benchmark data removed"),
@@ -4557,7 +4569,9 @@ def verify_model_snapshot(manifest: dict[str, Any], model_cache: pathlib.Path) -
     return artifact_snapshot_path(artifacts[0], model_cache)
 
 
-def acquire_model_snapshot(manifest: dict[str, Any], model_cache: pathlib.Path) -> pathlib.Path:
+def _acquire_model_snapshot_locked(
+    manifest: dict[str, Any], model_cache: pathlib.Path
+) -> pathlib.Path:
     ensure_private_directory(model_cache)
     acquired: set[tuple[str, str, str | None]] = set()
     for artifact in model_artifacts(manifest):
@@ -4570,10 +4584,33 @@ def acquire_model_snapshot(manifest: dict[str, Any], model_cache: pathlib.Path) 
             continue
         acquired.add(identity)
         destination = artifact_snapshot_path(artifact, model_cache)
-        if destination.is_dir():
-            continue
         parent = destination.parent
         ensure_private_directory(parent)
+        backup: pathlib.Path | None = None
+        if destination.is_dir():
+            broken = [
+                path
+                for path in destination.rglob("*")
+                if path.is_symlink() and not path.exists()
+            ]
+            try:
+                if broken:
+                    raise LetsInferError(
+                        f"existing model snapshot contains a broken link: {broken[0]}"
+                    )
+                if "filename" in artifact:
+                    _verify_gguf_artifact(artifact, destination, model_cache)
+                continue
+            except LetsInferError:
+                backup = parent / (
+                    f".{artifact['revision']}.invalid-{secrets.token_hex(8)}"
+                )
+                destination.replace(backup)
+                _fsync_path(parent)
+        elif destination.exists() or destination.is_symlink():
+            raise LetsInferError(
+                f"model snapshot destination is unsafe: {destination}"
+            )
         staging = parent / f".{artifact['revision']}.incoming-{secrets.token_hex(8)}"
         try:
             acquisition = manifest["model"]["acquisition"]
@@ -4652,12 +4689,29 @@ def acquire_model_snapshot(manifest: dict[str, Any], model_cache: pathlib.Path) 
                 staging.replace(destination)
             except FileExistsError:
                 shutil.rmtree(staging)
+            if backup is not None:
+                shutil.rmtree(backup)
             _fsync_path(parent)
         except BaseException:
             if staging.exists():
                 shutil.rmtree(staging)
+            if backup is not None and backup.exists() and not destination.exists():
+                backup.replace(destination)
+                _fsync_path(parent)
             raise
     return verify_model_snapshot(manifest, model_cache)
+
+
+def acquire_model_snapshot(
+    manifest: dict[str, Any], model_cache: pathlib.Path
+) -> pathlib.Path:
+    """Acquire exact model data while excluding local cleanup."""
+
+    try:
+        with storage_lock(letsinfer_home_root()):
+            return _acquire_model_snapshot_locked(manifest, model_cache)
+    except StorageUsageError as error:
+        raise LetsInferError(str(error)) from error
 
 
 def verify_installed_runtime(
@@ -5046,8 +5100,9 @@ def ensure_install_dependencies(
     runtime_artifact_root: pathlib.Path | None,
     download: bool,
     build_image: bool,
-) -> None:
+) -> tuple[str, ...]:
     """Resolve exact model and image dependencies into their shared stores."""
+    downloaded: tuple[str, ...] = ()
     try:
         verify_model_snapshot(manifest, model_cache)
     except LetsInferError as error:
@@ -5060,7 +5115,21 @@ def ensure_install_dependencies(
                 "exact model artifacts are missing or incomplete and dependency "
                 f"downloads are disabled: {required}"
             ) from error
-        acquire_model_snapshot(manifest, model_cache)
+        try:
+            acquire_model_snapshot(manifest, model_cache)
+        except LetsInferError as download_error:
+            raise LetsInferError(
+                "exact model data is missing or incomplete and automatic "
+                f"re-download failed: {download_error}"
+            ) from download_error
+        downloaded = tuple(
+            sorted(
+                {
+                    f"{artifact['repository']}@{artifact['revision']}"
+                    for artifact in model_artifacts(manifest)
+                }
+            )
+        )
 
     ensure_image(
         manifest,
@@ -5068,6 +5137,7 @@ def ensure_install_dependencies(
         pull=download,
         artifact_root=runtime_artifact_root,
     )
+    return downloaded
 
 
 def container_inspect(name: str) -> dict[str, Any] | None:
@@ -6503,6 +6573,18 @@ def _retire_qualification_candidate(*, remove_container: bool) -> None:
 def _qualification_candidate_lifecycle(
     config: dict[str, Any], action: str
 ) -> int:
+    if action == "stop":
+        return _qualification_candidate_lifecycle_locked(config, action)
+    try:
+        with storage_lock(letsinfer_home_root()):
+            return _qualification_candidate_lifecycle_locked(config, action)
+    except StorageUsageError as error:
+        raise LetsInferError(str(error)) from error
+
+
+def _qualification_candidate_lifecycle_locked(
+    config: dict[str, Any], action: str
+) -> int:
     """Apply one lifecycle action to the candidate that owns the inference slot."""
     if config.get("qualification_mode") is not True:
         raise LetsInferError("qualification slot has an invalid lifecycle mode")
@@ -6545,6 +6627,8 @@ def _qualification_candidate_lifecycle(
         else:
             print(f"STOPPED {config['name']} candidate=preserved")
         return 0
+
+    downloaded = _ensure_config_start_dependencies(config, manifest)
 
     if action == "recover":
         cleared_trip = clear_protection_trip(config)
@@ -6628,8 +6712,7 @@ def _qualification_candidate_lifecycle(
         raise
     presenter = _human_presenter()
     if presenter is not None:
-        presenter.records(
-            (
+        rows = [
                 command_ui.RecordRow(
                     "Runtime",
                     config.get("model", manifest["model"]["alias"]),
@@ -6642,13 +6725,27 @@ def _qualification_candidate_lifecycle(
                     "Recovered" if cleared_trip else "Armed",
                     "Protection trip cleared" if cleared_trip else "",
                 ),
+        ]
+        if downloaded:
+            rows.append(
+                command_ui.RecordRow(
+                    "Model data",
+                    "Downloaded again",
+                    ", ".join(downloaded),
+                    command_ui.Semantic.INFO,
+                )
             )
-        )
+        presenter.records(tuple(rows))
     else:
         print(
             f"{action.upper()} {config['name']} candidate=active "
             f"protection_trip_cleared={str(cleared_trip).lower()}"
         )
+        if downloaded:
+            print(
+                "MODEL DATA downloaded_again=true artifacts="
+                + ",".join(downloaded)
+            )
     return 0
 
 
@@ -6705,6 +6802,32 @@ def configured_release(
             "service configuration memory-pressure threshold does not match its manifest"
         )
     return path, manifest
+
+
+def _ensure_config_start_dependencies(
+    config: Mapping[str, Any], manifest: dict[str, Any]
+) -> tuple[str, ...]:
+    """Reacquire an exact configured model before any local restart."""
+
+    runtime_digest = config.get("runtime_digest")
+    runtime_root = (
+        default_runtime_home() / ".objects" / runtime_digest
+        if isinstance(runtime_digest, str) and SHA256_RE.fullmatch(runtime_digest)
+        else None
+    )
+    downloaded = ensure_install_dependencies(
+        manifest,
+        model_cache=pathlib.Path(str(config["model_cache"])),
+        runtime_artifact_root=runtime_root,
+        download=True,
+        build_image=False,
+    )
+    verify_installed_runtime(
+        manifest,
+        model_cache=pathlib.Path(str(config["model_cache"])),
+        runtime_artifact_root=runtime_root,
+    )
+    return downloaded
 
 
 def bind_config_to_control_bundle(config: dict[str, Any]) -> dict[str, Any]:
@@ -8901,6 +9024,10 @@ def _engine_group_lifecycle(
         raise LetsInferError("engine-group lifecycle is main-node-only")
     with _site_store() as store:
         placements = {row["placement_id"]: row for row in store.placements()}
+        member_names = {
+            row["member_id"]: row["display_name"]
+            for row in (store.members() if hasattr(store, "members") else [])
+        }
         selected = [
             (row, placements[row["placement_id"]])
             for row in store.engine_groups()
@@ -8982,6 +9109,26 @@ def _engine_group_lifecycle(
                 }
                 _sync_group_placement(store, failed)
                 raise
+            downloads = []
+            member_results = (
+                orchestrator.results
+                if isinstance(orchestrator.results, Mapping)
+                else {}
+            )
+            for member_id, member_result in sorted(member_results.items()):
+                artifacts = member_result.get("model_artifacts_downloaded")
+                if isinstance(artifacts, list) and artifacts and all(
+                    isinstance(item, str) for item in artifacts
+                ):
+                    downloads.append(
+                        {
+                            "member_id": member_id,
+                            "name": member_names.get(member_id, member_id),
+                            "artifacts": list(artifacts),
+                        }
+                    )
+            if downloads:
+                result = {**result, "model_artifact_downloads": downloads}
             _sync_group_placement(store, result)
             results.append(result)
         if len(results) == 1:
@@ -8995,12 +9142,20 @@ def _engine_group_lifecycle(
                 }
             )
         ).hexdigest()[:32]
-        return {
+        aggregate = {
             "group_id": aggregate_id,
             "group_ids": [result["group_id"] for result in results],
             "state": results[0]["state"],
             "groups": results,
         }
+        aggregate_downloads = [
+            item
+            for result in results
+            for item in result.get("model_artifact_downloads", [])
+        ]
+        if aggregate_downloads:
+            aggregate["model_artifact_downloads"] = aggregate_downloads
+        return aggregate
 
 
 def _remove_all_engine_groups() -> list[str]:
@@ -9324,12 +9479,16 @@ def _controller_site_action(
             "identifier": group["group_id"],
             "model": model,
             "state": "stopped" if action == "stop" else "running",
+            "model_artifact_downloads": group.get(
+                "model_artifact_downloads", []
+            ),
         }
     config_path = default_service_config_path()
     config = read_service_config(config_path)
     if config.get("model") != model:
         raise LetsInferError(f"no installed runtime serves model {model!r}")
     audit_action = f"runtime.{action}"
+    downloaded: tuple[str, ...] = ()
     try:
         if action == "stop":
             active = run(
@@ -9345,31 +9504,41 @@ def _controller_site_action(
                 stop_from_config(argparse.Namespace(config=str(config_path)))
             state = "stopped"
         elif action in {"start", "restart", "recover"}:
-            installed = run(
-                ["systemctl", "--user", "is-enabled", ENGINE_SERVICE_NAME],
-                check=False,
-            )
-            if installed.returncode != 0 or installed.stdout.strip() not in {
-                "enabled", "static",
-            }:
-                raise LetsInferError(f"{ENGINE_SERVICE_NAME} is not installed")
-            if action in {"restart", "recover"}:
-                disarm_before_planned_stop(config)
-            if action == "recover":
-                clear_protection_trip(config)
-            elif protection_trip_latched(config):
-                raise LetsInferError(
-                    "runtime protection is tripped; use the recover action"
-                )
-            run_passthrough(
-                [
-                    "systemctl",
-                    "--user",
-                    "start" if action == "start" else "restart",
-                    ENGINE_SERVICE_NAME,
-                ]
-            )
-            run(["systemctl", "--user", "restart", RECOVERY_TIMER_NAME])
+            try:
+                with storage_lock(letsinfer_home_root()):
+                    _manifest_path, manifest = configured_release(config)
+                    downloaded = _ensure_config_start_dependencies(config, manifest)
+                    installed = run(
+                        ["systemctl", "--user", "is-enabled", ENGINE_SERVICE_NAME],
+                        check=False,
+                    )
+                    if installed.returncode != 0 or installed.stdout.strip() not in {
+                        "enabled", "static",
+                    }:
+                        raise LetsInferError(
+                            f"{ENGINE_SERVICE_NAME} is not installed"
+                        )
+                    if action in {"restart", "recover"}:
+                        disarm_before_planned_stop(config)
+                    if action == "recover":
+                        clear_protection_trip(config)
+                    elif protection_trip_latched(config):
+                        raise LetsInferError(
+                            "runtime protection is tripped; use the recover action"
+                        )
+                    run_passthrough(
+                        [
+                            "systemctl",
+                            "--user",
+                            "start" if action == "start" else "restart",
+                            ENGINE_SERVICE_NAME,
+                        ]
+                    )
+                    run(
+                        ["systemctl", "--user", "restart", RECOVERY_TIMER_NAME]
+                    )
+            except StorageUsageError as error:
+                raise LetsInferError(str(error)) from error
             state = "running"
         else:
             raise LetsInferError("controller runtime action is invalid")
@@ -9401,6 +9570,7 @@ def _controller_site_action(
         "identifier": config["placement_id"],
         "model": model,
         "state": state,
+        "model_artifacts_downloaded": list(downloaded),
     }
 
 
@@ -10634,7 +10804,9 @@ def stop(arguments: argparse.Namespace) -> int:
                         ),
                         command_ui.RecordRow("Group", group["group_id"]),
                         command_ui.RecordRow("Members", members),
-                        command_ui.RecordRow("State", "Paused" if paused else "Stopped"),
+                        command_ui.RecordRow(
+                            "State", "Paused" if paused else "Stopped"
+                        ),
                     )
                 )
             else:
@@ -11524,34 +11696,55 @@ def _run_engine_service_action(
                 else len(group["member_states"])
             )
             presenter = _human_presenter()
+            downloads = group.get("model_artifact_downloads", [])
+            download_names = sorted(
+                {
+                    str(item.get("name"))
+                    for item in downloads
+                    if isinstance(item, Mapping) and item.get("name")
+                }
+            )
             if presenter is not None:
-                presenter.records(
-                    (
-                        command_ui.RecordRow(
-                            "Runtime",
-                            model or "All installed runtimes",
-                            semantic=command_ui.Semantic.SUCCESS,
+                rows = [
+                    command_ui.RecordRow(
+                        "Runtime",
+                        model or "All installed runtimes",
+                        semantic=command_ui.Semantic.SUCCESS,
+                    ),
+                    command_ui.RecordRow("Group", group["group_id"]),
+                    command_ui.RecordRow("Members", members),
+                    command_ui.RecordRow("Action", action.title()),
+                    command_ui.RecordRow(
+                        "Guard",
+                        "Recovered" if action == "recover" else "Armed",
+                        (
+                            "Protection trips acknowledged"
+                            if action == "recover"
+                            else ""
                         ),
-                        command_ui.RecordRow("Group", group["group_id"]),
-                        command_ui.RecordRow("Members", members),
-                        command_ui.RecordRow("Action", action.title()),
+                    ),
+                ]
+                if download_names:
+                    rows.append(
                         command_ui.RecordRow(
-                            "Guard",
-                            "Recovered" if action == "recover" else "Armed",
-                            (
-                                "Protection trips acknowledged"
-                                if action == "recover"
-                                else ""
-                            ),
-                        ),
+                            "Model data",
+                            "Downloaded again",
+                            ", ".join(download_names),
+                            command_ui.Semantic.INFO,
+                        )
                     )
-                )
+                presenter.records(tuple(rows))
             else:
                 print(
                     f"{action.upper()} group={group['group_id']} "
                     f"members={members} "
                     f"protection_trips_acknowledged={str(action == 'recover').lower()}"
                 )
+                if download_names:
+                    print(
+                        "MODEL DATA downloaded_again=true nodes="
+                        + ",".join(download_names)
+                    )
             return 0
     config_path = absolute_user_path(
         arguments.config or default_service_config_path()
@@ -11569,23 +11762,31 @@ def _run_engine_service_action(
     )
     if enabled.returncode != 0 or enabled.stdout.strip() not in {"enabled", "static"}:
         raise LetsInferError(f"{ENGINE_SERVICE_NAME} is not installed")
-    if action in {"restart", "recover"}:
-        disarm_before_planned_stop(config)
-    if action == "recover":
-        cleared_trip = clear_protection_trip(config)
-    else:
-        if protection_trip_latched(config):
-            raise LetsInferError(
-                "runtime protection is tripped; use `letsinfer model recover MODEL`"
+    try:
+        with storage_lock(letsinfer_home_root()):
+            _manifest_path, manifest = configured_release(config)
+            downloaded = _ensure_config_start_dependencies(config, manifest)
+            if action in {"restart", "recover"}:
+                disarm_before_planned_stop(config)
+            if action == "recover":
+                cleared_trip = clear_protection_trip(config)
+            else:
+                if protection_trip_latched(config):
+                    raise LetsInferError(
+                        "runtime protection is tripped; use "
+                        "`letsinfer model recover MODEL`"
+                    )
+                cleared_trip = False
+            systemd_action = "start" if action == "start" else "restart"
+            run_passthrough(
+                ["systemctl", "--user", systemd_action, ENGINE_SERVICE_NAME]
             )
-        cleared_trip = False
-    systemd_action = "start" if action == "start" else "restart"
-    run_passthrough(["systemctl", "--user", systemd_action, ENGINE_SERVICE_NAME])
-    run(["systemctl", "--user", "restart", RECOVERY_TIMER_NAME])
+            run(["systemctl", "--user", "restart", RECOVERY_TIMER_NAME])
+    except StorageUsageError as error:
+        raise LetsInferError(str(error)) from error
     presenter = _human_presenter()
     if presenter is not None:
-        presenter.records(
-            (
+        rows = [
                 command_ui.RecordRow(
                     "Runtime",
                     config["model"],
@@ -11598,13 +11799,27 @@ def _run_engine_service_action(
                     "Recovered" if cleared_trip else "Armed",
                     "Protection trip cleared" if cleared_trip else "",
                 ),
+        ]
+        if downloaded:
+            rows.append(
+                command_ui.RecordRow(
+                    "Model data",
+                    "Downloaded again",
+                    ", ".join(downloaded),
+                    command_ui.Semantic.INFO,
+                )
             )
-        )
+        presenter.records(tuple(rows))
     else:
         print(
             f"{action.upper()} {ENGINE_SERVICE_NAME} protection_trip_cleared="
             f"{str(cleared_trip).lower()}"
         )
+        if downloaded:
+            print(
+                "MODEL DATA downloaded_again=true artifacts="
+                + ",".join(downloaded)
+            )
     return 0
 
 
@@ -17698,7 +17913,13 @@ class LocalEngineGroupExecutor:
         ):
             raise LetsInferError("engine-group job differs from the staged immutable configuration")
 
-    def _safe_result(self, config: Mapping[str, Any], state: str) -> dict[str, Any]:
+    def _safe_result(
+        self,
+        config: Mapping[str, Any],
+        state: str,
+        *,
+        model_artifacts_downloaded: Sequence[str] = (),
+    ) -> dict[str, Any]:
         task = config["task"]
         group = config["_group"]
         host = _engine_group_member_host(group, config["member_id"])
@@ -17731,6 +17952,10 @@ class LocalEngineGroupExecutor:
             "tls_certificate_sha256": certificate_sha256(certificate_path),
             "tls_certificate_pem": certificate_pem,
         }
+        if model_artifacts_downloaded:
+            result["model_artifacts_downloaded"] = list(
+                model_artifacts_downloaded
+            )
         if task["endpoint_owner"]:
             endpoint_host = f"[{host}]" if ":" in host else host
             result["endpoint"] = f"https://{endpoint_host}:{task['port_base']}"
@@ -17901,6 +18126,15 @@ class LocalEngineGroupExecutor:
         return self._start_config(config)
 
     def _start_config(self, config: Mapping[str, Any]) -> Mapping[str, Any]:
+        try:
+            with storage_lock(letsinfer_home_root()):
+                return self._start_config_locked(config)
+        except StorageUsageError as error:
+            raise LetsInferError(str(error)) from error
+
+    def _start_config_locked(
+        self, config: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
         manifest = config["_manifest"]
         if self._config_uses_native(config):
             return self._start_native_config(config)
@@ -17911,7 +18145,13 @@ class LocalEngineGroupExecutor:
         )
         verify_host_target(manifest)
         runtime_root = pathlib.Path(config["object_root"])
-        ensure_image(manifest, build=False, pull=False, artifact_root=runtime_root)
+        downloaded = ensure_install_dependencies(
+            manifest,
+            model_cache=pathlib.Path(config["model_cache"]),
+            runtime_artifact_root=runtime_root,
+            download=True,
+            build_image=False,
+        )
         verify_installed_runtime(
             manifest,
             model_cache=pathlib.Path(config["model_cache"]),
@@ -18014,7 +18254,11 @@ class LocalEngineGroupExecutor:
             publish_protection_state(
                 protection, generation, "armed", inspection=inspection
             )
-            return self._safe_result(config, "running")
+            return self._safe_result(
+                config,
+                "running",
+                model_artifacts_downloaded=downloaded,
+            )
         except BaseException:
             if not protection_trip_latched(protection):
                 disarm_before_planned_stop(protection)
@@ -18059,6 +18303,13 @@ class LocalEngineGroupExecutor:
         )
         verify_host_target(manifest)
         runtime_root = pathlib.Path(config["object_root"])
+        downloaded = ensure_install_dependencies(
+            manifest,
+            model_cache=pathlib.Path(config["model_cache"]),
+            runtime_artifact_root=runtime_root,
+            download=True,
+            build_image=False,
+        )
         verify_installed_runtime(
             manifest,
             model_cache=pathlib.Path(config["model_cache"]),
@@ -18133,7 +18384,11 @@ class LocalEngineGroupExecutor:
                     "native Engine model identity does not match its release"
                 )
             require_memory_reserve(manifest, phase="runtime")
-            return self._safe_result(config, "running")
+            return self._safe_result(
+                config,
+                "running",
+                model_artifacts_downloaded=downloaded,
+            )
         except BaseException:
             try:
                 macos_services.remove_launch_agent(label)
@@ -20263,6 +20518,301 @@ def _audit_command_result(
             ) from error
 
 
+def _storage_reference(
+    manifest: dict[str, Any],
+    config: Mapping[str, Any],
+    *,
+    active: bool,
+) -> RuntimeStorageReference:
+    model_cache = pathlib.Path(str(config["model_cache"])).expanduser()
+    model_paths = tuple(
+        artifact_snapshot_path(artifact, model_cache)
+        for artifact in model_artifacts(manifest)
+    )
+    cache_paths = tuple(
+        pathlib.Path(str(config[key])).expanduser()
+        for key in ("store_root", "runtime_cache_root")
+        if isinstance(config.get(key), str) and config[key]
+    )
+    return RuntimeStorageReference(
+        model=str(config.get("model") or manifest["model"]["alias"]),
+        model_paths=model_paths,
+        cache_paths=cache_paths,
+        active=active,
+    )
+
+
+def _group_storage_references() -> list[RuntimeStorageReference]:
+    references: list[RuntimeStorageReference] = []
+    states: dict[str, str] = {}
+    job_store = site_data_root() / "member-jobs.sqlite3"
+    if job_store.is_file() and not job_store.is_symlink():
+        try:
+            with MemberJobStore(job_store) as store:
+                states = {
+                    str(row["group_id"]): str(row["state"])
+                    for row in store.groups()
+                }
+        except MemberJobError as error:
+            raise LetsInferError(
+                f"cannot classify local engine-group storage: {error}"
+            ) from error
+    root = default_engine_group_root()
+    if not root.exists():
+        return references
+    if root.is_symlink() or not root.is_dir() or root.stat().st_uid != os.getuid():
+        raise LetsInferError("local engine-group storage root is unsafe")
+    for group_root in sorted(root.iterdir()):
+        if not group_root.is_dir() or group_root.is_symlink():
+            continue
+        if not re.fullmatch(r"[0-9a-f]{32}", group_root.name):
+            continue
+        config_path = group_root / "config.json"
+        try:
+            config = json.loads(_validate_private_file(config_path, minimum_bytes=64))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise LetsInferError(
+                f"engine-group storage configuration is invalid: {config_path}"
+            ) from error
+        required = {
+            "group_id", "control_root", "manifest_path", "manifest_sha256",
+            "runtime_digest", "model_cache", "store_root", "runtime_cache_root",
+            "container_name",
+        }
+        if (
+            not isinstance(config, dict)
+            or not required.issubset(config)
+            or config.get("group_id") != group_root.name
+            or not SHA256_RE.fullmatch(str(config.get("runtime_digest", "")))
+        ):
+            raise LetsInferError(
+                f"engine-group storage configuration is incomplete: {config_path}"
+            )
+        _manifest_path, manifest = validate_control_bundle(
+            pathlib.Path(str(config["control_root"])),
+            pathlib.Path(str(config["manifest_path"])),
+            str(config["manifest_sha256"]),
+        )
+        journal_active = states.get(group_root.name) == "running"
+        if manifest["image"]["distribution"] in {
+            "registry-digest",
+            "local-image-id",
+        }:
+            process_active = managed_container_running(
+                run,
+                str(config["container_name"]),
+                managed_label=MANAGED_LABEL,
+            )
+        else:
+            if platform.system() != "Darwin":
+                process_active = False
+            else:
+                try:
+                    _enabled, observed, _detail = macos_services.service_state(
+                        f"ai.letsinfer.engine.{group_root.name}"
+                    )
+                except macos_services.MacOSServiceError as error:
+                    raise LetsInferError(str(error)) from error
+                process_active = observed == "active"
+        references.append(
+            _storage_reference(
+                manifest,
+                config,
+                active=journal_active or process_active,
+            )
+        )
+    return references
+
+
+def _service_storage_references() -> list[RuntimeStorageReference]:
+    references: list[RuntimeStorageReference] = []
+    for path, candidate in (
+        (qualification_service_config_path(), True),
+        (default_service_config_path(), False),
+    ):
+        if not path.is_file():
+            continue
+        config = read_service_config(path)
+        _manifest_path, manifest = configured_release(config)
+        if candidate:
+            active = managed_container_running(
+                run, str(config["name"]), managed_label=MANAGED_LABEL
+            )
+        else:
+            _enabled, observed = _unit_enabled_active(ENGINE_SERVICE_NAME)
+            process_active = (
+                managed_container_running(
+                    run, str(config["name"]), managed_label=MANAGED_LABEL
+                )
+                if manifest["image"]["distribution"]
+                in {"registry-digest", "local-image-id"}
+                else False
+            )
+            active = observed == "active" or process_active
+        references.append(_storage_reference(manifest, config, active=active))
+    return references
+
+
+def _node_usage_plan() -> tuple[dict[str, Any], tuple[Any, ...], bool]:
+    try:
+        active_benchmark = benchmark_jobs.active_state()
+        references = [*_group_storage_references(), *_service_storage_references()]
+        candidates = cleanup_plan(
+            letsinfer_home_root(),
+            references,
+            benchmark_roots=(benchmarks_root(),),
+            benchmark_active=active_benchmark is not None,
+        )
+        report = usage_report(letsinfer_home_root(), candidates)
+        report["container_runtime"] = container_runtime_usage(
+            run, managed_label=MANAGED_LABEL
+        )
+        return (
+            report,
+            candidates,
+            active_benchmark is not None,
+        )
+    except (StorageUsageError, benchmark_jobs.BenchmarkJobError) as error:
+        raise LetsInferError(str(error)) from error
+
+
+def _render_node_usage(report: Mapping[str, Any]) -> None:
+    presenter = _human_presenter()
+    if presenter is None:
+        print(json.dumps(report, sort_keys=True))
+        return
+    node_usage_ui.render(presenter, report)
+
+
+def node_usage_command(arguments: argparse.Namespace) -> int:
+    selected_categories = set(arguments.category or RECLAIMABLE_CATEGORIES)
+    if not arguments.clean and (arguments.yes or arguments.category):
+        raise LetsInferError("--yes and --category require --clean")
+    try:
+        with storage_lock(letsinfer_home_root()):
+            report, candidates, benchmark_active = _node_usage_plan()
+    except StorageUsageError as error:
+        raise LetsInferError(str(error)) from error
+    selected = tuple(
+        item for item in candidates if item.category in selected_categories
+    )
+    if not arguments.clean:
+        if arguments.json:
+            print(json.dumps(report, sort_keys=True))
+        else:
+            _render_node_usage(report)
+            presenter = _human_presenter()
+            if presenter is not None and report["total_reclaimable_bytes"]:
+                presenter.result(
+                    "Cleanup available",
+                    semantic=command_ui.Semantic.INFO,
+                    detail="Run `letsinfer node usage --clean` to review and remove it",
+                )
+        return 0
+    if benchmark_active:
+        raise LetsInferError(
+            "storage cleanup is unavailable while a benchmark is active; "
+            "run `letsinfer benchmark stop` first"
+        )
+    selected_bytes = sum(item.usage.allocated_bytes for item in selected)
+    if not arguments.json:
+        _render_node_usage(report)
+    if not selected:
+        result = {
+            "cleanup_id": None,
+            "receipt": None,
+            "removed": [],
+            "removed_allocated_bytes": 0,
+            "models_to_download_again": [],
+        }
+        after = report
+    else:
+        if not arguments.yes:
+            presenter = _human_presenter()
+            if presenter is None or not sys.stdin.isatty():
+                raise LetsInferError(
+                    "node usage cleanup requires --yes in non-interactive use"
+                )
+            try:
+                confirmed = presenter.prompt.confirm(
+                    f"Remove {_storage_size(selected_bytes)} of unused Let’s Infer data?",
+                    require_tty=True,
+                )
+            except command_ui.PromptUnavailable as error:
+                raise LetsInferError("storage cleanup confirmation was cancelled") from error
+            if not confirmed:
+                raise CommandDenied("Storage cleanup cancelled")
+        reviewed = tuple(
+            (
+                item.category,
+                str(item.path),
+                item.device,
+                item.inode,
+                item.usage.allocated_bytes,
+            )
+            for item in selected
+        )
+        try:
+            with benchmark_jobs.cleanup_guard() as guarded_benchmark:
+                with storage_lock(letsinfer_home_root()):
+                    _refreshed_report, refreshed, refreshed_active = _node_usage_plan()
+                    refreshed_selected = tuple(
+                        item
+                        for item in refreshed
+                        if item.category in selected_categories
+                    )
+                    current = tuple(
+                        (
+                            item.category,
+                            str(item.path),
+                            item.device,
+                            item.inode,
+                            item.usage.allocated_bytes,
+                        )
+                        for item in refreshed_selected
+                    )
+                    if guarded_benchmark is not None or refreshed_active or current != reviewed:
+                        raise LetsInferError(
+                            "storage changed after review; rerun "
+                            "`letsinfer node usage --clean`"
+                        )
+                    result = execute_cleanup(
+                        letsinfer_home_root(), refreshed_selected
+                    )
+                    after, _unused, _active = _node_usage_plan()
+        except (StorageUsageError, benchmark_jobs.BenchmarkJobError) as error:
+            raise LetsInferError(str(error)) from error
+    output = {**after, "cleanup": result}
+    if arguments.json:
+        print(json.dumps(output, sort_keys=True))
+    else:
+        presenter = _human_presenter()
+        if presenter is not None:
+            rows = [
+                command_ui.RecordRow(
+                    "Removed",
+                    _storage_size(int(result["removed_allocated_bytes"])),
+                    f"{len(result['removed'])} item(s)",
+                    command_ui.Semantic.SUCCESS,
+                )
+            ]
+            if result["models_to_download_again"]:
+                rows.append(
+                    command_ui.RecordRow(
+                        "Model data",
+                        "Downloads again on start",
+                        ", ".join(result["models_to_download_again"]),
+                        command_ui.Semantic.INFO,
+                    )
+                )
+            if result["receipt"]:
+                rows.append(
+                    command_ui.RecordRow("Receipt", result["receipt"])
+                )
+            presenter.records(tuple(rows))
+    return 0
+
+
 def node_info_command(arguments: argparse.Namespace) -> int:
     """Show one selected node identity and hardware document."""
     try:
@@ -21674,6 +22224,22 @@ def parser() -> argparse.ArgumentParser:
     )
     node_list.add_argument("--json", action="store_true")
     node_list.set_defaults(action=member_list_command, action_id="node.list")
+    node_usage = node_operations.add_parser(
+        "usage",
+        help=help_label(
+            "show local storage and safely clean unused data", "node.usage"
+        ),
+    )
+    node_usage.add_argument("--clean", action="store_true")
+    node_usage.add_argument(
+        "--category",
+        action="append",
+        choices=sorted(RECLAIMABLE_CATEGORIES),
+        help="limit cleanup to a repeatable reclaimable category",
+    )
+    node_usage.add_argument("--yes", action="store_true")
+    node_usage.add_argument("--json", action="store_true")
+    node_usage.set_defaults(action=node_usage_command, action_id="node.usage")
     node_add = node_operations.add_parser(
         "add", help=help_label("discover, request, and approve a child node", "node.add")
     )

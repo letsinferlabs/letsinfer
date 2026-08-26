@@ -148,6 +148,12 @@ Receipts bind the candidate ID, version, pack digest, target contract, model,
 Engine distribution, installation identity, and selection policy. A bounded history
 supports explicit rollback.
 
+`letsinfer node usage` reports the local owned stores without double-counting
+Docker’s shared layer store. Its explicit cleanup preserves active snapshots
+and runtime rollback objects, but may remove model data used only by stopped
+groups; the sealed manifest then causes every affected replica or parallel
+member to download and verify that exact revision again before start.
+
 ## Building a candidate
 
 Validate candidate source with the runtimes repository tools:

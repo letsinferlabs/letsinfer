@@ -352,6 +352,23 @@
           ]
         }
       },
+      "node.usage": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": {
+          "action": "node.usage",
+          "categories": [
+            {
+              "allocated_bytes": 140000000000,
+              "id": "models",
+              "reclaimable_bytes": 12000000000
+            }
+          ],
+          "home": "/mock/letsinfer",
+          "total_allocated_bytes": 150000000000,
+          "total_reclaimable_bytes": 12000000000
+        }
+      },
       "status": {
         "exit_code": 0,
         "stderr": "",
@@ -861,6 +878,23 @@
               "state": "active"
             }
           ]
+        }
+      },
+      "node.usage": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": {
+          "action": "node.usage",
+          "categories": [
+            {
+              "allocated_bytes": 140000000000,
+              "id": "models",
+              "reclaimable_bytes": 12000000000
+            }
+          ],
+          "home": "/mock/letsinfer",
+          "total_allocated_bytes": 150000000000,
+          "total_reclaimable_bytes": 12000000000
         }
       },
       "node.pause": {

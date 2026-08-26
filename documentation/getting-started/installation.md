@@ -24,13 +24,21 @@ The default install asks for sudo to create the launcher and enable persistent
 user services. It does not put runtime data or secrets in a system directory.
 
 The Linux installer checks the Docker CLI, daemon, and operator access before
-downloading Let's Infer. Before initialization, it also verifies Docker from a
-transient systemd user service. If Docker is healthy but the operator cannot
-access `/var/run/docker.sock`, the installer can add that account to the
-socket's group after warning that Docker group membership is root-equivalent.
-Linux requires a fresh login before the new group reaches the shell, so sign in
-again and rerun the installer. If an already-running user service manager still
-has stale groups, the rerun offers to restart it before initialization continues.
+downloading Let's Infer. If Docker is absent, it explicitly invokes `sudo` and
+uses the distribution package manager: `docker.io` through apt on Ubuntu or
+Debian, `moby-engine` through dnf on Fedora, or `docker` through zypper on
+openSUSE/SLES and pacman on Arch/Manjaro. It then enables `docker.service` and
+verifies the installed CLI and daemon. Unsupported distributions stop with an
+error instead of guessing at packages or running a downloaded convenience
+installer; macOS installation never changes Docker.
+
+Before initialization, the installer also verifies Docker from a transient
+systemd user service. If Docker is healthy but the operator cannot access
+`/var/run/docker.sock`, the installer can add that account to the socket's
+group after warning that Docker group membership is root-equivalent. Linux
+requires a fresh login before the new group reaches the shell, so sign in again
+and rerun the installer. If an already-running user service manager still has
+stale groups, the rerun offers to restart it before initialization continues.
 
 For an install without administrator access:
 
@@ -39,7 +47,9 @@ curl -fsSL https://letsinfer.ai/install.sh | sh -s -- --user
 ```
 
 This exposes the command from `~/.local/bin`. Add that directory to `PATH` if
-your shell does not already include it.
+your shell does not already include it. The `--user` option does not make
+system dependencies rootless: if Docker is absent, automatic setup still needs
+`sudo`; use `--no-setup` to install only the Let's Infer files.
 
 Useful installer options:
 
