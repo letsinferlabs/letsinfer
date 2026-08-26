@@ -34,6 +34,8 @@ def _docker_installer_harness(
     docker_info_exit: int = 0,
     package_install_exit: int = 0,
     include_preflight: bool = True,
+    include_mdns: bool = False,
+    mdns_present: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     script = INSTALLER.read_text(encoding="utf-8")
     function_prefix, marker, _remainder = script.partition('\nwhile [ "$#" -gt 0 ]; do')
@@ -45,6 +47,7 @@ def _docker_installer_harness(
         fake_bin = root / "bin"
         fake_bin.mkdir()
         command_log = root / "commands.log"
+        mdns_service_marker = root / "mdns-service-active"
         os_release = root / "os-release"
         os_release.write_text(f'ID="{distribution}"\n', encoding="utf-8")
         (fake_bin / "python3").symlink_to(sys.executable)
@@ -64,6 +67,20 @@ esac
             (fake_bin / "docker").write_bytes(docker_template.read_bytes())
             (fake_bin / "docker").chmod(0o755)
 
+        avahi_publish_template = root / "avahi-publish-template"
+        avahi_browse_template = root / "avahi-browse-template"
+        _write_executable(avahi_publish_template, "#!/bin/sh\nexit 0\n")
+        _write_executable(avahi_browse_template, "#!/bin/sh\nexit 0\n")
+        if mdns_present:
+            (fake_bin / "avahi-publish-service").write_bytes(
+                avahi_publish_template.read_bytes()
+            )
+            (fake_bin / "avahi-publish-service").chmod(0o755)
+            (fake_bin / "avahi-browse").write_bytes(
+                avahi_browse_template.read_bytes()
+            )
+            (fake_bin / "avahi-browse").chmod(0o755)
+
         _write_executable(
             fake_bin / "sudo",
             """#!/bin/sh
@@ -79,6 +96,13 @@ exec "$@"
             fake_bin / "systemctl",
             """#!/bin/sh
 printf 'systemctl %s\n' "$*" >>"$FAKE_COMMAND_LOG"
+if [ "$*" = "is-active --quiet avahi-daemon.service" ]; then
+    [ -f "$FAKE_MDNS_SERVICE_MARKER" ]
+    exit
+fi
+if [ "$*" = "enable --now avahi-daemon.service" ]; then
+    : >"$FAKE_MDNS_SERVICE_MARKER"
+fi
 exit "${FAKE_SYSTEMCTL_EXIT:-0}"
 """,
         )
@@ -91,17 +115,29 @@ if [ "{manager}" = "apt-get" ] && [ "$1" = "update" ]; then
     exit 0
 fi
 [ "${{FAKE_PACKAGE_INSTALL_EXIT:-0}}" -eq 0 ] || exit "$FAKE_PACKAGE_INSTALL_EXIT"
-/bin/cp "$FAKE_DOCKER_TEMPLATE" "$FAKE_BIN/docker"
-/bin/chmod 0755 "$FAKE_BIN/docker"
+case " $* " in
+    *" avahi "*|*" avahi-daemon "*|*" avahi-utils "*|*" avahi-tools "*)
+        /bin/cp "$FAKE_AVAHI_PUBLISH_TEMPLATE" "$FAKE_BIN/avahi-publish-service"
+        /bin/cp "$FAKE_AVAHI_BROWSE_TEMPLATE" "$FAKE_BIN/avahi-browse"
+        /bin/chmod 0755 "$FAKE_BIN/avahi-publish-service" "$FAKE_BIN/avahi-browse"
+        ;;
+    *)
+        /bin/cp "$FAKE_DOCKER_TEMPLATE" "$FAKE_BIN/docker"
+        /bin/chmod 0755 "$FAKE_BIN/docker"
+        ;;
+esac
 exit 0
 """,
             )
 
         preflight = 'preflight_linux_docker "fixture-operator"' if include_preflight else ":"
+        mdns = 'ensure_platform_mdns "$1" "$2"' if include_mdns else ":"
         harness = (
             function_prefix
             + "\npython_command=python3\n"
             + '\nensure_platform_docker "$1" "$2"\n'
+            + mdns
+            + "\n"
             + preflight
             + "\n"
         )
@@ -112,6 +148,9 @@ exit 0
             "FAKE_BIN": str(fake_bin),
             "FAKE_COMMAND_LOG": str(command_log),
             "FAKE_DOCKER_TEMPLATE": str(docker_template),
+            "FAKE_AVAHI_PUBLISH_TEMPLATE": str(avahi_publish_template),
+            "FAKE_AVAHI_BROWSE_TEMPLATE": str(avahi_browse_template),
+            "FAKE_MDNS_SERVICE_MARKER": str(mdns_service_marker),
             "FAKE_DOCKER_VERSION_EXIT": str(docker_version_exit),
             "FAKE_DOCKER_INFO_EXIT": str(docker_info_exit),
             "FAKE_PACKAGE_INSTALL_EXIT": str(package_install_exit),
@@ -154,6 +193,32 @@ class BootstrapInstallTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(log, "")
+
+    def test_missing_ubuntu_avahi_is_installed_and_started(self) -> None:
+        result, log = _docker_installer_harness(
+            include_preflight=False,
+            include_mdns=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("apt-get install -y avahi-daemon avahi-utils", log)
+        self.assertIn("systemctl enable --now avahi-daemon.service", log)
+
+    def test_supported_distributions_use_native_avahi_packages(self) -> None:
+        scenarios = {
+            "debian": "apt-get install -y avahi-daemon avahi-utils",
+            "fedora": "dnf install -y avahi avahi-tools",
+            "opensuse-leap": "zypper --non-interactive install avahi avahi-utils",
+            "arch": "pacman --sync --needed --noconfirm avahi",
+        }
+        for distribution, package_command in scenarios.items():
+            with self.subTest(distribution=distribution):
+                result, log = _docker_installer_harness(
+                    distribution=distribution,
+                    include_preflight=False,
+                    include_mdns=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(package_command, log)
 
     def test_supported_distributions_use_declared_native_packages(self) -> None:
         scenarios = {
@@ -357,6 +422,7 @@ class BootstrapInstallTests(unittest.TestCase):
             script,
         )
         self.assertIn('ensure_platform_docker "$platform_os"', script)
+        self.assertIn('ensure_platform_mdns "$platform_os"', script)
         self.assertIn(
             "sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io",
             script,
@@ -365,6 +431,8 @@ class BootstrapInstallTests(unittest.TestCase):
         self.assertIn("sudo zypper --non-interactive install docker", script)
         self.assertIn("sudo pacman --sync --needed --noconfirm docker", script)
         self.assertNotIn("get.docker.com", script)
+        self.assertIn("avahi-daemon avahi-utils", script)
+        self.assertIn("avahi avahi-tools", script)
         self.assertIn('preflight_linux_docker "$operator"', script)
         self.assertIn("preflight_linux_docker_service", script)
         self.assertIn("Preparing platform networking", script)

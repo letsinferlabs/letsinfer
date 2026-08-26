@@ -298,6 +298,77 @@ ensure_platform_docker() {
     ensure_linux_docker "$os_release_path"
 }
 
+install_linux_mdns() {
+    os_release_path=$1
+    command -v sudo >/dev/null 2>&1 \
+        || fail "Avahi is unavailable and sudo is required to install it"
+    distribution=$(linux_distribution_id "$os_release_path") \
+        || fail "Linux distribution metadata is invalid: $os_release_path"
+    clear_progress
+    printf 'letsinfer install: installing local discovery support with sudo for %s.\n' \
+        "$distribution" >&2
+    case "$distribution" in
+        ubuntu|debian)
+            command -v apt-get >/dev/null 2>&1 \
+                || fail "$distribution local discovery installation requires apt-get"
+            sudo apt-get update \
+                || fail "apt could not refresh package metadata for local discovery"
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                avahi-daemon avahi-utils \
+                || fail "apt could not install local discovery support"
+            ;;
+        fedora)
+            command -v dnf >/dev/null 2>&1 \
+                || fail "Fedora local discovery installation requires dnf"
+            sudo dnf install -y avahi avahi-tools \
+                || fail "dnf could not install local discovery support"
+            ;;
+        opensuse-leap|opensuse-tumbleweed|sles)
+            command -v zypper >/dev/null 2>&1 \
+                || fail "$distribution local discovery installation requires zypper"
+            sudo zypper --non-interactive install avahi avahi-utils \
+                || fail "zypper could not install local discovery support"
+            ;;
+        arch|manjaro)
+            command -v pacman >/dev/null 2>&1 \
+                || fail "$distribution local discovery installation requires pacman"
+            sudo pacman --sync --needed --noconfirm avahi \
+                || fail "pacman could not install local discovery support"
+            ;;
+        *)
+            fail "automatic local discovery installation is unsupported on Linux distribution: $distribution"
+            ;;
+    esac
+    hash -r 2>/dev/null || :
+}
+
+ensure_linux_mdns() {
+    os_release_path=${1:-/etc/os-release}
+    if ! command -v avahi-publish-service >/dev/null 2>&1 \
+        || ! command -v avahi-browse >/dev/null 2>&1; then
+        install_linux_mdns "$os_release_path"
+    fi
+    command -v avahi-publish-service >/dev/null 2>&1 \
+        || fail "local discovery publisher remains unavailable after installation"
+    command -v avahi-browse >/dev/null 2>&1 \
+        || fail "local node discovery remains unavailable after installation"
+    if ! systemctl is-active --quiet avahi-daemon.service; then
+        command -v sudo >/dev/null 2>&1 \
+            || fail "sudo is required to start local discovery"
+        sudo systemctl enable --now avahi-daemon.service \
+            || fail "local discovery installed, but avahi-daemon.service could not start"
+    fi
+    systemctl is-active --quiet avahi-daemon.service \
+        || fail "local discovery daemon is unavailable"
+}
+
+ensure_platform_mdns() {
+    target_platform=$1
+    os_release_path=${2:-/etc/os-release}
+    [ "$target_platform" = "linux" ] || return 0
+    ensure_linux_mdns "$os_release_path"
+}
+
 preflight_linux_docker() {
     operator=$1
     if docker info >/dev/null 2>&1; then
@@ -504,6 +575,7 @@ if [ "$run_setup" -eq 1 ] && [ "$platform_os" = "linux" ]; then
             || fail "automatic Linux setup requires: $setup_command"
     done
     ensure_platform_docker "$platform_os"
+    ensure_platform_mdns "$platform_os"
     operator=$(id -un)
     preflight_linux_docker "$operator"
 fi
