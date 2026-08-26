@@ -149,6 +149,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --home) shift 2 ;;
         --launcher-root) launcher_root=$2; shift 2 ;;
+        --python) printf '%s\n' "$2" >"$FAKE_PYTHON_PATH_FILE"; shift 2 ;;
         *) exit 2 ;;
     esac
 done
@@ -203,11 +204,13 @@ exit "${FAKE_SETUP_STATUS:-0}"
         run_root = self.root / f"run-{self.run_number}"
         run_root.mkdir()
         setup_args = run_root / "setup-args"
+        python_path = run_root / "python-path"
         environment = os.environ.copy()
         environment.pop("NO_COLOR", None)
         environment.update(
             {
                 "FAKE_SETUP_ARGS_FILE": str(setup_args),
+                "FAKE_PYTHON_PATH_FILE": str(python_path),
                 "FAKE_SETUP_STDOUT": json.dumps(
                     {
                         "display_name": "Home",
@@ -316,6 +319,44 @@ exit "${FAKE_SETUP_STATUS:-0}"
             "Let's Infer 1.2.3 installed and initialized for macos/arm64.", output
         )
 
+    def test_macos_persists_a_compatible_python(self) -> None:
+        environment = self._environment()
+        result = self._run_pipe(environment)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selected = pathlib.Path(environment["FAKE_PYTHON_PATH_FILE"]).read_text(
+            encoding="utf-8"
+        ).strip()
+        self.assertTrue(pathlib.Path(selected).is_absolute())
+        verified = subprocess.run(
+            [
+                selected,
+                "-c",
+                (
+                    "import hashlib,http.server,plistlib,sqlite3,ssl,urllib.request;"
+                    "hashlib.sha256(b'letsinfer').digest();"
+                    "sqlite3.connect(':memory:').close();"
+                    "plistlib.dumps({'letsinfer':True});"
+                    "raise SystemExit(not ssl.HAS_TLSv1_3)"
+                ),
+            ],
+            check=False,
+        )
+        self.assertEqual(verified.returncode, 0)
+
+    def test_macos_rejects_an_explicit_incompatible_python_before_mutation(self) -> None:
+        incompatible = self.root / "incompatible-python"
+        self._executable(incompatible, "#!/bin/sh\nexit 1\n")
+        environment = self._environment(LETSINFER_PYTHON=str(incompatible))
+
+        result = self._run_pipe(environment)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "working Python 3.9 or newer with TLS 1.3 support", result.stderr
+        )
+        self.assertFalse(pathlib.Path(environment["LETSINFER_HOME"]).exists())
+
     def test_no_color_keeps_progress_but_emits_no_color_sequences(self) -> None:
         environment = self._environment(NO_COLOR="1")
         status, output = self._run_tty(environment)
@@ -392,6 +433,9 @@ exit "${FAKE_SETUP_STATUS:-0}"
         )
         self.assertFalse(
             pathlib.Path(environment["FAKE_SETUP_ARGS_FILE"]).exists()
+        )
+        self.assertFalse(
+            pathlib.Path(environment["FAKE_PYTHON_PATH_FILE"]).exists()
         )
 
     def test_linux_requires_explicit_approval_for_docker_group_enrollment(self) -> None:

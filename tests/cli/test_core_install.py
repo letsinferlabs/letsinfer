@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -31,18 +32,39 @@ class CoreInstallTests(unittest.TestCase):
             home = prefix / "share/letsinfer"
             launchers = prefix / "bin"
             self.addCleanup(self._restore_directory_modes, prefix)
-            first = install(REPOSITORY_ROOT, home, launcher_root=launchers)
-            second = install(REPOSITORY_ROOT, home, launcher_root=launchers)
+            python = pathlib.Path(sys.executable).resolve()
+            first = install(
+                REPOSITORY_ROOT,
+                home,
+                launcher_root=launchers,
+                python_executable=python,
+            )
+            second = install(
+                REPOSITORY_ROOT,
+                home,
+                launcher_root=launchers,
+                python_executable=python,
+            )
             self.assertEqual(first, second)
             source = pathlib.Path(first["source_root"])
             self.assertTrue((launchers / "letsinfer").is_symlink())
             self.assertEqual((launchers / "letsinfer").resolve(), source / "bin/letsinfer")
             self.assertEqual((home / "core/current").resolve(), source)
+            self.assertTrue((home / "core/python").is_symlink())
+            self.assertEqual((home / "core/python").resolve(), python)
             completed = subprocess.run(
                 [str(launchers / "letsinfer"), "--help"],
                 check=False,
                 capture_output=True,
                 text=True,
+                env={
+                    key: value
+                    for key, value in {
+                        **os.environ,
+                        "LETSINFER_HOME": str(home),
+                    }.items()
+                    if key != "LETSINFER_PYTHON"
+                },
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("Let's Infer", completed.stdout)
@@ -59,6 +81,17 @@ class CoreInstallTests(unittest.TestCase):
             self.assertFalse((source / "letsinfer.md").exists())
             self.assertFalse((source / "context").exists())
             self.assertFalse((source / "scratchpad").exists())
+
+    def test_invalid_python_fails_before_installation_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary) / "share/letsinfer"
+            with self.assertRaisesRegex(CoreInstallError, "absolute path"):
+                install(
+                    REPOSITORY_ROOT,
+                    home,
+                    python_executable=pathlib.Path("python3"),
+                )
+            self.assertFalse(home.exists())
 
     def test_existing_regular_launcher_is_not_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

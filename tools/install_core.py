@@ -95,9 +95,21 @@ def install(
     home: pathlib.Path,
     *,
     launcher_root: pathlib.Path | None = None,
+    python_executable: pathlib.Path | None = None,
 ) -> dict[str, Any]:
     source = source.resolve(strict=True)
     home = home.expanduser().resolve(strict=False)
+    python: pathlib.Path | None = None
+    if python_executable is not None:
+        if not python_executable.is_absolute():
+            raise CoreInstallError("Python executable must be an absolute path")
+        try:
+            python = pathlib.Path(os.path.abspath(python_executable))
+            details = python.stat()
+        except OSError as error:
+            raise CoreInstallError("Python executable is unavailable") from error
+        if not stat.S_ISREG(details.st_mode) or not os.access(python, os.X_OK):
+            raise CoreInstallError("Python executable must be a regular executable")
     if home in {pathlib.Path("/"), pathlib.Path.home()}:
         raise CoreInstallError("LETSINFER_HOME is too broad")
     if home.exists() and (home.is_symlink() or not home.is_dir()):
@@ -170,6 +182,8 @@ def install(
             raise
         _verify_installed_tree(destination, manifest)
     _atomic_link(core / "current", destination, parent_mode=0o700)
+    if python is not None:
+        _atomic_link(core / "python", python, parent_mode=0o700)
     bin_root = launcher_root.expanduser().resolve(strict=False) if launcher_root else None
     for name in LAUNCHERS:
         target = core / "current" / "bin" / name
@@ -197,9 +211,15 @@ def main(arguments: Sequence[str] | None = None) -> int:
         default=pathlib.Path(os.environ.get("LETSINFER_HOME", "~/.local/share/letsinfer")),
     )
     parser.add_argument("--launcher-root", type=pathlib.Path)
+    parser.add_argument("--python", type=pathlib.Path)
     parsed = parser.parse_args(arguments)
     try:
-        result = install(parsed.source, parsed.home, launcher_root=parsed.launcher_root)
+        result = install(
+            parsed.source,
+            parsed.home,
+            launcher_root=parsed.launcher_root,
+            python_executable=parsed.python,
+        )
     except CoreInstallError as error:
         parser.error(str(error))
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
