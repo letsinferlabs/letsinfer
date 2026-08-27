@@ -18,6 +18,7 @@ import http.server
 import ipaddress
 import io
 import json
+import math
 import os
 import pathlib
 import platform
@@ -1895,6 +1896,63 @@ def parse_mem_total_gib(text: str) -> int:
     raise LetsInferError("MemTotal is missing from /proc/meminfo")
 
 
+def parse_linux_installed_memory_gib(
+    root: pathlib.Path = pathlib.Path("/sys/devices/system/memory"),
+) -> int:
+    """Return installed online RAM from Linux's kernel memory-block inventory."""
+
+    try:
+        block_text = (root / "block_size_bytes").read_text(
+            encoding="ascii"
+        ).strip()
+        online_text = (root / "online").read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError) as error:
+        raise LetsInferError("Linux installed-memory inventory is unavailable") from error
+    if not re.fullmatch(r"[0-9a-fA-F]+", block_text) or not re.fullmatch(
+        r"[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*",
+        online_text,
+    ):
+        raise LetsInferError("Linux installed-memory inventory is invalid")
+    block_bytes = int(block_text, 16)
+    if block_bytes <= 0 or block_bytes > 1024**4:
+        raise LetsInferError("Linux memory-block size is invalid")
+    block_count = 0
+    previous_end = -1
+    for token in online_text.split(","):
+        fields = token.split("-", 1)
+        start = int(fields[0])
+        end = int(fields[-1])
+        if start > end or start <= previous_end:
+            raise LetsInferError("Linux online-memory block ranges are invalid")
+        block_count += end - start + 1
+        previous_end = end
+    total_bytes = block_count * block_bytes
+    if total_bytes <= 0 or total_bytes > 1024**5:
+        raise LetsInferError("Linux installed-memory capacity is invalid")
+    return max(1, (total_bytes + (1024**3) // 2) // (1024**3))
+
+
+def parse_nvidia_memory_capacity_gib(rows: Sequence[str]) -> int | None:
+    """Return nominal per-GPU capacity, or None for true unified memory."""
+
+    unavailable = {"N/A", "NOT SUPPORTED"}
+    normalized = [value.strip().upper() for value in rows]
+    if normalized and all(value in unavailable for value in normalized):
+        return None
+    if not normalized or any(value in unavailable for value in normalized):
+        raise LetsInferError("NVIDIA accelerator memory inventory is inconsistent")
+    capacities: list[int] = []
+    for value in normalized:
+        try:
+            memory_mib = float(value)
+        except ValueError as error:
+            raise LetsInferError("nvidia-smi reported invalid accelerator memory") from error
+        if not math.isfinite(memory_mib) or memory_mib <= 0:
+            raise LetsInferError("nvidia-smi reported invalid accelerator memory")
+        capacities.append(max(1, int(memory_mib / 1024 + 0.5)))
+    return min(capacities)
+
+
 def gpu_count() -> int:
     result = run(["nvidia-smi", "-L"], check=False)
     if result.returncode != 0:
@@ -1984,15 +2042,19 @@ def host_device_fingerprint() -> dict[str, Any]:
             "target auto-detection requires homogeneous NVIDIA compute capability"
         )
     addressing = [value.upper() for value in nvidia_query("addressing_mode", count)]
-    topology = "unified" if all(value == "ATS" for value in addressing) else "discrete"
+    supported_addressing = {"ATS", "HMM", "NONE", "N/A", "NOT SUPPORTED"}
+    if any(value not in supported_addressing for value in addressing):
+        raise LetsInferError(
+            "nvidia-smi reported an unknown NVIDIA addressing mode: "
+            + ", ".join(addressing)
+        )
     memory_rows = nvidia_query("memory.total", count)
-    accelerator_memory: list[int] = []
-    for value in memory_rows:
-        if value.upper() not in {"N/A", "NOT SUPPORTED"}:
-            try:
-                accelerator_memory.append(int(float(value)) // 1024)
-            except ValueError as error:
-                raise LetsInferError("nvidia-smi reported invalid accelerator memory") from error
+    accelerator_memory = parse_nvidia_memory_capacity_gib(memory_rows)
+    topology = "unified" if accelerator_memory is None else "discrete"
+    if topology == "unified" and any(value != "ATS" for value in addressing):
+        raise LetsInferError(
+            "NVIDIA unified memory requires ATS on every physical accelerator"
+        )
     meminfo = pathlib.Path("/proc/meminfo").read_text(encoding="utf-8")
     accelerator: dict[str, Any] = {
         "vendor": "nvidia",
@@ -2001,15 +2063,19 @@ def host_device_fingerprint() -> dict[str, Any]:
         "partitioning": gpu_partitioning_mode(count),
         "names": nvidia_query("name", count),
     }
-    if len(accelerator_memory) == count:
-        accelerator["minimum_memory_gib"] = min(accelerator_memory)
+    if accelerator_memory is not None:
+        accelerator["minimum_memory_gib"] = accelerator_memory
     accelerator["uuids"] = nvidia_query("uuid", count)
     return {
         "platform": host_platform(),
         "accelerator": accelerator,
         "memory": {
             "topology": topology,
-            "total_gib": parse_mem_total_gib(meminfo),
+            "total_gib": (
+                parse_linux_installed_memory_gib()
+                if topology == "discrete"
+                else parse_mem_total_gib(meminfo)
+            ),
             "addressing_modes": addressing,
         },
     }
@@ -19474,6 +19540,11 @@ def _topology_status_snapshot() -> dict[str, Any]:
             if isinstance(facts.get("accelerator"), Mapping)
             else {}
         )
+        member_memory = (
+            facts.get("memory")
+            if isinstance(facts.get("memory"), Mapping)
+            else {}
+        )
         accelerator_name = (
             inventory.get("gpu_name")
             if isinstance(inventory, Mapping) and inventory.get("gpu_name")
@@ -19519,11 +19590,10 @@ def _topology_status_snapshot() -> dict[str, Any]:
                 "accelerator": accelerator_name,
                 "connection": connection,
                 "accelerator_count": accelerator.get("count"),
-                "memory_total_gib": (
-                    facts.get("memory", {}).get("total_gib")
-                    if isinstance(facts.get("memory"), Mapping)
-                    else None
-                ),
+                "memory_topology": member_memory.get("topology"),
+                "accelerator_memory_gib": accelerator.get("minimum_memory_gib"),
+                "system_memory_gib": member_memory.get("total_gib"),
+                "memory_total_gib": member_memory.get("total_gib"),
                 "models": sorted(
                     models_by_member[member_id],
                     key=lambda row: (str(row["model"]), str(row["group_id"])),
