@@ -30,13 +30,33 @@ class LinuxHardwareInventoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "block_size_bytes").write_text("80000000\n", encoding="ascii")
-            (root / "online").write_text("0,2-48\n", encoding="ascii")
+            for index in (0, *range(2, 49)):
+                block = root / f"memory{index}"
+                block.mkdir()
+                (block / "state").write_text("online\n", encoding="ascii")
 
             self.assertEqual(cli.parse_linux_installed_memory_gib(root), 96)
 
-            (root / "online").write_text("0-2,2-4\n", encoding="ascii")
-            with self.assertRaisesRegex(cli.LetsInferError, "ranges"):
+            (root / "memory48" / "state").write_text(
+                "offline\n", encoding="ascii"
+            )
+            self.assertEqual(cli.parse_linux_installed_memory_gib(root), 94)
+
+            (root / "memory48" / "state").write_text(
+                "going-offline\n", encoding="ascii"
+            )
+            with self.assertRaisesRegex(cli.LetsInferError, "state is invalid"):
                 cli.parse_linux_installed_memory_gib(root)
+
+    def test_kernel_memory_blocks_support_online_attribute(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "block_size_bytes").write_text("40000000\n", encoding="ascii")
+            block = root / "memory0"
+            block.mkdir()
+            (block / "online").write_text("1\n", encoding="ascii")
+
+            self.assertEqual(cli.parse_linux_installed_memory_gib(root), 1)
 
     def test_nvidia_memory_capacity_distinguishes_discrete_and_unified(self) -> None:
         self.assertEqual(cli.parse_nvidia_memory_capacity_gib(["32607"]), 32)
