@@ -44,7 +44,9 @@ Only runtime schema 6 is accepted. The top-level fields are:
 `orchestration` is optional. Unknown fields fail closed. Derive `id` exactly
 from `engine.id`, the primary Hugging Face URI, and `target.id`. Executable
 runtime source contains no qualification or publication status. A release is
-qualified only by inclusion in the signed catalog.
+qualified only by inclusion in the signed catalog. Qualification affects
+evidence claims and catalog recommendation, not whether an operator-selected
+runtime receives managed placement, lifecycle, status, or routing.
 
 `release.json` is deliberately small and is not included in the executable
 runtime pack:

@@ -110,10 +110,13 @@ versions, compatible targets, refreshed catalog state, and JSON output.
 
 ### `letsinfer model install [MODEL]`
 
-Installs a named model through the signed catalog and target matcher, or opens
-the node/model selector when `MODEL` is omitted. Assigning the same model to
-multiple compatible nodes creates replicas automatically, while different
-selections create independent services.
+Installs a named model through the signed catalog and target matcher, accepts
+an explicit local runtime directory, archive, or digest-pinned runtime OCI, or
+opens the node/model selector when `MODEL` is omitted. Assigning the same model
+to multiple compatible nodes creates replicas automatically, while an exact
+operator-selected source remains unqualified but receives the ordinary
+managed group and route; use `--node` to bind a compatible node, and use OCI
+when a content-addressed local object is not already present on a remote child.
 
 ### `letsinfer model remove MODEL`
 
