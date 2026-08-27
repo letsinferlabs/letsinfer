@@ -95,14 +95,14 @@ Parallelism stays inside an exact runtime. The target declares its required
 node count, GPUs per node, memory, and verified interconnect. Its optional
 orchestration contract declares generic node tasks, startup phases, readiness,
 and one endpoint owner. Core allocates authenticated resources and manages the
-group atomically; the Engine distribution privately turns those tasks into ranks,
+placement group atomically; the Engine distribution privately turns those tasks into ranks,
 pipeline stages, collectives, and engine commands.
 
 This keeps power with runtime authors: a new TP degree, PP schedule, GPU count,
 transport, kernel, or engine configuration is a new runtime candidate, not a
 core feature. Core changes only when a genuinely new generic resource or
-secure orchestration primitive is required. The gateway routes complete group
-endpoints and can replicate a complete parallel group without rewriting it.
+secure orchestration primitive is required. The gateway routes complete
+placement-group endpoints and can replicate a parallel placement group unchanged.
 
 ## Qualification and recommendations
 
@@ -114,7 +114,7 @@ OCI, model revision, or runtime pack.
 Qualification is evidence and recommendation metadata. It is not permission
 to execute. A catalog install uses qualification to choose the recommended
 candidate; an explicit install of exact runtime bytes remains operator policy
-and enters the same managed engine-group placement, allocation, lifecycle,
+and enters the same managed placement-group placement, allocation, lifecycle,
 status, and routing path. Core never marks direct bytes qualified, and direct
 installation does not publish them or add them to the signed catalog.
 
@@ -161,8 +161,8 @@ rollback, and schema-3 receipts are migrated when read.
 `letsinfer node usage` reports the local owned stores without double-counting
 Docker’s shared layer store. Its explicit cleanup preserves active snapshots
 and runtime rollback objects, but may remove model data used only by stopped
-groups; the sealed manifest then causes every affected replica or parallel
-member to download and verify that exact revision again before start.
+placement groups; the sealed manifest then causes every affected placement to
+download and verify that exact revision again before start.
 
 ## Building a candidate
 

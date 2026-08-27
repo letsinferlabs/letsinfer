@@ -4,7 +4,7 @@ import Security
 final class EngineAccessKeyStore {
     private let service = "ai.letsinfer.ios.engine-access"
     private let account = "default"
-    private let groupAccount = "active-group"
+    private let placementGroupAccount = "active-placement-group"
 
     func key() throws -> String {
         let query: [CFString: Any] = [
@@ -43,37 +43,39 @@ final class EngineAccessKeyStore {
         guard let header, header.hasPrefix("Bearer ")
         else { return false }
         let candidate = String(header.dropFirst("Bearer ".count))
-        let expected = [try? key(), groupKey()].compactMap { $0 }
+        let expected = [try? key(), placementGroupKey()].compactMap { $0 }
         return expected.contains {
             constantTimeEqual(Data(candidate.utf8), Data($0.utf8))
         }
     }
 
-    func setGroupKey(_ value: String?) throws {
+    func setPlacementGroupKey(_ value: String?) throws {
         SecItemDelete([
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
-            kSecAttrAccount: groupAccount,
+            kSecAttrAccount: placementGroupAccount,
         ] as CFDictionary)
         guard let value else { return }
         let status = SecItemAdd([
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
-            kSecAttrAccount: groupAccount,
+            kSecAttrAccount: placementGroupAccount,
             kSecValueData: Data(value.utf8),
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ] as CFDictionary, nil)
         guard status == errSecSuccess else {
-            throw NodeError.crypto("Could not store the group Engine key (\(status))")
+            throw NodeError.crypto(
+                "Could not store the placement-group Engine key (\(status))"
+            )
         }
     }
 
-    private func groupKey() -> String? {
+    private func placementGroupKey() -> String? {
         var item: CFTypeRef?
         let status = SecItemCopyMatching([
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
-            kSecAttrAccount: groupAccount,
+            kSecAttrAccount: placementGroupAccount,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne,
         ] as CFDictionary, &item)

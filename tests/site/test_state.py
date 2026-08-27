@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from core.orchestration import build_single_group_plan
+from core.orchestration import build_single_placement_group_plan
 from tests.gateway.helpers import insert_member, routing_facts, set_member_facts
 from tests.orchestration.helpers import release_identity
 from core.site import state
@@ -30,6 +30,52 @@ class SiteStateTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.environment.stop()
         self.temporary.cleanup()
+
+    def register_group(
+        self,
+        store: state.SiteStore,
+        identity: state.SiteIdentity,
+        *,
+        model: str = "fixture-model",
+        runtime_digit: str = "3",
+        topology_digit: str = "1",
+    ):
+        release = release_identity(
+            manifest_sha256="2" * 64,
+            runtime_digest=runtime_digit * 64,
+        )
+        service_id = store.ensure_model_service(model)["service_id"]
+        plan = build_single_placement_group_plan(
+            member_id=identity.member_id,
+            member_address="node.local:9770",
+            device_uuids=[f"GPU-{identity.member_id[:8]}"],
+            topology_sha256=topology_digit * 64,
+            manifest_sha256="2" * 64,
+            runtime_digest=runtime_digit * 64,
+            service_id=service_id,
+            release=release,
+            port_base=18000,
+        )
+        store.register_placement_group(
+            plan.document(),
+            source=release["source"],
+            model=model,
+            runtime=f"{model}/fixture-engine/fixture-target@{runtime_digit}",
+            target="fixture-target",
+            capacity={
+                "max_connections": 16,
+                "max_active_requests": 1,
+                "max_context_tokens": 4096,
+                "interconnect": {
+                    "kind": "any",
+                    "rdma_required": False,
+                    "minimum_speed_mbps": 0,
+                    "minimum_mtu": 0,
+                },
+            },
+            engine_credential_sha256="6" * 64,
+        )
+        return plan, release
 
     def test_setup_separates_site_and_member_keys(self) -> None:
         identity = state.setup_site("Home", "127.0.0.1")
@@ -75,73 +121,62 @@ class SiteStateTests(unittest.TestCase):
         with self.assertRaisesRegex(state.SiteError, "cannot be a symlink"):
             state.read_exposure_for_cleanup()
         with self.assertRaisesRegex(state.SiteError, "cannot be a symlink"):
-            state.has_active_engine_groups_for_cleanup()
+            state.has_active_placement_groups_for_cleanup()
 
-    def test_cleanup_detects_active_engine_groups_without_identity(self) -> None:
+    def test_cleanup_detects_active_placement_groups_without_identity(self) -> None:
         identity = state.setup_site("Home", "127.0.0.1")
         with state.SiteStore(identity=identity) as store:
-            store.connection.execute(
-                "INSERT INTO model_services(service_id,model,desired_state,"
-                "created_at_unix,updated_at_unix) "
-                "VALUES('service','fixture-model','running',1,1)"
-            )
-            store.connection.execute(
-                "INSERT INTO placements(placement_id,service_id,model,runtime,target,"
-                "strategy,state,topology_sha256,members_json,endpoints_json,capacity_json,"
-                "updated_at_unix) VALUES('placement','service','fixture-model','runtime',"
-                "'target','single','active',?, '[]','[]','{}',1)",
-                ("b" * 64,),
-            )
-            store.connection.execute(
-                "INSERT INTO engine_groups(group_id,placement_id,source,runtime_digest,"
-                "manifest_sha256,topology_sha256,engine_credential_sha256,strategy,"
-                "runtime_execution_contract_sha256,failure_policy,required_tasks,plan_json,"
-                "plan_sha256,desired_state,state,members_json,created_at_unix,updated_at_unix) "
-                "VALUES('group','placement',?,?,?,?,?,'single',?,'independent',1,'{}',?,"
-                "'running','running','[]',1,1)",
-                tuple("c" * 64 for _item in range(7)),
-            )
+            plan, _release = self.register_group(store, identity)
+            placement_group_id = plan.placement_group_id
             state.identity_path().unlink()
-            self.assertTrue(state.has_active_engine_groups_for_cleanup())
+            self.assertTrue(state.has_active_placement_groups_for_cleanup())
             for incomplete_state in ("failed", "removing"):
                 store.connection.execute(
-                    "UPDATE engine_groups SET desired_state='removed', state=? "
-                    "WHERE group_id='group'",
-                    (incomplete_state,),
+                    "UPDATE placement_groups SET desired_state='removed', state=? "
+                    "WHERE placement_group_id=?",
+                    (incomplete_state, placement_group_id),
                 )
-                self.assertTrue(state.has_active_engine_groups_for_cleanup())
+                self.assertTrue(state.has_active_placement_groups_for_cleanup())
             store.connection.execute(
-                "UPDATE engine_groups SET state='removed' WHERE group_id='group'"
+                "UPDATE placement_groups SET state='removed' "
+                "WHERE placement_group_id=?",
+                (placement_group_id,),
             )
-            self.assertFalse(state.has_active_engine_groups_for_cleanup())
+            self.assertFalse(state.has_active_placement_groups_for_cleanup())
 
-    def test_empty_engine_group_storage_migrates_to_generic_execution_columns(self) -> None:
+    def test_schema_four_contains_only_placement_group_and_placement_state(self) -> None:
         identity = state.setup_site("Home", "127.0.0.1")
-        with sqlite3.connect(state.database_path()) as connection:
-            connection.execute(
-                "ALTER TABLE engine_groups RENAME COLUMN "
-                "runtime_execution_contract_sha256 TO engine_strategy"
-            )
-            connection.execute(
-                "ALTER TABLE engine_groups RENAME COLUMN "
-                "required_tasks TO minimum_healthy_members"
-            )
-            connection.execute(
-                "UPDATE site_meta SET value='2' WHERE key='schema_version'"
-            )
         with state.SiteStore(identity=identity) as store:
-            columns = {
+            group_columns = {
                 row["name"]
-                for row in store.connection.execute("PRAGMA table_info(engine_groups)")
+                for row in store.connection.execute("PRAGMA table_info(placement_groups)")
             }
-            self.assertIn("runtime_execution_contract_sha256", columns)
-            self.assertIn("required_tasks", columns)
-            self.assertNotIn("engine_strategy", columns)
+            placement_columns = {
+                row["name"]
+                for row in store.connection.execute("PRAGMA table_info(placements)")
+            }
+            request_summary_columns = {
+                row["name"]
+                for row in store.connection.execute(
+                    "PRAGMA table_info(request_summaries)"
+                )
+            }
+            self.assertIn("endpoint_json", group_columns)
+            self.assertIn("plan_json", group_columns)
+            self.assertNotIn("placement_id", group_columns)
+            self.assertNotIn("strategy", group_columns)
+            self.assertIn("placement_group_id", placement_columns)
+            self.assertIn("node_id", placement_columns)
+            self.assertIn("task_id", placement_columns)
+            self.assertIn("placement_group_id", request_summary_columns)
+            self.assertIn("placement_id", request_summary_columns)
+            self.assertIn("node_id", request_summary_columns)
+            self.assertNotIn("member_id", request_summary_columns)
             self.assertEqual(
                 store.connection.execute(
                     "SELECT value FROM site_meta WHERE key='schema_version'"
                 ).fetchone()[0],
-                "3",
+                "4",
             )
 
     def test_fresh_adoption_window_expires_and_closes_after_external_pairing(self) -> None:
@@ -275,19 +310,32 @@ class SiteStateTests(unittest.TestCase):
             self.assertEqual(store.controllers(), [])
             self.assertEqual(store.verify_audit()["events"], before + 2)
 
-    def test_placement_schema_is_closed_and_rejects_numeric_coercion(self) -> None:
+    def test_placement_group_endpoint_schema_is_closed(self) -> None:
         identity = state.setup_site()
-        placement = {
-            "placement_id": "a" * 32,
-            "model": "fixture-model",
-            "runtime": "fixture-model/fixture-engine/fixture-target@1",
-            "target": "fixture-target",
-            "strategy": "single",
-            "state": "running",
-            "topology_sha256": "b" * 64,
-            "members": [identity.member_id],
-            "endpoints": [{
-                "member_id": identity.member_id,
+        with state.SiteStore(identity=identity) as store:
+            plan, release = self.register_group(store, identity)
+            placement = plan.placements[0]
+            store.set_placement_group(
+                plan.document(),
+                source=release["source"],
+                engine_credential_sha256="6" * 64,
+                desired_state="running",
+                state="running",
+                placements=[
+                    {
+                        "placement_id": placement.placement_id,
+                        "node_id": placement.node_id,
+                        "task_id": placement.task_id,
+                        "state": "running",
+                        "operation_id": "a" * 32,
+                        "error": None,
+                    }
+                ],
+                action="placement_group.start",
+            )
+            endpoint = {
+                "placement_id": placement.placement_id,
+                "node_id": placement.node_id,
                 "url": "http://127.0.0.1:18000",
                 "credential_file": str(state.config_root() / "engine.key"),
                 "ca_file": None,
@@ -299,98 +347,64 @@ class SiteStateTests(unittest.TestCase):
                 "memory_pressure": False,
                 "temperature_c": -1,
                 "prefix_keys": [],
-            }],
-            "capacity": {
-                "max_connections": 16,
-                "max_active_requests": 1,
-                "max_context_tokens": 4096,
-            },
-        }
-        with state.SiteStore(identity=identity) as store:
-            placement["service_id"] = store.ensure_model_service(
-                "fixture-model"
-            )["service_id"]
-            store.set_placement(placement)
-            invalid: list[tuple[str, dict]] = []
-            for label, path, value in (
-                ("boolean endpoint capacity", ("endpoints", 0, "max_active_requests"), True),
-                ("string endpoint capacity", ("endpoints", 0, "max_context_tokens"), "4096"),
-                ("boolean aggregate capacity", ("capacity", "max_active_requests"), False),
-                ("non-string prefix", ("endpoints", 0, "prefix_keys"), [1]),
-                ("public plaintext backend", ("endpoints", 0, "url"), "http://192.0.2.1:18000"),
-            ):
-                candidate = copy.deepcopy(placement)
-                target = candidate
-                for item in path[:-1]:
-                    target = target[item]
-                target[path[-1]] = value
-                invalid.append((label, candidate))
-            extra_endpoint = copy.deepcopy(placement)
-            extra_endpoint["endpoints"][0]["internal_note"] = "not-schema"
-            invalid.append(("unknown endpoint field", extra_endpoint))
-            extra_capacity = copy.deepcopy(placement)
-            extra_capacity["capacity"]["scheduler_hint"] = 1
-            invalid.append(("unknown capacity field", extra_capacity))
-            no_endpoint = copy.deepcopy(placement)
-            no_endpoint["endpoints"] = []
-            invalid.append(("running without endpoint", no_endpoint))
-
-            for label, candidate in invalid:
-                with self.subTest(label=label):
-                    with self.assertRaises(state.SiteError):
-                        store.set_placement(candidate)
-
-    def test_replica_placements_for_one_model_service_can_run_together(self) -> None:
-        identity = state.setup_site()
-        endpoint = {
-            "member_id": identity.member_id,
-            "url": "http://127.0.0.1:18000",
-            "credential_file": str(state.config_root() / "engine.key"),
-            "ca_file": None,
-            "token_count_path": "/v1/token-count",
-            "token_count_protocol": "letsinfer-token-count-v1",
-            "max_active_requests": 1,
-            "max_context_tokens": 4096,
-            "healthy": True,
-            "memory_pressure": False,
-            "temperature_c": -1,
-            "prefix_keys": [],
-        }
-        first = {
-            "placement_id": "a" * 32,
-            "model": "fixture-model",
-            "runtime": "fixture-model/fixture-engine/fixture-target@1",
-            "target": "fixture-target",
-            "strategy": "single",
-            "state": "running",
-            "topology_sha256": "b" * 64,
-            "members": [identity.member_id],
-            "endpoints": [endpoint],
-            "capacity": {
-                "max_connections": 16,
-                "max_active_requests": 1,
-                "max_context_tokens": 4096,
-            },
-        }
-        second = copy.deepcopy(first)
-        second.update(
-            {
-                "placement_id": "c" * 32,
-                "runtime": "fixture-model/fixture-engine/fixture-target@2",
-                "topology_sha256": "d" * 64,
             }
-        )
+            running = store.set_placement_group_endpoint(
+                plan.placement_group_id,
+                endpoint,
+                state="running",
+            )
+            self.assertEqual(running["endpoint"], endpoint)
+
+            unknown = {**endpoint, "internal_note": "not-schema"}
+            with self.assertRaises(state.SiteError):
+                store.set_placement_group_endpoint(
+                    plan.placement_group_id,
+                    unknown,
+                    state="running",
+                )
+            wrong = {**endpoint, "placement_id": "f" * 32}
+            with self.assertRaises(state.SiteError):
+                store.set_placement_group_endpoint(
+                    plan.placement_group_id,
+                    wrong,
+                    state="running",
+                )
+            with self.assertRaises(state.SiteError):
+                store.set_placement_group_endpoint(
+                    plan.placement_group_id,
+                    None,
+                    state="running",
+                )
+
+
+    def test_replica_placement_groups_share_one_model_service(self) -> None:
+        identity = state.setup_site()
         with state.SiteStore(identity=identity) as store:
-            service_id = store.ensure_model_service("fixture-model")["service_id"]
-            first["service_id"] = service_id
-            second["service_id"] = service_id
-            store.set_placement(first)
+            first, _first_release = self.register_group(
+                store,
+                identity,
+                runtime_digit="3",
+                topology_digit="1",
+            )
             before = store.verify_audit()["events"]
-            store.set_placement(second)
-            placements = {row["placement_id"]: row for row in store.placements()}
-            self.assertEqual(placements[first["placement_id"]]["state"], "running")
-            self.assertEqual(placements[second["placement_id"]]["state"], "running")
-            self.assertEqual(store.verify_audit()["events"], before + 1)
+            second, _second_release = self.register_group(
+                store,
+                identity,
+                runtime_digit="4",
+                topology_digit="5",
+            )
+            placement_groups = store.placement_groups()
+            self.assertEqual(
+                {row["placement_group_id"] for row in placement_groups},
+                {first.placement_group_id, second.placement_group_id},
+            )
+            self.assertEqual(
+                {row["service_id"] for row in placement_groups},
+                {first.service_id},
+            )
+            self.assertEqual(len(store.placements()), 2)
+            self.assertEqual(store.verify_audit()["events"], before + 2)
+
 
     def test_member_drain_and_resume_are_atomic_audited_admission_states(self) -> None:
         identity = state.setup_site()
@@ -482,65 +496,40 @@ class SiteStateTests(unittest.TestCase):
             self.assertEqual(enabled, store.exposure())
             self.assertEqual(store.verify_audit()["events"], before + 1)
 
-    def test_engine_group_transition_is_placement_bound_and_audited(self) -> None:
+    def test_placement_group_transition_is_placement_bound_and_audited(self) -> None:
         identity = state.setup_site()
-        sealed_release = release_identity(
-            manifest_sha256="2" * 64,
-            runtime_digest="3" * 64,
-        )
-        placement_id = "4" * 32
         with state.SiteStore(identity=identity) as store:
-            service_id = store.ensure_model_service("example-model")["service_id"]
-            plan = build_single_group_plan(
-                member_id=identity.member_id,
-                member_address="a.local:9770",
-                device_uuids=["GPU-fixture"],
-                topology_sha256="1" * 64,
-                manifest_sha256="2" * 64,
-                runtime_digest="3" * 64,
-                service_id=service_id,
-                release=sealed_release,
-                port_base=18000,
+            plan, sealed_release = self.register_group(
+                store,
+                identity,
+                model="example-model",
             )
-            members = [
+            placement_states = [
                 {
-                    "member_id": item.member_id,
+                    "placement_id": item.placement_id,
+                    "node_id": item.node_id,
                     "task_id": item.task_id,
                     "state": "staging",
                     "operation_id": None,
                     "error": None,
                 }
-                for item in plan.assignments
+                for item in plan.placements
             ]
-            store.set_placement({
-                "placement_id": placement_id,
-                "service_id": service_id,
-                "model": "example-model",
-                "runtime": "example-runtime",
-                "target": "example-target",
-                "strategy": "single",
-                "state": "starting",
-                "topology_sha256": "1" * 64,
-                "members": [item.member_id for item in plan.assignments],
-                "endpoints": [],
-                "capacity": {},
-            })
             before = store.verify_audit()["events"]
-            stored = store.set_engine_group(
+            stored = store.set_placement_group(
                 plan.document(),
-                placement_id=placement_id,
                 source=sealed_release["source"],
                 engine_credential_sha256="6" * 64,
                 desired_state="running",
                 state="staging",
-                members=members,
-                action="group.stage",
+                placements=placement_states,
+                action="placement_group.stage",
             )
-            self.assertEqual(stored["group_id"], plan.group_id)
-            rows = store.engine_groups()
-            self.assertEqual(rows[0]["state"], "staging")
-            self.assertEqual(rows[0]["plan"], plan.document())
+            self.assertEqual(stored["placement_group_id"], plan.placement_group_id)
+            self.assertEqual(stored["placements"][0]["state"], "staging")
+            self.assertEqual(stored["plan"], plan.document())
             self.assertEqual(store.verify_audit()["events"], before + 1)
+
 
     def test_device_reservation_ignores_unrelated_invalid_node_inventory(self) -> None:
         identity = state.setup_site()
@@ -556,15 +545,18 @@ class SiteStateTests(unittest.TestCase):
                 "UPDATE members SET facts_json='{}' WHERE member_id=?",
                 (unrelated,),
             )
-            allocations = store.reserve_group_devices(
-                "a" * 32,
+            plan, _release = self.register_group(store, identity)
+            placement = plan.placements[0]
+            allocations = store.reserve_placement_devices(
+                plan.placement_group_id,
                 [{
-                    "member_id": identity.member_id,
-                    "device_uuids": [f"GPU-{identity.member_id[:8]}"],
+                    "placement_id": placement.placement_id,
+                    "node_id": placement.node_id,
+                    "device_uuids": list(placement.device_uuids),
                 }],
             )
         self.assertEqual(len(allocations), 1)
-        self.assertEqual(allocations[0]["member_id"], identity.member_id)
+        self.assertEqual(allocations[0]["node_id"], identity.member_id)
 
     def test_membership_invite_is_one_use_and_site_key_never_moves(self) -> None:
         coordinator_home = pathlib.Path(self.temporary.name) / "main"

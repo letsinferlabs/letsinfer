@@ -49,18 +49,18 @@ there is no arbitrary shell route.
 
 ## Physical link lifecycle
 
-Core treats node membership and engine-group data links as separate scopes.
+Core treats node membership and placement-group data links as separate scopes.
 Platform providers may prepare addressing for supported high-speed hardware,
 but generic topology accepts a link only after mutual certificate and direct
-route proof. Losing that proof pauses only groups whose immutable connection
+route proof. Losing that proof pauses only placement groups whose immutable connection
 plans require the link. The nodes remain online over their management network,
-the gateway keeps routing unaffected groups, and reconnection requires an
+the gateway keeps routing unaffected placement groups, and reconnection requires an
 explicit model resume rather than silently restarting work.
 
 ## Replication
 
 A model service is the logical model your clients request. It may contain one
-or more independent engine groups. Each replica group has its own immutable
+or more independent placement groups. Each placement group has its own immutable
 runtime release, target, assigned GPU UUIDs, endpoint, health, capacity, and
 telemetry. This lets the same model run across mixed hardware as long as the
 catalog contains a qualified runtime for every selected node.
@@ -79,7 +79,7 @@ one resolves to, and which existing model would be replaced. Incompatible
 nodes are skipped with a reason. Replacement requires explicit confirmation
 or `--replace-existing`.
 
-Each physical GPU can belong to only one active group. Allocations are sealed
+Each physical GPU can belong to only one active placement group. Allocations are sealed
 by exact GPU UUID and only those devices are exposed to the Engine container.
 Starting, stopping, or failing one replica does not implicitly stop the other
 replicas.
@@ -94,17 +94,17 @@ Stopped replicas and stopped members of a parallel runtime may release their
 local model snapshots and rebuildable caches after an explicit cleanup review.
 Their sealed runtime plans remain installed; the next start downloads and
 verifies the exact declared revisions on each affected node before admitting
-the group, and the lifecycle result names every node that downloaded data
+the placement group, and the lifecycle result names every node that downloaded data
 again.
 
 The main gateway chooses a healthy replica using capacity, queue depth,
 pressure, temperature, and bounded prefix-affinity hints. It retries another
-group only before response streaming begins. If every compatible group is
+placement group only before response streaming begins. If every compatible placement group is
 temporarily full, the request waits in the shared admission queue instead of
 overloading a runtime.
 
-Runtime upgrades roll one group at a time. A failed replacement is removed and
-the exact prior signed release is restored for that group before the upgrade
+Runtime upgrades roll one placement group at a time. A failed replacement is removed and
+the exact prior signed release is restored for that placement group before the upgrade
 stops. Rollback likewise reinstalls retained immutable release identities
 rather than re-resolving the latest catalog.
 
@@ -115,8 +115,8 @@ placement and load balancing. A runtime owns TP/PP topology, private ranks,
 interconnect requirements, kernels, and engine configuration. Core assigns
 only generic task IDs, exact node and GPU UUIDs, ports, addresses, credentials,
 and verified connection facts. A parallel runtime may consume multiple
-machines or GPUs as one atomic engine group; the gateway publishes its single
-endpoint only after every required task is ready. Complete parallel groups can
+machines or GPUs as one atomic placement group; the gateway publishes its single
+endpoint only after every required task is ready. Complete parallel placement groups can
 also be replicated. Core never invents parallelism from a single-device
 runtime.
 

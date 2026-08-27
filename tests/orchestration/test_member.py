@@ -16,21 +16,21 @@ from core.orchestration.member import (
     MemberJobStore,
     PROTOCOL,
     canonical_bytes,
-    validate_group_job,
+    validate_placement_job,
 )
-from core.orchestration import build_single_group_plan
+from core.orchestration import build_single_placement_group_plan
 from core.orchestration.credentials import credential_sha256
 from tests.orchestration.helpers import release_identity
 
 
 class MemberJobTests(unittest.TestCase):
-    member_id = "1" * 32
+    node_id = "1" * 32
     credential = "A" * 43
 
     def job(self, *, action: str = "stage", operation_id: str = "2" * 32) -> dict:
         release = release_identity()
-        plan = build_single_group_plan(
-            member_id=self.member_id,
+        plan = build_single_placement_group_plan(
+            member_id=self.node_id,
             member_address="member.local:9770",
             device_uuids=["GPU-fixture"],
             topology_sha256="4" * 64,
@@ -41,13 +41,14 @@ class MemberJobTests(unittest.TestCase):
             port_base=18000,
         )
         group = plan.document()
-        assignment = plan.assignments[0]
+        placement = plan.placements[0]
         return {
             "protocol": PROTOCOL,
             "operation_id": operation_id,
-            "group_id": group["group_id"],
+            "placement_group_id": group["placement_group_id"],
+            "placement_id": placement.placement_id,
             "action": action,
-            "member_id": self.member_id,
+            "node_id": self.node_id,
             "plan_sha256": hashlib.sha256(canonical_bytes(group)).hexdigest(),
             "runtime_digest": group["runtime_digest"],
             "manifest_sha256": group["manifest_sha256"],
@@ -55,37 +56,39 @@ class MemberJobTests(unittest.TestCase):
             "engine_credential_sha256": credential_sha256(self.credential),
             "expires_at_unix": int(time.time()) + 60,
             "source": release["source"] if action == "stage" else None,
-            "task": {
-                "task_id": assignment.task_id,
-                "launcher": assignment.launcher,
-                "port_base": assignment.port_base,
-                "port_count": assignment.port_count,
-                "command": list(assignment.command),
-                "environment": dict(assignment.environment),
-                "endpoint_owner": assignment.endpoint_owner,
-                "readiness": dict(assignment.readiness),
-                "device_uuids": list(assignment.device_uuids),
+            "placement": {
+                "placement_id": placement.placement_id,
+                "node_id": placement.node_id,
+                "task_id": placement.task_id,
+                "launcher": placement.launcher,
+                "port_base": placement.port_base,
+                "port_count": placement.port_count,
+                "command": list(placement.command),
+                "environment": dict(placement.environment),
+                "endpoint_owner": placement.endpoint_owner,
+                "readiness": dict(placement.readiness),
+                "device_uuids": list(placement.device_uuids),
             },
-            "group": group,
+            "placement_group": group,
         }
 
     def test_validation_binds_target_member_plan_and_pinned_source(self) -> None:
         value = self.job()
-        self.assertIs(validate_group_job(value, expected_member_id=self.member_id), value)
+        self.assertIs(validate_placement_job(value, expected_node_id=self.node_id), value)
         changed = self.job()
-        changed["group"]["resources"][0]["address"] = "changed.local:9770"
+        changed["placement_group"]["placements"][0]["address"] = "changed.local:9770"
         with self.assertRaisesRegex(MemberJobError, "identity does not match"):
-            validate_group_job(changed, expected_member_id=self.member_id)
+            validate_placement_job(changed, expected_node_id=self.node_id)
         changed = self.job()
         changed["source"] = "registry.example/runtime:latest"
         with self.assertRaisesRegex(MemberJobError, "immutable"):
-            validate_group_job(changed, expected_member_id=self.member_id)
+            validate_placement_job(changed, expected_node_id=self.node_id)
 
     def test_agent_is_idempotent_and_rejects_changed_replay(self) -> None:
         calls: list[str] = []
         with tempfile.TemporaryDirectory() as directory:
             agent = MemberAgent(
-                member_id=self.member_id,
+                member_id=self.node_id,
                 store_path=pathlib.Path(directory) / "jobs.sqlite3",
                 handler=lambda job, _credential: calls.append(job["action"]) or {"state": "staged"},
             )
@@ -99,25 +102,10 @@ class MemberJobTests(unittest.TestCase):
             with self.assertRaisesRegex(MemberJobError, "different bytes"):
                 agent.execute(changed, engine_credential=self.credential)
 
-    def test_legacy_role_storage_is_renamed_to_generic_task_storage(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            database = pathlib.Path(directory) / "jobs.sqlite3"
-            with MemberJobStore(database) as store:
-                store.connection.execute(
-                    "ALTER TABLE groups RENAME COLUMN task_json TO role_json"
-                )
-            with MemberJobStore(database) as store:
-                columns = {
-                    str(row["name"])
-                    for row in store.connection.execute("PRAGMA table_info(groups)")
-                }
-            self.assertIn("task_json", columns)
-            self.assertNotIn("role_json", columns)
-
     def test_lifecycle_requires_stage_and_stop_before_remove(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             agent = MemberAgent(
-                member_id=self.member_id,
+                member_id=self.node_id,
                 store_path=pathlib.Path(directory) / "jobs.sqlite3",
                 handler=lambda job, _credential: {"state": job["action"]},
             )
@@ -134,7 +122,7 @@ class MemberJobTests(unittest.TestCase):
     def test_result_storage_rejects_sensitive_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             agent = MemberAgent(
-                member_id=self.member_id,
+                member_id=self.node_id,
                 store_path=pathlib.Path(directory) / "jobs.sqlite3",
                 handler=lambda _job, _credential: {"api_token": "do-not-store"},
             )
@@ -144,7 +132,7 @@ class MemberJobTests(unittest.TestCase):
     def test_status_uses_live_observer_and_reports_trip_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             agent = MemberAgent(
-                member_id=self.member_id,
+                member_id=self.node_id,
                 store_path=pathlib.Path(directory) / "jobs.sqlite3",
                 handler=lambda job, _credential: {"state": job["action"]},
                 observer=lambda _group: {
@@ -154,8 +142,8 @@ class MemberJobTests(unittest.TestCase):
             )
             stage = self.job()
             agent.execute(stage, engine_credential=self.credential)
-            status = agent.status(stage["group_id"])
-            self.assertEqual(status["group"]["state"], "failed")
+            status = agent.status(stage["placement_group_id"])
+            self.assertEqual(status["placement"]["state"], "failed")
             self.assertTrue(status["protection_trip_latched"])
 
     def test_submit_is_durable_and_asynchronous_for_long_lifecycle_work(self) -> None:
@@ -171,7 +159,7 @@ class MemberJobTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = pathlib.Path(directory) / "jobs.sqlite3"
             agent = MemberAgent(
-                member_id=self.member_id,
+                member_id=self.node_id,
                 store_path=database,
                 handler=handler,
             )
@@ -202,7 +190,7 @@ class MemberJobTests(unittest.TestCase):
                 raise RuntimeError("adapter failed; api_key=do-not-store")
 
             agent = MemberAgent(
-                member_id=self.member_id,
+                member_id=self.node_id,
                 store_path=database,
                 handler=fail,
             )

@@ -8,9 +8,9 @@ import tempfile
 import unittest
 
 from core.orchestration.credentials import (
-    GroupCredentialError,
+    PlacementGroupCredentialError,
     credential_sha256,
-    derive_group_credential,
+    derive_placement_group_credential,
     ensure_master,
 )
 
@@ -22,14 +22,14 @@ class GroupCredentialTests(unittest.TestCase):
             master = ensure_master(path)
             self.assertEqual(master, ensure_master(path))
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-            first = derive_group_credential("1" * 32, master=master)
-            self.assertEqual(first, derive_group_credential("1" * 32, master=master))
-            self.assertNotEqual(first, derive_group_credential("2" * 32, master=master))
+            first = derive_placement_group_credential("1" * 32, master=master)
+            self.assertEqual(first, derive_placement_group_credential("1" * 32, master=master))
+            self.assertNotEqual(first, derive_placement_group_credential("2" * 32, master=master))
             self.assertRegex(credential_sha256(first), r"^[0-9a-f]{64}$")
 
     def test_invalid_master_fails_closed(self) -> None:
-        with self.assertRaisesRegex(GroupCredentialError, "master"):
-            derive_group_credential("1" * 32, master=b"short")
+        with self.assertRaisesRegex(PlacementGroupCredentialError, "master"):
+            derive_placement_group_credential("1" * 32, master=b"short")
 
 
 if __name__ == "__main__":

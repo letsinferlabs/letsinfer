@@ -427,7 +427,7 @@ class TopologyTests(unittest.TestCase):
         left, right = "1" * 32, "2" * 32
         graph = TopologyGraph([facts(left, right), facts(right, left)])
         placement = graph.resolve(target("parallel", 2), coordinator_id=left)
-        self.assertEqual(placement.member_ids, (left, right))
+        self.assertEqual(placement.node_ids, (left, right))
         self.assertEqual(
             graph.engine_addresses(
                 placement, target("parallel", 2)["placement"]["interconnect"]
@@ -471,7 +471,7 @@ class TopologyTests(unittest.TestCase):
         placement = TopologyGraph([pressured]).resolve(
             target("single", 1), coordinator_id=member_id
         )
-        self.assertEqual(placement.member_ids, (member_id,))
+        self.assertEqual(placement.node_ids, (member_id,))
         stale = facts(member_id)
         stale["observed_at_unix"] -= 31
         with self.assertRaisesRegex(TopologyError, "stale"):
@@ -489,7 +489,7 @@ class TopologyTests(unittest.TestCase):
         }
         selected = graph.resolve_catalog_targets(targets, coordinator_id=left)
         self.assertEqual(selected.target_id, "fixture-parallel")
-        self.assertEqual(selected.placement.member_ids, (left, right))
+        self.assertEqual(selected.placement_group.node_ids, (left, right))
 
         del targets["fixture-parallel"]
         selected = graph.resolve_catalog_targets(targets, coordinator_id=left)

@@ -92,24 +92,24 @@ from .exposure import (
     verify_tailscale,
 )
 from .orchestration import (
-    bind_endpoint_member,
-    build_group_plan,
-    build_single_group_plan,
+    bind_endpoint_node,
+    build_placement_group_plan,
+    build_single_placement_group_plan,
     MemberAgent,
     MemberJobError,
     MemberJobStore,
     OrchestrationError,
-    credential_sha256 as group_credential_sha256,
+    credential_sha256 as placement_group_credential_sha256,
     orchestration_contract_sha256,
     validate_orchestration_contract,
-    validate_group_document,
-    validate_group_target_interconnect,
+    validate_placement_group_document,
+    validate_placement_group_target_interconnect,
     validate_target_binding,
 )
 from .orchestration.coordinator import (
-    allocate_group_ports,
-    EngineGroupOrchestrator,
-    GroupOrchestrationError,
+    allocate_placement_ports,
+    PlacementGroupOrchestrator,
+    PlacementGroupOrchestrationError,
 )
 from .runtime_packs import (
     RUNTIME_CONFIG,
@@ -174,7 +174,7 @@ from .site.state import (
     data_root as site_data_root,
     identity_json,
     identity_path as site_identity_path,
-    has_active_engine_groups_for_cleanup,
+    has_active_placement_groups_for_cleanup,
     member_certificate_path as site_member_certificate_path,
     member_key_path as site_member_key_path,
     member_proof,
@@ -192,13 +192,13 @@ from .site.control import (
     fetch_member_job_status,
     SiteControlServer,
     SiteControlState,
-    fetch_member_group_status,
+    fetch_member_placement_group_status,
     fetch_member_facts,
     join_site,
     request_member_link_probe,
     request_self_detach,
     request_self_member_state,
-    submit_member_group_job,
+    submit_member_placement_job,
 )
 from .site.discovery import Publisher as DiscoveryPublisher
 from .site.discovery import advertisement as discovery_advertisement
@@ -221,8 +221,8 @@ from .site.move import (
 )
 from .site.links import LinkError, LinkStore
 from .site.topology import (
-    Placement,
-    TargetPlacement,
+    ResolvedPlacementGroup,
+    ResolvedTargetPlacementGroup,
     TopologyError,
     TopologyGraph,
     validate_member_facts,
@@ -285,11 +285,12 @@ ACCELERATOR_ARCHITECTURE_LABEL = "io.letsinfer.accelerator-architecture"
 MEMORY_MODEL_LABEL = "io.letsinfer.memory-model"
 GPU_COUNT_LABEL = "io.letsinfer.gpu-count"
 GPU_PARTITIONING_LABEL = "io.letsinfer.gpu-partitioning"
-GROUP_ID_LABEL = "io.letsinfer.group"
-GROUP_NODE_LABEL = "io.letsinfer.group-node"
-GROUP_TASK_LABEL = "io.letsinfer.group-task"
+PLACEMENT_GROUP_ID_LABEL = "io.letsinfer.placement-group"
+PLACEMENT_ID_LABEL = "io.letsinfer.placement"
+PLACEMENT_NODE_LABEL = "io.letsinfer.placement-node"
+PLACEMENT_TASK_LABEL = "io.letsinfer.placement-task"
 SECURITY_PROFILE = "tls-api-key-v1"
-SERVICE_CONFIG_VERSION = 4
+SERVICE_CONFIG_VERSION = 5
 CORE_SOURCE_MANIFEST = "SOURCE-MANIFEST.json"
 SERVICE_NAME = "letsinfer.service"
 ENGINE_SERVICE_NAME = "letsinfer-engine.service"
@@ -311,10 +312,10 @@ NODE_AGENT_MEMORY_LIMIT_BYTES = 192 * 1024 * 1024
 NODE_AGENT_TASK_LIMIT = 32
 GATEWAY_MEMORY_HIGH_BYTES = 64 * 1024 * 1024
 GATEWAY_MEMORY_LIMIT_BYTES = 96 * 1024 * 1024
-PROTECTION_STATE_NAME = "protected-engine.state"
-PROTECTION_ACK_NAME = "protected-engine.ack"
+PROTECTION_STATE_NAME = "protected-placement.state"
+PROTECTION_ACK_NAME = "protected-placement.ack"
 PROTECTION_TRIP_NAME = "protection-trip.json"
-PROTECTION_ROOT_NAME = "protected-engines"
+PROTECTION_ROOT_NAME = "protected-placements"
 WATCHDOG_PUBLIC_STATE_DIRECTORY = "service-state"
 CONTROLLER_PAIRING_PROTOCOL = "letsinfer-controller-pair-v1"
 CONTROLLER_PAIRING_PORT = 9769
@@ -597,7 +598,7 @@ def _core_update_identity() -> str:
 
 
 def _update_components() -> tuple[Component, ...]:
-    """Return core plus every distinct installed engine-group release."""
+    """Return core plus every distinct installed placement-group release."""
     components = [
         Component("core", "core", PRODUCT_VERSION, _core_update_identity())
     ]
@@ -610,33 +611,27 @@ def _update_components() -> tuple[Component, ...]:
             installed_releases: list[tuple[str, Mapping[str, Any]]] = []
             if identity.role == "main":
                 with SiteStore(identity=identity) as store:
-                    placements = {
-                        row["placement_id"]: row for row in store.placements()
-                    }
-                    groups = store.engine_groups()
+                    groups = store.placement_groups()
                 for group in groups:
                     if (
                         group.get("state") == "removed"
                         or group.get("desired_state") == "removed"
                     ):
                         continue
-                    placement = placements.get(group.get("placement_id"))
                     plan = group.get("plan")
                     release = plan.get("release") if isinstance(plan, Mapping) else None
-                    if not isinstance(placement, Mapping) or not isinstance(
-                        release, Mapping
-                    ):
+                    if not isinstance(release, Mapping):
                         raise UpdateError(
-                            "installed engine group has no release identity"
+                            "installed placement group has no release identity"
                         )
-                    installed_releases.append((str(placement.get("model", "")), release))
+                    installed_releases.append((str(group.get("model", "")), release))
             elif identity.role == "child":
-                root = default_engine_group_root()
+                root = default_placement_group_root()
                 if root.exists() and (root.is_symlink() or not root.is_dir()):
-                    raise UpdateError(f"engine-group storage is unsafe: {root}")
+                    raise UpdateError(f"placement-group storage is unsafe: {root}")
                 if root.is_dir():
                     for candidate in sorted(root.iterdir()):
-                        path = candidate / "group.json"
+                        path = candidate / "placement-group.json"
                         if (
                             candidate.is_symlink()
                             or not candidate.is_dir()
@@ -644,7 +639,7 @@ def _update_components() -> tuple[Component, ...]:
                         ):
                             continue
                         try:
-                            group = validate_group_document(
+                            group = validate_placement_group_document(
                                 json.loads(_validate_private_file(path, minimum_bytes=64))
                             )
                         except (
@@ -653,12 +648,12 @@ def _update_components() -> tuple[Component, ...]:
                             OrchestrationError,
                         ) as error:
                             raise UpdateError(
-                                f"installed engine-group plan is invalid: {path}"
+                                f"installed placement-group plan is invalid: {path}"
                             ) from error
                         release = group.get("release")
                         if not isinstance(release, Mapping):
                             raise UpdateError(
-                                "installed engine group has no release identity"
+                                "installed placement group has no release identity"
                             )
                         installed_releases.append(
                             (str(release.get("logical_model", "")), release)
@@ -666,7 +661,7 @@ def _update_components() -> tuple[Component, ...]:
             else:
                 raise UpdateError("configured node has an invalid role")
         except (OSError, SiteError) as error:
-            raise UpdateError(f"cannot inspect installed engine groups: {error}") from error
+            raise UpdateError(f"cannot inspect installed placement groups: {error}") from error
         for model, release in installed_releases:
             values = {
                 "model": model,
@@ -684,7 +679,7 @@ def _update_components() -> tuple[Component, ...]:
                 or not SHA256_RE.fullmatch(str(values["digest"]))
                 or not REGISTRY_DIGEST_RE.fullmatch(str(values["source"]))
             ):
-                raise UpdateError("installed engine-group release identity is invalid")
+                raise UpdateError("installed placement-group release identity is invalid")
             key = (
                 str(values["model"]),
                 str(values["target"]),
@@ -837,23 +832,23 @@ def default_gateway_telemetry_path() -> pathlib.Path:
     return site_data_root() / "gateway/telemetry.state"
 
 
-def default_gateway_group_telemetry_path() -> pathlib.Path:
+def default_gateway_placement_group_telemetry_path() -> pathlib.Path:
     path = default_gateway_telemetry_path()
-    return path.with_name(path.name + ".groups.json")
+    return path.with_name(path.name + ".placement-groups.json")
 
 
-def default_engine_group_root() -> pathlib.Path:
-    return site_data_root() / "engine-groups"
+def default_placement_group_root() -> pathlib.Path:
+    return site_data_root() / "placement-groups"
 
 
-_ENGINE_GROUP_LIFECYCLE_THREAD_LOCK = threading.RLock()
+_PLACEMENT_GROUP_LIFECYCLE_THREAD_LOCK = threading.RLock()
 
 
 @contextlib.contextmanager
-def _engine_group_lifecycle_lock() -> Iterable[None]:
-    """Serialize explicit group lifecycle against background reconciliation."""
-    with _ENGINE_GROUP_LIFECYCLE_THREAD_LOCK:
-        root = default_engine_group_root()
+def _placement_group_lifecycle_lock() -> Iterable[None]:
+    """Serialize placement-group lifecycle against background reconciliation."""
+    with _PLACEMENT_GROUP_LIFECYCLE_THREAD_LOCK:
+        root = default_placement_group_root()
         ensure_private_directory(root)
         path = root / ".lifecycle.lock"
         descriptor = os.open(
@@ -869,7 +864,7 @@ def _engine_group_lifecycle_lock() -> Iterable[None]:
                 or stat.S_IMODE(details.st_mode) != 0o600
             ):
                 raise LetsInferError(
-                    "engine-group lifecycle lock must be private and user-owned"
+                    "placement-group lifecycle lock must be private and user-owned"
                 )
             with os.fdopen(descriptor, "r+", encoding="utf-8") as handle:
                 descriptor = -1
@@ -880,10 +875,10 @@ def _engine_group_lifecycle_lock() -> Iterable[None]:
                 os.close(descriptor)
 
 
-def _serialized_engine_group_lifecycle(function: Any) -> Any:
+def _serialized_placement_group_lifecycle(function: Any) -> Any:
     @functools.wraps(function)
     def serialized(*args: Any, **kwargs: Any) -> Any:
-        with _engine_group_lifecycle_lock():
+        with _placement_group_lifecycle_lock():
             return function(*args, **kwargs)
 
     return serialized
@@ -1605,10 +1600,10 @@ def _rdma_docker_options(
         or isinstance(memory_bytes, bool)
         or memory_bytes <= 0
     ):
-        raise LetsInferError("engine-group RDMA binding is invalid")
+        raise LetsInferError("placement-group RDMA binding is invalid")
     nodes = binding["device_nodes"]
     if not isinstance(nodes, list) or not nodes or len(nodes) > 16:
-        raise LetsInferError("engine-group RDMA device list is invalid")
+        raise LetsInferError("placement-group RDMA device list is invalid")
     paths: list[str] = []
     for node in nodes:
         if (
@@ -1627,7 +1622,7 @@ def _rdma_docker_options(
             or node["minor"] < 0
             or node["path"] in paths
         ):
-            raise LetsInferError("engine-group RDMA device identity is invalid")
+            raise LetsInferError("placement-group RDMA device identity is invalid")
         paths.append(node["path"])
     options: list[str] = []
     for path in paths:
@@ -1658,8 +1653,8 @@ def docker_command(
     api_key_file: pathlib.Path,
     tls_cert_file: pathlib.Path,
     tls_key_file: pathlib.Path,
-    group_context: Mapping[str, Any] | None = None,
-    group_config_file: pathlib.Path | None = None,
+    placement_context: Mapping[str, Any] | None = None,
+    placement_group_config_file: pathlib.Path | None = None,
     runtime_artifact_root: pathlib.Path | None = None,
     rdma_binding: Mapping[str, Any] | None = None,
 ) -> list[str]:
@@ -1681,44 +1676,45 @@ def docker_command(
             "engine launch runtime artifact must be installed under LETSINFER_HOME"
         ) from error
     runtime_command: tuple[str, ...] | None = None
-    if group_context is not None:
-        required_group = {
-            "group_id", "member_id", "task_id", "launcher",
+    if placement_context is not None:
+        required_placement = {
+            "placement_group_id", "placement_id", "node_id", "task_id", "launcher",
             "command", "environment", "port_base", "port_count",
             "endpoint_owner", "readiness", "device_uuids",
         }
-        if set(group_context) != required_group:
-            raise LetsInferError("engine-group container context is invalid")
+        if set(placement_context) != required_placement:
+            raise LetsInferError("placement container context is invalid")
         if (
-            not re.fullmatch(r"[0-9a-f]{32}", str(group_context["group_id"]))
-            or not re.fullmatch(r"[0-9a-f]{32}", str(group_context["member_id"]))
-            or group_context["port_base"] != port
-            or not isinstance(group_context["port_count"], int)
-            or isinstance(group_context["port_count"], bool)
-            or group_context["port_count"] not in range(1, 33)
-            or not isinstance(group_context["endpoint_owner"], bool)
-            or not isinstance(group_context["device_uuids"], list)
-            or not group_context["device_uuids"]
-            or len(group_context["device_uuids"])
-            != len(set(group_context["device_uuids"]))
+            not re.fullmatch(r"[0-9a-f]{32}", str(placement_context["placement_group_id"]))
+            or not re.fullmatch(r"[0-9a-f]{32}", str(placement_context["placement_id"]))
+            or not re.fullmatch(r"[0-9a-f]{32}", str(placement_context["node_id"]))
+            or placement_context["port_base"] != port
+            or not isinstance(placement_context["port_count"], int)
+            or isinstance(placement_context["port_count"], bool)
+            or placement_context["port_count"] not in range(1, 33)
+            or not isinstance(placement_context["endpoint_owner"], bool)
+            or not isinstance(placement_context["device_uuids"], list)
+            or not placement_context["device_uuids"]
+            or len(placement_context["device_uuids"])
+            != len(set(placement_context["device_uuids"]))
             or any(
                 not isinstance(device_uuid, str) or not device_uuid
-                for device_uuid in group_context["device_uuids"]
+                for device_uuid in placement_context["device_uuids"]
             )
-            or group_config_file is None
+            or placement_group_config_file is None
         ):
-            raise LetsInferError("engine-group container identity is invalid")
-        if group_context["launcher"] == "runtime-command":
-            raw_command = group_context["command"]
+            raise LetsInferError("placement container identity is invalid")
+        if placement_context["launcher"] == "runtime-command":
+            raw_command = placement_context["command"]
             if not isinstance(raw_command, list) or not raw_command:
-                raise LetsInferError("runtime-owned engine-group command is invalid")
+                raise LetsInferError("runtime-owned placement-group command is invalid")
             runtime_command = tuple(raw_command)
-        elif group_context["launcher"] != "manifest" or group_context["command"] != []:
-            raise LetsInferError("engine-group launcher is invalid")
-    elif group_config_file is not None:
-        raise LetsInferError("engine-group configuration requires a group context")
-    if rdma_binding is not None and group_context is None:
-        raise LetsInferError("RDMA resources require an engine-group context")
+        elif placement_context["launcher"] != "manifest" or placement_context["command"] != []:
+            raise LetsInferError("placement-group launcher is invalid")
+    elif placement_group_config_file is not None:
+        raise LetsInferError("placement-group configuration requires a placement")
+    if rdma_binding is not None and placement_context is None:
+        raise LetsInferError("RDMA resources require a placement context")
     # Startup readiness is verified separately through the authenticated API.
     # Docker health is liveness: long prefills may occupy an engine's HTTP loop,
     # but its kernel listener must remain present for queued requests.
@@ -1766,11 +1762,12 @@ def docker_command(
         f"{GPU_PARTITIONING_LABEL}={target['accelerator']['partitioning']}",
         *(
             [
-                "--label", f"{GROUP_ID_LABEL}={group_context['group_id']}",
-                "--label", f"{GROUP_NODE_LABEL}={group_context['member_id']}",
-                "--label", f"{GROUP_TASK_LABEL}={group_context['task_id']}",
+                "--label", f"{PLACEMENT_GROUP_ID_LABEL}={placement_context['placement_group_id']}",
+                "--label", f"{PLACEMENT_ID_LABEL}={placement_context['placement_id']}",
+                "--label", f"{PLACEMENT_NODE_LABEL}={placement_context['node_id']}",
+                "--label", f"{PLACEMENT_TASK_LABEL}={placement_context['task_id']}",
             ]
-            if group_context is not None
+            if placement_context is not None
             else []
         ),
         "--init",
@@ -1807,8 +1804,8 @@ def docker_command(
         "--gpus",
         (
             "all"
-            if group_context is None
-            else "device=" + ",".join(group_context["device_uuids"])
+            if placement_context is None
+            else "device=" + ",".join(placement_context["device_uuids"])
         ),
         *_rdma_docker_options(rdma_binding, container["memory_bytes"]),
         "--memory",
@@ -1841,17 +1838,18 @@ def docker_command(
         "-e",
         "LOGNAME=letsinfer",
     ]
-    if group_context is not None:
-        group_path = pathlib.Path(group_config_file).expanduser()
+    if placement_context is not None:
+        placement_group_path = pathlib.Path(placement_group_config_file).expanduser()
         command.extend([
-            "-v", f"{group_path}:/run/letsinfer/group.json:ro",
-            "-e", "LETSINFER_GROUP_CONFIG=/run/letsinfer/group.json",
-            "-e", f"LETSINFER_GROUP_ID={group_context['group_id']}",
-            "-e", f"LETSINFER_NODE_ID={group_context['member_id']}",
-            "-e", f"LETSINFER_TASK_ID={group_context['task_id']}",
-            "-e", f"LETSINFER_PORT_BASE={group_context['port_base']}",
-            "-e", f"LETSINFER_PORT_COUNT={group_context['port_count']}",
-            "-e", f"LETSINFER_ENGINE_PORT={group_context['port_base'] if group_context['endpoint_owner'] else -1}",
+            "-v", f"{placement_group_path}:/run/letsinfer/placement-group.json:ro",
+            "-e", "LETSINFER_PLACEMENT_GROUP_CONFIG=/run/letsinfer/placement-group.json",
+            "-e", f"LETSINFER_PLACEMENT_GROUP_ID={placement_context['placement_group_id']}",
+            "-e", f"LETSINFER_PLACEMENT_ID={placement_context['placement_id']}",
+            "-e", f"LETSINFER_NODE_ID={placement_context['node_id']}",
+            "-e", f"LETSINFER_TASK_ID={placement_context['task_id']}",
+            "-e", f"LETSINFER_PORT_BASE={placement_context['port_base']}",
+            "-e", f"LETSINFER_PORT_COUNT={placement_context['port_count']}",
+            "-e", f"LETSINFER_ENGINE_PORT={placement_context['port_base'] if placement_context['endpoint_owner'] else -1}",
             "-e", "LETSINFER_ENGINE_CREDENTIAL_FILE=/run/secrets/letsinfer-api-key",
             "-e", "LETSINFER_TLS_CERT_FILE=/run/secrets/letsinfer-tls.crt",
             "-e", "LETSINFER_TLS_KEY_FILE=/run/secrets/letsinfer-tls.key",
@@ -1860,13 +1858,15 @@ def docker_command(
         command.extend(["-v", f"{store_root}:/root/.cache/letsinfer-prefix-store"])
     for key, value in launch.environment:
         command.extend(["-e", f"{key}={value}"])
-    if group_context is not None:
-        static_environment = group_context["environment"]
+    if placement_context is not None:
+        static_environment = placement_context["environment"]
         if not isinstance(static_environment, dict):
-            raise LetsInferError("engine-group environment is invalid")
+            raise LetsInferError("placement-group environment is invalid")
         existing_names = {key for key, _value in launch.environment}
         if existing_names.intersection(static_environment):
-            raise LetsInferError("runtime group environment cannot replace adapter-owned values")
+            raise LetsInferError(
+                "runtime placement environment cannot replace adapter-owned values"
+            )
         for key, value in sorted(static_environment.items()):
             command.extend(["-e", f"{key}={value}"])
     command.append(manifest["image"]["reference"])
@@ -6094,8 +6094,8 @@ def read_service_config(path: pathlib.Path) -> dict[str, Any]:
         "gateway_telemetry_file": str,
         "engine_port": int,
         "placement_id": str,
-        "placement_strategy": str,
-        "placement_members": list,
+        "placement_node_ids": list,
+        "device_uuids": dict,
         "topology_sha256": str,
         "model_cache": str,
         "store_root": str,
@@ -6146,17 +6146,23 @@ def read_service_config(path: pathlib.Path) -> dict[str, Any]:
         raise LetsInferError("gateway and engine ports must be distinct")
     if not re.fullmatch(r"[0-9a-f]{32}", config["placement_id"]):
         raise LetsInferError("service configuration contains an invalid placement identity")
-    if config["placement_strategy"] not in {"single", "replicated", "distributed"}:
-        raise LetsInferError("service configuration contains an invalid placement strategy")
     if (
-        not config["placement_members"]
+        not config["placement_node_ids"]
         or not all(
-            isinstance(member_id, str) and re.fullmatch(r"[0-9a-f]{32}", member_id)
-            for member_id in config["placement_members"]
+            isinstance(node_id, str) and re.fullmatch(r"[0-9a-f]{32}", node_id)
+            for node_id in config["placement_node_ids"]
         )
-        or len(set(config["placement_members"])) != len(config["placement_members"])
+        or len(set(config["placement_node_ids"])) != len(config["placement_node_ids"])
     ):
-        raise LetsInferError("service configuration contains invalid placement members")
+        raise LetsInferError("service configuration contains invalid placement nodes")
+    if set(config["device_uuids"]) != set(config["placement_node_ids"]) or any(
+        not isinstance(values, list)
+        or not values
+        or len(values) != len(set(values))
+        or any(not isinstance(value, str) or not value for value in values)
+        for values in config["device_uuids"].values()
+    ):
+        raise LetsInferError("service configuration contains invalid placement devices")
     if not SHA256_RE.fullmatch(config["topology_sha256"]):
         raise LetsInferError("service configuration contains an invalid topology identity")
     if not isinstance(config["gateway_listen"], str) or not config["gateway_listen"]:
@@ -6241,9 +6247,12 @@ def resolve_service_placement(
 ) -> dict[str, Any]:
     """Resolve the manifest against freshly authenticated site topology."""
     identity, _graph, placement = resolve_manifest_placement(manifest)
-    if placement.strategy != "single" or len(placement.member_ids) != 1:
+    if (
+        target_contract(manifest)["placement"]["strategy"] != "single"
+        or len(placement.node_ids) != 1
+    ):
         raise LetsInferError(
-            "this target requires the engine-group installation path"
+            "this target requires the placement-group installation path"
         )
     return service_placement_identity(identity, placement, manifest_sha256)
 
@@ -6259,15 +6268,14 @@ def resolve_benchmark_service_placement(
         with _site_store() as store:
             matches = [
                 row
-                for row in store.engine_groups()
-                if row["strategy"] == "parallel"
-                and row["manifest_sha256"] == manifest_sha256
+                for row in store.placement_groups()
+                if row["manifest_sha256"] == manifest_sha256
                 and row["state"] != "removed"
                 and row["desired_state"] != "removed"
             ]
             if len(matches) != 1:
                 raise LetsInferError(
-                    "parallel benchmark requires one exact installed engine group"
+                    "parallel benchmark requires one exact installed placement group"
                 )
             row = matches[0]
             if (row["state"], row["desired_state"]) not in {
@@ -6275,31 +6283,31 @@ def resolve_benchmark_service_placement(
                 ("stopped", "stopped"),
             }:
                 raise LetsInferError(
-                    f"benchmark cannot isolate engine group {row['group_id']} "
+                    f"benchmark cannot isolate placement group {row['placement_group_id']} "
                     "in its current state"
                 )
             try:
-                document = validate_group_document(dict(row["plan"]))
-                validate_group_target_interconnect(
+                document = validate_placement_group_document(dict(row["plan"]))
+                validate_placement_group_target_interconnect(
                     document, contract["placement"]
                 )
             except (OrchestrationError, KeyError) as error:
                 raise LetsInferError(
-                    f"parallel benchmark engine-group plan is invalid: {error}"
+                    f"parallel benchmark placement-group plan is invalid: {error}"
                 ) from error
-            resources = document["resources"]
-            member_ids = tuple(resource["node_id"] for resource in resources)
+            placements = document["placements"]
+            node_ids = tuple(placement["node_id"] for placement in placements)
             device_uuids = {
-                resource["node_id"]: tuple(resource["device_uuids"])
-                for resource in resources
+                placement["node_id"]: tuple(placement["device_uuids"])
+                for placement in placements
             }
             members = {
                 member["member_id"]: member
                 for member in store.members()
-                if member["member_id"] in member_ids
+                if member["member_id"] in node_ids
                 and member["state"] == "active"
             }
-            if set(members) != set(member_ids) or any(
+            if set(members) != set(node_ids) or any(
                 not isinstance(member.get("facts"), Mapping)
                 or not isinstance(member["facts"].get("observed_at_unix"), int)
                 or not 0
@@ -6309,9 +6317,9 @@ def resolve_benchmark_service_placement(
             ):
                 raise LetsInferError(
                     "parallel benchmark requires fresh authenticated facts from "
-                    "every engine-group node"
+                    "every placement-group node"
                 )
-            link_failure = _engine_group_required_link_failure(
+            link_failure = _placement_group_required_link_failure(
                 row, store, now_unix=now
             )
             if link_failure is not None:
@@ -6321,29 +6329,29 @@ def resolve_benchmark_service_placement(
                 )
         if (
             document["release"].get("target_id") != contract["id"]
-            or len(resources) != contract["placement"]["node_count"]
+            or len(placements) != contract["placement"]["node_count"]
             or any(
-                len(resource["device_uuids"])
+                len(placement["device_uuids"])
                 != contract["accelerator"]["count"]
-                for resource in resources
+                for placement in placements
             )
         ):
             raise LetsInferError(
-                "parallel benchmark engine group differs from the runtime target"
+                "parallel benchmark placement group differs from the runtime target"
             )
         return (
             {
-                "placement_id": row["placement_id"],
-                "placement_strategy": "parallel",
-                "placement_members": list(member_ids),
+                "placement_group_id": row["placement_group_id"],
+                "placement_id": document["endpoint_placement_id"],
+                "placement_node_ids": list(node_ids),
                 "topology_sha256": row["topology_sha256"],
                 "device_uuids": {
-                    member_id: list(device_uuids[member_id])
-                    for member_id in member_ids
+                    node_id: list(device_uuids[node_id])
+                    for node_id in node_ids
                 },
                 "site_id": identity.site_id,
             },
-            (row["group_id"],),
+            (row["placement_group_id"],),
         )
     identity, graph = _fresh_site_topology()
     try:
@@ -6363,63 +6371,40 @@ def resolve_benchmark_service_placement(
             raise LetsInferError(
                 f"cannot resolve runtime placement: {unallocated_error}"
             ) from unallocated_error
-    if placement.strategy not in {"single", "parallel"}:
-        raise LetsInferError(
-            "benchmark placement strategy is invalid"
-        )
     selected_devices = {
-        (member_id, device_uuid)
-        for member_id in placement.member_ids
-        for device_uuid in placement.device_uuids[member_id]
+        (node_id, device_uuid)
+        for node_id in placement.node_ids
+        for device_uuid in placement.device_uuids[node_id]
     }
     with _site_store() as store:
         allocations = store.device_allocations(active_only=True)
-        groups = {row["group_id"]: row for row in store.engine_groups()}
-    resident_group_ids = tuple(
+        groups = {row["placement_group_id"]: row for row in store.placement_groups()}
+        placement_groups_by_placement = {
+            placement["placement_id"]: placement["placement_group_id"]
+            for placement in store.placements()
+        }
+    resident_placement_group_ids = tuple(
         sorted(
             {
-                str(row["group_id"])
+                str(placement_groups_by_placement[row["placement_id"]])
                 for row in allocations
-                if (str(row["member_id"]), str(row["device_uuid"]))
-                in selected_devices
+                if row["placement_id"] in placement_groups_by_placement
+                and (str(row["node_id"]), str(row["device_uuid"])) in selected_devices
             }
         )
     )
-    for group_id in resident_group_ids:
-        row = groups.get(group_id)
+    for placement_group_id in resident_placement_group_ids:
+        row = groups.get(placement_group_id)
         if row is None or (
             (row["state"], row["desired_state"])
             not in {("running", "running"), ("stopped", "stopped")}
         ):
             raise LetsInferError(
-                f"benchmark cannot isolate engine group {group_id} in its current state"
-            )
-    if placement.strategy == "parallel":
-        if len(resident_group_ids) != 1:
-            raise LetsInferError(
-                "parallel benchmark requires one exact installed engine group"
-            )
-        group = groups[resident_group_ids[0]]
-        resources = group.get("plan", {}).get("resources")
-        if not isinstance(resources, list) or any(
-            not isinstance(resource, Mapping) for resource in resources
-        ):
-            raise LetsInferError("parallel benchmark engine-group plan is incomplete")
-        group_devices = {
-            (str(resource.get("node_id")), str(device_uuid))
-            for resource in resources
-            for device_uuid in resource.get("device_uuids", [])
-        }
-        if (
-            group.get("manifest_sha256") != manifest_sha256
-            or group_devices != selected_devices
-        ):
-            raise LetsInferError(
-                "parallel benchmark engine group differs from the installed runtime placement"
+                f"benchmark cannot isolate placement group {placement_group_id} in its current state"
             )
     return (
         service_placement_identity(identity, placement, manifest_sha256),
-        resident_group_ids,
+        resident_placement_group_ids,
     )
 
 
@@ -6440,21 +6425,23 @@ def service_placement_identity(
     identity: Any, placement: Any, manifest_sha256: str
 ) -> dict[str, Any]:
     identity_material = {
-        "contract": "letsinfer-placement-v1",
+        "contract": "letsinfer-qualification-placement-v1",
         "site_id": identity.site_id,
         "manifest_sha256": manifest_sha256,
         "topology_sha256": placement.topology_sha256,
-        "strategy": placement.strategy,
-        "members": list(placement.member_ids),
+        "node_ids": list(placement.node_ids),
         "device_uuids": {
-            member_id: list(placement.device_uuids[member_id])
-            for member_id in placement.member_ids
+            node_id: list(placement.device_uuids[node_id])
+            for node_id in placement.node_ids
         },
     }
     return {
         "placement_id": hashlib.sha256(canonical_bytes(identity_material)).hexdigest()[:32],
-        "placement_strategy": placement.strategy,
-        "placement_members": list(placement.member_ids),
+        "placement_node_ids": list(placement.node_ids),
+        "device_uuids": {
+            node_id: list(placement.device_uuids[node_id])
+            for node_id in placement.node_ids
+        },
         "topology_sha256": placement.topology_sha256,
     }
 
@@ -6472,78 +6459,36 @@ def logical_service_id(node_id: str, model: str) -> str:
     ).hexdigest()[:32]
 
 
-def service_placement_document(
-    config: dict[str, Any], manifest: dict[str, Any], state: str
-) -> dict[str, Any]:
-    identity = read_site_identity()
-    if identity.member_id not in config["placement_members"]:
-        raise LetsInferError("local member is not part of the configured placement")
-    serving = manifest["serving"]
-    adapter = adapter_for(manifest)
-    endpoint = {
-        "member_id": identity.member_id,
-        "url": f"https://127.0.0.1:{config['engine_port']}",
-        "credential_file": config["engine_api_key_file"],
-        "ca_file": config["tls_cert_file"],
-        "token_count_path": adapter.token_count_path,
-        "token_count_protocol": adapter.token_count_protocol,
-        "max_active_requests": serving["max_active_requests"],
-        "max_context_tokens": serving["max_context_tokens"],
-        "healthy": state == "running",
-        "memory_pressure": False,
-        "temperature_c": -1,
-        "prefix_keys": [],
-    }
-    runtime_version = config.get("runtime_version", config["release"])
-    runtime_digest = config.get("runtime_digest", config["manifest_sha256"])
-    runtime_identity = (
-        f"{manifest['model']['alias']}/{adapter.name}/"
-        f"{target_contract(manifest)['id']}@{runtime_version}"
-        f"@sha256:{runtime_digest}"
-    )
-    return {
-        "placement_id": config["placement_id"],
-        "service_id": logical_service_id(identity.site_id, manifest["model"]["alias"]),
-        "model": manifest["model"]["alias"],
-        "runtime": runtime_identity,
-        "target": target_contract(manifest)["id"],
-        "strategy": config["placement_strategy"],
-        "state": state,
-        "topology_sha256": config["topology_sha256"],
-        "members": config["placement_members"],
-        "endpoints": [endpoint],
-        "capacity": {
-            "max_connections": serving["max_connections"],
-            "max_active_requests": serving["max_active_requests"],
-            "max_context_tokens": serving["max_context_tokens"],
-        },
-    }
-
-
 def update_service_placement(
     config: dict[str, Any], manifest: dict[str, Any], state: str
 ) -> None:
-    try:
-        identity = read_site_identity()
-        with SiteStore(identity=identity) as store:
-            store.ensure_model_service(manifest["model"]["alias"])
-            store.set_placement(service_placement_document(config, manifest, state))
-    except SiteError as error:
-        raise LetsInferError(f"cannot update service placement: {error}") from error
+    """Validate a private qualification placement without routing or copying it.
+
+    The qualification container and its private config are the authoritative
+    transient state. Managed routing is registered only by placement groups.
+    """
+
+    if state not in {"starting", "running", "stopped", "failed"}:
+        raise LetsInferError("qualification placement state is invalid")
+    identity = read_site_identity()
+    if identity.member_id not in config["placement_node_ids"]:
+        raise LetsInferError("local node is not part of the qualification placement")
+    if manifest["model"]["alias"] != config["model"]:
+        raise LetsInferError("qualification placement model identity changed")
 
 
 def _resolve_qualification_service_placement(
     manifest: dict[str, Any], manifest_sha256: str
 ) -> dict[str, Any]:
-    """Reuse a benchmark slot only after every conflicting group is stopped."""
-    placement, resident_group_ids = resolve_benchmark_service_placement(
+    """Reuse a benchmark slot only after every conflicting placement group stops."""
+    placement, resident_placement_group_ids = resolve_benchmark_service_placement(
         manifest, manifest_sha256
     )
-    intents = _benchmark_engine_group_intents(resident_group_ids)
-    running = sorted(group_id for group_id, value in intents.items() if value)
+    intents = _benchmark_placement_group_intents(resident_placement_group_ids)
+    running = sorted(placement_group_id for placement_group_id, value in intents.items() if value)
     if running:
         raise LetsInferError(
-            "qualification requires conflicting resident engine groups to be "
+            "qualification requires conflicting resident placement groups to be "
             "stopped first: " + ",".join(running)
         )
     return placement
@@ -8361,7 +8306,7 @@ def _fresh_site_topology() -> tuple[Any, TopologyGraph]:
                 member_id: [
                     row["device_uuid"]
                     for row in allocations
-                    if row["member_id"] == member_id
+                    if row["node_id"] == member_id
                 ]
                 for member_id in (row["member_id"] for row in members)
             },
@@ -8376,7 +8321,7 @@ def _catalog_site_release(
     runtime: str | None,
     *,
     topology: tuple[Any, TopologyGraph] | None = None,
-) -> tuple[tuple[str, str, str, str, str], TargetPlacement]:
+) -> tuple[tuple[str, str, str, str, str], ResolvedTargetPlacementGroup]:
     """Resolve one catalog release against the complete authenticated site."""
     model_record = catalog.get("models", {}).get(model)
     if not isinstance(model_record, dict):
@@ -8515,13 +8460,13 @@ def _control_member_host(address: str) -> str:
     return f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
 
 
-def _engine_group_transport() -> tuple[Any, Any, Any]:
+def _placement_group_transport() -> tuple[Any, Any, Any]:
     def submit(
         member: Mapping[str, Any],
         job: Mapping[str, Any],
         credential: str | None,
     ) -> Mapping[str, Any]:
-        return submit_member_group_job(
+        return submit_member_placement_job(
             _site_control_endpoint(str(member["address"])),
             expected_member_id=str(member["member_id"]),
             expected_certificate_sha256=str(member["certificate_sha256"]),
@@ -8540,19 +8485,19 @@ def _engine_group_transport() -> tuple[Any, Any, Any]:
         )
 
     def group_status(
-        member: Mapping[str, Any], group_id: str
+        member: Mapping[str, Any], placement_group_id: str
     ) -> Mapping[str, Any]:
-        return fetch_member_group_status(
+        return fetch_member_placement_group_status(
             _site_control_endpoint(str(member["address"])),
             expected_member_id=str(member["member_id"]),
             expected_certificate_sha256=str(member["certificate_sha256"]),
-            group_id=group_id,
+            placement_group_id=placement_group_id,
         )
 
     return submit, job_status, group_status
 
 
-def _engine_group_member_controls(
+def _placement_group_node_controls(
     records: Sequence[Mapping[str, Any]],
     member_ids: Sequence[str],
     *,
@@ -8566,7 +8511,7 @@ def _engine_group_member_controls(
         if row.get("state") in allowed_states and row.get("member_id") in wanted
     }
     if set(selected) != wanted:
-        raise LetsInferError("engine-group placement contains an unavailable member identity")
+        raise LetsInferError("placement-group placement contains an unavailable member identity")
     return {
         member_id: {
             "member_id": member_id,
@@ -8579,7 +8524,7 @@ def _engine_group_member_controls(
     }
 
 
-def _group_release_identity(
+def _placement_group_release_identity(
     *,
     catalog_release_value: Mapping[str, Any],
     candidate_id: str,
@@ -8590,7 +8535,7 @@ def _group_release_identity(
     runtime: RuntimePack,
     manifest_sha256: str,
 ) -> dict[str, Any]:
-    """Bind one installed group to the exact signed-catalog release."""
+    """Bind one placement group to the exact signed-catalog release."""
     release = dict(catalog_release_value)
     from core.engine_distribution import distribution_projection
 
@@ -8693,7 +8638,7 @@ def _group_release_identity(
     }
 
 
-def _direct_group_release_identity(
+def _direct_placement_group_release_identity(
     *,
     source: str,
     runtime: RuntimePack,
@@ -8748,7 +8693,7 @@ def _direct_group_release_identity(
     }
 
 
-def install_engine_group(
+def install_placement_group(
     arguments: argparse.Namespace,
     *,
     source: str,
@@ -8759,21 +8704,23 @@ def install_engine_group(
     release_identity: Mapping[str, Any],
     resolved_topology: tuple[Any, TopologyGraph, Any] | None = None,
 ) -> int:
-    """Install one exact engine group under a logical model service."""
+    """Install one exact placement group under a logical model service."""
     if not is_immutable_runtime_source(source):
-        raise LetsInferError("engine-group installation requires an immutable runtime")
+        raise LetsInferError("placement-group installation requires an immutable runtime")
     if any(
         bool(getattr(arguments, name, False))
         for name in ("no_service", "no_start", "no_build_image")
     ):
         raise LetsInferError(
-            "engine-group installation does not support disabling required lifecycle services"
+            "placement-group installation does not support disabling required lifecycle services"
         )
     identity, graph, placement = (
         resolved_topology or resolve_manifest_placement(manifest)
     )
-    if placement.strategy not in {"single", "parallel"}:
-        raise LetsInferError("engine-group installation has an invalid target strategy")
+    placement_contract = target_contract(manifest)["placement"]
+    placement_mode = placement_contract["strategy"]
+    if placement_mode not in {"single", "parallel"}:
+        raise LetsInferError("placement-group installation has an invalid target strategy")
     runtime_root = pathlib.Path(receipt["object_root"])
     try:
         runtime = verify_descriptor(runtime_root)
@@ -8790,19 +8737,19 @@ def install_engine_group(
             target_contract(manifest)["placement"],
         )
     except (RuntimePackError, OrchestrationError) as error:
-        raise LetsInferError(f"runtime engine-group contract is invalid: {error}") from error
-    if placement.strategy == "parallel" and contract is None:
-        raise LetsInferError("parallel runtime has no engine-group contract")
-    if placement.strategy == "single" and contract is not None:
-        raise LetsInferError("single runtime cannot carry a parallel group contract")
+        raise LetsInferError(f"runtime placement-group contract is invalid: {error}") from error
+    if placement_mode == "parallel" and contract is None:
+        raise LetsInferError("parallel runtime has no placement-group contract")
+    if placement_mode == "single" and contract is not None:
+        raise LetsInferError("single runtime cannot carry a multi-placement contract")
     manifest_sha256 = sha256_file(manifest_path)
     service_id = logical_service_id(identity.site_id, manifest["model"]["alias"])
     group_member_ids = (
-        placement.member_ids
+        placement.node_ids
         if contract is None
-        else bind_endpoint_member(
+        else bind_endpoint_node(
             contract,
-            placement.member_ids,
+            placement.node_ids,
             identity.member_id,
         )
     )
@@ -8810,10 +8757,10 @@ def install_engine_group(
         selected_records = {
             row["member_id"]: row
             for row in store.members()
-            if row["state"] == "active" and row["member_id"] in placement.member_ids
+            if row["state"] == "active" and row["member_id"] in placement.node_ids
         }
-        existing_groups = store.engine_groups()
-    controls = _engine_group_member_controls(
+        existing_groups = store.placement_groups()
+    controls = _placement_group_node_controls(
         list(selected_records.values()), group_member_ids
     )
     occupied: dict[str, list[tuple[int, int]]] = {
@@ -8822,7 +8769,7 @@ def install_engine_group(
     for existing in existing_groups:
         if existing["state"] in {"removed", "failed"}:
             continue
-        for resource in existing["plan"]["resources"]:
+        for resource in existing["plan"]["placements"]:
             if resource["node_id"] in occupied:
                 occupied[resource["node_id"]].append(
                     (resource["port_base"], resource["port_count"])
@@ -8846,10 +8793,10 @@ def install_engine_group(
                 None,
             )
             if port_base is None:
-                raise GroupOrchestrationError(
+                raise PlacementGroupOrchestrationError(
                     f"no engine port remains on node {member_id}"
                 )
-            plan = build_single_group_plan(
+            plan = build_single_placement_group_plan(
                 member_id=member_id,
                 member_address=_control_member_host(
                     selected_records[member_id]["address"]
@@ -8864,14 +8811,14 @@ def install_engine_group(
                 port_count=port_count,
             )
         else:
-            port_bases = allocate_group_ports(
+            port_bases = allocate_placement_ports(
                 contract,
                 member_ids=group_member_ids,
                 occupied={key: tuple(value) for key, value in occupied.items()},
             )
-        if placement.strategy == "parallel" and len(placement.member_ids) > 1:
+        if len(placement.node_ids) > 1:
             engine_addresses = graph.engine_addresses(
-                placement, target_contract(manifest)["placement"]["interconnect"]
+                placement, placement_contract["interconnect"]
             )
         else:
             engine_addresses = {
@@ -8879,13 +8826,13 @@ def install_engine_group(
                 for member_id in group_member_ids
             }
         if contract is not None:
-            interconnect = target_contract(manifest)["placement"]["interconnect"]
+            interconnect = placement_contract["interconnect"]
             rdma_interfaces = (
                 graph.engine_interfaces(placement, interconnect)
                 if interconnect["rdma_required"]
                 else {}
             )
-            plan = build_group_plan(
+            plan = build_placement_group_plan(
                 contract,
                 member_ids=group_member_ids,
                 member_addresses=engine_addresses,
@@ -8896,37 +8843,24 @@ def install_engine_group(
                 release=release_identity,
                 member_port_bases=port_bases,
                 member_device_uuids=placement.device_uuids,
-                connections=graph.placement_connections(placement),
+                connections=graph.placement_group_connections(placement),
                 member_rdma_interfaces=rdma_interfaces,
                 endpoint_member_id=identity.member_id,
             )
-    except (OrchestrationError, GroupOrchestrationError, TopologyError) as error:
-        raise LetsInferError(f"cannot build engine-group plan: {error}") from error
-    submit, job_status, group_status = _engine_group_transport()
+    except (OrchestrationError, PlacementGroupOrchestrationError, TopologyError) as error:
+        raise LetsInferError(f"cannot build placement-group plan: {error}") from error
+    submit, job_status, group_status = _placement_group_transport()
 
     runtime_identity = (
         f"{manifest['model']['alias']}/{adapter_for(manifest).name}/"
         f"{target_contract(manifest)['id']}@{runtime.runtime['version']}"
         f"@sha256:{runtime.digest}"
     )
-    placement_id = plan.group_id
-    placement_document = {
-        "placement_id": placement_id,
-        "service_id": service_id,
-        "model": manifest["model"]["alias"],
-        "runtime": runtime_identity,
-        "target": target_contract(manifest)["id"],
-        "strategy": placement.strategy,
-        "state": "starting",
-        "topology_sha256": placement.topology_sha256,
-        "members": list(placement.member_ids),
-        "endpoints": [],
-        "capacity": {
-            "max_connections": manifest["serving"]["max_connections"],
-            "max_active_requests": manifest["serving"]["max_active_requests"],
-            "max_context_tokens": manifest["serving"]["max_context_tokens"],
-            "interconnect": target_contract(manifest)["placement"]["interconnect"],
-        },
+    capacity = {
+        "max_connections": manifest["serving"]["max_connections"],
+        "max_active_requests": manifest["serving"]["max_active_requests"],
+        "max_context_tokens": manifest["serving"]["max_context_tokens"],
+        "interconnect": target_contract(manifest)["placement"]["interconnect"],
     }
     receipt_path: pathlib.Path | None = None
     try:
@@ -8934,43 +8868,51 @@ def install_engine_group(
             service = store.ensure_model_service(manifest["model"]["alias"])
             if service["service_id"] != service_id:
                 raise LetsInferError("logical model service identity is inconsistent")
-            store.reserve_group_devices(
-                plan.group_id,
-                [
-                    {
-                        "member_id": assignment.member_id,
-                        "device_uuids": list(assignment.device_uuids),
-                    }
-                    for assignment in plan.assignments
-                ],
-            )
-            store.set_placement(placement_document)
-            orchestrator = EngineGroupOrchestrator(
+            orchestrator = PlacementGroupOrchestrator(
                 store=store,
                 plan=plan,
-                placement_id=placement_id,
                 source=source,
                 members=controls,
                 submit=submit,
                 status=group_status,
                 job_status=job_status,
             )
+            store.register_placement_group(
+                plan.document(),
+                source=source,
+                model=manifest["model"]["alias"],
+                runtime=runtime_identity,
+                target=target_contract(manifest)["id"],
+                capacity=capacity,
+                engine_credential_sha256=orchestrator.engine_credential_sha256,
+            )
+            store.reserve_placement_devices(
+                plan.placement_group_id,
+                [
+                    {
+                        "placement_id": placement.placement_id,
+                        "node_id": placement.node_id,
+                        "device_uuids": list(placement.device_uuids),
+                    }
+                    for placement in plan.placements
+                ],
+            )
             started = False
             try:
                 orchestrator.stage()
                 orchestrator.start()
                 started = True
-                credential_root = secrets_root() / "engine-groups" / plan.group_id
+                credential_root = secrets_root() / "placement-groups" / plan.placement_group_id
                 ensure_private_directory(credential_root)
                 credential_file = credential_root / "engine-api.key"
                 _atomic_private_text(
                     credential_file, orchestrator.engine_credential + "\n"
                 )
                 endpoints: list[dict[str, Any]] = []
-                for assignment in plan.assignments:
-                    if not assignment.endpoint_owner:
+                for placement in plan.placements:
+                    if not placement.endpoint_owner:
                         continue
-                    result = orchestrator.results.get(assignment.member_id)
+                    result = orchestrator.results.get(placement.placement_id)
                     if (
                         not isinstance(result, dict)
                         or not isinstance(result.get("endpoint"), str)
@@ -8980,17 +8922,17 @@ def install_engine_group(
                         )
                     ):
                         raise LetsInferError(
-                            "engine-group member returned incomplete endpoint identity"
+                            "endpoint placement returned incomplete identity"
                         )
-                    certificate_file = credential_root / f"{assignment.member_id}.crt"
+                    certificate_file = credential_root / f"{placement.node_id}.crt"
                     _atomic_private_text(
                         certificate_file, result["tls_certificate_pem"]
                     )
                     if certificate_sha256(certificate_file) != result["tls_certificate_sha256"]:
-                        raise LetsInferError("engine-group endpoint certificate changed")
+                        raise LetsInferError("placement-group endpoint certificate changed")
                     endpoints.append({
-                        "member_id": assignment.member_id,
-                        "model": manifest["model"]["alias"],
+                        "placement_id": placement.placement_id,
+                        "node_id": placement.node_id,
                         "url": result["endpoint"],
                         "credential_file": str(credential_file),
                         "ca_file": str(certificate_file),
@@ -9002,7 +8944,7 @@ def install_engine_group(
                         "prefix_keys": [],
                     })
                 if not endpoints:
-                    raise LetsInferError("engine-group has no inference endpoint")
+                    raise LetsInferError("placement-group has no inference endpoint")
                 receipt.update(
                     {
                         "manifest_path": str(manifest_path),
@@ -9013,11 +8955,13 @@ def install_engine_group(
                     receipt_path = write_selection(receipt)
                 except RuntimePackError as error:
                     raise LetsInferError(
-                        f"engine-group runtime receipt failed: {error}"
+                        f"placement-group runtime receipt failed: {error}"
                     ) from error
-                placement_document["state"] = "running"
-                placement_document["endpoints"] = endpoints
-                store.set_placement(placement_document)
+                store.set_placement_group_endpoint(
+                    plan.placement_group_id,
+                    endpoints[0],
+                    state="running",
+                )
             except Exception as error:
                 rollback_error: BaseException | None = None
                 if started:
@@ -9025,30 +8969,32 @@ def install_engine_group(
                         orchestrator.stop()
                     except BaseException as stopped_error:
                         rollback_error = stopped_error
-                placement_document["state"] = "failed"
-                placement_document["endpoints"] = []
                 try:
-                    store.set_placement(placement_document)
+                    store.set_placement_group_endpoint(
+                        plan.placement_group_id,
+                        None,
+                        state="failed",
+                    )
                 except BaseException as state_error:
                     rollback_error = rollback_error or state_error
                 try:
-                    store.set_group_allocation_state(plan.group_id, "released")
+                    store.set_placement_group_allocation_state(plan.placement_group_id, "released")
                 except BaseException as allocation_error:
                     rollback_error = rollback_error or allocation_error
                 if rollback_error is not None:
                     raise LetsInferError(
-                        "engine-group installation failed and rollback was incomplete: "
+                        "placement-group installation failed and rollback was incomplete: "
                         f"{type(rollback_error).__name__}"
                     ) from error
                 raise
     except BaseException as error:
         if isinstance(error, LetsInferError):
             raise
-        if isinstance(error, (SiteError, ControlError, GroupOrchestrationError)):
-            raise LetsInferError(f"engine-group installation failed: {error}") from error
+        if isinstance(error, (SiteError, ControlError, PlacementGroupOrchestrationError)):
+            raise LetsInferError(f"placement-group installation failed: {error}") from error
         raise
     if receipt_path is None:
-        raise LetsInferError("engine-group runtime receipt was not persisted")
+        raise LetsInferError("placement-group runtime receipt was not persisted")
     presenter = _human_presenter()
     if presenter is not None:
         presenter.records(
@@ -9058,26 +9004,26 @@ def install_engine_group(
                     runtime_identity,
                     semantic=command_ui.Semantic.SUCCESS,
                 ),
-                command_ui.RecordRow("Group", plan.group_id),
-                command_ui.RecordRow("Placement", placement_id),
-                command_ui.RecordRow("Members", len(plan.assignments)),
+                command_ui.RecordRow("Placement group", plan.placement_group_id),
+                command_ui.RecordRow("Placements", len(plan.placements)),
             )
         )
         presenter.verbatim(receipt_path, label="Receipt", copyable=True)
     else:
         print(
-            f"INSTALLED GROUP {runtime_identity} group={plan.group_id} "
-            f"placement={placement_id} members={len(plan.assignments)} "
+            f"INSTALLED PLACEMENT GROUP {runtime_identity} "
+            f"placement_group={plan.placement_group_id} "
+            f"placements={len(plan.placements)} "
             f"receipt={receipt_path}"
         )
     return 0
 
 
-def _validated_engine_group_document(row: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate the immutable plan identity stored beside one engine group."""
-    document = validate_group_document(dict(row["plan"]))
+def _validated_placement_group_document(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the immutable plan identity stored beside one placement group."""
+    document = validate_placement_group_document(dict(row["plan"]))
     if (
-        row.get("group_id") != document["group_id"]
+        row.get("placement_group_id") != document["placement_group_id"]
         or row.get("runtime_digest") != document["runtime_digest"]
         or row.get("manifest_sha256") != document["manifest_sha256"]
         or row.get("topology_sha256") != document["topology_sha256"]
@@ -9086,11 +9032,11 @@ def _validated_engine_group_document(row: Mapping[str, Any]) -> dict[str, Any]:
         or not is_immutable_runtime_source(row.get("source"))
         or row.get("source") != document["release"]["source"]
     ):
-        raise LetsInferError("durable engine-group identity is inconsistent")
+        raise LetsInferError("durable placement-group identity is inconsistent")
     return document
 
 
-def _restore_engine_group_orchestrator(
+def _restore_placement_group_orchestrator(
     store: SiteStore,
     row: Mapping[str, Any],
     *,
@@ -9098,14 +9044,14 @@ def _restore_engine_group_orchestrator(
     actor_id: str = "main",
     origin_interface: str = "orchestrator",
     correlation_id: str | None = None,
-) -> tuple[EngineGroupOrchestrator, dict[str, Any]]:
-    """Rebuild a controller only from immutable objects and durable group state."""
+) -> tuple[PlacementGroupOrchestrator, dict[str, Any]]:
+    """Rebuild a controller from immutable objects and placement-group state."""
     try:
-        document = _validated_engine_group_document(row)
+        document = _validated_placement_group_document(row)
         runtime_root = default_runtime_home() / ".objects" / document["runtime_digest"]
         runtime = verify_descriptor(runtime_root)
         if runtime.digest != document["runtime_digest"]:
-            raise LetsInferError("engine-group runtime object identity changed")
+            raise LetsInferError("placement-group runtime object identity changed")
         regenerated_manifest = runtime_execution_manifest(
             runtime.runtime,
             qualified=document["release"]["qualification"] == "qualified",
@@ -9115,7 +9061,7 @@ def _restore_engine_group_orchestrator(
             != document["manifest_sha256"]
         ):
             raise LetsInferError(
-                "engine-group runtime no longer reproduces its execution manifest"
+                "placement-group runtime no longer reproduces its execution manifest"
             )
         control_root, manifest_path = install_control_bundle(
             runtime.runtime_path, regenerated_manifest
@@ -9127,12 +9073,12 @@ def _restore_engine_group_orchestrator(
             runtime.runtime.get("orchestration"),
             target_contract(manifest)["placement"],
         )
-        resources = list(document["resources"])
+        placements = list(document["placements"])
         if contract is None:
-            if document["strategy"] != "single" or len(resources) != 1:
-                raise LetsInferError("engine-group runtime lost its parallel contract")
-            resource = resources[0]
-            plan = build_single_group_plan(
+            if len(placements) != 1:
+                raise LetsInferError("placement-group runtime lost its parallel contract")
+            resource = placements[0]
+            plan = build_single_placement_group_plan(
                 member_id=resource["node_id"],
                 member_address=resource["address"],
                 device_uuids=resource["device_uuids"],
@@ -9145,43 +9091,41 @@ def _restore_engine_group_orchestrator(
                 port_count=resource["port_count"],
             )
         else:
-            plan = build_group_plan(
+            plan = build_placement_group_plan(
                 contract,
-                member_ids=tuple(item["node_id"] for item in resources),
-                member_addresses={item["node_id"]: item["address"] for item in resources},
+                member_ids=tuple(item["node_id"] for item in placements),
+                member_addresses={item["node_id"]: item["address"] for item in placements},
                 topology_sha256=document["topology_sha256"],
                 manifest_sha256=document["manifest_sha256"],
                 runtime_digest=document["runtime_digest"],
                 service_id=document["service_id"],
                 release=document["release"],
-                member_port_bases={item["node_id"]: item["port_base"] for item in resources},
+                member_port_bases={item["node_id"]: item["port_base"] for item in placements},
                 member_device_uuids={
-                    item["node_id"]: item["device_uuids"] for item in resources
+                    item["node_id"]: item["device_uuids"] for item in placements
                 },
                 connections=document["connections"],
                 member_rdma_interfaces={
                     item["node_id"]: item["rdma_interface"]
-                    for item in resources
+                    for item in placements
                     if "rdma_interface" in item
                 },
                 endpoint_member_id=next(
-                    item["node_id"]
-                    for item in resources
-                    if item["task_id"] == document["endpoint_owner"]
+                    item["node_id"] for item in placements
+                    if item["placement_id"] == document["endpoint_placement_id"]
                 ),
             )
         if plan.document() != document:
-            raise LetsInferError("runtime contract no longer reproduces the engine-group plan")
-        controls = _engine_group_member_controls(
+            raise LetsInferError("runtime contract no longer reproduces the placement-group plan")
+        controls = _placement_group_node_controls(
             store.members(),
-            tuple(item.member_id for item in plan.assignments),
+            tuple(item.node_id for item in plan.placements),
             require_active=False,
         )
-        submit, job_status, group_status = _engine_group_transport()
-        orchestrator = EngineGroupOrchestrator(
+        submit, job_status, group_status = _placement_group_transport()
+        orchestrator = PlacementGroupOrchestrator(
             store=store,
             plan=plan,
-            placement_id=str(row["placement_id"]),
             source=str(row["source"]),
             members=controls,
             submit=submit,
@@ -9195,112 +9139,60 @@ def _restore_engine_group_orchestrator(
         if orchestrator.engine_credential_sha256 != row.get(
             "engine_credential_sha256"
         ):
-            raise LetsInferError("engine-group credential identity changed")
-        member_states = row.get("members")
-        if not isinstance(member_states, list) or {
-            item.get("member_id") for item in member_states if isinstance(item, dict)
+            raise LetsInferError("placement-group credential identity changed")
+        placement_states = row.get("placements")
+        if not isinstance(placement_states, list) or {
+            item.get("placement_id")
+            for item in placement_states
+            if isinstance(item, dict)
         } != set(orchestrator.states):
-            raise LetsInferError("engine-group member journal is incomplete")
+            raise LetsInferError("placement journal is incomplete")
         orchestrator.states = {
-            str(item["member_id"]): dict(item) for item in member_states
+            str(item["placement_id"]): {
+                key: item.get(key)
+                for key in (
+                    "placement_id", "node_id", "task_id", "state",
+                    "operation_id", "error",
+                )
+            }
+            for item in placement_states
         }
         orchestrator.persisted_state = str(row["state"])
         return orchestrator, manifest
-    except (RuntimePackError, OrchestrationError, GroupOrchestrationError) as error:
-        raise LetsInferError(f"cannot restore engine-group controller: {error}") from error
+    except (RuntimePackError, OrchestrationError, PlacementGroupOrchestrationError) as error:
+        raise LetsInferError(f"cannot restore placement-group controller: {error}") from error
 
 
-def _sync_group_placement(
-    store: SiteStore,
-    group: Mapping[str, Any],
-) -> None:
-    placement = next(
-        (
-            row
-            for row in store.placements()
-            if row["placement_id"] == group["placement_id"]
-        ),
-        None,
-    )
-    if placement is None:
-        raise LetsInferError("engine-group placement record disappeared")
-    member_states = {
-        item["member_id"]: item["state"] for item in group["member_states"]
-    }
-    group_running = group["state"] == "running"
-    updated = {
-        key: placement[key]
-        for key in (
-            "placement_id",
-            "service_id",
-            "model",
-            "runtime",
-            "target",
-            "strategy",
-            "state",
-            "topology_sha256",
-            "members",
-            "endpoints",
-            "capacity",
-        )
-    }
-    if group_running:
-        updated["state"] = "running"
-    elif group["desired_state"] in {"stopped", "removed"} and group["state"] in {
-        "stopped", "removed",
-    }:
-        updated["state"] = "stopped"
-    elif group["state"] in {"stopping", "removing"}:
-        updated["state"] = "draining"
-    elif group["state"] in {"staging", "staged", "starting", "recovering"}:
-        updated["state"] = "starting"
-    else:
-        updated["state"] = "failed"
-    updated["endpoints"] = [
-        {
-            **endpoint,
-            "healthy": group_running
-            and member_states.get(endpoint["member_id"]) == "running",
-        }
-        for endpoint in placement["endpoints"]
-    ]
-    if (
-        updated["state"] != placement["state"]
-        or updated["endpoints"] != placement["endpoints"]
-    ):
-        store.set_placement(updated)
 
-
-def _select_engine_group(
+def _select_placement_group(
     store: SiteStore,
     model: str | None,
     *,
     required: bool = True,
-) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    placements = {row["placement_id"]: row for row in store.placements()}
-    candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for group in store.engine_groups():
-        if group["state"] == "removed" or group["desired_state"] == "removed":
+) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for placement_group in store.placement_groups():
+        if (
+            placement_group["state"] == "removed"
+            or placement_group["desired_state"] == "removed"
+        ):
             continue
-        placement = placements.get(group["placement_id"])
-        if placement is None:
-            raise LetsInferError("engine-group placement record disappeared")
-        if model is not None and placement["model"] != model:
+        if model is not None and placement_group["model"] != model:
             continue
-        candidates.append((group, placement))
+        candidates.append(placement_group)
     if not candidates:
         if model is not None and required:
-            raise LetsInferError(f"no installed engine group serves model {model!r}")
+            raise LetsInferError(f"no installed placement group serves model {model!r}")
         return None
     if len(candidates) != 1:
-        names = ", ".join(sorted({item[1]["model"] for item in candidates}))
+        names = ", ".join(sorted({item["model"] for item in candidates}))
         raise LetsInferError(
-            "multiple engine groups are installed; specify the model (" + names + ")"
+            "multiple placement groups are installed; specify the model (" + names + ")"
         )
     return candidates[0]
 
 
-def _engine_group_lifecycle(
+def _placement_group_lifecycle(
     model: str | None,
     action: str,
     *,
@@ -9311,25 +9203,22 @@ def _engine_group_lifecycle(
 ) -> dict[str, Any] | None:
     identity = read_site_identity()
     if identity.role != "main":
-        raise LetsInferError("engine-group lifecycle is main-node-only")
+        raise LetsInferError("placement-group lifecycle is main-node-only")
     with _site_store() as store:
-        placements = {row["placement_id"]: row for row in store.placements()}
         member_names = {
             row["member_id"]: row["display_name"]
             for row in (store.members() if hasattr(store, "members") else [])
         }
         selected = [
-            (row, placements[row["placement_id"]])
-            for row in store.engine_groups()
+            row for row in store.placement_groups()
             if row["state"] != "removed"
             and (action == "remove" or row["desired_state"] != "removed")
-            and row["placement_id"] in placements
-            and (model is None or placements[row["placement_id"]]["model"] == model)
+            and (model is None or row["model"] == model)
         ]
         if not selected:
             return None
         results: list[dict[str, Any]] = []
-        for row, _placement in selected:
+        for row in selected:
             if (
                 action == "start"
                 and row["state"] == "running"
@@ -9337,22 +9226,20 @@ def _engine_group_lifecycle(
             ):
                 results.append(
                     {
-                        **row["plan"],
-                        "placement_id": row["placement_id"],
+                        **row,
                         "desired_state": "running",
                         "state": "running",
-                        "member_states": [dict(value) for value in row["members"]],
                     }
                 )
                 continue
             if action in {"start", "restart", "recover"}:
-                link_failure = _engine_group_required_link_failure(row, store)
+                link_failure = _placement_group_required_link_failure(row, store)
                 if link_failure is not None:
                     raise LetsInferError(
-                        "engine group cannot resume until its required node link "
-                        f"is verified: {row['group_id']} ({link_failure})"
+                        "placement group cannot resume until its required node link "
+                        f"is verified: {row['placement_group_id']} ({link_failure})"
                     )
-            orchestrator, _manifest = _restore_engine_group_orchestrator(
+            orchestrator, _manifest = _restore_placement_group_orchestrator(
                 store,
                 row,
                 actor_type=actor_type,
@@ -9370,7 +9257,6 @@ def _engine_group_lifecycle(
                         result = orchestrator.recover(acknowledge_trips=False)
                 elif action == "restart":
                     stopped = orchestrator.stop()
-                    _sync_group_placement(store, stopped)
                     result = orchestrator.recover(acknowledge_trips=False)
                 elif action == "recover":
                     result = orchestrator.recover(acknowledge_trips=True)
@@ -9380,24 +9266,10 @@ def _engine_group_lifecycle(
                         and row["state"] not in {"staged", "stopped"}
                     ):
                         stopped = orchestrator.stop()
-                        _sync_group_placement(store, stopped)
                     result = orchestrator.remove()
                 else:
-                    raise LetsInferError("engine-group lifecycle action is invalid")
-            except GroupOrchestrationError:
-                current = next(
-                    item
-                    for item in store.engine_groups()
-                    if item["group_id"] == row["group_id"]
-                )
-                failed = {
-                    **current["plan"],
-                    "placement_id": current["placement_id"],
-                    "desired_state": current["desired_state"],
-                    "state": current["state"],
-                    "member_states": current["members"],
-                }
-                _sync_group_placement(store, failed)
+                    raise LetsInferError("placement-group lifecycle action is invalid")
+            except PlacementGroupOrchestrationError:
                 raise
             downloads = []
             member_results = (
@@ -9405,21 +9277,27 @@ def _engine_group_lifecycle(
                 if isinstance(orchestrator.results, Mapping)
                 else {}
             )
-            for member_id, member_result in sorted(member_results.items()):
+            placements_by_id = {
+                item["placement_id"]: item for item in row["placements"]
+            }
+            for placement_id, member_result in sorted(member_results.items()):
                 artifacts = member_result.get("model_artifacts_downloaded")
                 if isinstance(artifacts, list) and artifacts and all(
                     isinstance(item, str) for item in artifacts
                 ):
                     downloads.append(
                         {
-                            "member_id": member_id,
-                            "name": member_names.get(member_id, member_id),
+                            "placement_id": placement_id,
+                            "node_id": placements_by_id[placement_id]["node_id"],
+                            "name": member_names.get(
+                                placements_by_id[placement_id]["node_id"],
+                                placements_by_id[placement_id]["node_id"],
+                            ),
                             "artifacts": list(artifacts),
                         }
                     )
             if downloads:
                 result = {**result, "model_artifact_downloads": downloads}
-            _sync_group_placement(store, result)
             results.append(result)
         if len(results) == 1:
             return results[0]
@@ -9428,15 +9306,17 @@ def _engine_group_lifecycle(
                 {
                     "contract": "letsinfer-replica-lifecycle-v1",
                     "model": model,
-                    "groups": sorted(result["group_id"] for result in results),
+                    "placement_groups": sorted(
+                        result["placement_group_id"] for result in results
+                    ),
                 }
             )
         ).hexdigest()[:32]
         aggregate = {
-            "group_id": aggregate_id,
-            "group_ids": [result["group_id"] for result in results],
+            "placement_group_id": aggregate_id,
+            "placement_group_ids": [result["placement_group_id"] for result in results],
             "state": results[0]["state"],
-            "groups": results,
+            "placement_groups": results,
         }
         aggregate_downloads = [
             item
@@ -9448,7 +9328,7 @@ def _engine_group_lifecycle(
         return aggregate
 
 
-def _remove_all_engine_groups() -> list[str]:
+def _remove_all_placement_groups() -> list[str]:
     identity = read_site_identity()
     if identity.role != "main":
         return []
@@ -9457,7 +9337,7 @@ def _remove_all_engine_groups() -> list[str]:
         with _site_store() as store:
             active = [
                 row
-                for row in store.engine_groups()
+                for row in store.placement_groups()
                 if row["state"] != "removed"
                 or row["desired_state"] != "removed"
             ]
@@ -9466,19 +9346,14 @@ def _remove_all_engine_groups() -> list[str]:
             row = active[0]
             if row["state"] == "removed":
                 raise LetsInferError(
-                    "engine-group removal is incomplete; restore member connectivity "
+                    "placement-group removal is incomplete; restore member connectivity "
                     "and retry removal before uninstalling"
                 )
-            placement = next(
-                item
-                for item in store.placements()
-                if item["placement_id"] == row["placement_id"]
-            )
-            model = placement["model"]
-        result = _engine_group_lifecycle(model, "remove")
+            model = row["model"]
+        result = _placement_group_lifecycle(model, "remove")
         if result is None or result["state"] != "removed":
-            raise LetsInferError(f"engine group for {model!r} was not removed")
-        removed.append(result["group_id"])
+            raise LetsInferError(f"placement group for {model!r} was not removed")
+        removed.append(result["placement_group_id"])
 
 
 def _apply_controller_site_move(prepared: PreparedMove) -> Any:
@@ -9779,7 +9654,7 @@ def _controller_site_action(
 
     if model is None:
         raise LetsInferError("controller runtime action requires a model")
-    group = _engine_group_lifecycle(
+    group = _placement_group_lifecycle(
         model,
         action,
         actor_type="controller",
@@ -9790,7 +9665,7 @@ def _controller_site_action(
     if group is not None:
         return {
             "resource": "placement",
-            "identifier": group["group_id"],
+            "identifier": group["placement_group_id"],
             "model": model,
             "state": "stopped" if action == "stop" else "running",
             "model_artifact_downloads": group.get(
@@ -9888,67 +9763,61 @@ def _controller_site_action(
     }
 
 
-def _engine_group_status(model: str | None) -> list[dict[str, Any]]:
-    local_member_id = read_site_identity().member_id
+def _placement_group_status(model: str | None) -> list[dict[str, Any]]:
+    local_node_id = read_site_identity().member_id
     with _site_store() as store:
-        placements = {row["placement_id"]: row for row in store.placements()}
         values: list[dict[str, Any]] = []
-        for row in store.engine_groups():
+        for row in store.placement_groups():
             if row["state"] == "removed" or row["desired_state"] == "removed":
                 continue
-            placement = placements.get(row["placement_id"])
-            if placement is None:
-                raise LetsInferError("engine-group placement record disappeared")
-            if model is not None and placement["model"] != model:
+            if model is not None and row["model"] != model:
                 continue
             release = row.get("plan", {}).get("release", {})
             values.append({
-                "group_id": row["group_id"],
-                "placement_id": row["placement_id"],
-                "model": placement["model"],
-                "runtime": placement["runtime"],
-                "target": placement["target"],
-                "capacity": placement["capacity"],
-                "strategy": row["strategy"],
+                "placement_group_id": row["placement_group_id"],
+                "model": row["model"],
+                "runtime": row["runtime"],
+                "target": row["target"],
+                "capacity": row["capacity"],
                 "desired_state": row["desired_state"],
                 "state": row["state"],
                 "topology_sha256": row["topology_sha256"],
-                "members": row["members"],
-                "endpoints": placement["endpoints"],
+                "placements": row["placements"],
+                "endpoint": row["endpoint"],
                 "last_error": row["last_error"],
                 "updated_at_unix": row["updated_at_unix"],
-                "local_task": any(
-                    member.get("member_id") == local_member_id
-                    for member in row["members"]
+                "local_placement": any(
+                    placement.get("node_id") == local_node_id
+                    for placement in row["placements"]
                 ),
                 "engine_distribution": release.get("engine_distribution"),
             })
     if model is not None and not values:
-        raise LetsInferError(f"no installed engine group serves model {model!r}")
+        raise LetsInferError(f"no installed placement group serves model {model!r}")
     return values
 
 
-def _engine_group_required_link_failure(
+def _placement_group_required_link_failure(
     row: Mapping[str, Any],
     store: SiteStore,
     *,
     now_unix: int | None = None,
 ) -> str | None:
-    """Return a bounded reason only when one sealed group link is unavailable."""
+    """Return a bounded reason when a sealed placement-group link is unavailable."""
 
     plan = row.get("plan")
     connections = plan.get("connections") if isinstance(plan, Mapping) else None
-    resources = plan.get("resources") if isinstance(plan, Mapping) else None
+    placements = plan.get("placements") if isinstance(plan, Mapping) else None
     if not isinstance(connections, list) or not connections:
         return None
-    if not isinstance(resources, list):
+    if not isinstance(placements, list):
         return "required_link_plan_invalid"
     member_ids = {
-        str(resource.get("node_id"))
-        for resource in resources
-        if isinstance(resource, Mapping)
+        str(placement.get("node_id"))
+        for placement in placements
+        if isinstance(placement, Mapping)
     }
-    if len(member_ids) != len(resources):
+    if len(member_ids) != len(placements):
         return "required_link_plan_invalid"
     now = int(time.time()) if now_unix is None else now_unix
     members = {
@@ -9999,44 +9868,47 @@ def _engine_group_required_link_failure(
     return None
 
 
-def _pause_engine_group_for_link_loss(
+def _pause_placement_group_for_link_loss(
     store: SiteStore,
     row: Mapping[str, Any],
-    orchestrator: EngineGroupOrchestrator,
+    orchestrator: PlacementGroupOrchestrator,
     reason: str,
 ) -> dict[str, Any]:
-    """Drain and stop exactly one affected group, preserving every sibling."""
+    """Stop one affected placement group while preserving replica siblings."""
 
-    draining = {
-        **dict(row["plan"]),
-        "placement_id": row["placement_id"],
-        "desired_state": "stopped",
-        "state": "stopping",
-        "member_states": [dict(value) for value in row["members"]],
-    }
-    _sync_group_placement(store, draining)
     stopped = orchestrator.stop()
-    paused = store.set_engine_group(
+    paused = store.set_placement_group(
         row["plan"],
-        placement_id=row["placement_id"],
         source=row["source"],
         engine_credential_sha256=row["engine_credential_sha256"],
         desired_state="stopped",
         state="stopped",
-        members=stopped["member_states"],
-        action="group.link-pause",
+        placements=[
+            {
+                key: placement.get(key)
+                for key in (
+                    "placement_id",
+                    "node_id",
+                    "task_id",
+                    "state",
+                    "operation_id",
+                    "error",
+                )
+            }
+            for placement in stopped["placements"]
+        ],
+        action="placement_group.stop",
         error=reason,
         actor_type="system",
         actor_id="main",
         origin_interface="link-monitor",
     )
-    _sync_group_placement(store, paused)
     return paused
 
 
-@_serialized_engine_group_lifecycle
-def reconcile_engine_groups_once() -> dict[str, Any]:
-    """Refresh durable health without changing a group's desired lifecycle."""
+@_serialized_placement_group_lifecycle
+def reconcile_placement_groups_once() -> dict[str, Any]:
+    """Refresh health without changing a placement group's desired lifecycle."""
     summary: dict[str, list[str]] = {
         "healthy": [],
         "degraded": [],
@@ -10045,7 +9917,7 @@ def reconcile_engine_groups_once() -> dict[str, Any]:
     }
     now = int(time.time())
     with _site_store() as store:
-        for row in store.engine_groups():
+        for row in store.placement_groups():
             if row["desired_state"] != "running" or row["state"] in {
                 "staging", "starting", "recovering", "removing", "removed",
             }:
@@ -10055,46 +9927,47 @@ def reconcile_engine_groups_once() -> dict[str, Any]:
                     row["state"] in {"degraded", "failed"}
                     and now - int(row["updated_at_unix"]) < 300
                 )
-                orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
-                link_failure = _engine_group_required_link_failure(
+                orchestrator, _manifest = _restore_placement_group_orchestrator(store, row)
+                link_failure = _placement_group_required_link_failure(
                     row,
                     store,
                     now_unix=now,
                 )
                 if link_failure is not None:
                     try:
-                        _pause_engine_group_for_link_loss(
+                        _pause_placement_group_for_link_loss(
                             store,
                             row,
                             orchestrator,
                             link_failure,
                         )
-                        summary["paused"].append(row["group_id"])
+                        summary["paused"].append(row["placement_group_id"])
                     except Exception:
                         current_row = next(
                             (
                                 value
-                                for value in store.engine_groups()
-                                if value["group_id"] == row["group_id"]
+                                for value in store.placement_groups()
+                                if value["placement_group_id"] == row["placement_group_id"]
                             ),
                             None,
                         )
                         if current_row is not None:
                             failed = {
                                 **current_row["plan"],
-                                "placement_id": current_row["placement_id"],
+                                "placement_group_id": current_row[
+                                    "placement_group_id"
+                                ],
                                 "desired_state": current_row["desired_state"],
                                 "state": current_row["state"],
-                                "member_states": current_row["members"],
+                                "placements": current_row["placements"],
                             }
-                            _sync_group_placement(store, failed)
-                        summary["failed"].append(row["group_id"])
+                        summary["failed"].append(row["placement_group_id"])
                     continue
                 current = orchestrator.reconcile()
                 if not recovery_in_cooldown:
                     states = {
-                        item["member_id"]: item["state"]
-                        for item in current["member_states"]
+                        item["placement_id"]: item["state"]
+                        for item in current["placements"]
                     }
                     if (
                         current["state"] == "failed"
@@ -10104,33 +9977,43 @@ def reconcile_engine_groups_once() -> dict[str, Any]:
                         current = orchestrator.recover(
                             acknowledge_trips=False
                         )
-                _sync_group_placement(store, current)
                 bucket = "healthy" if current["state"] == "running" else current["state"]
-                summary[bucket].append(row["group_id"])
+                summary[bucket].append(row["placement_group_id"])
             except Exception as error:
                 error_code = type(error).__name__
                 if row["state"] == "failed" and row["last_error"] == error_code:
                     failed = {
                         **row["plan"],
-                        "placement_id": row["placement_id"],
+                        "placement_group_id": row["placement_group_id"],
                         "desired_state": "running",
                         "state": "failed",
-                        "member_states": row["members"],
+                        "placements": row["placements"],
                     }
                 else:
-                    failed = store.set_engine_group(
+                    failed = store.set_placement_group(
                         row["plan"],
-                        placement_id=row["placement_id"],
                         source=row["source"],
                         engine_credential_sha256=row["engine_credential_sha256"],
                         desired_state="running",
                         state="failed",
-                        members=row["members"],
-                        action="group.reconcile",
+                        placements=[
+                            {
+                                key: placement.get(key)
+                                for key in (
+                                    "placement_id",
+                                    "node_id",
+                                    "task_id",
+                                    "state",
+                                    "operation_id",
+                                    "error",
+                                )
+                            }
+                            for placement in row["placements"]
+                        ],
+                        action="placement_group.reconcile",
                         error=error_code,
                     )
-                _sync_group_placement(store, failed)
-                summary["failed"].append(row["group_id"])
+                summary["failed"].append(row["placement_group_id"])
     return summary
 
 
@@ -10143,7 +10026,7 @@ def _catalog_release_for_node(
     graph: TopologyGraph,
     member_id: str,
     ignore_allocations: bool = False,
-) -> tuple[tuple[str, str, str, str, str], TargetPlacement, TopologyGraph]:
+) -> tuple[tuple[str, str, str, str, str], ResolvedTargetPlacementGroup, TopologyGraph]:
     """Resolve one exact target-specific release for one physical node."""
     if member_id not in graph.members:
         raise LetsInferError(f"node is not active in this topology: {member_id}")
@@ -10214,104 +10097,104 @@ def _selected_install_node_ids(
     return (identity.member_id,)
 
 
-def _remove_terminal_engine_group_without_runtime(
+def _remove_terminal_placement_group_without_runtime(
     store: SiteStore,
     row: Mapping[str, Any],
     allocations: Sequence[Mapping[str, Any]],
 ) -> None:
-    """Forget only a proven-inactive failed group whose immutable pack is gone."""
-    document = _validated_engine_group_document(row)
-    placement = next(
-        (
-            item
-            for item in store.placements()
-            if item["placement_id"] == row["placement_id"]
-        ),
-        None,
-    )
-    member_states = row.get("members")
-    resources = document["resources"]
-    members_by_id = (
+    """Forget a failed inactive placement group whose runtime object is gone."""
+    document = _validated_placement_group_document(row)
+    placement_states = row.get("placements")
+    planned_placements = document["placements"]
+    placements_by_id = (
         {
-            item.get("member_id"): item
-            for item in member_states
+            item.get("placement_id"): item
+            for item in placement_states
             if isinstance(item, Mapping)
         }
-        if isinstance(member_states, list)
+        if isinstance(placement_states, list)
         else {}
     )
-    terminal_members = (
-        len(members_by_id) == len(resources)
+    terminal_placements = (
+        len(placements_by_id) == len(planned_placements)
         and all(
-            resource["node_id"] in members_by_id
-            and members_by_id[resource["node_id"]].get("task_id")
-            == resource["task_id"]
-            and members_by_id[resource["node_id"]].get("state")
+            planned["placement_id"] in placements_by_id
+            and placements_by_id[planned["placement_id"]].get("task_id")
+            == planned["task_id"]
+            and placements_by_id[planned["placement_id"]].get("state")
             in {"failed", "removed", "stopped", "unreachable"}
-            for resource in resources
+            for planned in planned_placements
         )
     )
     if (
-        placement is None
-        or row.get("state") != "failed"
+        row.get("state") != "failed"
         or row.get("desired_state") not in {"stopped", "removed"}
-        or placement.get("state") not in {"failed", "stopped"}
-        or any(
-            isinstance(endpoint, Mapping) and endpoint.get("healthy") is not False
-            for endpoint in placement.get("endpoints", [])
+        or (
+            isinstance(row.get("endpoint"), Mapping)
+            and row["endpoint"].get("healthy") is not False
         )
         or any(allocation.get("state") != "released" for allocation in allocations)
-        or not terminal_members
+        or not terminal_placements
     ):
         raise LetsInferError(
-            "engine-group runtime object is missing while durable state may still be active"
+            "placement-group runtime object is missing while durable state may still be active"
         )
-    removed_members = [
+    removed_placements = [
         {
-            "member_id": resource["node_id"],
-            "task_id": resource["task_id"],
+            "placement_id": planned["placement_id"],
+            "node_id": planned["node_id"],
+            "task_id": planned["task_id"],
             "state": "removed",
             "operation_id": None,
             "error": None,
         }
-        for resource in resources
+        for planned in planned_placements
     ]
-    removed = store.set_engine_group(
+    removed = store.set_placement_group(
         document,
-        placement_id=str(row["placement_id"]),
         source=str(row["source"]),
         engine_credential_sha256=str(row["engine_credential_sha256"]),
         desired_state="removed",
         state="removed",
-        members=removed_members,
-        action="group.remove",
+        placements=removed_placements,
+        action="placement_group.remove",
     )
-    store.set_group_allocation_state(document["group_id"], "released")
-    _sync_group_placement(store, removed)
+    store.set_placement_group_allocation_state(document["placement_group_id"], "released")
 
 
-def _remove_engine_groups_by_id(group_ids: Sequence[str]) -> None:
-    """Drain and remove exact groups before an explicitly approved replacement."""
-    wanted = tuple(dict.fromkeys(group_ids))
+def _remove_placement_groups_by_id(placement_group_ids: Sequence[str]) -> None:
+    """Remove exact placement groups before an approved replacement."""
+    wanted = tuple(dict.fromkeys(placement_group_ids))
     if not wanted:
         return
     with _site_store() as store:
-        rows = {row["group_id"]: row for row in store.engine_groups()}
+        rows = {row["placement_group_id"]: row for row in store.placement_groups()}
+        placement_to_group = {
+            placement["placement_id"]: placement["placement_group_id"]
+            for row in rows.values()
+            for placement in row["placements"]
+        }
         allocations_by_group: dict[str, list[dict[str, Any]]] = {}
         for allocation in store.device_allocations():
+            placement_group_id = placement_to_group.get(
+                str(allocation["placement_id"])
+            )
+            if placement_group_id is None:
+                raise LetsInferError("device allocation has no placement group")
             allocations_by_group.setdefault(
-                str(allocation["group_id"]), []
+                placement_group_id, []
             ).append(dict(allocation))
-        missing = [group_id for group_id in wanted if group_id not in rows]
+        missing = [placement_group_id for placement_group_id in wanted if placement_group_id not in rows]
         if missing:
             raise LetsInferError(
-                "replacement group state disappeared: " + ",".join(missing)
+                "replacement placement-group state disappeared: "
+                + ",".join(missing)
             )
-        for group_id in wanted:
-            row = rows[group_id]
+        for placement_group_id in wanted:
+            row = rows[placement_group_id]
             if row["state"] == "removed":
                 continue
-            allocations = allocations_by_group.get(group_id, [])
+            allocations = allocations_by_group.get(placement_group_id, [])
             runtime_root = default_runtime_home() / ".objects" / str(
                 row["runtime_digest"]
             )
@@ -10319,14 +10202,14 @@ def _remove_engine_groups_by_id(group_ids: Sequence[str]) -> None:
                 runtime_root.exists() and not runtime_root.is_dir()
             ):
                 raise LetsInferError(
-                    f"engine-group runtime storage is unsafe: {runtime_root}"
+                    f"placement-group runtime storage is unsafe: {runtime_root}"
                 )
             if not runtime_root.is_dir():
-                _remove_terminal_engine_group_without_runtime(
+                _remove_terminal_placement_group_without_runtime(
                     store, row, allocations
                 )
                 continue
-            orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
+            orchestrator, _manifest = _restore_placement_group_orchestrator(store, row)
             allocations_released = bool(allocations) and all(
                 allocation["state"] == "released" for allocation in allocations
             )
@@ -10336,15 +10219,13 @@ def _remove_engine_groups_by_id(group_ids: Sequence[str]) -> None:
                 and not allocations_released
             ):
                 stopped = orchestrator.stop()
-                _sync_group_placement(store, stopped)
             removed = orchestrator.remove()
-            _sync_group_placement(store, removed)
 
 
 def _install_catalog_nodes(
     arguments: argparse.Namespace,
 ) -> int | None:
-    """Plan and install one independent target-specific group per selected node."""
+    """Plan and install one target-specific placement group per selected node."""
     model_path = pathlib.Path(arguments.model).expanduser()
     if model_path.exists() or REGISTRY_DIGEST_RE.fullmatch(arguments.model):
         return None
@@ -10358,14 +10239,9 @@ def _install_catalog_nodes(
     identity, graph = _fresh_site_topology()
     with _site_store() as store:
         members = store.members()
-        placements = {
-            row["placement_id"]: row
-            for row in store.placements()
-            if row["state"] in {"starting", "running", "draining"}
-        }
         groups = [
             row
-            for row in store.engine_groups()
+            for row in store.placement_groups()
             if row["state"] != "removed" and row["desired_state"] != "removed"
         ]
     selected = _selected_install_node_ids(arguments, identity, members)
@@ -10374,22 +10250,18 @@ def _install_catalog_nodes(
         member_id: [] for member_id in selected
     }
     for group in groups:
-        for resource in group["plan"]["resources"]:
+        for resource in group["plan"]["placements"]:
             if resource["node_id"] in groups_by_node:
                 groups_by_node[resource["node_id"]].append(group)
     install_nodes: list[str] = []
     replacements: dict[str, list[str]] = {}
-    planned: dict[str, tuple[tuple[str, str, str, str, str], TargetPlacement]] = {}
+    planned: dict[str, tuple[tuple[str, str, str, str, str], ResolvedTargetPlacementGroup]] = {}
     presenter = _human_presenter()
     plan_rows: list[dict[str, Any]] = []
     for member_id in selected:
         display_name = member_rows[member_id]["display_name"]
         resident = groups_by_node[member_id]
-        resident_models = {
-            placements[row["placement_id"]]["model"]
-            for row in resident
-            if row["placement_id"] in placements
-        }
+        resident_models = {str(row["model"]) for row in resident}
         try:
             release, choice, _node_graph = _catalog_release_for_node(
                 catalog,
@@ -10416,7 +10288,7 @@ def _install_catalog_nodes(
         planned[member_id] = (release, choice)
         install_nodes.append(member_id)
         if resident:
-            replacements[member_id] = [row["group_id"] for row in resident]
+            replacements[member_id] = [row["placement_group_id"] for row in resident]
             names = ", ".join(sorted(resident_models)) or "an installed runtime"
             if presenter is not None:
                 plan_rows.append(
@@ -10453,17 +10325,16 @@ def _install_catalog_nodes(
         )
     if not install_nodes:
         if any(
-            placements[row["placement_id"]]["model"] == arguments.model
+            row["model"] == arguments.model
             for rows in groups_by_node.values()
             for row in rows
-            if row["placement_id"] in placements
         ):
             return 0
         raise LetsInferError("no selected node has a qualified runtime for this model")
     if replacements and not getattr(arguments, "replace_existing", False):
         if not sys.stdin.isatty():
             raise LetsInferError(
-                "installation would replace installed runtime groups; retry with "
+                "installation would replace installed placement groups; retry with "
                 "--replace-existing"
             )
         if not ui.confirm(
@@ -10473,8 +10344,8 @@ def _install_catalog_nodes(
     activity = _command_activity(arguments)
     with activity, ui.protect_stdout(activity):
         if replacements:
-            _remove_engine_groups_by_id(
-                [group_id for values in replacements.values() for group_id in values]
+            _remove_placement_groups_by_id(
+                [placement_group_id for values in replacements.values() for placement_group_id in values]
             )
         completed = 0
         for member_id in install_nodes:
@@ -10507,7 +10378,7 @@ def _install_catalog_nodes(
             release_record = catalog_release_record(
                 dict(catalog), arguments.model, target_id, candidate, version
             )
-            release_identity = _group_release_identity(
+            release_identity = _placement_group_release_identity(
                 catalog_release_value=release_record,
                 candidate_id=candidate,
                 version=version,
@@ -10517,7 +10388,7 @@ def _install_catalog_nodes(
                 runtime=runtime,
                 manifest_sha256=sha256_file(manifest_path),
             )
-            install_engine_group(
+            install_placement_group(
                 arguments,
                 source=source,
                 manifest_path=manifest_path,
@@ -10525,7 +10396,7 @@ def _install_catalog_nodes(
                 control_root=control_root,
                 receipt=receipt,
                 release_identity=release_identity,
-                resolved_topology=(identity, node_graph, choice.placement),
+                resolved_topology=(identity, node_graph, choice.placement_group),
             )
             completed += 1
     if presenter is not None:
@@ -10534,7 +10405,7 @@ def _install_catalog_nodes(
                 command_ui.RecordRow(
                     "Runtime", arguments.model, semantic=command_ui.Semantic.SUCCESS
                 ),
-                command_ui.RecordRow("Groups", completed),
+                command_ui.RecordRow("Placement groups", completed),
                 command_ui.RecordRow(
                     "Nodes",
                     ", ".join(
@@ -10546,14 +10417,14 @@ def _install_catalog_nodes(
         )
     else:
         print(
-            f"REPLICA POOL {arguments.model} groups={completed} "
+            f"REPLICA POOL {arguments.model} placement_groups={completed} "
             f"nodes={','.join(install_nodes)}"
         )
     return 0
 
 
 def scale_command(arguments: argparse.Namespace) -> int:
-    """Converge one logical model service to an exact number of groups."""
+    """Converge a model service to an exact number of placement groups."""
     replicas = arguments.replicas
     if not isinstance(replicas, int) or isinstance(replicas, bool) or replicas not in range(1, 129):
         raise LetsInferError("--replicas must be from 1 through 128")
@@ -10568,14 +10439,12 @@ def scale_command(arguments: argparse.Namespace) -> int:
         raise LetsInferError(str(error)) from error
 
     with _site_store() as store:
-        placements = {row["placement_id"]: row for row in store.placements()}
         current = [
             row
-            for row in store.engine_groups()
+            for row in store.placement_groups()
             if row["state"] != "removed"
             and row["desired_state"] != "removed"
-            and row["placement_id"] in placements
-            and placements[row["placement_id"]]["model"] == arguments.model
+            and row["model"] == arguments.model
         ]
     if len(current) > replicas:
         removable = sorted(
@@ -10583,10 +10452,10 @@ def scale_command(arguments: argparse.Namespace) -> int:
             key=lambda row: (
                 row["state"] == "running",
                 row["updated_at_unix"],
-                row["group_id"],
+                row["placement_group_id"],
             ),
         )[: len(current) - replicas]
-        _remove_engine_groups_by_id([row["group_id"] for row in removable])
+        _remove_placement_groups_by_id([row["placement_group_id"] for row in removable])
         current = [row for row in current if row not in removable]
 
     while len(current) < replicas:
@@ -10614,7 +10483,7 @@ def scale_command(arguments: argparse.Namespace) -> int:
             expected_target_contract_sha256=target_sha256,
         )
         runtime = verify_descriptor(pathlib.Path(receipt["object_root"]))
-        release_identity = _group_release_identity(
+        release_identity = _placement_group_release_identity(
             catalog_release_value=catalog_release_record(
                 dict(catalog), arguments.model, target_id, candidate, version
             ),
@@ -10626,7 +10495,7 @@ def scale_command(arguments: argparse.Namespace) -> int:
             runtime=runtime,
             manifest_sha256=sha256_file(manifest_path),
         )
-        install_engine_group(
+        install_placement_group(
             arguments,
             source=source,
             manifest_path=manifest_path,
@@ -10634,17 +10503,15 @@ def scale_command(arguments: argparse.Namespace) -> int:
             control_root=control_root,
             receipt=receipt,
             release_identity=release_identity,
-            resolved_topology=(identity, graph, choice.placement),
+            resolved_topology=(identity, graph, choice.placement_group),
         )
         with _site_store() as store:
-            placements = {row["placement_id"]: row for row in store.placements()}
             current = [
                 row
-                for row in store.engine_groups()
+                for row in store.placement_groups()
                 if row["state"] != "removed"
                 and row["desired_state"] != "removed"
-                and row["placement_id"] in placements
-                and placements[row["placement_id"]]["model"] == arguments.model
+                and row["model"] == arguments.model
             ]
     presenter = _human_presenter()
     if presenter is not None:
@@ -10653,12 +10520,15 @@ def scale_command(arguments: argparse.Namespace) -> int:
                 command_ui.RecordRow(
                     "Runtime", arguments.model, semantic=command_ui.Semantic.SUCCESS
                 ),
-                command_ui.RecordRow("Groups", len(current)),
+                command_ui.RecordRow("Placement groups", len(current)),
                 command_ui.RecordRow("Desired", replicas),
             )
         )
     else:
-        print(f"REPLICA POOL {arguments.model} groups={len(current)} desired={replicas}")
+        print(
+            f"REPLICA POOL {arguments.model} "
+            f"placement_groups={len(current)} desired={replicas}"
+        )
     return 0
 
 
@@ -10748,13 +10618,13 @@ def install(arguments: argparse.Namespace) -> int:
         else local_runtime_source(runtime.digest)
     )
     manifest_sha256 = sha256_file(manifest_path)
-    release_identity = _direct_group_release_identity(
+    release_identity = _direct_placement_group_release_identity(
         source=immutable_source,
         runtime=runtime,
         manifest_sha256=manifest_sha256,
         target_sha256=target_contract_sha256(target_contract(manifest)),
     )
-    return install_engine_group(
+    return install_placement_group(
         arguments,
         source=immutable_source,
         manifest_path=manifest_path,
@@ -10764,236 +10634,6 @@ def install(arguments: argparse.Namespace) -> int:
         release_identity=release_identity,
         resolved_topology=_resolve_direct_install_placement(arguments, manifest),
     )
-    # Legacy direct-service activation remains below for receipt compatibility;
-    # new installations return through the engine-group path above.
-    selected_receipt = prepared_receipt
-    manifest_sha = sha256_file(manifest_path)
-    placement = resolve_service_placement(manifest, manifest_sha)
-    control_root, installed_manifest_path = install_control_bundle(
-        manifest_path,
-        manifest,
-    )
-
-    config_path = absolute_user_path(
-        arguments.config or default_service_config_path()
-    )
-    previous_config: dict[str, Any] | None = None
-    if config_path.is_file():
-        candidate = read_service_config(config_path)
-        if (
-            candidate["release"] == manifest["release"]
-            and candidate["engine"] == adapter_for(manifest).name
-        ):
-            previous_config = candidate
-
-    model_cache = requested_model_cache(arguments.model_cache)
-    store_root = (
-        expanded_path(arguments.store_root)
-        if arguments.store_root
-        else expanded_path(previous_config["store_root"])
-        if previous_config
-        else default_store_root(manifest)
-    )
-    runtime_cache_root = (
-        expanded_path(arguments.runtime_cache_root)
-        if arguments.runtime_cache_root
-        else default_runtime_cache_root(manifest)
-    )
-    api_key_file = expanded_path(
-        arguments.api_key_file or default_engine_api_key_path()
-    )
-    gateway_api_key_file = default_api_key_path()
-    try:
-        gateway_token = read_api_key(gateway_api_key_file)
-        with SiteStore() as store:
-            if store.authenticate_key(gateway_token) is None:
-                raise LetsInferError(
-                    "the local inference API key is not registered; rerun the installer"
-                )
-    except SiteError as error:
-        raise LetsInferError(str(error)) from error
-    tls_cert_file = expanded_path(arguments.tls_cert_file or default_tls_cert_path())
-    tls_key_file = expanded_path(arguments.tls_key_file or default_tls_key_path())
-    watchdog_data_root = expanded_path(
-        arguments.watchdog_data_root or default_watchdog_data_root()
-    )
-    watchdog_cert_file = expanded_path(
-        arguments.watchdog_cert_file or default_watchdog_cert_path()
-    )
-    watchdog_key_file = expanded_path(
-        arguments.watchdog_key_file or default_watchdog_key_path()
-    )
-    watchdog_controller_ca_file = expanded_path(
-        arguments.watchdog_controller_ca_file or default_watchdog_controller_ca_path()
-    )
-    watchdog_controller_ca_key_file = expanded_path(
-        arguments.watchdog_controller_ca_key_file
-        or default_watchdog_controller_ca_key_path()
-    )
-    watchdog_local_controller_cert_file = expanded_path(
-        arguments.watchdog_local_controller_cert_file
-        or default_watchdog_local_controller_cert_path()
-    )
-    watchdog_local_controller_key_file = expanded_path(
-        arguments.watchdog_local_controller_key_file
-        or default_watchdog_local_controller_key_path()
-    )
-    runtime_artifact_root = pathlib.Path(selected_receipt["object_root"]).expanduser()
-    download_dependencies = bool(
-        getattr(
-            arguments,
-            "download_dependencies",
-            getattr(arguments, "download", True),
-        )
-    )
-    ensure_install_dependencies(
-        manifest,
-        model_cache=model_cache,
-        runtime_artifact_root=runtime_artifact_root,
-        download=download_dependencies,
-        build_image=not arguments.no_build_image,
-    )
-    ensure_private_directory(store_root)
-    ensure_runtime_home(runtime_cache_root)
-    ensure_api_key(api_key_file)
-    ensure_tls_material(tls_cert_file, tls_key_file)
-    ensure_private_directory(watchdog_data_root)
-    ensure_private_directory(watchdog_data_root / PROTECTION_ROOT_NAME)
-    ensure_watchdog_tls_material(
-        watchdog_cert_file,
-        watchdog_key_file,
-        watchdog_controller_ca_file,
-        watchdog_controller_ca_key_file,
-        watchdog_local_controller_cert_file,
-        watchdog_local_controller_key_file,
-    )
-    installation_identity = ensure_installation_identity()
-    site_identity = read_site_identity()
-    controller_allowlist_file = ensure_controller_authorization(
-        site_identity,
-        watchdog_local_controller_cert_file,
-    )
-    (
-        watchdog_binary,
-        watchdog_binary_sha,
-        watchdog_source_sha,
-    ) = install_core_watchdog_runtime()
-    verify_installed_runtime(manifest, model_cache=model_cache)
-
-    ensure_private_directory(config_path.parent)
-    config = {
-        "schema_version": SERVICE_CONFIG_VERSION,
-        "engine": adapter_for(manifest).name,
-        "model": manifest["model"]["alias"],
-        "release": manifest["release"],
-        "manifest_sha256": manifest_sha,
-        "name": arguments.name or f"letsinfer-{adapter_for(manifest).name.replace('.', '-')}",
-        "gateway_listen": arguments.gateway_listen,
-        "gateway_protocol": "http",
-        "gateway_port": arguments.port,
-        "gateway_max_connections": arguments.gateway_max_connections,
-        "gateway_queue_timeout_seconds": arguments.gateway_queue_timeout,
-        "gateway_telemetry_file": str(default_gateway_telemetry_path()),
-        "engine_port": arguments.engine_port,
-        **placement,
-        "model_cache": str(model_cache),
-        "store_root": str(store_root),
-        "runtime_cache_root": str(runtime_cache_root),
-        "engine_api_key_file": str(api_key_file),
-        "gateway_api_key_file": str(gateway_api_key_file),
-        "tls_cert_file": str(tls_cert_file),
-        "tls_key_file": str(tls_key_file),
-        "watchdog_binary_path": str(watchdog_binary),
-        "watchdog_binary_sha256": watchdog_binary_sha,
-        "watchdog_source_sha256": watchdog_source_sha,
-        "watchdog_data_root": str(watchdog_data_root),
-        "protection_root": str(
-            watchdog_data_root / PROTECTION_ROOT_NAME / placement["placement_id"]
-        ),
-        "watchdog_listen": arguments.watchdog_listen or manifest["watchdog"]["listen"],
-        "watchdog_port": arguments.watchdog_port or manifest["watchdog"]["port"],
-        "memory_pressure_available_bytes": manifest["watchdog"]["protection"][
-            "warning_available_bytes"
-        ],
-        "watchdog_cert_file": str(watchdog_cert_file),
-        "watchdog_key_file": str(watchdog_key_file),
-        "watchdog_controller_ca_file": str(watchdog_controller_ca_file),
-        "watchdog_controller_ca_key_file": str(watchdog_controller_ca_key_file),
-        "watchdog_local_controller_cert_file": str(
-            watchdog_local_controller_cert_file
-        ),
-        "watchdog_local_controller_key_file": str(
-            watchdog_local_controller_key_file
-        ),
-        "installation_id": installation_identity["installation_id"],
-        "watchdog_controller_allowlist_file": str(controller_allowlist_file),
-        "source_root": str(control_root),
-        "manifest_path": str(installed_manifest_path),
-    }
-    config.update(
-        {
-            "runtime_name": selected_receipt["candidate_id"],
-            "runtime_version": selected_receipt["version"],
-            "runtime_digest": selected_receipt["digest"],
-            "runtime_policy": selected_receipt["policy"],
-        }
-    )
-    config["watchdog_public_state_file"] = str(
-        write_watchdog_public_state(config, manifest)
-    )
-    if prepared_receipt is not None:
-        prepared_receipt["manifest_path"] = str(installed_manifest_path)
-        prepared_receipt["control_root"] = str(control_root)
-    if arguments.no_service:
-        active = run(
-            ["systemctl", "--user", "is-active", SERVICE_NAME], check=False
-        )
-        if active.returncode == 0:
-            raise LetsInferError(
-                "--no-service cannot replace configuration for an active service"
-            )
-        atomic_json(config_path, config)
-        config_path.chmod(0o600)
-        update_service_placement(config, manifest, "stopped")
-    else:
-        install_user_service(
-            config_path,
-            config,
-            manifest,
-            no_start=arguments.no_start,
-            runtime_receipt=prepared_receipt,
-        )
-        if arguments.no_start:
-            update_service_placement(config, manifest, "stopped")
-    if prepared_receipt is not None and arguments.no_service:
-        try:
-            write_selection(prepared_receipt)
-        except RuntimePackError as error:
-            raise LetsInferError(
-                f"runtime activated but its selection receipt could not be written: {error}"
-            ) from error
-    presenter = _human_presenter()
-    if presenter is not None:
-        service_state = "Disabled" if arguments.no_service else "Enabled"
-        if not arguments.no_service and arguments.no_start:
-            service_state = "Installed, not started"
-        presenter.records(
-            (
-                command_ui.RecordRow(
-                    "Runtime",
-                    manifest["release"],
-                    semantic=command_ui.Semantic.SUCCESS,
-                ),
-                command_ui.RecordRow("Service", service_state),
-            )
-        )
-        presenter.verbatim(config_path, label="Configuration", copyable=True)
-    else:
-        print(
-            f"INSTALLED {manifest['release']} "
-            f"config={config_path} service={'disabled' if arguments.no_service else 'enabled'}"
-        )
-    return 0
 
 
 def _stop_managed_container(
@@ -11080,14 +10720,14 @@ def stop(arguments: argparse.Namespace) -> int:
                 raise LetsInferError(f"no installed runtime serves model {model!r}")
             return _qualification_candidate_lifecycle(qualification, "stop")
     if arguments.name is None and arguments.config is None:
-        group = _engine_group_lifecycle(model, "stop")
+        group = _placement_group_lifecycle(model, "stop")
         if group is not None:
             paused = getattr(arguments, "action_id", None) == "model.pause"
-            groups = group.get("groups")
-            members = (
-                sum(len(item["member_states"]) for item in groups)
-                if isinstance(groups, list)
-                else len(group["member_states"])
+            placement_groups = group.get("placement_groups")
+            placements = (
+                sum(len(item["placements"]) for item in placement_groups)
+                if isinstance(placement_groups, list)
+                else len(group["placements"])
             )
             presenter = _human_presenter()
             if presenter is not None:
@@ -11098,8 +10738,10 @@ def stop(arguments: argparse.Namespace) -> int:
                             model or "All installed runtimes",
                             semantic=command_ui.Semantic.SUCCESS,
                         ),
-                        command_ui.RecordRow("Group", group["group_id"]),
-                        command_ui.RecordRow("Members", members),
+                        command_ui.RecordRow(
+                            "Placement group", group["placement_group_id"]
+                        ),
+                        command_ui.RecordRow("Placements", placements),
                         command_ui.RecordRow(
                             "State", "Paused" if paused else "Stopped"
                         ),
@@ -11107,8 +10749,9 @@ def stop(arguments: argparse.Namespace) -> int:
                 )
             else:
                 print(
-                    f"{'PAUSED' if paused else 'STOPPED'} group={group['group_id']} "
-                    f"members={members}"
+                    f"{'PAUSED' if paused else 'STOPPED'} "
+                    f"placement_group={group['placement_group_id']} "
+                    f"placements={placements}"
                 )
             return 0
     if arguments.name is not None:
@@ -11492,30 +11135,30 @@ def _model_status_from_groups(groups: Sequence[Mapping[str, Any]]) -> list[dict[
             "model": model,
             "state": state,
             "replicas": len(model_groups),
-            "group_ids": sorted(str(group["group_id"]) for group in model_groups),
+            "placement_group_ids": sorted(str(group["placement_group_id"]) for group in model_groups),
             "runtimes": sorted({str(group["runtime"]) for group in model_groups}),
             "targets": sorted({str(group["target"]) for group in model_groups}),
         })
     return result
 
 
-def _local_engine_group_status(identity: Any) -> list[dict[str, Any]]:
-    """Read this node's exact staged group tasks without coordinator authority."""
+def _local_placement_group_status(identity: Any) -> list[dict[str, Any]]:
+    """Read this node's exact staged placements without main-node authority."""
 
     job_store = site_data_root() / "member-jobs.sqlite3"
     if not job_store.exists():
         return []
     if job_store.is_symlink() or not job_store.is_file():
-        raise LetsInferError("local engine-group journal is unsafe")
+        raise LetsInferError("local placement-group journal is unsafe")
     try:
         with MemberJobStore(job_store) as store:
-            rows = store.groups()
+            rows = store.placements()
     except MemberJobError as error:
-        raise LetsInferError(f"cannot read local engine-group journal: {error}") from error
+        raise LetsInferError(f"cannot read local placement-group journal: {error}") from error
 
     # A child journal can retain stopped history after the main has removed an
-    # older group.  When a task is running, it is the node's current runtime;
-    # do not let an obsolete, incompatible staged artifact hide that live task.
+    # older placement group. A running placement is the node's current runtime;
+    # do not let obsolete staged state hide that live placement.
     running_rows = [row for row in rows if row.get("state") == "running"]
     rows = running_rows or [
         row for row in rows if row.get("state") in {"staged", "stopped"}
@@ -11523,10 +11166,11 @@ def _local_engine_group_status(identity: Any) -> list[dict[str, Any]]:
 
     values: list[dict[str, Any]] = []
     for row in rows:
-        group_id = str(row.get("group_id") or "")
-        config = _read_engine_group_config(group_id, repair_tls=False)
+        placement_group_id = str(row.get("placement_group_id") or "")
+        config = _read_placement_group_config(placement_group_id, repair_tls=False)
         expected = {
-            "member_id": config["member_id"],
+            "placement_id": config["placement_id"],
+            "node_id": config["node_id"],
             "plan_sha256": config["plan_sha256"],
             "runtime_digest": config["runtime_digest"],
             "manifest_sha256": config["manifest_sha256"],
@@ -11534,15 +11178,15 @@ def _local_engine_group_status(identity: Any) -> list[dict[str, Any]]:
             "engine_credential_sha256": config["_credential_sha256"],
         }
         if (
-            config["member_id"] != identity.member_id
+            config["node_id"] != identity.member_id
             or any(row.get(key) != value for key, value in expected.items())
-            or row.get("task") != config["task"]
+            or row.get("placement") != config["placement"]
         ):
             raise LetsInferError(
-                "local engine-group journal differs from its staged runtime"
+                "local placement-group journal differs from its staged runtime"
             )
         manifest = config["_manifest"]
-        group = config["_group"]
+        group = config["_placement_group"]
         model = manifest["model"]["alias"]
         engine = adapter_for(manifest).name
         target = target_contract(manifest)["id"]
@@ -11552,8 +11196,7 @@ def _local_engine_group_status(identity: Any) -> list[dict[str, Any]]:
         )
         state = str(row["state"])
         values.append({
-            "group_id": group_id,
-            "placement_id": group_id,
+            "placement_group_id": placement_group_id,
             "model": model,
             "runtime": runtime,
             "target": target,
@@ -11565,19 +11208,19 @@ def _local_engine_group_status(identity: Any) -> list[dict[str, Any]]:
                     "max_context_tokens",
                 )
             },
-            "strategy": group["strategy"],
             "desired_state": "running" if state == "running" else "stopped",
             "state": state,
             "topology_sha256": config["topology_sha256"],
-            "members": [{
-                "member_id": identity.member_id,
-                "task_id": config["task"]["task_id"],
+            "placements": [{
+                "placement_id": config["placement_id"],
+                "node_id": identity.member_id,
+                "task_id": config["placement"]["task_id"],
                 "state": state,
             }],
-            "endpoints": [],
+            "endpoint": None,
             "last_error": None,
             "updated_at_unix": row["updated_at_unix"],
-            "local_task": True,
+            "local_placement": True,
             "engine_distribution": group.get("release", {}).get(
                 "engine_distribution"
             ),
@@ -11585,26 +11228,32 @@ def _local_engine_group_status(identity: Any) -> list[dict[str, Any]]:
     return values
 
 
-def _engine_group_dashboard_projection(
+def _placement_group_dashboard_projection(
     groups: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any] | None:
-    """Project one complete engine group onto the detailed runtime dashboard."""
+    """Project one complete placement group onto the detailed runtime dashboard."""
 
-    if len(groups) != 1:
+    active_placement_groups = [
+        item
+        for item in groups
+        if item.get("state") not in {"failed", "stopped", "removed"}
+        and item.get("desired_state") != "removed"
+    ]
+    if len(active_placement_groups) != 1:
         return None
-    group = groups[0]
+    group = active_placement_groups[0]
     model = group.get("model")
     target = group.get("target")
     runtime = group.get("runtime")
-    group_id = group.get("group_id")
+    placement_group_id = group.get("placement_group_id")
     if not all(isinstance(value, str) and value for value in (
-        model, target, runtime, group_id
-    )) or re.fullmatch(r"[0-9a-f]{32}", str(group_id)) is None:
+        model, target, runtime, placement_group_id
+    )) or re.fullmatch(r"[0-9a-f]{32}", str(placement_group_id)) is None:
         return None
     assert isinstance(model, str)
     assert isinstance(target, str)
     assert isinstance(runtime, str)
-    assert isinstance(group_id, str)
+    assert isinstance(placement_group_id, str)
     identity, digest_marker, digest = runtime.rpartition("@sha256:")
     model_prefix = f"{model}/"
     if (
@@ -11632,16 +11281,34 @@ def _engine_group_dashboard_projection(
     distribution_kind = (
         distribution.get("kind") if isinstance(distribution, Mapping) else None
     )
-    local_task = group.get("local_task") is True
+    local_node_id = read_site_identity().member_id
+    local_placements = [
+        item
+        for item in group.get("placements", [])
+        if isinstance(item, Mapping) and item.get("node_id") == local_node_id
+    ]
+    local_placement = (
+        local_placements[0]
+        if len(local_placements) == 1
+        else None
+    )
     native = distribution_kind not in {None, "oci-container"}
     inspection: dict[str, Any] | None = None
     health: Mapping[str, Any] = {}
-    process_name = f"letsinfer-group-{group_id}"
+    process_name = (
+        f"letsinfer-placement-{local_placement['placement_id']}"
+        if local_placement is not None
+        else f"placement-group-{placement_group_id}"
+    )
     process_kind = "oci-container"
     if native:
-        process_name = f"ai.letsinfer.engine.{group_id}"
+        process_name = (
+            f"ai.letsinfer.engine.{local_placement['placement_id']}"
+            if local_placement is not None
+            else f"ai.letsinfer.placement-group.{placement_group_id}"
+        )
         process_kind = "native-launch-agent"
-        if local_task:
+        if local_placement is not None:
             try:
                 _enabled, active, _detail = macos_services.service_state(process_name)
             except macos_services.MacOSServiceError:
@@ -11656,7 +11323,7 @@ def _engine_group_dashboard_projection(
             "armed": lifecycle_running and process_running,
             "trip_latched": False,
         }
-    elif local_task or distribution_kind is None:
+    elif local_placement is not None or distribution_kind is None:
         inspected = container_inspect(process_name)
         inspection = dict(inspected) if isinstance(inspected, Mapping) else None
         state = inspection.get("State") if inspection is not None else None
@@ -11668,7 +11335,13 @@ def _engine_group_dashboard_projection(
         protection = protection_status(
             {
                 "protection_root": str(
-                    default_watchdog_data_root() / PROTECTION_ROOT_NAME / group_id
+                    default_watchdog_data_root()
+                    / PROTECTION_ROOT_NAME
+                    / (
+                        local_placement["placement_id"]
+                        if local_placement is not None
+                        else placement_group_id
+                    )
                 )
             },
             inspection,
@@ -11697,7 +11370,7 @@ def _engine_group_dashboard_projection(
         else None
     )
     return {
-        "group": dict(group),
+        "placement_group": dict(group),
         "container": {
             "name": process_name,
             "kind": process_kind,
@@ -11720,13 +11393,13 @@ def _engine_group_dashboard_projection(
     }
 
 
-def _engine_group_dashboard_lifecycle(
+def _placement_group_dashboard_lifecycle(
     control: Mapping[str, Any],
     projection: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Combine control-plane health with one opaque engine-group lifecycle."""
+    """Combine control-plane health with one opaque placement-group lifecycle."""
 
-    group = projection["group"]
+    group = projection["placement_group"]
     container = projection["container"]
     protection = projection["protection"]
     runtime_ready = container.get("healthy") is True
@@ -11744,38 +11417,38 @@ def _engine_group_dashboard_lifecycle(
         return {
             **details,
             "state": "starting",
-            "reason": "engine-group-startup",
+            "reason": "placement-group-startup",
             "transitional": True,
         }
     if group_state in {"stopping", "removing"}:
         return {
             **details,
             "state": "stopping",
-            "reason": "engine-group-shutdown",
+            "reason": "placement-group-shutdown",
             "transitional": True,
         }
     if group_state in {"stopped", "removed"}:
-        return {**details, "state": "stopped", "reason": "engine-group-stopped"}
+        return {**details, "state": "stopped", "reason": "placement-group-stopped"}
     if group_state == "failed":
-        return {**details, "state": "failed", "reason": "engine-group-failure"}
+        return {**details, "state": "failed", "reason": "placement-group-failure"}
     if group_state != "running" or not runtime_ready:
         return {
             **details,
             "state": "degraded",
-            "reason": "engine-group-not-ready",
+            "reason": "placement-group-not-ready",
         }
     if protection.get("armed") is not True:
         if protection.get("phase") == "starting":
             return {
                 **details,
                 "state": "starting",
-                "reason": "engine-group-protection-startup",
+                "reason": "placement-group-protection-startup",
                 "transitional": True,
             }
         return {
             **details,
             "state": "degraded",
-            "reason": "engine-group-protection-not-ready",
+            "reason": "placement-group-protection-not-ready",
         }
     if control.get("state") != "ready":
         return {
@@ -11787,8 +11460,73 @@ def _engine_group_dashboard_lifecycle(
     return {
         **details,
         "state": "ready",
-        "reason": "engine-group-ready",
+        "reason": "placement-group-ready",
         "ready": True,
+    }
+
+
+def _placement_groups_lifecycle(
+    control: Mapping[str, Any],
+    placement_groups: Sequence[Mapping[str, Any]],
+    *,
+    gateway_model_identity: bool,
+) -> dict[str, Any]:
+    """Derive service health directly from every managed placement group."""
+
+    details = {
+        "ready": False,
+        "transitional": False,
+        "runtime_ready": False,
+        "ready_services": control.get("ready_services", 0),
+        "total_services": control.get("total_services", 0),
+    }
+    states = {str(item.get("state") or "unknown") for item in placement_groups}
+    if states & {"staging", "staged", "starting", "recovering"}:
+        return {
+            **details,
+            "state": "starting",
+            "reason": "placement-group-startup",
+            "transitional": True,
+        }
+    if states & {"stopping", "removing"}:
+        return {
+            **details,
+            "state": "stopping",
+            "reason": "placement-group-shutdown",
+            "transitional": True,
+        }
+    running = [
+        item
+        for item in placement_groups
+        if item.get("state") == "running" and item.get("desired_state") == "running"
+    ]
+    if running:
+        running_details = {**details, "runtime_ready": True}
+        if control.get("state") != "ready":
+            return {
+                **running_details,
+                "state": str(control.get("state") or "degraded"),
+                "reason": str(control.get("reason") or "node-not-ready"),
+                "transitional": control.get("transitional") is True,
+            }
+        if control.get("total_services") and not gateway_model_identity:
+            return {
+                **running_details,
+                "state": "degraded",
+                "reason": "placement-group-route-unavailable",
+            }
+        return {
+            **running_details,
+            "state": "ready",
+            "reason": "placement-groups-ready",
+            "ready": True,
+        }
+    if states and states <= {"stopped", "removed"}:
+        return {**details, "state": "stopped", "reason": "placement-groups-stopped"}
+    return {
+        **details,
+        "state": "failed" if "failed" in states else "degraded",
+        "reason": "placement-groups-unavailable",
     }
 
 
@@ -11833,14 +11571,14 @@ def status(arguments: argparse.Namespace) -> int:
     if arguments.name is None and arguments.config is None and site_identity_path().exists():
         identity = read_site_identity()
         if identity.role == "main":
-            groups = _engine_group_status(model)
+            groups = _placement_group_status(model)
             live_groups = groups
         elif model is not None:
             raise LetsInferError(
-                "node-wide engine-group status is available from the main node"
+                "node-wide placement-group status is available from the main node"
             )
         else:
-            live_groups = _local_engine_group_status(identity)
+            live_groups = _local_placement_group_status(identity)
     config_path = absolute_user_path(
         arguments.config or active_service_config_path()
     )
@@ -11954,25 +11692,47 @@ def status(arguments: argparse.Namespace) -> int:
         }
         payload.update(_complete_local_node_status(identity))
         if live_groups:
-            payload["engine_groups"] = live_groups
+            payload["placement_groups"] = live_groups
         payload["models"] = _model_status_from_groups(live_groups)
         control_lifecycle = runtime_lifecycle(payload)
-        projection = _engine_group_dashboard_projection(live_groups)
+        projection = _placement_group_dashboard_projection(live_groups)
+        if live_groups:
+            running_models = {
+                str(placement_group["model"])
+                for placement_group in live_groups
+                if placement_group.get("state") == "running"
+                and placement_group.get("desired_state") == "running"
+            }
+            gateway_model_identity = (
+                running_models <= gateway_models if is_main else True
+            )
+            service.update(
+                {
+                    "runtime_installed": True,
+                    "runtime_metadata_ready": True,
+                    "runtime_mode": "placement-group",
+                    "placement_group_ids": sorted(
+                        str(item["placement_group_id"]) for item in live_groups
+                    ),
+                    "gateway_model_identity": gateway_model_identity,
+                }
+            )
         if projection is not None:
             service.update({
-                "runtime_installed": True,
-                "runtime_metadata_ready": True,
-                "runtime_mode": "engine-group",
-                "engine_group_id": projection["group"]["group_id"],
+                "placement_group_id": projection["placement_group"][
+                    "placement_group_id"
+                ],
             })
-            if is_main:
-                service["gateway_model_identity"] = (
-                    projection["container"]["model"] in gateway_models
-                )
             payload["container"] = projection["container"]
             payload["protection"] = projection["protection"]
-            payload["lifecycle"] = _engine_group_dashboard_lifecycle(
+            payload["lifecycle"] = _placement_group_dashboard_lifecycle(
                 control_lifecycle, projection
+            )
+        elif live_groups:
+            payload["lifecycle"] = _placement_groups_lifecycle(
+                control_lifecycle,
+                live_groups,
+                gateway_model_identity=service["gateway_model_identity"],
             )
         else:
             payload["lifecycle"] = control_lifecycle
@@ -12187,7 +11947,7 @@ def status(arguments: argparse.Namespace) -> int:
         payload["hardware"] = None
         payload["links"] = []
     if live_groups:
-        payload["engine_groups"] = live_groups
+        payload["placement_groups"] = live_groups
     payload["models"] = _model_status_from_groups(live_groups)
     payload["lifecycle"] = runtime_lifecycle(payload)
     payload["telemetry"] = (
@@ -12247,26 +12007,26 @@ def _managed_inspection(name: str) -> dict[str, Any]:
     return inspection
 
 
-def _local_engine_group_log_targets(
-    group_id: str | None,
+def _local_placement_group_log_targets(
+    placement_group_id: str | None,
 ) -> list[tuple[str, str]]:
-    """Return validated local group/container identities without mutating state."""
-    if group_id is not None and not re.fullmatch(r"[0-9a-f]{32}", group_id):
-        raise LetsInferError("engine-group identity is invalid")
-    root = default_engine_group_root()
+    """Return validated local placement/container identities without mutation."""
+    if placement_group_id is not None and not re.fullmatch(r"[0-9a-f]{32}", placement_group_id):
+        raise LetsInferError("placement-group identity is invalid")
+    root = default_placement_group_root()
     if not root.exists():
         return []
     if root.is_symlink() or not root.is_dir():
-        raise LetsInferError(f"engine-group storage is unsafe: {root}")
+        raise LetsInferError(f"placement-group storage is unsafe: {root}")
     root_details = root.stat()
     if (
         root_details.st_uid != os.getuid()
         or stat.S_IMODE(root_details.st_mode) & 0o077
     ):
         raise LetsInferError(
-            f"engine-group storage must be private and user-owned: {root}"
+            f"placement-group storage must be private and user-owned: {root}"
         )
-    candidates = [root / group_id] if group_id is not None else sorted(root.iterdir())
+    candidates = [root / placement_group_id] if placement_group_id is not None else sorted(root.iterdir())
     targets: list[tuple[str, str]] = []
     for candidate in candidates:
         if not candidate.is_dir() or candidate.is_symlink():
@@ -12277,10 +12037,10 @@ def _local_engine_group_log_targets(
             or stat.S_IMODE(candidate_details.st_mode) & 0o077
         ):
             raise LetsInferError(
-                f"engine-group directory must be private and user-owned: {candidate}"
+                f"placement-group directory must be private and user-owned: {candidate}"
             )
-        candidate_group_id = candidate.name
-        if not re.fullmatch(r"[0-9a-f]{32}", candidate_group_id):
+        candidate_placement_group_id = candidate.name
+        if not re.fullmatch(r"[0-9a-f]{32}", candidate_placement_group_id):
             continue
         path = candidate / "config.json"
         if not path.is_file():
@@ -12289,38 +12049,41 @@ def _local_engine_group_log_targets(
             config = json.loads(_validate_private_file(path, minimum_bytes=64))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise LetsInferError(
-                f"engine-group configuration is invalid JSON: {path}"
+                f"placement-group configuration is invalid JSON: {path}"
             ) from error
-        task = config.get("task") if isinstance(config, Mapping) else None
-        expected_name = f"letsinfer-group-{candidate_group_id}"
+        placement = config.get("placement") if isinstance(config, Mapping) else None
+        placement_id = config.get("placement_id") if isinstance(config, Mapping) else None
+        expected_name = f"letsinfer-placement-{placement_id}"
         if (
             not isinstance(config, Mapping)
-            or config.get("schema_version") != 1
-            or config.get("group_id") != candidate_group_id
-            or not re.fullmatch(r"[0-9a-f]{32}", str(config.get("member_id", "")))
-            or not isinstance(task, Mapping)
-            or not isinstance(task.get("task_id"), str)
+            or config.get("schema_version") != 2
+            or config.get("placement_group_id") != candidate_placement_group_id
+            or not re.fullmatch(r"[0-9a-f]{32}", str(placement_id or ""))
+            or not re.fullmatch(r"[0-9a-f]{32}", str(config.get("node_id", "")))
+            or not isinstance(placement, Mapping)
+            or not isinstance(placement.get("task_id"), str)
             or config.get("container_name") != expected_name
         ):
-            raise LetsInferError(f"engine-group logging identity is invalid: {path}")
+            raise LetsInferError(f"placement-group logging identity is invalid: {path}")
         inspection = _managed_inspection(expected_name)
         labels = inspection.get("Config", {}).get("Labels") or {}
         if (
-            labels.get(GROUP_ID_LABEL) != candidate_group_id
-            or labels.get(GROUP_NODE_LABEL) != config["member_id"]
-            or labels.get(GROUP_TASK_LABEL) != task["task_id"]
+            labels.get(PLACEMENT_GROUP_ID_LABEL) != candidate_placement_group_id
+            or labels.get(PLACEMENT_ID_LABEL) != placement_id
+            or labels.get(PLACEMENT_NODE_LABEL) != config["node_id"]
+            or labels.get(PLACEMENT_TASK_LABEL) != placement["task_id"]
         ):
             raise LetsInferError(
-                f"managed container {expected_name} does not match its engine group"
+                f"managed container {expected_name} does not match its placement group"
             )
-        targets.append((candidate_group_id, expected_name))
+        targets.append((candidate_placement_group_id, expected_name))
     return targets
 
 
 def logs(arguments: argparse.Namespace) -> int:
-    group_id = getattr(arguments, "group", None)
-    if arguments.config is not None and group_id is not None:
-        raise LetsInferError("--config cannot be combined with --group")
+    placement_group_id = getattr(arguments, "placement_group", None)
+    if arguments.config is not None and placement_group_id is not None:
+        raise LetsInferError("--config cannot be combined with --placement-group")
     name: str | None = None
     if arguments.config is not None:
         config = read_service_config(absolute_user_path(arguments.config))
@@ -12328,27 +12091,22 @@ def logs(arguments: argparse.Namespace) -> int:
         _managed_inspection(name)
     else:
         qualification_path = qualification_service_config_path()
-        if qualification_path.is_file() and group_id is None:
+        if qualification_path.is_file() and placement_group_id is None:
             qualification = read_service_config(qualification_path)
             name = qualification["name"]
             _managed_inspection(name)
         else:
-            targets = _local_engine_group_log_targets(group_id)
+            targets = _local_placement_group_log_targets(placement_group_id)
             if len(targets) > 1:
                 raise LetsInferError(
-                    "multiple local engine groups exist; specify --group GROUP_ID"
+                    "multiple local placement groups exist; specify "
+                    "--placement-group PLACEMENT_GROUP_ID"
                 )
             if targets:
-                _selected_group, name = targets[0]
-            else:
-                legacy_path = default_service_config_path()
-                if legacy_path.is_file() and group_id is None:
-                    legacy = read_service_config(legacy_path)
-                    name = legacy["name"]
-                    _managed_inspection(name)
+                _selected_placement_group, name = targets[0]
     if name is None:
-        detail = f" {group_id}" if group_id is not None else ""
-        raise LetsInferError(f"no local engine group{detail} is available")
+        detail = f" {placement_group_id}" if placement_group_id is not None else ""
+        raise LetsInferError(f"no local placement group{detail} is available")
     command = ["docker", "logs", "--timestamps", "--tail", str(arguments.tail)]
     if arguments.follow:
         command.append("--follow")
@@ -12376,13 +12134,13 @@ def _run_engine_service_action(
                 raise LetsInferError(f"no installed runtime serves model {model!r}")
             return _qualification_candidate_lifecycle(candidate, action)
     if arguments.config is None:
-        group = _engine_group_lifecycle(model, action)
+        group = _placement_group_lifecycle(model, action)
         if group is not None:
-            groups = group.get("groups")
-            members = (
-                sum(len(item["member_states"]) for item in groups)
-                if isinstance(groups, list)
-                else len(group["member_states"])
+            placement_groups = group.get("placement_groups")
+            placements = (
+                sum(len(item["placements"]) for item in placement_groups)
+                if isinstance(placement_groups, list)
+                else len(group["placements"])
             )
             presenter = _human_presenter()
             downloads = group.get("model_artifact_downloads", [])
@@ -12400,8 +12158,10 @@ def _run_engine_service_action(
                         model or "All installed runtimes",
                         semantic=command_ui.Semantic.SUCCESS,
                     ),
-                    command_ui.RecordRow("Group", group["group_id"]),
-                    command_ui.RecordRow("Members", members),
+                    command_ui.RecordRow(
+                        "Placement group", group["placement_group_id"]
+                    ),
+                    command_ui.RecordRow("Placements", placements),
                     command_ui.RecordRow("Action", action.title()),
                     command_ui.RecordRow(
                         "Guard",
@@ -12425,8 +12185,8 @@ def _run_engine_service_action(
                 presenter.records(tuple(rows))
             else:
                 print(
-                    f"{action.upper()} group={group['group_id']} "
-                    f"members={members} "
+                    f"{action.upper()} placement_group={group['placement_group_id']} "
+                    f"placements={placements} "
                     f"protection_trips_acknowledged={str(action == 'recover').lower()}"
                 )
                 if download_names:
@@ -12543,7 +12303,7 @@ def user_lingering_enabled() -> bool:
     return linger.returncode == 0 and linger.stdout.strip().lower() == "yes"
 
 
-def _doctor_engine_groups(
+def _doctor_placement_groups(
     arguments: argparse.Namespace,
     groups: Sequence[Mapping[str, Any]],
 ) -> int:
@@ -12619,37 +12379,39 @@ def _doctor_engine_groups(
     except LetsInferError as error:
         record("gateway-api", False, str(error))
     with _site_store() as store:
-        rows = {row["group_id"]: row for row in store.engine_groups()}
+        rows = {row["placement_group_id"]: row for row in store.placement_groups()}
         for group in groups:
-            row = rows.get(str(group["group_id"]))
+            row = rows.get(str(group["placement_group_id"]))
             try:
                 if row is None:
-                    raise LetsInferError("engine-group journal disappeared")
-                _restore_engine_group_orchestrator(store, row)
+                    raise LetsInferError("placement-group journal disappeared")
+                _restore_placement_group_orchestrator(store, row)
                 immutable = True
                 immutable_detail = row["runtime_digest"]
             except LetsInferError as error:
                 immutable = False
                 immutable_detail = str(error)
             record(
-                f"group-{group['group_id']}-immutable",
+                f"placement-group-{group['placement_group_id']}-immutable",
                 immutable,
                 immutable_detail,
             )
-            members_running = all(
-                item["state"] == "running" for item in group["members"]
+            placements_running = all(
+                item["state"] == "running" for item in group["placements"]
             )
-            endpoints_healthy = bool(group["endpoints"]) and all(
-                endpoint.get("healthy") is True for endpoint in group["endpoints"]
+            endpoint_healthy = (
+                isinstance(group.get("endpoint"), Mapping)
+                and group["endpoint"].get("healthy") is True
             )
             record(
-                f"group-{group['group_id']}-health",
+                f"placement-group-{group['placement_group_id']}-health",
                 group["state"] == "running"
                 and group["desired_state"] == "running"
-                and members_running
-                and endpoints_healthy,
+                and placements_running
+                and endpoint_healthy,
                 f"state={group['state']} desired={group['desired_state']} "
-                f"members_running={members_running} endpoints_healthy={endpoints_healthy}",
+                f"placements_running={placements_running} "
+                f"endpoint_healthy={endpoint_healthy}",
             )
         try:
             audit = store.verify_audit()
@@ -12680,7 +12442,7 @@ def _doctor_engine_groups(
     payload = {
         "operational_ready": operational_ready,
         "publication_ready": False,
-        "engine_groups": [dict(item) for item in groups],
+        "placement_groups": [dict(item) for item in groups],
         "checks": checks,
     }
     if arguments.json:
@@ -12772,12 +12534,12 @@ def doctor(arguments: argparse.Namespace) -> int:
     if arguments.config is None and site_identity_path().exists():
         identity = read_site_identity()
         if identity.role == "main":
-            groups = _engine_group_status(model)
+            groups = _placement_group_status(model)
             if groups:
-                return _doctor_engine_groups(arguments, groups)
+                return _doctor_placement_groups(arguments, groups)
         elif model is not None:
             raise LetsInferError(
-                "node-wide engine-group doctor is available from the main node"
+                "node-wide placement-group doctor is available from the main node"
             )
 
     config_path = absolute_user_path(
@@ -13504,11 +13266,12 @@ def uninstall(arguments: argparse.Namespace) -> int:
 
         _remove_public_exposure()
         if site_identity_valid:
-            _remove_all_engine_groups()
-        elif has_active_engine_groups_for_cleanup():
+            _remove_all_placement_groups()
+        elif has_active_placement_groups_for_cleanup():
             raise LetsInferError(
                 "cannot safely uninstall while an unreadable node identity owns active "
-                "engine groups; restore the node identity and stop those groups first"
+                "placement groups; restore the node identity and stop those placement "
+                "placement groups first"
             )
         _retire_qualification_candidate(remove_container=True)
         system = platform.system()
@@ -14205,17 +13968,17 @@ def _retain_runtime_history(active_digest: str, previous: dict[str, Any]) -> Non
         ) from error
 
 
-def _group_upgrade_placement(
+def _placement_group_upgrade_resolution(
     identity: Any,
     graph: TopologyGraph,
     *,
     member_ids: Sequence[str],
     target: Mapping[str, Any],
-) -> tuple[TopologyGraph, Placement]:
-    """Resolve an updated target only on the group's existing machines."""
+) -> tuple[TopologyGraph, ResolvedPlacementGroup]:
+    """Resolve an updated target on the placement group's existing nodes."""
     wanted = tuple(member_ids)
     if not wanted or len(wanted) != len(set(wanted)) or set(wanted) - set(graph.members):
-        raise LetsInferError("engine-group update has invalid node identities")
+        raise LetsInferError("placement-group update has invalid node identities")
     try:
         constrained = TopologyGraph(
             [graph.members[member_id] for member_id in wanted],
@@ -14230,31 +13993,31 @@ def _group_upgrade_placement(
         )
     except TopologyError as error:
         raise LetsInferError(
-            "updated runtime no longer fits the engine group's existing nodes: "
+            "updated runtime no longer fits the placement group's existing nodes: "
             f"{error}"
         ) from error
-    if set(placement.member_ids) != set(wanted):
+    if set(placement.node_ids) != set(wanted):
         raise LetsInferError(
-            "updated runtime changes the engine-group node count; install it as a new group"
+            "updated runtime changes the node count; install it as a new placement group"
         )
     return constrained, placement
 
 
-def _group_member_ids(group: Mapping[str, Any]) -> tuple[str, ...]:
-    resources = group.get("plan", {}).get("resources")
+def _placement_group_node_ids(group: Mapping[str, Any]) -> tuple[str, ...]:
+    placements = group.get("plan", {}).get("placements")
     if (
-        not isinstance(resources, list)
-        or not resources
-        or any(not isinstance(item, Mapping) for item in resources)
+        not isinstance(placements, list)
+        or not placements
+        or any(not isinstance(item, Mapping) for item in placements)
     ):
-        raise LetsInferError("engine group has an incomplete immutable node plan")
-    values = tuple(str(item.get("node_id", "")) for item in resources)
+        raise LetsInferError("placement group has an incomplete immutable node plan")
+    values = tuple(str(item.get("node_id", "")) for item in placements)
     if any(not re.fullmatch(r"[0-9a-f]{32}", value) for value in values):
-        raise LetsInferError("engine group has an invalid immutable node plan")
+        raise LetsInferError("placement group has an invalid immutable node plan")
     return values
 
 
-def _cleanup_failed_group_release(
+def _cleanup_failed_placement_group_release(
     source: str,
     member_ids: Sequence[str],
 ) -> None:
@@ -14262,113 +14025,111 @@ def _cleanup_failed_group_release(
     wanted = set(member_ids)
     with _site_store() as store:
         candidates = [
-            row["group_id"]
-            for row in store.engine_groups()
+            row["placement_group_id"]
+            for row in store.placement_groups()
             if row["source"] == source
             and row["state"] != "removed"
             and row["desired_state"] != "removed"
-            and set(_group_member_ids(row)) == wanted
+            and set(_placement_group_node_ids(row)) == wanted
         ]
     if candidates:
-        _remove_engine_groups_by_id(candidates)
+        _remove_placement_groups_by_id(candidates)
 
 
-@_serialized_engine_group_lifecycle
-def _stop_engine_group_by_id(group_id: str) -> None:
-    """Stop one exact group without affecting its replica siblings."""
+@_serialized_placement_group_lifecycle
+def _stop_placement_group_by_id(placement_group_id: str) -> None:
+    """Stop one exact placement group without affecting replica siblings."""
     with _site_store() as store:
         row = next(
-            (item for item in store.engine_groups() if item["group_id"] == group_id),
+            (item for item in store.placement_groups() if item["placement_group_id"] == placement_group_id),
             None,
         )
         if row is None or row["state"] == "removed":
-            raise LetsInferError("engine group disappeared before it could be stopped")
+            raise LetsInferError("placement group disappeared before it could be stopped")
         if row["state"] == "stopped" and row["desired_state"] == "stopped":
             return
-        orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
+        orchestrator, _manifest = _restore_placement_group_orchestrator(store, row)
         stopped = orchestrator.stop()
-        _sync_group_placement(store, stopped)
 
 
-@_serialized_engine_group_lifecycle
-def _start_engine_group_by_id(group_id: str) -> None:
-    """Recover one exact stopped group without affecting replica siblings."""
+@_serialized_placement_group_lifecycle
+def _start_placement_group_by_id(placement_group_id: str) -> None:
+    """Recover one stopped placement group without affecting replica siblings."""
     with _site_store() as store:
         row = next(
-            (item for item in store.engine_groups() if item["group_id"] == group_id),
+            (item for item in store.placement_groups() if item["placement_group_id"] == placement_group_id),
             None,
         )
         if row is None or row["state"] == "removed":
-            raise LetsInferError("engine group disappeared before it could be restored")
+            raise LetsInferError("placement group disappeared before it could be restored")
         if row["state"] == "running" and row["desired_state"] == "running":
             return
         if row["state"] != "stopped" or row["desired_state"] != "stopped":
             raise LetsInferError(
-                "engine group entered an unsafe state before restoration"
+                "placement group entered an unsafe state before restoration"
             )
-        link_failure = _engine_group_required_link_failure(row, store)
+        link_failure = _placement_group_required_link_failure(row, store)
         if link_failure is not None:
             raise LetsInferError(
-                "engine group cannot resume until its required node link is verified: "
-                f"{group_id} ({link_failure})"
+                "placement group cannot resume until its required node link is verified: "
+                f"{placement_group_id} ({link_failure})"
             )
-        orchestrator, _manifest = _restore_engine_group_orchestrator(store, row)
+        orchestrator, _manifest = _restore_placement_group_orchestrator(store, row)
         started = orchestrator.start()
-        _sync_group_placement(store, started)
 
 
-def _benchmark_engine_group_intents(
-    group_ids: Sequence[str],
+def _benchmark_placement_group_intents(
+    placement_group_ids: Sequence[str],
 ) -> dict[str, bool]:
-    """Return whether each exact conflicting group must be restored running."""
-    wanted = tuple(dict.fromkeys(group_ids))
-    if len(wanted) != len(group_ids) or any(
-        not re.fullmatch(r"[0-9a-f]{32}", group_id) for group_id in wanted
+    """Return which conflicting placement groups must be restored running."""
+    wanted = tuple(dict.fromkeys(placement_group_ids))
+    if len(wanted) != len(placement_group_ids) or any(
+        not re.fullmatch(r"[0-9a-f]{32}", placement_group_id) for placement_group_id in wanted
     ):
-        raise LetsInferError("benchmark resident engine-group identity is invalid")
+        raise LetsInferError("benchmark resident placement-group identity is invalid")
     if not wanted:
         return {}
     with _site_store() as store:
-        rows = {row["group_id"]: row for row in store.engine_groups()}
+        rows = {row["placement_group_id"]: row for row in store.placement_groups()}
     intents: dict[str, bool] = {}
-    for group_id in wanted:
-        row = rows.get(group_id)
+    for placement_group_id in wanted:
+        row = rows.get(placement_group_id)
         if row is None or (
             (row["state"], row["desired_state"])
             not in {("running", "running"), ("stopped", "stopped")}
         ):
             raise LetsInferError(
-                f"benchmark cannot isolate engine group {group_id} in its current state"
+                f"benchmark cannot isolate placement group {placement_group_id} in its current state"
             )
-        intents[group_id] = row["desired_state"] == "running"
+        intents[placement_group_id] = row["desired_state"] == "running"
     return intents
 
 
-def _parallel_benchmark_group_config(
-    group_id: str,
+def _placement_group_benchmark_config(
+    placement_group_id: str,
     manifest: Mapping[str, Any],
     manifest_sha256: str,
 ) -> dict[str, Any]:
-    """Bind a private benchmark endpoint to one exact local group task."""
+    """Bind a private benchmark endpoint to one exact local placement."""
     with _site_store() as store:
         row = next(
-            (item for item in store.engine_groups() if item["group_id"] == group_id),
+            (item for item in store.placement_groups() if item["placement_group_id"] == placement_group_id),
             None,
         )
     if row is None or row.get("manifest_sha256") != manifest_sha256:
         raise LetsInferError(
-            "parallel benchmark engine group differs from the installed runtime"
+            "parallel benchmark placement group differs from the installed runtime"
         )
-    config = _read_engine_group_config(group_id)
+    config = _read_placement_group_config(placement_group_id)
     identity = read_site_identity()
-    task = config.get("task")
+    placement = config.get("placement")
     if (
-        config.get("member_id") != identity.member_id
-        or not isinstance(task, Mapping)
-        or task.get("endpoint_owner") is not True
-        or not isinstance(task.get("port_base"), int)
-        or isinstance(task.get("port_base"), bool)
-        or not 1 <= task["port_base"] <= 65_535
+        config.get("node_id") != identity.member_id
+        or not isinstance(placement, Mapping)
+        or placement.get("endpoint_owner") is not True
+        or not isinstance(placement.get("port_base"), int)
+        or isinstance(placement.get("port_base"), bool)
+        or not 1 <= placement["port_base"] <= 65_535
         or config.get("manifest_sha256") != manifest_sha256
         or config.get("_manifest") != manifest
     ):
@@ -14378,9 +14139,8 @@ def _parallel_benchmark_group_config(
     core = _qualification_core_plane_config()
     core.update(
         {
-            "benchmark_group_id": group_id,
-            "placement_strategy": "parallel",
-            "engine_port": task["port_base"],
+            "benchmark_placement_group_id": placement_group_id,
+            "engine_port": placement["port_base"],
             "engine_api_key_file": config["credential_file"],
             "tls_cert_file": config["tls_certificate_file"],
             "tls_key_file": config["tls_key_file"],
@@ -14391,7 +14151,7 @@ def _parallel_benchmark_group_config(
     return core
 
 
-def _active_group_id_for_release(
+def _active_placement_group_id_for_release(
     source: str,
     member_ids: Sequence[str],
 ) -> str:
@@ -14399,15 +14159,15 @@ def _active_group_id_for_release(
     with _site_store() as store:
         matches = [
             row
-            for row in store.engine_groups()
+            for row in store.placement_groups()
             if row["source"] == source
             and row["state"] != "removed"
             and row["desired_state"] != "removed"
-            and set(_group_member_ids(row)) == wanted
+            and set(_placement_group_node_ids(row)) == wanted
         ]
     if len(matches) != 1:
-        raise LetsInferError("restored engine-group identity is ambiguous")
-    return str(matches[0]["group_id"])
+        raise LetsInferError("restored placement-group identity is ambiguous")
+    return str(matches[0]["placement_group_id"])
 
 
 def _install_retained_group_release(
@@ -14416,7 +14176,7 @@ def _install_retained_group_release(
     release: Mapping[str, Any],
     member_ids: Sequence[str],
 ) -> str:
-    """Recreate one exact historical group on the same physical nodes."""
+    """Recreate one historical placement group on the same physical nodes."""
     try:
         manifest_path, manifest, control_root, receipt = prepare_runtime_install(
             str(release["source"]),
@@ -14434,15 +14194,15 @@ def _install_retained_group_release(
             runtime.digest != release["runtime_digest"]
             or sha256_file(manifest_path) != release["manifest_sha256"]
         ):
-            raise LetsInferError("retained engine-group release bytes changed")
+            raise LetsInferError("retained placement-group release bytes changed")
         identity, graph = _fresh_site_topology()
-        constrained, placement = _group_upgrade_placement(
+        constrained, placement = _placement_group_upgrade_resolution(
             identity,
             graph,
             member_ids=member_ids,
             target=target_contract(manifest),
         )
-        install_engine_group(
+        install_placement_group(
             arguments,
             source=str(release["source"]),
             manifest_path=manifest_path,
@@ -14453,16 +14213,16 @@ def _install_retained_group_release(
             resolved_topology=(identity, constrained, placement),
         )
     except (KeyError, RuntimePackError) as error:
-        raise LetsInferError(f"retained engine-group release is invalid: {error}") from error
-    return _active_group_id_for_release(str(release["source"]), member_ids)
+        raise LetsInferError(f"retained placement-group release is invalid: {error}") from error
+    return _active_placement_group_id_for_release(str(release["source"]), member_ids)
 
 
 def upgrade_runtime(arguments: argparse.Namespace) -> int:
-    """Roll each replica group to its candidate's latest signed release."""
+    """Roll each placement group to its candidate's latest signed release."""
     model = arguments.runtime
     if arguments.to:
         raise LetsInferError(
-            "qualified engine groups update only from the signed catalog; --to is unsupported"
+            "qualified placement groups update only from the signed catalog; --to is unsupported"
         )
     location = resolved_catalog_location(arguments.catalog)
     if location is None:
@@ -14472,20 +14232,18 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
     except (CatalogError, RuntimePackError) as error:
         raise LetsInferError(str(error)) from error
     with _site_store() as store:
-        placements = {row["placement_id"]: row for row in store.placements()}
         groups = sorted(
             (
                 row
-                for row in store.engine_groups()
+                for row in store.placement_groups()
                 if row["state"] != "removed"
                 and row["desired_state"] != "removed"
-                and row["placement_id"] in placements
-                and placements[row["placement_id"]]["model"] == model
+                and row["model"] == model
             ),
-            key=lambda row: row["group_id"],
+            key=lambda row: row["placement_group_id"],
         )
     if not groups:
-        raise LetsInferError(f"no installed engine group serves model {model!r}")
+        raise LetsInferError(f"no installed placement group serves model {model!r}")
 
     presenter = _human_presenter()
     planned: list[dict[str, Any]] = []
@@ -14494,7 +14252,7 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
         release = group["plan"].get("release")
         if not isinstance(release, Mapping):
             raise LetsInferError(
-                f"engine group {group['group_id']} has no immutable release identity"
+                f"placement group {group['placement_group_id']} has no immutable release identity"
             )
         candidate_id = str(release.get("candidate_id", ""))
         target_id = str(release.get("target_id", ""))
@@ -14520,11 +14278,12 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
             or target_sha256 != release.get("target_contract_sha256")
         ):
             raise LetsInferError(
-                f"catalog changed immutable target identity for group {group['group_id']}"
+                "catalog changed immutable target identity for placement group "
+                f"{group['placement_group_id']}"
             )
         planned.append(
             {
-                "group": group,
+                "placement_group": group,
                 "current": dict(release),
                 "target": target,
                 "target_sha256": target_sha256,
@@ -14538,7 +14297,7 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
         if presenter is not None:
             plan_rows.append(
                 {
-                    "group": group["group_id"],
+                    "placement_group": group["placement_group_id"],
                     "state": state.title(),
                     "runtime": candidate_id,
                     "version": (
@@ -14554,13 +14313,16 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
             )
         else:
             print(
-                f"{state.upper()} group={group['group_id']} candidate={candidate_id} "
+                f"{state.upper()} placement_group={group['placement_group_id']} "
+                f"candidate={candidate_id} "
                 f"{release.get('version')} -> {version}"
             )
     if presenter is not None:
         presenter.table(
             (
-                command_ui.TableColumn("group", "GROUP", min_width=8),
+                command_ui.TableColumn(
+                    "placement_group", "PLACEMENT GROUP", min_width=15
+                ),
                 command_ui.TableColumn("state", "STATE", min_width=7),
                 command_ui.TableColumn("runtime", "RUNTIME", min_width=8),
                 command_ui.TableColumn("version", "VERSION", min_width=9),
@@ -14573,28 +14335,32 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
             presenter.result(
                 "Runtime is current",
                 semantic=command_ui.Semantic.SUCCESS,
-                detail=f"{model} · {len(groups)} group(s)",
+                detail=f"{model} · {len(groups)} placement groups",
             )
         else:
-            print(f"CURRENT model={model} groups={len(groups)}")
+            print(f"CURRENT model={model} placement_groups={len(groups)}")
         return 0
     if arguments.dry_run:
         if presenter is not None:
             presenter.result(
                 "Dry run complete",
                 semantic=command_ui.Semantic.INFO,
-                detail=f"{model} · {len(changes)} group(s) would be upgraded",
+                detail=(
+                    f"{model} · {len(changes)} placement groups would be upgraded"
+                ),
             )
         else:
-            print(f"DRY RUN model={model} groups={len(changes)}")
+            print(
+                f"DRY RUN model={model} placement_groups={len(changes)}"
+            )
         return 0
 
     completed = 0
     for item in changes:
-        old_group = item["group"]
+        old_group = item["placement_group"]
         old_release = item["current"]
         member_ids = tuple(
-            resource["node_id"] for resource in old_group["plan"]["resources"]
+            resource["node_id"] for resource in old_group["plan"]["placements"]
         )
         resolving = _command_activity(
             arguments,
@@ -14612,7 +14378,7 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
                 expected_target_contract_sha256=item["target_sha256"],
             )
         runtime = verify_descriptor(pathlib.Path(receipt["object_root"]))
-        release_identity = _group_release_identity(
+        release_identity = _placement_group_release_identity(
             catalog_release_value=item["record"],
             candidate_id=item["candidate_id"],
             version=item["version"],
@@ -14622,10 +14388,10 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
             runtime=runtime,
             manifest_sha256=sha256_file(manifest_path),
         )
-        _remove_engine_groups_by_id([old_group["group_id"]])
+        _remove_placement_groups_by_id([old_group["placement_group_id"]])
         try:
             identity, graph = _fresh_site_topology()
-            constrained, placement = _group_upgrade_placement(
+            constrained, placement = _placement_group_upgrade_resolution(
                 identity,
                 graph,
                 member_ids=member_ids,
@@ -14637,7 +14403,7 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
                 action_id=arguments.action_id,
             )
             with applying, ui.protect_stdout(applying):
-                install_engine_group(
+                install_placement_group(
                     arguments,
                     source=item["source"],
                     manifest_path=manifest_path,
@@ -14647,33 +14413,35 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
                     release_identity=release_identity,
                     resolved_topology=(identity, constrained, placement),
                 )
-            updated_group_id = _active_group_id_for_release(
+            updated_placement_group_id = _active_placement_group_id_for_release(
                 item["source"], member_ids
             )
             if old_group["desired_state"] == "stopped":
-                _stop_engine_group_by_id(updated_group_id)
+                _stop_placement_group_by_id(updated_placement_group_id)
         except BaseException as update_error:
             try:
-                _cleanup_failed_group_release(item["source"], member_ids)
-                restored_group_id = _install_retained_group_release(
+                _cleanup_failed_placement_group_release(item["source"], member_ids)
+                restored_placement_group_id = _install_retained_group_release(
                     arguments,
                     release=old_release,
                     member_ids=member_ids,
                 )
                 if old_group["desired_state"] == "stopped":
-                    _stop_engine_group_by_id(restored_group_id)
+                    _stop_placement_group_by_id(restored_placement_group_id)
             except BaseException as rollback_error:
                 raise LetsInferError(
-                    f"group {old_group['group_id']} update failed and rollback failed: "
+                    "placement group "
+                    f"{old_group['placement_group_id']} update failed and rollback failed: "
                     f"{type(rollback_error).__name__}"
                 ) from update_error
             raise LetsInferError(
-                f"group {old_group['group_id']} update failed; previous release restored"
+                "placement group "
+                f"{old_group['placement_group_id']} update failed; previous release restored"
             ) from update_error
         completed += 1
         if presenter is not None:
             presenter.result(
-                f"Upgraded group {completed} of {len(changes)}",
+                f"Upgraded placement group {completed} of {len(changes)}",
                 semantic=command_ui.Semantic.SUCCESS,
                 detail=f"{item['candidate_id']} · {item['version']}",
             )
@@ -14688,11 +14456,11 @@ def upgrade_runtime(arguments: argparse.Namespace) -> int:
                 command_ui.RecordRow(
                     "Runtime", model, semantic=command_ui.Semantic.SUCCESS
                 ),
-                command_ui.RecordRow("Groups", completed, "Upgraded"),
+                command_ui.RecordRow("Placement groups", completed, "Upgraded"),
             )
         )
     else:
-        print(f"UPDATED model={model} groups={completed}")
+        print(f"UPDATED model={model} placement_groups={completed}")
     return 0
 
 
@@ -14700,37 +14468,35 @@ def rollback_runtime(arguments: argparse.Namespace) -> int:
     """Roll every current replica back to its most recently removed release."""
     model = arguments.runtime
     with _site_store() as store:
-        placements = {row["placement_id"]: row for row in store.placements()}
-        all_groups = store.engine_groups()
+        all_groups = store.placement_groups()
     current = [
         row
         for row in all_groups
         if row["state"] != "removed"
         and row["desired_state"] != "removed"
-        and row["placement_id"] in placements
-        and placements[row["placement_id"]]["model"] == model
+        and row["model"] == model
         and (
             getattr(arguments, "target", None) is None
-            or placements[row["placement_id"]]["target"] == arguments.target
+            or row["target"] == arguments.target
         )
     ]
     if not current:
-        raise LetsInferError(f"no installed engine group serves model {model!r}")
+        raise LetsInferError(f"no installed placement group serves model {model!r}")
     presenter = _human_presenter()
     planned: list[tuple[dict[str, Any], dict[str, Any]]] = []
     plan_rows: list[dict[str, Any]] = []
-    for group in sorted(current, key=lambda row: row["group_id"]):
+    for group in sorted(current, key=lambda row: row["placement_group_id"]):
         release = group["plan"].get("release")
         if not isinstance(release, Mapping):
-            raise LetsInferError("current engine group has no immutable release")
-        member_ids = set(_group_member_ids(group))
+            raise LetsInferError("current placement group has no immutable release")
+        member_ids = set(_placement_group_node_ids(group))
         candidates = [
             row
             for row in all_groups
             if row["state"] == "removed"
             and row["desired_state"] == "removed"
             and row["source"] != group["source"]
-            and set(_group_member_ids(row)) == member_ids
+            and set(_placement_group_node_ids(row)) == member_ids
             and isinstance(row["plan"].get("release"), Mapping)
             and row["plan"]["release"].get("candidate_id")
             == release.get("candidate_id")
@@ -14739,18 +14505,18 @@ def rollback_runtime(arguments: argparse.Namespace) -> int:
         ]
         if not candidates:
             raise LetsInferError(
-                f"engine group {group['group_id']} has no retained previous release"
+                f"placement group {group['placement_group_id']} has no retained previous release"
             )
         previous = max(
             candidates,
-            key=lambda row: (int(row["updated_at_unix"]), str(row["group_id"])),
+            key=lambda row: (int(row["updated_at_unix"]), str(row["placement_group_id"])),
         )
         planned.append((group, previous))
         old = previous["plan"]["release"]
         if presenter is not None:
             plan_rows.append(
                 {
-                    "group": group["group_id"],
+                    "placement_group": group["placement_group_id"],
                     "version": (
                         f"{release['version']} "
                         f"{'→' if presenter.terminal.unicode else '->'} "
@@ -14762,13 +14528,16 @@ def rollback_runtime(arguments: argparse.Namespace) -> int:
             )
         else:
             print(
-                f"ROLLBACK group={group['group_id']} {release['version']} -> "
+                f"ROLLBACK placement_group={group['placement_group_id']} "
+                f"{release['version']} -> "
                 f"{old['version']} nodes={len(member_ids)}"
             )
     if presenter is not None:
         presenter.table(
             (
-                command_ui.TableColumn("group", "GROUP", min_width=8),
+                command_ui.TableColumn(
+                    "placement_group", "PLACEMENT GROUP", min_width=15
+                ),
                 command_ui.TableColumn("version", "VERSION", min_width=9),
                 command_ui.TableColumn(
                     "nodes", "NODES", min_width=5, align="right"
@@ -14781,51 +14550,55 @@ def rollback_runtime(arguments: argparse.Namespace) -> int:
             presenter.result(
                 "Dry run complete",
                 semantic=command_ui.Semantic.INFO,
-                detail=f"{model} · {len(planned)} group(s) would be rolled back",
+                detail=(
+                    f"{model} · {len(planned)} placement groups would be rolled back"
+                ),
             )
         return 0
     completed = 0
     for group, previous in planned:
         current_release = dict(group["plan"]["release"])
         previous_release = dict(previous["plan"]["release"])
-        member_ids = _group_member_ids(group)
-        _remove_engine_groups_by_id([group["group_id"]])
+        member_ids = _placement_group_node_ids(group)
+        _remove_placement_groups_by_id([group["placement_group_id"]])
         try:
             applying = _command_activity(
                 arguments,
-                f"Rolling back group {completed + 1} of {len(planned)}",
+                f"Rolling back placement group {completed + 1} of {len(planned)}",
                 action_id=arguments.action_id,
             )
             with applying, ui.protect_stdout(applying):
-                restored_group_id = _install_retained_group_release(
+                restored_placement_group_id = _install_retained_group_release(
                     arguments,
                     release=previous_release,
                     member_ids=member_ids,
                 )
             if group["desired_state"] == "stopped":
-                _stop_engine_group_by_id(restored_group_id)
+                _stop_placement_group_by_id(restored_placement_group_id)
         except BaseException as rollback_error:
             try:
-                _cleanup_failed_group_release(previous_release["source"], member_ids)
-                current_group_id = _install_retained_group_release(
+                _cleanup_failed_placement_group_release(previous_release["source"], member_ids)
+                current_placement_group_id = _install_retained_group_release(
                     arguments,
                     release=current_release,
                     member_ids=member_ids,
                 )
                 if group["desired_state"] == "stopped":
-                    _stop_engine_group_by_id(current_group_id)
+                    _stop_placement_group_by_id(current_placement_group_id)
             except BaseException as restore_error:
                 raise LetsInferError(
-                    f"group {group['group_id']} rollback failed and current release "
+                    "placement group "
+                    f"{group['placement_group_id']} rollback failed and current release "
                     f"could not be restored: {type(restore_error).__name__}"
                 ) from rollback_error
             raise LetsInferError(
-                f"group {group['group_id']} rollback failed; current release restored"
+                "placement group "
+                f"{group['placement_group_id']} rollback failed; current release restored"
             ) from rollback_error
         completed += 1
         if presenter is not None:
             presenter.result(
-                f"Rolled back group {completed} of {len(planned)}",
+                f"Rolled back placement group {completed} of {len(planned)}",
                 semantic=command_ui.Semantic.SUCCESS,
                 detail=str(previous_release["version"]),
             )
@@ -14835,11 +14608,13 @@ def rollback_runtime(arguments: argparse.Namespace) -> int:
                 command_ui.RecordRow(
                     "Runtime", model, semantic=command_ui.Semantic.SUCCESS
                 ),
-                command_ui.RecordRow("Groups", completed, "Rolled back"),
+                command_ui.RecordRow(
+                    "Placement groups", completed, "Rolled back"
+                ),
             )
         )
     else:
-        print(f"ROLLED BACK model={model} groups={completed}")
+        print(f"ROLLED BACK model={model} placement_groups={completed}")
     return 0
 
 
@@ -15606,23 +15381,23 @@ def _benchmark_stop_timeout_seconds() -> int:
     except benchmark_jobs.BenchmarkJobError:
         state = None
     metadata = state.get("metadata") if isinstance(state, dict) else None
-    resident_groups = (
-        metadata.get("resident_group_ids")
+    resident_placement_groups = (
+        metadata.get("resident_placement_group_ids")
         if isinstance(metadata, dict)
         else None
     )
     if (
-        isinstance(resident_groups, list)
-        and resident_groups
+        isinstance(resident_placement_groups, list)
+        and resident_placement_groups
         and all(
-            isinstance(group_id, str)
-            and re.fullmatch(r"[0-9a-f]{32}", group_id)
-            for group_id in resident_groups
+            isinstance(placement_group_id, str)
+            and re.fullmatch(r"[0-9a-f]{32}", placement_group_id)
+            for placement_group_id in resident_placement_groups
         )
     ):
         # A resident Engine can legitimately take several minutes to reload.
         # This wait ends as soon as restoration completes; it is not a fixed
-        # delay.  Keep the worker alive long enough to restore the exact group
+        # delay. Keep the worker alive long enough to restore the placement group
         # even when cancellation lands before the temporary candidate writes
         # its qualification service configuration.
         return 3_600
@@ -15645,7 +15420,7 @@ def _benchmark_self_command(
     arguments: argparse.Namespace,
     executable: pathlib.Path,
     output: pathlib.Path,
-    resident_group_ids: Sequence[str] = (),
+    resident_placement_group_ids: Sequence[str] = (),
 ) -> list[str]:
     command = [str(executable), "benchmark", "run", arguments.runtime]
     values = (
@@ -15670,8 +15445,8 @@ def _benchmark_self_command(
     for context in ("32k", "64k", "128k", "256k"):
         if getattr(arguments, f"context_{context}"):
             command.append(f"--{context}")
-    for group_id in resident_group_ids:
-        command.extend(["--resident-group", group_id])
+    for placement_group_id in resident_placement_group_ids:
+        command.extend(["--resident-placement-group", placement_group_id])
     return command
 
 
@@ -16537,9 +16312,9 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         raise LetsInferError("--json is available only for benchmark status")
     if arguments.list and arguments.detach:
         raise LetsInferError("--detach cannot be combined with --list")
-    supplied_resident_groups = tuple(getattr(arguments, "resident_group", ()) or ())
-    if supplied_resident_groups and not arguments.job_worker:
-        raise LetsInferError("--resident-group is an internal benchmark-worker option")
+    supplied_resident_placement_groups = tuple(getattr(arguments, "resident_placement_group", ()) or ())
+    if supplied_resident_placement_groups and not arguments.job_worker:
+        raise LetsInferError("--resident-placement-group is an internal benchmark-worker option")
     nested_verification = bool(getattr(arguments, "nested_verification", False))
     manifest_path, manifest = resolve_model(arguments.runtime)
     root = runtime_source_root(manifest_path)
@@ -16625,60 +16400,53 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
     for context in ("32k", "64k", "128k", "256k"):
         if getattr(arguments, f"context_{context}"):
             command.append(f"--{context}")
-    benchmark_resident_group_ids: tuple[str, ...] = ()
-    benchmark_group_id: str | None = None
+    benchmark_resident_placement_group_ids: tuple[str, ...] = ()
+    benchmark_placement_group_id: str | None = None
     if arguments.list:
         command.append("--list")
     else:
-        config_path = default_service_config_path()
-        if config_path.is_file():
-            config = read_service_config(config_path)
-            if supplied_resident_groups:
-                raise LetsInferError(
-                    "benchmark worker received resident groups for a legacy service"
-                )
+        if nested_verification:
+            config = _qualification_core_plane_config()
+            placement = resolve_service_placement(
+                manifest, sha256_file(manifest_path)
+            )
         else:
-            if nested_verification:
-                config = _qualification_core_plane_config()
-                placement = resolve_service_placement(
+            placement, benchmark_resident_placement_group_ids = (
+                resolve_benchmark_service_placement(
                     manifest, sha256_file(manifest_path)
                 )
-            else:
-                placement, benchmark_resident_group_ids = (
-                    resolve_benchmark_service_placement(
-                        manifest, sha256_file(manifest_path)
-                    )
+            )
+            if arguments.job_worker and (
+                supplied_resident_placement_groups
+                != benchmark_resident_placement_group_ids
+            ):
+                raise LetsInferError(
+                    "benchmark resident placement groups changed before worker start"
                 )
-                if arguments.job_worker and (
-                    supplied_resident_groups != benchmark_resident_group_ids
-                ):
+            if placement.get("placement_group_id") is not None:
+                if len(benchmark_resident_placement_group_ids) != 1:
                     raise LetsInferError(
-                        "benchmark resident engine groups changed before worker start"
+                        "parallel benchmark requires one exact installed placement group"
                     )
-                if placement["placement_strategy"] == "parallel":
-                    if len(benchmark_resident_group_ids) != 1:
-                        raise LetsInferError(
-                            "parallel benchmark requires one exact installed engine group"
-                        )
-                    benchmark_group_id = benchmark_resident_group_ids[0]
-                    config = _parallel_benchmark_group_config(
-                        benchmark_group_id,
-                        manifest,
-                        sha256_file(manifest_path),
-                    )
-                else:
-                    config = _qualification_core_plane_config()
-            if benchmark_group_id is None:
-                config.update(
-                    {
-                        "engine_port": 18000,
-                        "protection_root": str(
-                            default_watchdog_data_root()
-                            / PROTECTION_ROOT_NAME
-                            / placement["placement_id"]
-                        ),
-                    }
+                benchmark_placement_group_id = benchmark_resident_placement_group_ids[0]
+                config = _placement_group_benchmark_config(
+                    benchmark_placement_group_id,
+                    manifest,
+                    sha256_file(manifest_path),
                 )
+            else:
+                config = _qualification_core_plane_config()
+        if benchmark_placement_group_id is None:
+            config.update(
+                {
+                    "engine_port": 18000,
+                    "protection_root": str(
+                        default_watchdog_data_root()
+                        / PROTECTION_ROOT_NAME
+                        / placement["placement_id"]
+                    ),
+                }
+            )
         _, watchdog_state = _unit_enabled_active(SERVICE_NAME)
         if watchdog_state != "active":
             raise LetsInferError(
@@ -16689,8 +16457,8 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
             installation_id
         ):
             raise LetsInferError("installed runtime has no valid installation identity")
-        if benchmark_group_id is not None:
-            command.append("--active-group")
+        if benchmark_placement_group_id is not None:
+            command.append("--active-placement-group")
             if arguments.container is None:
                 command.extend(["--container", config["name"]])
         if arguments.base_url is None:
@@ -16699,7 +16467,7 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                     "--base-url",
                     (
                         f"https://127.0.0.1:{config['engine_port']}"
-                        if benchmark_group_id is not None
+                        if benchmark_placement_group_id is not None
                         else f"http://127.0.0.1:{config['gateway_port']}"
                     ),
                 ]
@@ -16710,7 +16478,7 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                     "--api-key-file",
                     (
                         config["engine_api_key_file"]
-                        if benchmark_group_id is not None
+                        if benchmark_placement_group_id is not None
                         else config["gateway_api_key_file"]
                     ),
                 ]
@@ -16782,11 +16550,11 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                 _run_benchmark_with_service_isolation(
                     command,
                     protection_config=config,
-                    resident_group_ids=benchmark_resident_group_ids,
-                    benchmark_group_id=benchmark_group_id,
+                    resident_placement_group_ids=benchmark_resident_placement_group_ids,
+                    benchmark_placement_group_id=benchmark_placement_group_id,
                     cleanup_command=(
                         None
-                        if benchmark_group_id is not None
+                        if benchmark_placement_group_id is not None
                         else [
                             str(letsinfer_bin),
                             "stop",
@@ -16817,13 +16585,13 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                 signal.signal(signal.SIGINT, previous_int)
     else:
         assert output is not None
-        if benchmark_resident_group_ids:
+        if benchmark_resident_placement_group_ids:
             _gateway_is_idle()
         worker_command = _benchmark_self_command(
             arguments,
             letsinfer_bin,
             output,
-            benchmark_resident_group_ids,
+            benchmark_resident_placement_group_ids,
         )
         try:
             state = benchmark_jobs.start(
@@ -16831,8 +16599,8 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                 runtime=arguments.runtime,
                 output_directory=str(output),
                 metadata=(
-                    {"resident_group_ids": list(benchmark_resident_group_ids)}
-                    if benchmark_resident_group_ids
+                    {"resident_placement_group_ids": list(benchmark_resident_placement_group_ids)}
+                    if benchmark_resident_placement_group_ids
                     else None
                 ),
             )
@@ -16867,8 +16635,8 @@ def _run_benchmark_with_service_isolation(
     command: Sequence[str],
     *,
     protection_config: dict[str, Any] | None = None,
-    resident_group_ids: Sequence[str] = (),
-    benchmark_group_id: str | None = None,
+    resident_placement_group_ids: Sequence[str] = (),
+    benchmark_placement_group_id: str | None = None,
     cleanup_command: Sequence[str] | None = None,
     progress_job_id: str | None = None,
 ) -> None:
@@ -16911,14 +16679,14 @@ def _run_benchmark_with_service_isolation(
             raise LetsInferError(
                 f"refusing benchmark while {name} state is {state!r}"
             )
-    resident_group_intents = _benchmark_engine_group_intents(
-        resident_group_ids
+    resident_placement_group_intents = _benchmark_placement_group_intents(
+        resident_placement_group_ids
     )
-    if benchmark_group_id is not None and benchmark_group_id not in resident_group_intents:
+    if benchmark_placement_group_id is not None and benchmark_placement_group_id not in resident_placement_group_intents:
         raise LetsInferError(
-            "parallel benchmark group is not part of the exact resident placement"
+            "parallel benchmark placement group is not part of the resident placement"
         )
-    if any(resident_group_intents.values()):
+    if any(resident_placement_group_intents.values()):
         # Recheck immediately in the worker.  The parent check avoids starting
         # a doomed job, while this check closes most of the detach/start race
         # before resident inference is deliberately suspended.
@@ -16960,16 +16728,16 @@ def _run_benchmark_with_service_isolation(
                 ["systemctl", "--user", "stop", ENGINE_SERVICE_NAME]
             )
             engine_stopped = True
-        for group_id, was_running in resident_group_intents.items():
-            if group_id == benchmark_group_id:
+        for placement_group_id, was_running in resident_placement_group_intents.items():
+            if placement_group_id == benchmark_placement_group_id:
                 if was_running:
                     benchmark_group_stopped_for_restart = True
-                    _stop_engine_group_by_id(group_id)
-                _start_engine_group_by_id(group_id)
+                    _stop_placement_group_by_id(placement_group_id)
+                _start_placement_group_by_id(placement_group_id)
                 benchmark_group_started = True
             elif was_running:
-                stopped_groups.append(group_id)
-                _stop_engine_group_by_id(group_id)
+                stopped_groups.append(placement_group_id)
+                _stop_placement_group_by_id(placement_group_id)
         run_passthrough(command, failure_label="benchmark runner")
     except BaseException as error:
         benchmark_error = error
@@ -17025,33 +16793,33 @@ def _run_benchmark_with_service_isolation(
                     )
         if benchmark_group_started and (
             benchmark_trip_latched
-            or not resident_group_intents.get(benchmark_group_id, False)
+            or not resident_placement_group_intents.get(benchmark_placement_group_id, False)
         ):
             try:
-                _stop_engine_group_by_id(str(benchmark_group_id))
+                _stop_placement_group_by_id(str(benchmark_placement_group_id))
             except BaseException as error:
                 restore_errors.append(
-                    f"restore engine group {benchmark_group_id}: {error}"
+                    f"restore placement group {benchmark_placement_group_id}: {error}"
                 )
         elif (
             not benchmark_group_started
             and benchmark_group_stopped_for_restart
             and not benchmark_trip_latched
-            and resident_group_intents.get(benchmark_group_id, False)
+            and resident_placement_group_intents.get(benchmark_placement_group_id, False)
         ):
             try:
-                _start_engine_group_by_id(str(benchmark_group_id))
+                _start_placement_group_by_id(str(benchmark_placement_group_id))
             except BaseException as error:
                 restore_errors.append(
-                    f"restore engine group {benchmark_group_id}: {error}"
+                    f"restore placement group {benchmark_placement_group_id}: {error}"
                 )
         if not benchmark_trip_latched:
-            for group_id in reversed(stopped_groups):
+            for placement_group_id in reversed(stopped_groups):
                 try:
-                    _start_engine_group_by_id(group_id)
+                    _start_placement_group_by_id(placement_group_id)
                 except BaseException as error:
                     restore_errors.append(
-                        f"restore engine group {group_id}: {error}"
+                        f"restore placement group {placement_group_id}: {error}"
                     )
         if engine_stopped and not benchmark_trip_latched:
             try:
@@ -17360,7 +17128,7 @@ def _core_artifact_references() -> tuple[set[pathlib.Path], set[str]]:
         default_service_config_path(),
         qualification_service_config_path(),
     ]
-    group_root = default_engine_group_root()
+    group_root = default_placement_group_root()
     if group_root.is_dir() and not group_root.is_symlink():
         config_paths.extend(sorted(group_root.glob("*/config.json")))
     for path in config_paths:
@@ -18520,34 +18288,34 @@ def member_resume_command(arguments: argparse.Namespace) -> int:
     return 0
 
 
-def _engine_group_path(group_id: str) -> pathlib.Path:
-    if not re.fullmatch(r"[0-9a-f]{32}", group_id):
-        raise LetsInferError("engine-group identity is invalid")
-    return default_engine_group_root() / group_id
+def _placement_group_path(placement_group_id: str) -> pathlib.Path:
+    if not re.fullmatch(r"[0-9a-f]{32}", placement_group_id):
+        raise LetsInferError("placement-group identity is invalid")
+    return default_placement_group_root() / placement_group_id
 
 
-def _engine_group_member_host(group: Mapping[str, Any], member_id: str) -> str:
-    matches = [item for item in group["resources"] if item["node_id"] == member_id]
+def _placement_group_node_host(group: Mapping[str, Any], member_id: str) -> str:
+    matches = [item for item in group["placements"] if item["node_id"] == member_id]
     if len(matches) != 1:
-        raise LetsInferError("engine-group member address is unavailable")
+        raise LetsInferError("placement-group node address is unavailable")
     address = matches[0]["address"]
     parsed = urllib.parse.urlsplit(
         address if "://" in address else f"https://{address}"
     )
     if parsed.scheme != "https" or not parsed.hostname:
-        raise LetsInferError("engine-group member address is invalid")
+        raise LetsInferError("placement-group node address is invalid")
     return parsed.hostname
 
 
-def _engine_group_rdma_binding(
+def _placement_group_rdma_binding(
     group: Mapping[str, Any], member_id: str
 ) -> dict[str, Any] | None:
     """Revalidate one sealed RDMA interface and resolve its exact device nodes."""
     resources = [
-        item for item in group["resources"] if item["node_id"] == member_id
+        item for item in group["placements"] if item["node_id"] == member_id
     ]
     if len(resources) != 1:
-        raise LetsInferError("engine-group RDMA resource is unavailable")
+        raise LetsInferError("placement-group RDMA resource is unavailable")
     resource = resources[0]
     interface = resource.get("rdma_interface")
     if interface is None:
@@ -18558,7 +18326,7 @@ def _engine_group_rdma_binding(
         if member_id in item["nodes"] and item["rdma"] is True
     ]
     if not connections:
-        raise LetsInferError("engine-group RDMA connection is unavailable")
+        raise LetsInferError("placement-group RDMA connection is unavailable")
     peer_ids = sorted(
         {
             node
@@ -18568,8 +18336,8 @@ def _engine_group_rdma_binding(
         }
     )
     addresses = {
-        item["node_id"]: _engine_group_member_host(group, item["node_id"])
-        for item in group["resources"]
+        item["node_id"]: _placement_group_node_host(group, item["node_id"])
+        for item in group["placements"]
     }
     try:
         return resolve_connectx_rdma_binding(
@@ -18580,7 +18348,7 @@ def _engine_group_rdma_binding(
             minimum_mtu=max(item["mtu"] for item in connections),
         )
     except (InventoryError, KeyError) as error:
-        raise LetsInferError(f"engine-group RDMA binding is unavailable: {error}") from error
+        raise LetsInferError(f"placement-group RDMA binding is unavailable: {error}") from error
 
 
 def _require_matching_rdma_container(
@@ -18594,10 +18362,10 @@ def _require_matching_rdma_container(
     if not isinstance(host, Mapping) or not isinstance(config, Mapping):
         if binding is None:
             return
-        raise LetsInferError("engine-group container RDMA configuration is unavailable")
+        raise LetsInferError("placement-group container RDMA configuration is unavailable")
     devices = host.get("Devices") or []
     if not isinstance(devices, list):
-        raise LetsInferError("engine-group container device configuration is invalid")
+        raise LetsInferError("placement-group container device configuration is invalid")
     actual = {
         (
             item.get("PathOnHost"),
@@ -18613,26 +18381,26 @@ def _require_matching_rdma_container(
     if not isinstance(environment, list) or any(
         not isinstance(item, str) for item in environment
     ):
-        raise LetsInferError("engine-group container environment is invalid")
+        raise LetsInferError("placement-group container environment is invalid")
     rdma_environment = {
         item for item in environment if item.startswith("LETSINFER_RDMA_")
     }
     if binding is None:
         if actual or rdma_environment:
-            raise LetsInferError("non-RDMA engine group received RDMA resources")
+            raise LetsInferError("non-RDMA placement group received RDMA resources")
         return
     expected = {
         (item["path"], item["path"], "rwm")
         for item in binding["device_nodes"]
     }
     if actual != expected:
-        raise LetsInferError("engine-group container RDMA devices changed")
+        raise LetsInferError("placement-group container RDMA devices changed")
     expected_environment = {
         f"LETSINFER_RDMA_INTERFACE={binding['interface']}",
         f"LETSINFER_RDMA_DEVICE={binding['device']}",
     }
     if rdma_environment != expected_environment:
-        raise LetsInferError("engine-group container RDMA binding changed")
+        raise LetsInferError("placement-group container RDMA binding changed")
     ulimits = host.get("Ulimits") or []
     memlock = [
         item
@@ -18644,19 +18412,19 @@ def _require_matching_rdma_container(
         or memlock[0].get("Soft") != memory_bytes
         or memlock[0].get("Hard") != memory_bytes
     ):
-        raise LetsInferError("engine-group container RDMA memlock changed")
+        raise LetsInferError("placement-group container RDMA memlock changed")
 
 
-def _engine_group_launch_mode(
+def _placement_group_launch_mode(
     config: Mapping[str, Any],
 ) -> tuple[bool, str | None]:
-    qualification = config["_group"]["release"]["qualification"]
+    qualification = config["_placement_group"]["release"]["qualification"]
     if qualification not in {"qualified", "unqualified"}:
-        raise LetsInferError("engine-group release qualification is invalid")
+        raise LetsInferError("placement-group release qualification is invalid")
     return False, None
 
 
-def _collect_engine_group_launch_failure(
+def _collect_placement_group_launch_failure(
     config: Mapping[str, Any],
     evidence_dir: str | None,
 ) -> pathlib.Path | None:
@@ -18664,8 +18432,8 @@ def _collect_engine_group_launch_failure(
         pathlib.Path(evidence_dir)
         if evidence_dir is not None
         else evidence_root()
-        / "engine-groups"
-        / str(config["group_id"])
+        / "placement-groups"
+        / str(config["placement_group_id"])
         / "launches"
     )
     evidence = root / f"failure-{time.time_ns()}"
@@ -18682,18 +18450,18 @@ def _collect_engine_group_launch_failure(
     return evidence
 
 
-def _ensure_engine_group_tls(
+def _ensure_placement_group_tls(
     certificate: pathlib.Path,
     private_key: pathlib.Path,
     host: str,
 ) -> None:
     if certificate.exists() or private_key.exists():
         if not certificate.exists() or not private_key.exists():
-            raise LetsInferError("engine-group TLS material is incomplete")
+            raise LetsInferError("placement-group TLS material is incomplete")
     else:
         ensure_private_directory(certificate.parent)
         staging = pathlib.Path(
-            tempfile.mkdtemp(prefix=".group-tls-", dir=certificate.parent)
+            tempfile.mkdtemp(prefix=".placement-group-tls-", dir=certificate.parent)
         )
         try:
             staged_certificate = staging / "engine.crt"
@@ -18710,7 +18478,7 @@ def _ensure_engine_group_tls(
                         len(host.encode("idna")) > 253
                         or not re.fullmatch(r"[A-Za-z0-9.-]+", host)
                     ):
-                        raise LetsInferError("engine-group TLS hostname is invalid")
+                        raise LetsInferError("placement-group TLS hostname is invalid")
                     host_san = f"DNS:{host}"
             run([
                 "openssl", "req", "-x509", "-newkey", "rsa:3072", "-sha256",
@@ -18726,38 +18494,39 @@ def _ensure_engine_group_tls(
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
-    _validate_engine_group_tls(certificate, private_key, host)
+    _validate_placement_group_tls(certificate, private_key, host)
 
 
-def _validate_engine_group_tls(
+def _validate_placement_group_tls(
     certificate: pathlib.Path,
     private_key: pathlib.Path,
     host: str,
 ) -> None:
-    """Validate existing group TLS material without creating or replacing it."""
+    """Validate placement-group TLS material without creating or replacing it."""
 
     validate_tls_material(certificate, private_key)
     check_flag = "-checkip" if re.fullmatch(r"[0-9a-fA-F:.]+", host) else "-checkhost"
     run(["openssl", "x509", "-in", str(certificate), "-noout", check_flag, host])
 
 
-def _read_engine_group_config(
-    group_id: str,
+def _read_placement_group_config(
+    placement_group_id: str,
     *,
     repair_tls: bool = True,
 ) -> dict[str, Any]:
-    root = _engine_group_path(group_id)
+    root = _placement_group_path(placement_group_id)
     path = root / "config.json"
     try:
         payload = _validate_private_file(path, minimum_bytes=64)
         config = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LetsInferError("engine-group configuration is invalid JSON") from error
+        raise LetsInferError("placement-group configuration is invalid JSON") from error
     required = {
-        "schema_version", "group_id", "member_id", "plan_sha256", "source",
+        "schema_version", "placement_group_id", "placement_id", "node_id",
+        "plan_sha256", "source",
         "runtime_digest", "runtime_name", "runtime_version", "object_root",
         "control_root", "manifest_path", "manifest_sha256", "topology_sha256",
-        "task", "group_file", "credential_file", "tls_certificate_file",
+        "placement", "placement_group_file", "credential_file", "tls_certificate_file",
         "tls_key_file", "model_cache", "store_root",
         "runtime_cache_root", "container_name", "protection_root",
     }
@@ -18765,71 +18534,75 @@ def _read_engine_group_config(
         not isinstance(config, dict)
         or set(config) != required
         or type(config.get("schema_version")) is not int
-        or config.get("schema_version") != 1
+        or config.get("schema_version") != 2
     ):
-        raise LetsInferError("engine-group configuration schema is invalid")
-    if config.get("group_id") != group_id or not re.fullmatch(r"[0-9a-f]{32}", str(config.get("member_id"))):
-        raise LetsInferError("engine-group configuration identity is invalid")
+        raise LetsInferError("placement-group configuration schema is invalid")
+    if (
+        config.get("placement_group_id") != placement_group_id
+        or not re.fullmatch(r"[0-9a-f]{32}", str(config.get("placement_id")))
+        or not re.fullmatch(r"[0-9a-f]{32}", str(config.get("node_id")))
+    ):
+        raise LetsInferError("placement-group configuration identity is invalid")
     for key in ("plan_sha256", "runtime_digest", "manifest_sha256", "topology_sha256"):
         if not isinstance(config.get(key), str) or not SHA256_RE.fullmatch(config[key]):
-            raise LetsInferError(f"engine-group configuration {key} is invalid")
+            raise LetsInferError(f"placement-group configuration {key} is invalid")
     expected_root = root.resolve(strict=True)
     for key in (
-        "group_file", "credential_file", "tls_certificate_file", "tls_key_file"
+        "placement_group_file", "credential_file", "tls_certificate_file", "tls_key_file"
     ):
         candidate = pathlib.Path(config[key]).expanduser().resolve(strict=True)
         try:
             candidate.relative_to(expected_root)
         except ValueError as error:
-            raise LetsInferError(f"engine-group configuration {key} escapes its private root") from error
+            raise LetsInferError(f"placement-group configuration {key} escapes its private root") from error
     runtime_root = pathlib.Path(config["object_root"]).expanduser()
     try:
         runtime = verify_descriptor(runtime_root)
     except RuntimePackError as error:
         raise LetsInferError(str(error)) from error
     if runtime.digest != config["runtime_digest"]:
-        raise LetsInferError("engine-group runtime object identity changed")
+        raise LetsInferError("placement-group runtime object identity changed")
     manifest_path, manifest = validate_control_bundle(
         pathlib.Path(config["control_root"]).expanduser(),
         pathlib.Path(config["manifest_path"]).expanduser(),
         config["manifest_sha256"],
     )
     if manifest_path != pathlib.Path(config["manifest_path"]).expanduser().resolve(strict=True):
-        raise LetsInferError("engine-group manifest path is non-canonical")
-    group_file = pathlib.Path(config["group_file"])
+        raise LetsInferError("placement-group manifest path is non-canonical")
+    group_file = pathlib.Path(config["placement_group_file"])
     try:
-        group = validate_group_document(json.loads(_validate_private_file(group_file).decode("utf-8")))
+        group = validate_placement_group_document(json.loads(_validate_private_file(group_file).decode("utf-8")))
     except (UnicodeDecodeError, json.JSONDecodeError, OrchestrationError) as error:
-        raise LetsInferError(f"engine-group plan is invalid: {error}") from error
+        raise LetsInferError(f"placement-group plan is invalid: {error}") from error
     if (
-        group["group_id"] != group_id
+        group["placement_group_id"] != placement_group_id
         or hashlib.sha256(canonical_bytes(group)).hexdigest() != config["plan_sha256"]
         or group["runtime_digest"] != config["runtime_digest"]
         or group["manifest_sha256"] != config["manifest_sha256"]
         or group["topology_sha256"] != config["topology_sha256"]
     ):
-        raise LetsInferError("engine-group configuration does not match its plan")
+        raise LetsInferError("placement-group configuration does not match its plan")
     credential = read_api_key(pathlib.Path(config["credential_file"]))
     certificate = pathlib.Path(config["tls_certificate_file"])
     private_key = pathlib.Path(config["tls_key_file"])
-    host = _engine_group_member_host(group, config["member_id"])
+    host = _placement_group_node_host(group, config["node_id"])
     if repair_tls:
-        _ensure_engine_group_tls(certificate, private_key, host)
+        _ensure_placement_group_tls(certificate, private_key, host)
     else:
-        _validate_engine_group_tls(certificate, private_key, host)
+        _validate_placement_group_tls(certificate, private_key, host)
     config["_manifest"] = manifest
-    config["_group"] = group
-    config["_credential_sha256"] = group_credential_sha256(credential)
+    config["_placement_group"] = group
+    config["_credential_sha256"] = placement_group_credential_sha256(credential)
     return config
 
 
-class LocalEngineGroupExecutor:
-    """Install and run one bounded runtime task without arbitrary commands."""
+class LocalPlacementExecutor:
+    """Install and run one exact placement without arbitrary commands."""
 
     def __init__(self, member_id: str) -> None:
         if not re.fullmatch(r"[0-9a-f]{32}", member_id):
-            raise LetsInferError("local engine-group member identity is invalid")
-        self.member_id = member_id
+            raise LetsInferError("local placement node identity is invalid")
+        self.node_id = member_id
 
     def __call__(
         self, job: Mapping[str, Any], engine_credential: str | None
@@ -18837,7 +18610,7 @@ class LocalEngineGroupExecutor:
         action = job["action"]
         if action == "stage":
             if engine_credential is None:
-                raise LetsInferError("engine-group stage credential is unavailable")
+                raise LetsInferError("placement-group stage credential is unavailable")
             return self.stage(job, engine_credential)
         if action == "start":
             return self.start(job)
@@ -18847,23 +18620,24 @@ class LocalEngineGroupExecutor:
             return self.stop(job)
         if action == "remove":
             return self.remove(job)
-        raise LetsInferError("unsupported engine-group lifecycle action")
+        raise LetsInferError("unsupported placement-group lifecycle action")
 
     def _assert_job_matches_config(
         self, job: Mapping[str, Any], config: Mapping[str, Any]
     ) -> None:
         if (
-            job["group_id"] != config["group_id"]
-            or job["member_id"] != config["member_id"]
+            job["placement_group_id"] != config["placement_group_id"]
+            or job["placement_id"] != config["placement_id"]
+            or job["node_id"] != config["node_id"]
             or job["plan_sha256"] != config["plan_sha256"]
             or job["runtime_digest"] != config["runtime_digest"]
             or job["manifest_sha256"] != config["manifest_sha256"]
             or job["topology_sha256"] != config["topology_sha256"]
             or job["engine_credential_sha256"] != config["_credential_sha256"]
-            or job["task"] != config["task"]
-            or job["group"] != config["_group"]
+            or job["placement"] != config["placement"]
+            or job["placement_group"] != config["_placement_group"]
         ):
-            raise LetsInferError("engine-group job differs from the staged immutable configuration")
+            raise LetsInferError("placement-group job differs from the staged immutable configuration")
 
     def _safe_result(
         self,
@@ -18872,12 +18646,14 @@ class LocalEngineGroupExecutor:
         *,
         model_artifacts_downloaded: Sequence[str] = (),
     ) -> dict[str, Any]:
-        task = config["task"]
-        group = config["_group"]
-        host = _engine_group_member_host(group, config["member_id"])
-        if task["endpoint_owner"]:
+        placement = config["placement"]
+        placement_group = config["_placement_group"]
+        host = _placement_group_node_host(
+            placement_group, config["node_id"]
+        )
+        if placement["endpoint_owner"]:
             identity = read_site_identity()
-            if identity.role == "main" and identity.member_id == config["member_id"]:
+            if identity.role == "main" and identity.member_id == config["node_id"]:
                 # The Engine protocol intentionally binds its authenticated listener
                 # to loopback. When the endpoint owner is the main node itself, the
                 # gateway is local too, so advertise the reachable loopback SAN
@@ -18887,18 +18663,19 @@ class LocalEngineGroupExecutor:
         try:
             certificate_pem = certificate_path.read_text(encoding="ascii")
         except (OSError, UnicodeDecodeError) as error:
-            raise LetsInferError("engine-group public certificate is unavailable") from error
+            raise LetsInferError("placement-group public certificate is unavailable") from error
         if (
             len(certificate_pem.encode("ascii")) > 16_384
             or not certificate_pem.startswith("-----BEGIN CERTIFICATE-----\n")
             or not certificate_pem.rstrip().endswith("-----END CERTIFICATE-----")
         ):
-            raise LetsInferError("engine-group public certificate is invalid")
+            raise LetsInferError("placement-group public certificate is invalid")
         result: dict[str, Any] = {
             "state": state,
-            "group_id": config["group_id"],
-            "member_id": config["member_id"],
-            "task_id": task["task_id"],
+            "placement_group_id": config["placement_group_id"],
+            "placement_id": config["placement_id"],
+            "node_id": config["node_id"],
+            "task_id": placement["task_id"],
             "runtime_digest": config["runtime_digest"],
             "manifest_sha256": config["manifest_sha256"],
             "tls_certificate_sha256": certificate_sha256(certificate_path),
@@ -18908,9 +18685,11 @@ class LocalEngineGroupExecutor:
             result["model_artifacts_downloaded"] = list(
                 model_artifacts_downloaded
             )
-        if task["endpoint_owner"]:
+        if placement["endpoint_owner"]:
             endpoint_host = f"[{host}]" if ":" in host else host
-            result["endpoint"] = f"https://{endpoint_host}:{task['port_base']}"
+            result["endpoint"] = (
+                f"https://{endpoint_host}:{placement['port_base']}"
+            )
         else:
             result["endpoint"] = None
         return result
@@ -18918,21 +18697,21 @@ class LocalEngineGroupExecutor:
     def stage(
         self, job: Mapping[str, Any], engine_credential: str
     ) -> Mapping[str, Any]:
-        root = _engine_group_path(job["group_id"])
-        ensure_private_directory(default_engine_group_root())
+        root = _placement_group_path(job["placement_group_id"])
+        ensure_private_directory(default_placement_group_root())
         if root.exists():
-            config = _read_engine_group_config(job["group_id"])
+            config = _read_placement_group_config(job["placement_group_id"])
             self._assert_job_matches_config(job, config)
             if read_api_key(pathlib.Path(config["credential_file"])) != engine_credential:
-                raise LetsInferError("engine-group stage credential changed")
+                raise LetsInferError("placement-group stage credential changed")
             return self._safe_result(config, "staged")
         ensure_private_directory(root)
         try:
             manifest_path, manifest, control_root, receipt = prepare_runtime_install(
                 str(job["source"]),
-                policy="site-group",
+                policy="site-placement-group",
                 qualified=(
-                    job["group"]["release"]["qualification"] == "qualified"
+                    job["placement_group"]["release"]["qualification"] == "qualified"
                 ),
                 requested_runtime=None,
             )
@@ -18940,14 +18719,14 @@ class LocalEngineGroupExecutor:
                 receipt["digest"] != job["runtime_digest"]
                 or sha256_file(manifest_path) != job["manifest_sha256"]
             ):
-                raise LetsInferError("engine-group runtime or manifest identity differs from its job")
+                raise LetsInferError("placement-group runtime or manifest identity differs from its job")
             runtime_root = pathlib.Path(receipt["object_root"])
             runtime = verify_descriptor(runtime_root)
             contract = validate_target_binding(
                 runtime.runtime.get("orchestration"),
                 target_contract(manifest)["placement"],
             )
-            task = job["task"]
+            placement = job["placement"]
             single_port_count = int(
                 runtime.runtime["engine"]["distribution"].get("port_count", 1)
             )
@@ -18959,41 +18738,53 @@ class LocalEngineGroupExecutor:
                     "environment": {},
                     "readiness": {"kind": "manifest"},
                 }
-                if contract is None and task.get("task_id") == "task-0"
+                if contract is None and placement.get("task_id") == "task-0"
                 else None
                 if contract is None
                 else next(
-                    (item for item in contract["tasks"] if item["task_id"] == task.get("task_id")),
+                    (
+                        item
+                        for item in contract["tasks"]
+                        if item["task_id"] == placement.get("task_id")
+                    ),
                     None,
                 )
             )
-            expected_job_task = None if expected_task is None else {
-                "task_id": task["task_id"],
-                "port_base": task["port_base"],
+            expected_job_placement = None if expected_task is None else {
+                "placement_id": placement["placement_id"],
+                "node_id": placement["node_id"],
+                "task_id": placement["task_id"],
+                "port_base": placement["port_base"],
                 "port_count": expected_task["port_count"],
                 "launcher": expected_task["launcher"],
                 "command": list(expected_task.get("command", [])),
                 "environment": dict(expected_task["environment"]),
-                "endpoint_owner": task["task_id"] == (
+                "endpoint_owner": placement["task_id"] == (
                     "task-0" if contract is None else contract["endpoint_owner"]
                 ),
                 "readiness": dict(expected_task["readiness"]),
-                "device_uuids": list(task["device_uuids"]),
+                "device_uuids": list(placement["device_uuids"]),
             }
-            if expected_job_task != task:
-                raise LetsInferError("engine-group job task differs from the runtime contract")
-            group = validate_group_document(dict(job["group"]))
-            placement = target_contract(manifest)["placement"]
-            validate_group_target_interconnect(group, placement)
+            if expected_job_placement != placement:
+                raise LetsInferError(
+                    "placement job differs from the runtime contract"
+                )
+            placement_group = validate_placement_group_document(
+                dict(job["placement_group"])
+            )
+            target_placement = target_contract(manifest)["placement"]
+            validate_placement_group_target_interconnect(
+                placement_group, target_placement
+            )
             if (
-                group["strategy"] != placement["strategy"]
-                or len(group["resources"]) != placement["node_count"]
-                or group["runtime_execution_contract_sha256"]
+                len(placement_group["placements"])
+                != target_placement["node_count"]
+                or placement_group["runtime_execution_contract_sha256"]
                 != orchestration_contract_sha256(contract)
-                or len(task["device_uuids"])
+                or len(placement["device_uuids"])
                 != target_contract(manifest)["accelerator"]["count"]
             ):
-                raise LetsInferError("engine-group plan differs from the release target")
+                raise LetsInferError("placement-group plan differs from the release target")
             model_cache = default_model_cache_root()
             ensure_install_dependencies(
                 manifest,
@@ -19011,18 +18802,19 @@ class LocalEngineGroupExecutor:
             _atomic_private_text(credential_file, engine_credential + "\n")
             tls_certificate = root / "engine.crt"
             tls_key = root / "engine.key"
-            _ensure_engine_group_tls(
+            _ensure_placement_group_tls(
                 tls_certificate,
                 tls_key,
-                _engine_group_member_host(group, self.member_id),
+                _placement_group_node_host(placement_group, self.node_id),
             )
-            group_file = root / "group.json"
-            atomic_json(group_file, group)
-            group_file.chmod(0o600)
+            placement_group_file = root / "placement-group.json"
+            atomic_json(placement_group_file, placement_group)
+            placement_group_file.chmod(0o600)
             config = {
-                "schema_version": 1,
-                "group_id": job["group_id"],
-                "member_id": self.member_id,
+                "schema_version": 2,
+                "placement_group_id": job["placement_group_id"],
+                "placement_id": job["placement_id"],
+                "node_id": self.node_id,
                 "plan_sha256": job["plan_sha256"],
                 "source": job["source"],
                 "runtime_digest": job["runtime_digest"],
@@ -19033,24 +18825,24 @@ class LocalEngineGroupExecutor:
                 "manifest_path": str(manifest_path),
                 "manifest_sha256": job["manifest_sha256"],
                 "topology_sha256": job["topology_sha256"],
-                "task": dict(job["task"]),
-                "group_file": str(group_file),
+                "placement": dict(job["placement"]),
+                "placement_group_file": str(placement_group_file),
                 "credential_file": str(credential_file),
                 "tls_certificate_file": str(tls_certificate),
                 "tls_key_file": str(tls_key),
                 "model_cache": str(model_cache),
                 "store_root": str(default_store_root(manifest)),
                 "runtime_cache_root": str(default_runtime_cache_root(manifest)),
-                "container_name": f"letsinfer-group-{job['group_id']}",
+                "container_name": f"letsinfer-placement-{job['placement_id']}",
                 "protection_root": str(
                     default_watchdog_data_root()
                     / PROTECTION_ROOT_NAME
-                    / job["group_id"]
+                    / job["placement_id"]
                 ),
             }
             atomic_json(root / "config.json", config)
             (root / "config.json").chmod(0o600)
-            verified = _read_engine_group_config(job["group_id"])
+            verified = _read_placement_group_config(job["placement_group_id"])
             self._assert_job_matches_config(job, verified)
             return self._safe_result(verified, "staged")
         except BaseException:
@@ -19065,17 +18857,17 @@ class LocalEngineGroupExecutor:
         for _attempt in range(readiness["retries"]):
             inspection = container_inspect(name)
             if inspection is None or not inspection.get("State", {}).get("Running", False):
-                raise LetsInferError("engine-group container exited before readiness")
+                raise LetsInferError("placement-group container exited before readiness")
             result = run(
                 ["docker", "exec", name, *readiness["command"]], check=False
             )
             if result.returncode == 0:
                 return
             time.sleep(readiness["interval_seconds"])
-        raise LetsInferError("runtime-owned engine-group readiness timed out")
+        raise LetsInferError("runtime-owned placement-group readiness timed out")
 
     def start(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
-        config = _read_engine_group_config(job["group_id"])
+        config = _read_placement_group_config(job["placement_group_id"])
         self._assert_job_matches_config(job, config)
         return self._start_config(config)
 
@@ -19093,8 +18885,8 @@ class LocalEngineGroupExecutor:
         if self._config_uses_native(config):
             return self._start_native_config(config)
         verify_active_core_watchdog()
-        task = config["task"]
-        qualification_mode, evidence_dir = _engine_group_launch_mode(config)
+        task = config["placement"]
+        qualification_mode, evidence_dir = _placement_group_launch_mode(config)
         authorize_serving_launch(
             manifest["serving"],
             qualification_mode=qualification_mode,
@@ -19119,8 +18911,8 @@ class LocalEngineGroupExecutor:
             runtime_artifact_root=runtime_root,
         )
         require_memory_reserve(manifest, phase="launch")
-        rdma_binding = _engine_group_rdma_binding(
-            config["_group"], config["member_id"]
+        rdma_binding = _placement_group_rdma_binding(
+            config["_placement_group"], config["node_id"]
         )
         command = docker_command(
             manifest,
@@ -19134,12 +18926,13 @@ class LocalEngineGroupExecutor:
             api_key_file=pathlib.Path(config["credential_file"]),
             tls_cert_file=pathlib.Path(config["tls_certificate_file"]),
             tls_key_file=pathlib.Path(config["tls_key_file"]),
-            group_context={
-                "group_id": config["group_id"],
-                "member_id": config["member_id"],
+            placement_context={
+                "placement_group_id": config["placement_group_id"],
+                "placement_id": config["placement_id"],
+                "node_id": config["node_id"],
                 **dict(task),
             },
-            group_config_file=pathlib.Path(config["group_file"]),
+            placement_group_config_file=pathlib.Path(config["placement_group_file"]),
             runtime_artifact_root=runtime_root,
             rdma_binding=rdma_binding,
         )
@@ -19164,17 +18957,18 @@ class LocalEngineGroupExecutor:
                 )
                 labels = inspection.get("Config", {}).get("Labels") or {}
                 expected_labels = {
-                    GROUP_ID_LABEL: config["group_id"],
-                    GROUP_NODE_LABEL: config["member_id"],
-                    GROUP_TASK_LABEL: task["task_id"],
+                    PLACEMENT_GROUP_ID_LABEL: config["placement_group_id"],
+                    PLACEMENT_ID_LABEL: config["placement_id"],
+                    PLACEMENT_NODE_LABEL: config["node_id"],
+                    PLACEMENT_TASK_LABEL: task["task_id"],
                 }
                 if any(labels.get(key) != value for key, value in expected_labels.items()):
-                    raise LetsInferError("existing container has a different engine-group identity")
+                    raise LetsInferError("existing container has a different placement-group identity")
                 if not inspection.get("State", {}).get("Running", False):
                     run(["docker", "start", config["container_name"]])
                     inspection = container_inspect(config["container_name"])
             if inspection is None:
-                raise LetsInferError("engine-group container disappeared during start")
+                raise LetsInferError("placement-group container disappeared during start")
             _require_matching_rdma_container(
                 inspection,
                 rdma_binding,
@@ -19199,7 +18993,7 @@ class LocalEngineGroupExecutor:
                 pathlib.Path(config["tls_certificate_file"]),
                 pathlib.Path(config["credential_file"]),
             ):
-                raise LetsInferError("engine-group model identity does not match its release")
+                raise LetsInferError("placement-group model identity does not match its release")
             if task["endpoint_owner"] and task["launcher"] == "manifest":
                 prewarm(
                     manifest,
@@ -19211,7 +19005,7 @@ class LocalEngineGroupExecutor:
             require_memory_reserve(manifest, phase="runtime")
             inspection = container_inspect(config["container_name"])
             if inspection is None:
-                raise LetsInferError("engine-group container disappeared before protection armed")
+                raise LetsInferError("placement-group container disappeared before protection armed")
             publish_protection_state(
                 protection, generation, "armed", inspection=inspection
             )
@@ -19225,16 +19019,16 @@ class LocalEngineGroupExecutor:
                 disarm_before_planned_stop(protection)
             inspection = container_inspect(config["container_name"])
             if inspection is not None:
-                _collect_engine_group_launch_failure(config, evidence_dir)
+                _collect_placement_group_launch_failure(config, evidence_dir)
                 run(["docker", "update", "--restart", "no", config["container_name"]], check=False)
                 run(["docker", "stop", "--time", "30", config["container_name"]], check=False)
                 run(["docker", "rm", config["container_name"]], check=False)
             raise
 
-    def _native_label(self, group_id: str) -> str:
-        if not re.fullmatch(r"[0-9a-f]{32}", group_id):
-            raise LetsInferError("native Engine group identity is invalid")
-        return f"ai.letsinfer.engine.{group_id}"
+    def _native_label(self, placement_id: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{32}", placement_id):
+            raise LetsInferError("native Engine placement identity is invalid")
+        return f"ai.letsinfer.engine.{placement_id}"
 
     def _config_uses_native(self, config: Mapping[str, Any]) -> bool:
         manifest = config.get("_manifest")
@@ -19259,8 +19053,8 @@ class LocalEngineGroupExecutor:
         if platform.system() != "Darwin":
             raise LetsInferError("native Apple Engines require macOS")
         manifest = config["_manifest"]
-        task = config["task"]
-        qualification_mode, evidence_dir = _engine_group_launch_mode(config)
+        task = config["placement"]
+        qualification_mode, evidence_dir = _placement_group_launch_mode(config)
         authorize_serving_launch(
             manifest["serving"],
             qualification_mode=qualification_mode,
@@ -19305,13 +19099,14 @@ class LocalEngineGroupExecutor:
                 "LETSINFER_TLS_CERT_FILE": str(config["tls_certificate_file"]),
                 "LETSINFER_TLS_KEY_FILE": str(config["tls_key_file"]),
                 "LETSINFER_SERVED_MODEL": str(manifest["model"]["alias"]),
-                "LETSINFER_GROUP_ID": str(config["group_id"]),
-                "LETSINFER_MEMBER_ID": str(config["member_id"]),
+                "LETSINFER_PLACEMENT_GROUP_ID": str(config["placement_group_id"]),
+                "LETSINFER_PLACEMENT_ID": str(config["placement_id"]),
+                "LETSINFER_NODE_ID": str(config["node_id"]),
                 "LETSINFER_TASK_ID": str(task["task_id"]),
             }
         except NativeEngineError as error:
             raise LetsInferError(str(error)) from error
-        label = self._native_label(str(config["group_id"]))
+        label = self._native_label(str(config["placement_id"]))
         try:
             macos_services.install_launch_agent(
                 macos_services.LaunchAgent(
@@ -19361,12 +19156,12 @@ class LocalEngineGroupExecutor:
                 pass
             raise
 
-    def observe(self, group: Mapping[str, Any]) -> Mapping[str, Any]:
+    def observe(self, placement: Mapping[str, Any]) -> Mapping[str, Any]:
         """Report actual process/protection readiness, not only journal intent."""
-        group_id = str(group.get("group_id", ""))
-        config = _read_engine_group_config(group_id)
+        placement_group_id = str(placement.get("placement_group_id", ""))
+        config = _read_placement_group_config(placement_group_id)
         for key in (
-            "member_id", "plan_sha256", "runtime_digest", "manifest_sha256",
+            "placement_id", "node_id", "plan_sha256", "runtime_digest", "manifest_sha256",
             "topology_sha256", "engine_credential_sha256",
         ):
             expected = (
@@ -19374,19 +19169,19 @@ class LocalEngineGroupExecutor:
                 if key == "engine_credential_sha256"
                 else config[key]
             )
-            if group.get(key) != expected:
+            if placement.get(key) != expected:
                 raise LetsInferError(
-                    "engine-group observation journal differs from staged state"
+                    "placement-group observation journal differs from staged state"
                 )
-        if group.get("task") != config["task"]:
+        if placement.get("placement") != config["placement"]:
             raise LetsInferError(
-                "engine-group observation task differs from staged state"
+                "placement observation differs from staged state"
             )
-        stored_state = str(group.get("state", ""))
+        stored_state = str(placement.get("state", ""))
         if stored_state == "removed":
             return {"state": "removed", "protection_trip_latched": False}
         if self._config_uses_native(config):
-            label = self._native_label(group_id)
+            label = self._native_label(str(config["placement_id"]))
             try:
                 _enabled, active, _detail = macos_services.service_state(label)
             except macos_services.MacOSServiceError as error:
@@ -19398,7 +19193,7 @@ class LocalEngineGroupExecutor:
                     else "failed"
                 )
                 return {"state": state, "protection_trip_latched": False}
-            task = config["task"]
+            task = config["placement"]
             ready = health_ready(
                 task["port_base"], pathlib.Path(config["tls_certificate_file"])
             )
@@ -19420,7 +19215,7 @@ class LocalEngineGroupExecutor:
             return {"state": state, "protection_trip_latched": False}
         if stored_state != "running" or not protection["armed"]:
             return {"state": "failed", "protection_trip_latched": False}
-        task = config["task"]
+        task = config["placement"]
         if task["launcher"] == "manifest":
             ready = health_ready(
                 task["port_base"], pathlib.Path(config["tls_certificate_file"])
@@ -19440,19 +19235,19 @@ class LocalEngineGroupExecutor:
 
     def recover(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
         """Explicitly acknowledge this slot's durable trip and restart it."""
-        config = _read_engine_group_config(job["group_id"])
+        config = _read_placement_group_config(job["placement_group_id"])
         self._assert_job_matches_config(job, config)
         if not self._config_uses_native(config):
             clear_protection_trip(config)
         return self._start_config(config)
 
     def stop(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
-        config = _read_engine_group_config(job["group_id"])
+        config = _read_placement_group_config(job["placement_group_id"])
         self._assert_job_matches_config(job, config)
         if self._config_uses_native(config):
             try:
                 macos_services.remove_launch_agent(
-                    self._native_label(str(config["group_id"]))
+                    self._native_label(str(config["placement_id"]))
                 )
             except macos_services.MacOSServiceError as error:
                 raise LetsInferError(str(error)) from error
@@ -19468,27 +19263,27 @@ class LocalEngineGroupExecutor:
         return self._safe_result(config, "stopped")
 
     def remove(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
-        config = _read_engine_group_config(job["group_id"])
+        config = _read_placement_group_config(job["placement_group_id"])
         self._assert_job_matches_config(job, config)
         native = self._config_uses_native(config)
         if native:
             _enabled, active, _detail = macos_services.service_state(
-                self._native_label(str(config["group_id"]))
+                self._native_label(str(config["placement_id"]))
             )
             if active == "active":
                 raise LetsInferError(
                     "native Engine must be stopped before removal"
                 )
         elif container_inspect(config["container_name"]) is not None:
-            raise LetsInferError("engine-group container must be stopped before removal")
+            raise LetsInferError("placement-group container must be stopped before removal")
         result = self._safe_result(config, "removed")
         if native:
-            root = _engine_group_path(job["group_id"])
+            root = _placement_group_path(job["placement_group_id"])
             if root.resolve(strict=True) != (
-                default_engine_group_root() / job["group_id"]
+                default_placement_group_root() / job["placement_group_id"]
             ).resolve(strict=True):
                 raise LetsInferError(
-                    "refusing to remove a non-canonical engine-group directory"
+                    "refusing to remove a non-canonical placement-group directory"
                 )
             shutil.rmtree(root)
             _fsync_path(root.parent)
@@ -19497,7 +19292,7 @@ class LocalEngineGroupExecutor:
         expected_protection_root = (
             default_watchdog_data_root()
             / PROTECTION_ROOT_NAME
-            / job["group_id"]
+            / job["placement_group_id"]
         )
         if protection_root.exists():
             if (
@@ -19505,7 +19300,7 @@ class LocalEngineGroupExecutor:
                 != expected_protection_root.resolve(strict=True)
                 or protection_trip_latched({"protection_root": str(protection_root)})
             ):
-                raise LetsInferError("refusing to remove an unsafe engine-group protection slot")
+                raise LetsInferError("refusing to remove an unsafe placement-group protection slot")
             state_path, _, _ = protection_paths(
                 {"protection_root": str(protection_root)}
             )
@@ -19513,10 +19308,10 @@ class LocalEngineGroupExecutor:
                 state_path.is_file()
                 and _parse_protection_lines(state_path).get("phase") != "disarmed"
             ):
-                raise LetsInferError("engine-group protection must be disarmed before removal")
-        root = _engine_group_path(job["group_id"])
-        if root.resolve(strict=True) != (default_engine_group_root() / job["group_id"]).resolve(strict=True):
-            raise LetsInferError("refusing to remove a non-canonical engine-group directory")
+                raise LetsInferError("placement-group protection must be disarmed before removal")
+        root = _placement_group_path(job["placement_group_id"])
+        if root.resolve(strict=True) != (default_placement_group_root() / job["placement_group_id"]).resolve(strict=True):
+            raise LetsInferError("refusing to remove a non-canonical placement-group directory")
         shutil.rmtree(root)
         _fsync_path(root.parent)
         if protection_root.exists():
@@ -19709,9 +19504,9 @@ def _current_controller_placements(
     return [current[model][1] for model in sorted(current)]
 
 
-def _gateway_group_activity() -> dict[str, Any] | None:
-    """Read the gateway's atomic dynamic group snapshot without trusting links."""
-    path = default_gateway_group_telemetry_path()
+def _gateway_placement_group_activity() -> dict[str, Any] | None:
+    """Read the gateway's atomic placement-group snapshot without trusting links."""
+    path = default_gateway_placement_group_telemetry_path()
     try:
         details = path.lstat()
         if (
@@ -19735,19 +19530,24 @@ def _gateway_group_activity() -> dict[str, Any] | None:
         return None
     if (
         not isinstance(value, dict)
-        or set(value) != {"schema_version", "unix_ms", "models", "groups"}
-        or value.get("schema_version") != 1
+        or set(value) != {
+            "schema_version",
+            "unix_ms",
+            "models",
+            "placement_groups",
+        }
+        or value.get("schema_version") != 2
         or not isinstance(value.get("unix_ms"), int)
         or isinstance(value.get("unix_ms"), bool)
         or not isinstance(value.get("models"), dict)
-        or not isinstance(value.get("groups"), dict)
+        or not isinstance(value.get("placement_groups"), dict)
         or not 0 <= int(time.time() * 1000) - value["unix_ms"] <= 5_000
     ):
         return None
-    for placement_id, row in value["groups"].items():
+    for placement_group_id, row in value["placement_groups"].items():
         if (
-            not isinstance(placement_id, str)
-            or not ID_RE.fullmatch(placement_id)
+            not isinstance(placement_group_id, str)
+            or not ID_RE.fullmatch(placement_group_id)
             or not isinstance(row, dict)
             or not isinstance(row.get("active_requests"), int)
             or isinstance(row.get("active_requests"), bool)
@@ -19772,7 +19572,7 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
     link_store = LinkStore(identity)
     telemetry = TelemetryAggregator() if identity.role == "main" else None
     try:
-        group_executor = LocalEngineGroupExecutor(identity.member_id)
+        group_executor = LocalPlacementExecutor(identity.member_id)
         member_agent = MemberAgent(
             member_id=identity.member_id,
             handler=group_executor,
@@ -19845,9 +19645,8 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
             raise ControllerError("node aggregation is available only on the main node")
         with _site_store() as store:
             rows = store.members()
-            placements = store.placements()
             model_services = store.model_services()
-            engine_groups = store.engine_groups()
+            placement_groups = store.placement_groups()
             allocations = store.device_allocations(active_only=True)
             plans = store.topology_plans()
             exposure = store.exposure()
@@ -19860,99 +19659,141 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
         )
         members = [
             {
-                key: row[key]
-                for key in (
-                    "member_id", "display_name", "role", "address", "state",
-                    "certificate_sha256", "facts", "facts_sha256",
-                    "joined_at_unix", "updated_at_unix",
-                )
+                **{
+                    "node_id": row["member_id"],
+                    "display_name": row["display_name"],
+                    "role": row["role"],
+                    "address": row["address"],
+                    "state": row["state"],
+                    "certificate_sha256": row["certificate_sha256"],
+                    "facts": row["facts"],
+                    "facts_sha256": row["facts_sha256"],
+                    "joined_at_unix": row["joined_at_unix"],
+                    "updated_at_unix": row["updated_at_unix"],
+                }
             }
             for row in rows
         ]
-        safe_placements: list[dict[str, Any]] = []
-        for placement in placements:
-            safe = dict(placement)
-            safe["endpoints"] = [
-                {
-                    key: endpoint[key]
-                    for key in (
-                        "member_id", "url", "max_active_requests",
-                        "max_context_tokens", "healthy", "memory_pressure",
-                        "temperature_c", "prefix_keys",
-                    )
-                    if key in endpoint
-                }
-                for endpoint in placement["endpoints"]
-            ]
-            safe_placements.append(safe)
-        placements_by_id = {
-            placement["placement_id"]: placement for placement in safe_placements
-        }
-        allocations_by_group: dict[str, list[dict[str, Any]]] = {}
+        allocations_by_placement: dict[str, list[dict[str, Any]]] = {}
         for allocation in allocations:
-            allocations_by_group.setdefault(allocation["group_id"], []).append(
+            allocations_by_placement.setdefault(
+                str(allocation["placement_id"]), []
+            ).append(
                 {
-                    "machine_id": allocation["member_id"],
                     "device_uuid": allocation["device_uuid"],
                     "state": allocation["state"],
                 }
             )
-        activity = _gateway_group_activity()
-        group_activity = activity["groups"] if activity is not None else {}
+        activity = _gateway_placement_group_activity()
+        placement_group_activity = (
+            activity["placement_groups"] if activity is not None else {}
+        )
         model_activity = activity["models"] if activity is not None else {}
-        groups_by_service: dict[str, list[dict[str, Any]]] = {}
-        for group in engine_groups:
-            placement = placements_by_id.get(group["placement_id"])
-            if placement is None or group["state"] == "removed":
+        placement_groups_by_service: dict[str, list[dict[str, Any]]] = {}
+        for placement_group in placement_groups:
+            if placement_group["state"] == "removed":
                 continue
-            release = group["plan"].get("release")
-            service_id = group["plan"].get("service_id")
+            plan = placement_group["plan"]
+            release = plan.get("release")
+            service_id = plan.get("service_id")
             if not isinstance(service_id, str) or not isinstance(release, dict):
-                raise ControllerError("engine-group service identity is incomplete")
-            groups_by_service.setdefault(service_id, []).append(
+                raise ControllerError("placement-group service identity is incomplete")
+            endpoint = placement_group.get("endpoint")
+            safe_endpoint = (
+                None
+                if endpoint is None
+                else {
+                    key: endpoint[key]
+                    for key in (
+                        "placement_id",
+                        "node_id",
+                        "url",
+                        "max_active_requests",
+                        "max_context_tokens",
+                        "healthy",
+                        "memory_pressure",
+                        "temperature_c",
+                        "prefix_keys",
+                    )
+                }
+            )
+            safe_placements = [
                 {
-                    **placement,
-                    "group_id": group["group_id"],
+                    key: placement[key]
+                    for key in (
+                        "placement_id",
+                        "node_id",
+                        "task_id",
+                        "address",
+                        "port_base",
+                        "port_count",
+                        "device_uuids",
+                        "rdma_interface",
+                        "endpoint_owner",
+                        "state",
+                        "operation_id",
+                        "error",
+                        "updated_at_unix",
+                    )
+                }
+                | {
+                    "device_allocations": allocations_by_placement.get(
+                        str(placement["placement_id"]), []
+                    )
+                }
+                for placement in placement_group["placements"]
+            ]
+            placement_groups_by_service.setdefault(service_id, []).append(
+                {
+                    "placement_group_id": placement_group["placement_group_id"],
+                    "model": placement_group["model"],
+                    "runtime": placement_group["runtime"],
+                    "target": placement_group["target"],
                     "release": release,
-                    "failure_policy": group["failure_policy"],
-                    "endpoint_owner": group["plan"]["endpoint_owner"],
-                    "runtime_execution_contract_sha256": group[
+                    "runtime_digest": placement_group["runtime_digest"],
+                    "manifest_sha256": placement_group["manifest_sha256"],
+                    "topology_sha256": placement_group["topology_sha256"],
+                    "runtime_execution_contract_sha256": placement_group[
                         "runtime_execution_contract_sha256"
                     ],
-                    "resource_assignments": group["plan"]["resources"],
-                    "connections": group["plan"]["connections"],
-                    "task_states": [
-                        {
-                            "node_id": task["member_id"],
-                            "task_id": task["task_id"],
-                            "state": task["state"],
-                            "error": task["error"],
-                        }
-                        for task in group["members"]
-                    ],
-                    "device_allocations": allocations_by_group.get(
-                        group["group_id"], []
+                    "connections": plan["connections"],
+                    "placements": safe_placements,
+                    "endpoint": safe_endpoint,
+                    "capacity": placement_group["capacity"],
+                    "desired_state": placement_group["desired_state"],
+                    "state": placement_group["state"],
+                    "last_error": placement_group["last_error"],
+                    "created_at_unix": placement_group["created_at_unix"],
+                    "updated_at_unix": placement_group["updated_at_unix"],
+                    "telemetry": placement_group_activity.get(
+                        placement_group["placement_group_id"]
                     ),
-                    "desired_state": group["desired_state"],
-                    "last_error": group["last_error"],
-                    "telemetry": group_activity.get(group["placement_id"]),
                 }
             )
         services = [
             {
                 **service,
-                "groups": sorted(
-                    groups_by_service.get(service["service_id"], []),
-                    key=lambda group: group["group_id"],
+                "placement_groups": sorted(
+                    placement_groups_by_service.get(service["service_id"], []),
+                    key=lambda placement_group: placement_group[
+                        "placement_group_id"
+                    ],
                 ),
                 "telemetry": {
                     "active_requests": sum(
                         int(
-                            (group_activity.get(group["placement_id"]) or {}).get(
+                            (
+                                placement_group_activity.get(
+                                    placement_group["placement_group_id"]
+                                )
+                                or {}
+                            ).get(
                                 "active_requests", 0
                             )
                         )
-                        for group in groups_by_service.get(service["service_id"], [])
+                        for placement_group in placement_groups_by_service.get(
+                            service["service_id"], []
+                        )
                     ),
                     "queued_requests": int(
                         (model_activity.get(service["model"]) or {}).get(
@@ -19973,15 +19814,30 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
                     row["member_id"]: row["certificate_sha256"] for row in active
                 },
             )
+            graph_document = graph.document()
             topology_document: dict[str, Any] = {
-                **graph.document(), "topology_sha256": graph.sha256(), "valid": True,
+                "schema_version": 2,
+                "nodes": graph_document["members"],
+                "links": [
+                    {
+                        **{
+                            key: value
+                            for key, value in link.items()
+                            if key != "members"
+                        },
+                        "nodes": link["members"],
+                    }
+                    for link in graph_document["links"]
+                ],
+                "topology_sha256": graph.sha256(),
+                "valid": True,
             }
         except TopologyError as error:
             topology_document = {"valid": False, "error": str(error)}
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "identity": identity_json(identity),
-            "machines": members,
+            "nodes": members,
             "topology": topology_document,
             "services": services,
             "pending_topology_plans": plans,
@@ -20177,12 +20033,12 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
     )
     link_thread.start()
 
-    def monitor_engine_groups() -> None:
+    def monitor_placement_groups() -> None:
         if identity.role != "main":
             return
         while not stopped.wait(10.0):
             try:
-                reconcile_engine_groups_once()
+                reconcile_placement_groups_once()
             except (ControlError, LetsInferError, SiteError):
                 continue
             except Exception as error:
@@ -20191,8 +20047,8 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
                 return
 
     orchestration_thread = threading.Thread(
-        target=monitor_engine_groups,
-        name="letsinfer-group-monitor",
+        target=monitor_placement_groups,
+        name="letsinfer-placement-group-monitor",
         daemon=True,
     )
     orchestration_thread.start()
@@ -20251,7 +20107,7 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
         )
     if orchestration_failed:
         raise LetsInferError(
-            "engine-group health monitor failed: " + orchestration_failed[-1]
+            "placement-group health monitor failed: " + orchestration_failed[-1]
         )
     if link_monitor_failed:
         raise LetsInferError(
@@ -20277,10 +20133,9 @@ def _topology_status_snapshot() -> dict[str, Any]:
             if row["state"] in {"pending", "active", "draining", "offline"}
         ]
         allocations = store.device_allocations(active_only=True)
-        placements = {row["placement_id"]: dict(row) for row in store.placements()}
         groups = [
             dict(row)
-            for row in store.engine_groups()
+            for row in store.placement_groups()
             if row["state"] != "removed" and row["desired_state"] != "removed"
         ]
     online_members = [
@@ -20305,7 +20160,7 @@ def _topology_status_snapshot() -> dict[str, Any]:
                     member_id: [
                         row["device_uuid"]
                         for row in allocations
-                        if row["member_id"] == member_id
+                        if row["node_id"] == member_id
                     ]
                     for member_id in (
                         row["member_id"] for row in online_members
@@ -20318,51 +20173,25 @@ def _topology_status_snapshot() -> dict[str, Any]:
     models_by_member: dict[str, list[dict[str, Any]]] = {
         str(row["member_id"]): [] for row in members
     }
-    grouped_placement_ids: set[str] = set()
     for group in groups:
-        placement = placements.get(group["placement_id"])
-        resources = group.get("plan", {}).get("resources")
-        if placement is None or not isinstance(resources, list):
-            raise LetsInferError("engine-group topology record is incomplete")
-        grouped_placement_ids.add(str(group["placement_id"]))
-        for resource in resources:
-            if not isinstance(resource, Mapping):
-                raise LetsInferError("engine-group topology resource is invalid")
-            member_id = str(resource.get("node_id", ""))
+        group_placements = group.get("placements")
+        if not isinstance(group_placements, list) or not group_placements:
+            raise LetsInferError("placement-group topology record is incomplete")
+        for placement in group_placements:
+            if not isinstance(placement, Mapping):
+                raise LetsInferError("placement-group placement is invalid")
+            member_id = str(placement.get("node_id", ""))
             if member_id not in models_by_member:
                 continue
             models_by_member[member_id].append(
                 {
-                    "model": placement["model"],
-                    "state": group["state"],
-                    "group_id": group["group_id"],
-                    "runtime": placement["runtime"],
-                    "target": placement["target"],
-                    "reason": group.get("last_error"),
-                }
-            )
-    for placement_id, placement in sorted(placements.items()):
-        if (
-            placement_id in grouped_placement_ids
-            or placement.get("state") not in {"starting", "running", "draining"}
-        ):
-            continue
-        placement_members = placement.get("members")
-        if not isinstance(placement_members, list):
-            raise LetsInferError("standalone topology placement is incomplete")
-        for member_id_value in placement_members:
-            member_id = str(member_id_value)
-            if member_id not in models_by_member:
-                continue
-            models_by_member[member_id].append(
-                {
-                    "model": placement["model"],
+                    "model": group["model"],
                     "state": placement["state"],
-                    "group_id": None,
-                    "placement_id": placement_id,
-                    "runtime": placement["runtime"],
-                    "target": placement["target"],
-                    "reason": None,
+                    "placement_group_id": group["placement_group_id"],
+                    "placement_id": placement["placement_id"],
+                    "runtime": group["runtime"],
+                    "target": group["target"],
+                    "reason": group.get("last_error"),
                 }
             )
 
@@ -20456,7 +20285,7 @@ def _topology_status_snapshot() -> dict[str, Any]:
                 "memory_total_gib": member_memory.get("total_gib"),
                 "models": sorted(
                     models_by_member[member_id],
-                    key=lambda row: (str(row["model"]), str(row["group_id"])),
+                    key=lambda row: (str(row["model"]), str(row["placement_group_id"])),
                 ),
                 "traffic": traffic_by_member.get(
                     member_id,
@@ -20472,7 +20301,8 @@ def _topology_status_snapshot() -> dict[str, Any]:
     links = (
         [
             {
-                **link,
+                **{key: value for key, value in link.items() if key != "members"},
+                "nodes": link["members"],
                 "age_seconds": max(0, now - int(link["observed_at_unix"])),
             }
             for _key, link in sorted(graph.links.items())
@@ -20555,20 +20385,24 @@ def _topology_plan_document(
     with _site_store() as store:
         current = [
             row
-            for row in store.placements()
-            if row["model"] == model and row["state"] in {"starting", "running"}
+            for row in store.placement_groups()
+            if row["model"] == model
+            and row["state"] in {"starting", "running"}
+            and row["desired_state"] != "removed"
         ]
-    desired_members = list(choice.placement.member_ids)
+    desired_nodes = list(choice.placement_group.node_ids)
     matching = [
         row
         for row in current
         if row["target"] == target_id
-        and row["strategy"] == choice.placement.strategy
-        and row["members"] == desired_members
-        and row["runtime"] == desired_runtime
+        and sorted(
+            placement["node_id"] for placement in row["placements"]
+        )
+        == sorted(desired_nodes)
+        and row["source"] == source
     ]
     document = {
-        "schema_version": 1,
+        "schema_version": 2,
         "site_id": identity.site_id,
         "model": model,
         "engine": selected_engine,
@@ -20579,12 +20413,13 @@ def _topology_plan_document(
         "target": target_id,
         "target_contract_sha256": target_sha256,
         "topology_sha256": graph.sha256(),
-        "placement": {
-            "strategy": choice.placement.strategy,
-            "members": desired_members,
-            "reason": choice.placement.reason,
+        "placement_group": {
+            "nodes": desired_nodes,
+            "reason": choice.placement_group.reason,
         },
-        "current_placement_ids": [row["placement_id"] for row in current],
+        "current_placement_group_ids": [
+            row["placement_group_id"] for row in current
+        ],
         "change_required": not bool(matching),
         "automatic_restart": False,
     }
@@ -20594,7 +20429,7 @@ def _topology_plan_document(
             for key in (
                 "schema_version", "site_id", "model", "engine", "runtime_candidate", "runtime_version",
                 "runtime_identity", "runtime_source", "target",
-                "target_contract_sha256", "topology_sha256", "placement",
+                "target_contract_sha256", "topology_sha256", "placement_group",
                 "automatic_restart",
             )
         }
@@ -20631,9 +20466,8 @@ def topology_plan_command(arguments: argparse.Namespace) -> int:
                     command_ui.RecordRow("Engine", document["engine"]),
                     command_ui.RecordRow("Target", document["target"]),
                     command_ui.RecordRow(
-                        "Placement",
-                        document["placement"]["strategy"],
-                        ", ".join(document["placement"]["members"]),
+                        "Placement group",
+                        ", ".join(document["placement_group"]["nodes"]),
                     ),
                     command_ui.RecordRow(
                         "Change",
@@ -20650,8 +20484,8 @@ def topology_plan_command(arguments: argparse.Namespace) -> int:
         else:
             print(
                 f"PLAN model={document['model']} engine={document['engine']} "
-                f"target={document['target']} strategy={document['placement']['strategy']} "
-                f"members={','.join(document['placement']['members'])} "
+                f"target={document['target']} "
+                f"nodes={','.join(document['placement_group']['nodes'])} "
                 f"change_required={str(document['change_required']).lower()} "
                 f"plan={document['plan_id'] or 'none'} restart=manual"
             )
@@ -21526,18 +21360,18 @@ def _group_storage_references() -> list[RuntimeStorageReference]:
         try:
             with MemberJobStore(job_store) as store:
                 states = {
-                    str(row["group_id"]): str(row["state"])
+                    str(row["placement_group_id"]): str(row["state"])
                     for row in store.groups()
                 }
         except MemberJobError as error:
             raise LetsInferError(
-                f"cannot classify local engine-group storage: {error}"
+                f"cannot classify local placement-group storage: {error}"
             ) from error
-    root = default_engine_group_root()
+    root = default_placement_group_root()
     if not root.exists():
         return references
     if root.is_symlink() or not root.is_dir() or root.stat().st_uid != os.getuid():
-        raise LetsInferError("local engine-group storage root is unsafe")
+        raise LetsInferError("local placement-group storage root is unsafe")
     for group_root in sorted(root.iterdir()):
         if not group_root.is_dir() or group_root.is_symlink():
             continue
@@ -21548,21 +21382,21 @@ def _group_storage_references() -> list[RuntimeStorageReference]:
             config = json.loads(_validate_private_file(config_path, minimum_bytes=64))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise LetsInferError(
-                f"engine-group storage configuration is invalid: {config_path}"
+                f"placement-group storage configuration is invalid: {config_path}"
             ) from error
         required = {
-            "group_id", "control_root", "manifest_path", "manifest_sha256",
+            "placement_group_id", "control_root", "manifest_path", "manifest_sha256",
             "runtime_digest", "model_cache", "store_root", "runtime_cache_root",
             "container_name",
         }
         if (
             not isinstance(config, dict)
             or not required.issubset(config)
-            or config.get("group_id") != group_root.name
+            or config.get("placement_group_id") != group_root.name
             or not SHA256_RE.fullmatch(str(config.get("runtime_digest", "")))
         ):
             raise LetsInferError(
-                f"engine-group storage configuration is incomplete: {config_path}"
+                f"placement-group storage configuration is incomplete: {config_path}"
             )
         _manifest_path, manifest = validate_control_bundle(
             pathlib.Path(str(config["control_root"])),
@@ -22362,11 +22196,11 @@ def _accept_node_add_request(
     stopped_groups: tuple[str, ...] = ()
     stopped_qualification: dict[str, Any] | None = None
     if active_placements:
-        group_ids, qualification = _node_move_stop_targets(active_placements)
+        placement_group_ids, qualification = _node_move_stop_targets(active_placements)
         activity = _command_activity(arguments, "Stopping models before node move")
         with activity, ui.protect_stdout(activity):
             stopped_groups, stopped_qualification = _stop_node_move_models(
-                group_ids,
+                placement_group_ids,
                 qualification,
             )
         with _site_store() as store:
@@ -22429,20 +22263,30 @@ def _accept_node_add_request(
 def _node_move_stop_targets(
     active_placements: Sequence[Mapping[str, Any]],
 ) -> tuple[tuple[str, ...], dict[str, Any] | None]:
-    """Resolve active placements to stable group or qualification owners."""
+    """Resolve active placements to placement-group or qualification owners."""
     placements = {
         str(row["placement_id"]): row for row in active_placements
     }
     placement_ids = set(placements)
     with _site_store() as store:
-        groups = [
-            dict(row)
-            for row in store.engine_groups()
-            if str(row["placement_id"]) in placement_ids
-            and row["state"] != "removed"
-            and row["desired_state"] != "removed"
-        ]
-    covered = {str(row["placement_id"]) for row in groups}
+        groups = []
+        for row in store.placement_groups():
+            owned = {
+                str(placement["placement_id"])
+                for placement in row["placements"]
+            }
+            if (
+                owned & placement_ids
+                and row["state"] != "removed"
+                and row["desired_state"] != "removed"
+            ):
+                groups.append({**row, "_owned_placement_ids": owned})
+    covered = {
+        placement_id
+        for row in groups
+        for placement_id in row["_owned_placement_ids"]
+        if placement_id in placement_ids
+    }
     missing = sorted(placement_ids - covered)
     qualification: dict[str, Any] | None = None
     if missing:
@@ -22464,25 +22308,25 @@ def _node_move_stop_targets(
                 + ",".join(unresolved)
             )
     unstable = sorted(
-        str(row["group_id"])
+        str(row["placement_group_id"])
         for row in groups
         if (row["state"], row["desired_state"]) != ("running", "running")
     )
     if unstable:
         raise LetsInferError(
-            "node move requires model groups to finish their current lifecycle: "
+            "node move requires placement groups to finish their current lifecycle: "
             + ",".join(unstable)
         )
     return (
-        tuple(sorted(str(row["group_id"]) for row in groups)),
+        tuple(sorted(str(row["placement_group_id"]) for row in groups)),
         qualification,
     )
 
 
-def _node_move_running_group_ids(
+def _node_move_running_placement_group_ids(
     active_placements: Sequence[Mapping[str, Any]],
 ) -> tuple[str, ...]:
-    """Resolve active placements only when engine groups own every one."""
+    """Resolve active placements only when placement groups own every one."""
     groups, qualification = _node_move_stop_targets(active_placements)
     if qualification is not None:
         raise LetsInferError(
@@ -22491,19 +22335,19 @@ def _node_move_running_group_ids(
     return groups
 
 
-def _restore_node_move_groups(group_ids: Sequence[str]) -> None:
+def _restore_node_move_groups(placement_group_ids: Sequence[str]) -> None:
     errors: list[str] = []
-    for group_id in reversed(tuple(group_ids)):
+    for placement_group_id in reversed(tuple(placement_group_ids)):
         try:
-            _start_engine_group_by_id(group_id)
+            _start_placement_group_by_id(placement_group_id)
         except BaseException as error:
-            errors.append(f"{group_id}: {error}")
+            errors.append(f"{placement_group_id}: {error}")
     if errors:
         raise LetsInferError("model restoration was incomplete: " + "; ".join(errors))
 
 
 def _restore_node_move_models(
-    group_ids: Sequence[str],
+    placement_group_ids: Sequence[str],
     qualification: Mapping[str, Any] | None,
 ) -> None:
     """Restore every model owner after a pre-commit move failure."""
@@ -22514,19 +22358,19 @@ def _restore_node_move_models(
         except BaseException as error:
             errors.append(f"qualification: {error}")
     try:
-        _restore_node_move_groups(group_ids)
+        _restore_node_move_groups(placement_group_ids)
     except BaseException as error:
-        errors.append(f"groups: {error}")
+        errors.append(f"placement groups: {error}")
     if errors:
         raise LetsInferError("model restoration was incomplete: " + "; ".join(errors))
 
 
-def _stop_node_move_groups(group_ids: Sequence[str]) -> tuple[str, ...]:
+def _stop_node_move_groups(placement_group_ids: Sequence[str]) -> tuple[str, ...]:
     stopped: list[str] = []
     try:
-        for group_id in group_ids:
-            _stop_engine_group_by_id(group_id)
-            stopped.append(group_id)
+        for placement_group_id in placement_group_ids:
+            _stop_placement_group_by_id(placement_group_id)
+            stopped.append(placement_group_id)
     except BaseException as failure:
         try:
             _restore_node_move_groups(stopped)
@@ -22540,11 +22384,11 @@ def _stop_node_move_groups(group_ids: Sequence[str]) -> tuple[str, ...]:
 
 
 def _stop_node_move_models(
-    group_ids: Sequence[str],
+    placement_group_ids: Sequence[str],
     qualification: Mapping[str, Any] | None,
 ) -> tuple[tuple[str, ...], dict[str, Any] | None]:
     """Stop all model owners and roll back a partial pre-move stop."""
-    stopped_groups = _stop_node_move_groups(group_ids)
+    stopped_groups = _stop_node_move_groups(placement_group_ids)
     if qualification is None:
         return stopped_groups, None
     candidate = dict(qualification)
@@ -22777,14 +22621,12 @@ def model_list_command(arguments: argparse.Namespace) -> int:
 
 def _choose_installed_model(message: str) -> str:
     with _site_store() as store:
-        placements = {row["placement_id"]: row for row in store.placements()}
         models = sorted(
             {
-                placements[row["placement_id"]]["model"]
-                for row in store.engine_groups()
+                str(row["model"])
+                for row in store.placement_groups()
                 if row["state"] != "removed"
                 and row["desired_state"] != "removed"
-                and row["placement_id"] in placements
             }
         )
     if not models:
@@ -22856,7 +22698,7 @@ def _interactive_model_install(arguments: argparse.Namespace) -> int:
     identity, graph = _fresh_site_topology()
     with _site_store() as store:
         members = [dict(row) for row in store.members() if row["state"] == "active"]
-    assignments: dict[str, list[str]] = {}
+    placements: dict[str, list[str]] = {}
     for member in members:
         choices = []
         for model in sorted(catalog["models"]):
@@ -22886,10 +22728,10 @@ def _interactive_model_install(arguments: argparse.Namespace) -> int:
         except command_ui.PromptUnavailable as error:
             raise LetsInferError("model installation was cancelled") from error
         if selected != "Skip":
-            assignments.setdefault(selected, []).append(member["member_id"])
-    if not assignments:
+            placements.setdefault(selected, []).append(member["member_id"])
+    if not placements:
         raise LetsInferError("no model installation was selected")
-    for model, nodes in assignments.items():
+    for model, nodes in placements.items():
         child = _model_install_arguments(arguments, model)
         child.node = nodes
         child.all_nodes = False
@@ -22905,14 +22747,12 @@ def _remove_model_placements(arguments: argparse.Namespace) -> int:
     identity = read_site_identity()
     with _site_store() as store:
         members = store.members()
-        placements = {row["placement_id"]: row for row in store.placements()}
         groups = [
             row
-            for row in store.engine_groups()
+            for row in store.placement_groups()
             if row["state"] != "removed"
             and row["desired_state"] != "removed"
-            and row["placement_id"] in placements
-            and placements[row["placement_id"]]["model"] == arguments.model
+            and row["model"] == arguments.model
         ]
     if not groups:
         raise LetsInferError(f"no installed model serves {arguments.model!r}")
@@ -22924,7 +22764,7 @@ def _remove_model_placements(arguments: argparse.Namespace) -> int:
         selected_nodes = {
             resource["node_id"]
             for group in groups
-            for resource in group["plan"]["resources"]
+            for resource in group["plan"]["placements"]
         }
     elif requested:
         selector = argparse.Namespace(node=requested, all_nodes=False)
@@ -22939,22 +22779,22 @@ def _remove_model_placements(arguments: argparse.Namespace) -> int:
         selected_nodes = {
             resource["node_id"]
             for group in groups
-            for resource in group["plan"]["resources"]
+            for resource in group["plan"]["placements"]
         }
-    group_ids = [
-        group["group_id"]
+    placement_group_ids = [
+        group["placement_group_id"]
         for group in groups
         if any(
             resource["node_id"] in selected_nodes
-            for resource in group["plan"]["resources"]
+            for resource in group["plan"]["placements"]
         )
     ]
-    if not group_ids:
+    if not placement_group_ids:
         raise LetsInferError("the selected nodes do not host this model")
-    _remove_engine_groups_by_id(group_ids)
+    _remove_placement_groups_by_id(placement_group_ids)
     result = {
         "model": arguments.model,
-        "removed_group_ids": group_ids,
+        "removed_placement_group_ids": placement_group_ids,
         "node_ids": sorted(selected_nodes),
     }
     if arguments.json:
@@ -22965,12 +22805,12 @@ def _remove_model_placements(arguments: argparse.Namespace) -> int:
             presenter.result(
                 f"Removed {arguments.model}",
                 semantic=command_ui.Semantic.SUCCESS,
-                detail=f"{len(group_ids)} group(s)",
+                detail=f"{len(placement_group_ids)} placement groups",
             )
         else:
             print(
                 f"REMOVED model={arguments.model} "
-                f"groups={','.join(group_ids)}"
+                f"placement_groups={','.join(placement_group_ids)}"
             )
     return 0
 
@@ -23013,33 +22853,38 @@ def model_logs_command(arguments: argparse.Namespace) -> int:
 def _model_logs(arguments: argparse.Namespace) -> int:
     identity = read_site_identity()
     with _site_store() as store:
-        placements = {row["placement_id"]: row for row in store.placements()}
         local_groups = [
-            row["group_id"]
-            for row in store.engine_groups()
+            row["placement_group_id"]
+            for row in store.placement_groups()
             if row["state"] != "removed"
             and row["desired_state"] != "removed"
-            and row["placement_id"] in placements
-            and placements[row["placement_id"]]["model"] == arguments.model
+            and row["model"] == arguments.model
             and any(
                 resource["node_id"] == identity.member_id
-                for resource in row["plan"]["resources"]
+                for resource in row["plan"]["placements"]
             )
         ]
-    if arguments.group is not None:
-        if arguments.group not in local_groups:
-            raise LetsInferError("selected group does not locally serve this model")
-        selected = arguments.group
+    if arguments.placement_group is not None:
+        if arguments.placement_group not in local_groups:
+            raise LetsInferError(
+                "selected placement group does not locally serve this model"
+            )
+        selected = arguments.placement_group
     elif len(local_groups) == 1:
         selected = local_groups[0]
     elif not local_groups:
-        raise LetsInferError("this node has no local group for the selected model")
+        raise LetsInferError(
+            "this node has no local placement group for the selected model"
+        )
     else:
-        raise LetsInferError("multiple local groups serve this model; specify --group")
+        raise LetsInferError(
+            "multiple local placement groups serve this model; specify "
+            "--placement-group"
+        )
     return logs(
         argparse.Namespace(
             config=None,
-            group=selected,
+            placement_group=selected,
             tail=arguments.tail,
             follow=arguments.follow,
         )
@@ -23074,7 +22919,7 @@ def _benchmark_namespace(
         "yes": False,
         "job_worker": False,
         "job_id": None,
-        "resident_group": [],
+        "resident_placement_group": [],
     }
     values.update(vars(arguments))
     values["runtime"] = runtime
@@ -23308,7 +23153,7 @@ def parser() -> argparse.ArgumentParser:
         "logs", help=help_label("show logs for a model", "model.logs")
     )
     model_logs.add_argument("model")
-    model_logs.add_argument("--group")
+    model_logs.add_argument("--placement-group")
     model_logs.add_argument("--tail", type=int, default=200)
     model_logs.add_argument("--follow", action="store_true")
     model_logs.set_defaults(action=model_logs_command, action_id="model.logs")
@@ -23347,7 +23192,7 @@ def parser() -> argparse.ArgumentParser:
     benchmark_run.add_argument("--job-worker", action="store_true", help=argparse.SUPPRESS)
     benchmark_run.add_argument("--job-id", help=argparse.SUPPRESS)
     benchmark_run.add_argument(
-        "--resident-group", action="append", default=[], help=argparse.SUPPRESS
+        "--resident-placement-group", action="append", default=[], help=argparse.SUPPRESS
     )
     benchmark_options(benchmark_run, selections=True)
     benchmark_run.set_defaults(action=benchmark_run_command, action_id="benchmark.run")

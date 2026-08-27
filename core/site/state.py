@@ -31,7 +31,7 @@ from typing import Any, TypeVar
 from core.paths import config_root as canonical_config_root
 from core.paths import data_root as canonical_data_root
 from core.paths import secrets_root as canonical_secrets_root
-from core.orchestration import OrchestrationError, validate_group_document
+from core.orchestration import OrchestrationError, validate_placement_group_document
 from core.exact_tokens import TOKEN_COUNT_PROTOCOLS
 from core.runtime_sources import is_immutable_runtime_source
 
@@ -40,7 +40,7 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 KEY_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 CHECKPOINT_INTERVAL = 100
 MAX_REASON_BYTES = 512
 MAX_TAG_BYTES = 128
@@ -541,7 +541,7 @@ def read_exposure_for_cleanup(
     return value
 
 
-def has_active_engine_groups_for_cleanup(
+def has_active_placement_groups_for_cleanup(
     path: pathlib.Path | None = None,
 ) -> bool:
     """Fail closed if unreadable node identity hides live distributed work."""
@@ -563,28 +563,33 @@ def has_active_engine_groups_for_cleanup(
             connection.execute("PRAGMA query_only=ON")
             connection.execute("PRAGMA trusted_schema=OFF")
             table = connection.execute(
-                "SELECT type FROM sqlite_master WHERE name='engine_groups'"
+                "SELECT type FROM sqlite_master WHERE name='placement_groups'"
             ).fetchone()
             if table is None:
                 return False
             if table["type"] != "table":
-                raise SiteError("engine-group storage is not a table")
+                raise SiteError("placement-group storage is not a table")
             columns = {
                 row["name"]
-                for row in connection.execute('PRAGMA table_info("engine_groups")')
+                for row in connection.execute('PRAGMA table_info("placement_groups")')
             }
-            if not {"group_id", "desired_state", "state", "members_json"}.issubset(
+            if not {
+                "placement_group_id",
+                "desired_state",
+                "state",
+                "plan_json",
+            }.issubset(
                 columns
             ):
-                raise SiteError("engine-group cleanup schema is invalid")
+                raise SiteError("placement-group cleanup schema is invalid")
             row = connection.execute(
-                "SELECT COUNT(*) AS active FROM engine_groups "
+                "SELECT COUNT(*) AS active FROM placement_groups "
                 "WHERE desired_state IS NOT 'removed' OR state IS NOT 'removed'"
             ).fetchone()
         finally:
             connection.close()
     except sqlite3.Error as error:
-        raise SiteError("engine-group cleanup state cannot be read safely") from error
+        raise SiteError("placement-group cleanup state cannot be read safely") from error
     return bool(row["active"])
 
 
@@ -770,55 +775,62 @@ class SiteStore:
                 created_at_unix INTEGER NOT NULL,
                 updated_at_unix INTEGER NOT NULL
             ) STRICT;
-            CREATE TABLE IF NOT EXISTS placements (
-                placement_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS placement_groups (
+                placement_group_id TEXT PRIMARY KEY,
                 service_id TEXT NOT NULL REFERENCES model_services(service_id),
+                source TEXT NOT NULL,
                 model TEXT NOT NULL,
                 runtime TEXT NOT NULL,
                 target TEXT NOT NULL,
-                strategy TEXT NOT NULL CHECK(strategy IN ('single','parallel')),
-                state TEXT NOT NULL,
-                topology_sha256 TEXT NOT NULL,
-                members_json TEXT NOT NULL,
-                endpoints_json TEXT NOT NULL,
-                capacity_json TEXT NOT NULL,
-                updated_at_unix INTEGER NOT NULL
-            ) STRICT;
-            CREATE TABLE IF NOT EXISTS engine_groups (
-                group_id TEXT PRIMARY KEY,
-                placement_id TEXT NOT NULL REFERENCES placements(placement_id),
-                source TEXT NOT NULL,
                 runtime_digest TEXT NOT NULL,
                 manifest_sha256 TEXT NOT NULL,
                 topology_sha256 TEXT NOT NULL,
                 engine_credential_sha256 TEXT NOT NULL,
-                strategy TEXT NOT NULL CHECK(strategy IN ('single','parallel')),
                 runtime_execution_contract_sha256 TEXT NOT NULL,
-                failure_policy TEXT NOT NULL CHECK(failure_policy IN ('independent','whole-group')),
-                required_tasks INTEGER NOT NULL,
                 plan_json TEXT NOT NULL,
                 plan_sha256 TEXT NOT NULL,
                 desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped','removed')),
                 state TEXT NOT NULL CHECK(state IN
                     ('staging','staged','starting','running','degraded','stopping','stopped',
                      'recovering','removing','removed','failed')),
-                members_json TEXT NOT NULL,
+                endpoint_json TEXT,
+                capacity_json TEXT NOT NULL,
                 last_error TEXT,
                 created_at_unix INTEGER NOT NULL,
                 updated_at_unix INTEGER NOT NULL
             ) STRICT;
+            CREATE TABLE IF NOT EXISTS placements (
+                placement_id TEXT PRIMARY KEY,
+                placement_group_id TEXT NOT NULL REFERENCES placement_groups(placement_group_id),
+                node_id TEXT NOT NULL REFERENCES members(member_id),
+                task_id TEXT NOT NULL,
+                address TEXT NOT NULL,
+                port_base INTEGER NOT NULL,
+                port_count INTEGER NOT NULL,
+                device_uuids_json TEXT NOT NULL,
+                rdma_interface TEXT,
+                endpoint_owner INTEGER NOT NULL CHECK(endpoint_owner IN (0,1)),
+                state TEXT NOT NULL CHECK(state IN
+                    ('pending','staging','staged','starting','running','stopping',
+                     'stopped','removing','removed','failed','unreachable')),
+                operation_id TEXT,
+                error TEXT,
+                updated_at_unix INTEGER NOT NULL,
+                UNIQUE(placement_group_id,node_id),
+                UNIQUE(placement_group_id,task_id)
+            ) STRICT;
             CREATE TABLE IF NOT EXISTS device_allocations (
                 allocation_id TEXT PRIMARY KEY,
-                group_id TEXT NOT NULL,
-                member_id TEXT NOT NULL REFERENCES members(member_id),
+                placement_id TEXT NOT NULL REFERENCES placements(placement_id),
+                node_id TEXT NOT NULL REFERENCES members(member_id),
                 device_uuid TEXT NOT NULL,
                 state TEXT NOT NULL CHECK(state IN ('reserved','active','draining','released')),
                 created_at_unix INTEGER NOT NULL,
                 updated_at_unix INTEGER NOT NULL,
-                UNIQUE(group_id,member_id,device_uuid)
+                UNIQUE(placement_id,node_id,device_uuid)
             ) STRICT;
             CREATE UNIQUE INDEX IF NOT EXISTS device_allocations_exclusive
-              ON device_allocations(member_id,device_uuid)
+              ON device_allocations(node_id,device_uuid)
               WHERE state IN ('reserved','active','draining');
             CREATE TABLE IF NOT EXISTS topology_plans (
                 plan_id TEXT PRIMARY KEY,
@@ -848,8 +860,9 @@ class SiteStore:
                 request_id TEXT PRIMARY KEY,
                 key_id TEXT,
                 model TEXT NOT NULL,
+                placement_group_id TEXT,
                 placement_id TEXT,
-                member_id TEXT,
+                node_id TEXT,
                 received_unix_ms INTEGER NOT NULL,
                 completed_unix_ms INTEGER,
                 status TEXT NOT NULL,
@@ -909,67 +922,133 @@ class SiteStore:
               BEFORE DELETE ON audit_checkpoints BEGIN SELECT RAISE(ABORT,'audit checkpoints are append-only'); END;
             """
         )
-        self._migrate_engine_group_schema()
+        self._migrate_placement_group_schema()
 
-    def _migrate_engine_group_schema(self) -> None:
-        """Replace the pre-v3 engine-semantic group columns atomically."""
-        columns = {
+    def _migrate_placement_group_schema(self) -> None:
+        """Perform the one clean pre-launch cut only after legacy state is empty."""
+
+        group_columns = {
             str(row["name"])
-            for row in self.connection.execute("PRAGMA table_info(engine_groups)")
+            for row in self.connection.execute(
+                "PRAGMA table_info(placement_groups)"
+            )
         }
-        if "engine_strategy" not in columns:
-            return
-        legacy_groups = int(
-            self.connection.execute("SELECT COUNT(*) FROM engine_groups").fetchone()[0]
+        placement_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(placements)")
+        }
+        legacy = (
+            "placement_id" in group_columns
+            or "service_id" in placement_columns
+            or "members_json" in placement_columns
         )
-        if legacy_groups:
+        if not legacy:
+            return
+        non_removed = int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM placement_groups "
+                "WHERE state!='removed' OR desired_state!='removed'"
+            ).fetchone()[0]
+        )
+        unreleased = int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM device_allocations WHERE state!='released'"
+            ).fetchone()[0]
+        )
+        if non_removed or unreleased:
             raise SiteError(
-                "legacy engine-group state cannot be relabeled as a generic execution "
-                "contract; remove the pre-release groups before upgrading"
+                "legacy placement state must be removed and its devices released "
+                "before the schema-4 placement cut"
             )
         try:
             self.connection.executescript(
                 """
                 BEGIN IMMEDIATE;
-                CREATE TABLE engine_groups_v3 (
-                    group_id TEXT PRIMARY KEY,
-                    placement_id TEXT NOT NULL REFERENCES placements(placement_id),
+                DROP TABLE device_allocations;
+                DROP TABLE placement_groups;
+                DROP TABLE placements;
+                DROP TABLE request_summaries;
+                CREATE TABLE placement_groups (
+                    placement_group_id TEXT PRIMARY KEY,
+                    service_id TEXT NOT NULL REFERENCES model_services(service_id),
                     source TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    runtime TEXT NOT NULL,
+                    target TEXT NOT NULL,
                     runtime_digest TEXT NOT NULL,
                     manifest_sha256 TEXT NOT NULL,
                     topology_sha256 TEXT NOT NULL,
                     engine_credential_sha256 TEXT NOT NULL,
-                    strategy TEXT NOT NULL CHECK(strategy IN ('single','parallel')),
                     runtime_execution_contract_sha256 TEXT NOT NULL,
-                    failure_policy TEXT NOT NULL CHECK(failure_policy IN ('independent','whole-group')),
-                    required_tasks INTEGER NOT NULL,
                     plan_json TEXT NOT NULL,
                     plan_sha256 TEXT NOT NULL,
-                    desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped','removed')),
+                    desired_state TEXT NOT NULL
+                      CHECK(desired_state IN ('running','stopped','removed')),
                     state TEXT NOT NULL CHECK(state IN
-                        ('staging','staged','starting','running','degraded','stopping','stopped',
-                         'recovering','removing','removed','failed')),
-                    members_json TEXT NOT NULL,
+                      ('staging','staged','starting','running','degraded',
+                       'stopping','stopped','recovering','removing','removed','failed')),
+                    endpoint_json TEXT,
+                    capacity_json TEXT NOT NULL,
                     last_error TEXT,
                     created_at_unix INTEGER NOT NULL,
                     updated_at_unix INTEGER NOT NULL
                 ) STRICT;
-                INSERT INTO engine_groups_v3
-                    (group_id,placement_id,source,runtime_digest,manifest_sha256,
-                     topology_sha256,engine_credential_sha256,strategy,
-                     runtime_execution_contract_sha256,failure_policy,required_tasks,
-                     plan_json,plan_sha256,desired_state,state,members_json,last_error,
-                     created_at_unix,updated_at_unix)
-                SELECT group_id,placement_id,source,runtime_digest,manifest_sha256,
-                       topology_sha256,engine_credential_sha256,strategy,
-                       engine_strategy,failure_policy,minimum_healthy_members,
-                       plan_json,plan_sha256,desired_state,state,members_json,last_error,
-                       created_at_unix,updated_at_unix
-                  FROM engine_groups;
-                DROP TABLE engine_groups;
-                ALTER TABLE engine_groups_v3 RENAME TO engine_groups;
-                UPDATE site_meta SET value='3'
-                 WHERE key='schema_version' AND value='2';
+                CREATE TABLE placements (
+                    placement_id TEXT PRIMARY KEY,
+                    placement_group_id TEXT NOT NULL
+                      REFERENCES placement_groups(placement_group_id),
+                    node_id TEXT NOT NULL REFERENCES members(member_id),
+                    task_id TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    port_base INTEGER NOT NULL,
+                    port_count INTEGER NOT NULL,
+                    device_uuids_json TEXT NOT NULL,
+                    rdma_interface TEXT,
+                    endpoint_owner INTEGER NOT NULL CHECK(endpoint_owner IN (0,1)),
+                    state TEXT NOT NULL CHECK(state IN
+                      ('pending','staging','staged','starting','running','stopping',
+                       'stopped','removing','removed','failed','unreachable')),
+                    operation_id TEXT,
+                    error TEXT,
+                    updated_at_unix INTEGER NOT NULL,
+                    UNIQUE(placement_group_id,node_id),
+                    UNIQUE(placement_group_id,task_id)
+                ) STRICT;
+                CREATE TABLE device_allocations (
+                    allocation_id TEXT PRIMARY KEY,
+                    placement_id TEXT NOT NULL REFERENCES placements(placement_id),
+                    node_id TEXT NOT NULL REFERENCES members(member_id),
+                    device_uuid TEXT NOT NULL,
+                    state TEXT NOT NULL
+                      CHECK(state IN ('reserved','active','draining','released')),
+                    created_at_unix INTEGER NOT NULL,
+                    updated_at_unix INTEGER NOT NULL,
+                    UNIQUE(placement_id,node_id,device_uuid)
+                ) STRICT;
+                CREATE UNIQUE INDEX device_allocations_exclusive
+                  ON device_allocations(node_id,device_uuid)
+                  WHERE state IN ('reserved','active','draining');
+                CREATE TABLE request_summaries (
+                    request_id TEXT PRIMARY KEY,
+                    key_id TEXT,
+                    model TEXT NOT NULL,
+                    placement_group_id TEXT,
+                    placement_id TEXT,
+                    node_id TEXT,
+                    received_unix_ms INTEGER NOT NULL,
+                    completed_unix_ms INTEGER,
+                    status TEXT NOT NULL,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    cached_tokens INTEGER,
+                    queue_ms INTEGER,
+                    ttft_ms INTEGER,
+                    decode_ms INTEGER,
+                    retries INTEGER NOT NULL DEFAULT 0,
+                    exact_tokens INTEGER NOT NULL DEFAULT 0
+                ) STRICT;
+                UPDATE site_meta SET value='4'
+                 WHERE key='schema_version' AND value='3';
                 COMMIT;
                 """
             )
@@ -977,6 +1056,7 @@ class SiteStore:
             if self.connection.in_transaction:
                 self.connection.execute("ROLLBACK")
             raise
+
 
     def initialize_coordinator(self, identity: SiteIdentity) -> None:
         with self.transaction():
@@ -1993,14 +2073,19 @@ class SiteStore:
         ).fetchone()
         if current is None:
             raise SiteError("member is not active in this site")
-        for placement in self.connection.execute(
-            "SELECT placement_id,members_json FROM placements "
-            "WHERE state IN ('starting','running','draining')"
-        ):
-            if member_id in json.loads(placement["members_json"]):
-                raise SiteError(
-                    f"member is part of running placement {placement['placement_id']}; stop it first"
-                )
+        placement = self.connection.execute(
+            "SELECT p.placement_id,p.placement_group_id FROM placements AS p "
+            "JOIN placement_groups AS g USING(placement_group_id) "
+            "WHERE p.node_id=? AND (g.state!='removed' OR g.desired_state!='removed') "
+            "ORDER BY p.placement_id LIMIT 1",
+            (member_id,),
+        ).fetchone()
+        if placement is not None:
+            raise SiteError(
+                "node owns placement "
+                f"{placement['placement_id']} in placement group "
+                f"{placement['placement_group_id']}; remove it first"
+            )
         before = dict(current)
         before.pop("public_key_pem")
         before.pop("certificate_pem")
@@ -2136,148 +2221,285 @@ class SiteStore:
             )
         ]
 
-    def reserve_group_devices(
+    def register_placement_group(
         self,
-        group_id: str,
-        assignments: Sequence[Mapping[str, Any]],
+        plan: Mapping[str, Any],
+        *,
+        source: str,
+        model: str,
+        runtime: str,
+        target: str,
+        capacity: Mapping[str, Any],
+        engine_credential_sha256: str,
+        actor_type: str = "system",
+        actor_id: str = "main",
+        origin_interface: str = "orchestrator",
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Register one immutable placement group and its individual placements."""
+
+        try:
+            document = validate_placement_group_document(dict(plan))
+        except OrchestrationError as error:
+            raise SiteError(str(error)) from error
+        placement_group_id = document["placement_group_id"]
+        if (
+            not is_immutable_runtime_source(source)
+            or source != document["release"]["source"]
+            or not isinstance(engine_credential_sha256, str)
+            or not SHA256_RE.fullmatch(engine_credential_sha256)
+        ):
+            raise SiteError("placement-group source or credential identity is invalid")
+        for value, label in ((model, "model"), (runtime, "runtime"), (target, "target")):
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value.encode("utf-8")) > 1024
+                or any(unicodedata.category(character).startswith("C") for character in value)
+            ):
+                raise SiteError(f"placement-group {label} is invalid")
+        safe_capacity = dict(capacity)
+        capacity_fields = {
+            "max_connections",
+            "max_active_requests",
+            "max_context_tokens",
+            "interconnect",
+        }
+        if set(safe_capacity) != capacity_fields:
+            raise SiteError("placement-group capacity has invalid fields")
+        for key in ("max_connections", "max_active_requests", "max_context_tokens"):
+            value = safe_capacity[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise SiteError(f"placement-group capacity {key} must be positive")
+        interconnect = safe_capacity["interconnect"]
+        if not isinstance(interconnect, dict) or set(interconnect) != {
+            "kind",
+            "rdma_required",
+            "minimum_speed_mbps",
+            "minimum_mtu",
+        }:
+            raise SiteError("placement-group interconnect has invalid fields")
+        service = self.connection.execute(
+            "SELECT model FROM model_services WHERE service_id=?",
+            (document["service_id"],),
+        ).fetchone()
+        if service is None or service["model"] != model:
+            raise SiteError("placement group does not belong to its model service")
+        plan_json = _safe_json(document)
+        plan_sha256 = hashlib.sha256(_canonical_bytes(document)).hexdigest()
+        now = int(time.time())
+        current = self.connection.execute(
+            "SELECT * FROM placement_groups WHERE placement_group_id=?",
+            (placement_group_id,),
+        ).fetchone()
+        before = {} if current is None else dict(current)
+        if current is not None and (
+            current["plan_sha256"] != plan_sha256
+            or current["source"] != source
+            or current["engine_credential_sha256"] != engine_credential_sha256
+        ):
+            raise SiteError("placement-group immutable identity changed")
+        group_row = {
+            "placement_group_id": placement_group_id,
+            "service_id": document["service_id"],
+            "source": source,
+            "model": model,
+            "runtime": runtime,
+            "target": target,
+            "runtime_digest": document["runtime_digest"],
+            "manifest_sha256": document["manifest_sha256"],
+            "topology_sha256": document["topology_sha256"],
+            "engine_credential_sha256": engine_credential_sha256,
+            "runtime_execution_contract_sha256": document[
+                "runtime_execution_contract_sha256"
+            ],
+            "plan_json": plan_json,
+            "plan_sha256": plan_sha256,
+            "desired_state": "running",
+            "state": "staging",
+            "endpoint_json": None,
+            "capacity_json": _safe_json(safe_capacity),
+            "last_error": None,
+            "created_at_unix": now if current is None else int(current["created_at_unix"]),
+            "updated_at_unix": now,
+        }
+        placement_rows = [
+            {
+                "placement_id": item["placement_id"],
+                "placement_group_id": placement_group_id,
+                "node_id": item["node_id"],
+                "task_id": item["task_id"],
+                "address": item["address"],
+                "port_base": item["port_base"],
+                "port_count": item["port_count"],
+                "device_uuids_json": _safe_json(item["device_uuids"]),
+                "rdma_interface": item.get("rdma_interface"),
+                "endpoint_owner": int(
+                    item["placement_id"] == document["endpoint_placement_id"]
+                ),
+                "state": "pending",
+                "operation_id": None,
+                "error": None,
+                "updated_at_unix": now,
+            }
+            for item in document["placements"]
+        ]
+
+        def update(connection: sqlite3.Connection) -> str:
+            connection.execute(
+                """INSERT INTO placement_groups
+                   (placement_group_id,service_id,source,model,runtime,target,
+                    runtime_digest,manifest_sha256,topology_sha256,
+                    engine_credential_sha256,runtime_execution_contract_sha256,
+                    plan_json,plan_sha256,desired_state,state,endpoint_json,
+                    capacity_json,last_error,created_at_unix,updated_at_unix)
+                   VALUES(:placement_group_id,:service_id,:source,:model,:runtime,:target,
+                    :runtime_digest,:manifest_sha256,:topology_sha256,
+                    :engine_credential_sha256,:runtime_execution_contract_sha256,
+                    :plan_json,:plan_sha256,:desired_state,:state,:endpoint_json,
+                    :capacity_json,:last_error,:created_at_unix,:updated_at_unix)
+                   ON CONFLICT(placement_group_id) DO NOTHING""",
+                group_row,
+            )
+            for row in placement_rows:
+                connection.execute(
+                    """INSERT INTO placements
+                       (placement_id,placement_group_id,node_id,task_id,address,
+                        port_base,port_count,device_uuids_json,rdma_interface,
+                        endpoint_owner,state,operation_id,error,updated_at_unix)
+                       VALUES(:placement_id,:placement_group_id,:node_id,:task_id,:address,
+                        :port_base,:port_count,:device_uuids_json,:rdma_interface,
+                        :endpoint_owner,:state,:operation_id,:error,:updated_at_unix)
+                       ON CONFLICT(placement_id) DO NOTHING""",
+                    row,
+                )
+            return placement_group_id
+
+        identifier = self.mutate(
+            action="placement_group.register",
+            target=placement_group_id,
+            before=before,
+            callback=update,
+            after=lambda _connection, result: result,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            origin_interface=origin_interface,
+            correlation_id=correlation_id,
+        )
+        return self.placement_group(identifier)
+
+    def reserve_placement_devices(
+        self,
+        placement_group_id: str,
+        placements: Sequence[Mapping[str, Any]],
         *,
         actor_type: str = "system",
         actor_id: str = "main",
         origin_interface: str = "orchestrator",
         correlation_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Atomically reserve exact accelerator UUIDs for one engine group."""
-        if not isinstance(group_id, str) or not ID_RE.fullmatch(group_id):
-            raise SiteError("device allocation group identity is invalid")
-        requested: list[tuple[str, str]] = []
-        for assignment in assignments:
-            if not isinstance(assignment, Mapping) or set(assignment) != {
-                "member_id", "device_uuids"
-            }:
-                raise SiteError("device allocation assignment is invalid")
-            member_id = assignment.get("member_id")
-            device_uuids = assignment.get("device_uuids")
-            if (
-                not isinstance(member_id, str)
-                or not ID_RE.fullmatch(member_id)
-                or not isinstance(device_uuids, list)
-                or not device_uuids
-                or len(device_uuids) != len(set(device_uuids))
-                or any(
-                    not isinstance(device_uuid, str)
-                    or not device_uuid
-                    or len(device_uuid.encode("utf-8")) > 255
-                    or any(
-                        unicodedata.category(character).startswith("C")
-                        for character in device_uuid
-                    )
-                    for device_uuid in device_uuids
-                )
-            ):
-                raise SiteError("device allocation member or UUID is invalid")
-            requested.extend((member_id, device_uuid) for device_uuid in device_uuids)
-        if not requested or len(requested) != len(set(requested)):
-            raise SiteError("device allocation contains duplicate or empty claims")
-        requested_members = sorted({member_id for member_id, _uuid in requested})
-        placeholders = ",".join("?" for _member_id in requested_members)
-        active_rows = self.connection.execute(
-            "SELECT member_id,facts_json FROM members "
-            f"WHERE state='active' AND member_id IN ({placeholders})",
-            requested_members,
-        ).fetchall()
-        active_members = {str(row["member_id"]) for row in active_rows}
-        if any(member_id not in active_members for member_id, _uuid in requested):
-            raise SiteError("device allocation requires active child or main nodes")
-        inventory_by_member: dict[str, set[str]] = {}
-        for row in active_rows:
-            try:
-                facts = json.loads(str(row["facts_json"]))
-                devices = facts["accelerator"]["devices"]
-            except (KeyError, TypeError, json.JSONDecodeError) as error:
-                raise SiteError(
-                    f"node {row['member_id']} has no valid accelerator inventory"
-                ) from error
-            if (
-                not isinstance(devices, list)
-                or not devices
-                or len(devices) != len(set(devices))
-                or any(not isinstance(device, str) or not device for device in devices)
-            ):
-                raise SiteError(
-                    f"node {row['member_id']} has no valid accelerator inventory"
-                )
-            inventory_by_member[str(row["member_id"])] = set(devices)
-        unknown = [
-            (member_id, device_uuid)
-            for member_id, device_uuid in requested
-            if device_uuid not in inventory_by_member.get(member_id, set())
-        ]
-        if unknown:
-            member_id, device_uuid = unknown[0]
-            raise SiteError(
-                f"device {device_uuid} is not present in node {member_id}'s signed inventory"
+        if not isinstance(placement_group_id, str) or not ID_RE.fullmatch(
+            placement_group_id
+        ):
+            raise SiteError("placement-group device identity is invalid")
+        planned = {
+            str(row["placement_id"]): dict(row)
+            for row in self.connection.execute(
+                "SELECT placement_id,node_id,device_uuids_json FROM placements "
+                "WHERE placement_group_id=?",
+                (placement_group_id,),
             )
+        }
+        requested: list[tuple[str, str, str]] = []
+        for placement in placements:
+            if not isinstance(placement, Mapping) or set(placement) != {
+                "placement_id",
+                "node_id",
+                "device_uuids",
+            }:
+                raise SiteError("placement device assignment is invalid")
+            placement_id = placement["placement_id"]
+            node_id = placement["node_id"]
+            device_uuids = placement["device_uuids"]
+            expected = planned.get(str(placement_id))
+            if (
+                expected is None
+                or expected["node_id"] != node_id
+                or not isinstance(device_uuids, list)
+                or device_uuids != json.loads(expected["device_uuids_json"])
+            ):
+                raise SiteError("placement device assignment differs from its plan")
+            requested.extend(
+                (str(placement_id), str(node_id), device_uuid)
+                for device_uuid in device_uuids
+            )
+        if not requested or len(requested) != len(set(requested)):
+            raise SiteError("placement device assignment is empty or duplicated")
         now = int(time.time())
         rows = [
             {
                 "allocation_id": hashlib.sha256(
                     _canonical_bytes(
                         {
-                            "contract": "letsinfer-device-allocation-v1",
-                            "group_id": group_id,
-                            "member_id": member_id,
+                            "contract": "letsinfer-placement-device-v1",
+                            "placement_id": placement_id,
+                            "node_id": node_id,
                             "device_uuid": device_uuid,
                         }
                     )
                 ).hexdigest()[:32],
-                "group_id": group_id,
-                "member_id": member_id,
+                "placement_id": placement_id,
+                "node_id": node_id,
                 "device_uuid": device_uuid,
                 "state": "reserved",
                 "created_at_unix": now,
                 "updated_at_unix": now,
             }
-            for member_id, device_uuid in sorted(requested)
+            for placement_id, node_id, device_uuid in sorted(requested)
         ]
         current = [
             dict(row)
             for row in self.connection.execute(
-                "SELECT * FROM device_allocations WHERE group_id=? ORDER BY member_id,device_uuid",
-                (group_id,),
+                "SELECT * FROM device_allocations WHERE placement_id IN "
+                "(SELECT placement_id FROM placements WHERE placement_group_id=?) "
+                "ORDER BY placement_id,device_uuid",
+                (placement_group_id,),
             )
         ]
 
         def update(connection: sqlite3.Connection) -> list[dict[str, Any]]:
             conflicts = connection.execute(
-                """SELECT member_id,device_uuid,group_id FROM device_allocations
+                """SELECT node_id,device_uuid,placement_id FROM device_allocations
                    WHERE state IN ('reserved','active','draining')
-                     AND group_id!=?""",
-                (group_id,),
+                     AND placement_id NOT IN
+                       (SELECT placement_id FROM placements WHERE placement_group_id=?)""",
+                (placement_group_id,),
             ).fetchall()
             conflict_map = {
-                (str(row["member_id"]), str(row["device_uuid"])): str(row["group_id"])
+                (str(row["node_id"]), str(row["device_uuid"])): str(row["placement_id"])
                 for row in conflicts
             }
-            overlap = [
-                (member_id, device_uuid, conflict_map[(member_id, device_uuid)])
-                for member_id, device_uuid in requested
-                if (member_id, device_uuid) in conflict_map
-            ]
-            if overlap:
-                member_id, device_uuid, owner = overlap[0]
-                raise SiteError(
-                    f"device {device_uuid} on node {member_id} is allocated to group {owner}"
-                )
+            for _placement_id, node_id, device_uuid in requested:
+                owner = conflict_map.get((node_id, device_uuid))
+                if owner is not None:
+                    raise SiteError(
+                        f"device {device_uuid} on node {node_id} is allocated "
+                        f"to placement {owner}"
+                    )
             connection.execute(
                 "UPDATE device_allocations SET state='released',updated_at_unix=? "
-                "WHERE group_id=? AND state!='released'",
-                (now, group_id),
+                "WHERE placement_id IN "
+                "(SELECT placement_id FROM placements WHERE placement_group_id=?) "
+                "AND state!='released'",
+                (now, placement_group_id),
             )
             for row in rows:
                 connection.execute(
                     """INSERT INTO device_allocations
-                       (allocation_id,group_id,member_id,device_uuid,state,created_at_unix,updated_at_unix)
-                       VALUES(:allocation_id,:group_id,:member_id,:device_uuid,:state,:created_at_unix,:updated_at_unix)
+                       (allocation_id,placement_id,node_id,device_uuid,state,
+                        created_at_unix,updated_at_unix)
+                       VALUES(:allocation_id,:placement_id,:node_id,:device_uuid,:state,
+                        :created_at_unix,:updated_at_unix)
                        ON CONFLICT(allocation_id) DO UPDATE SET
                         state='reserved',updated_at_unix=excluded.updated_at_unix""",
                     row,
@@ -2285,8 +2507,8 @@ class SiteStore:
             return [dict(row) for row in rows]
 
         return self.mutate(
-            action="allocation.reserve",
-            target=group_id,
+            action="placement.reserve",
+            target=placement_group_id,
             before=current,
             callback=update,
             after=lambda _connection, result: result,
@@ -2296,9 +2518,9 @@ class SiteStore:
             correlation_id=correlation_id,
         )
 
-    def set_group_allocation_state(
+    def set_placement_group_allocation_state(
         self,
-        group_id: str,
+        placement_group_id: str,
         state: str,
         *,
         actor_type: str = "system",
@@ -2306,23 +2528,25 @@ class SiteStore:
         origin_interface: str = "orchestrator",
         correlation_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        if not ID_RE.fullmatch(group_id) or state not in {
-            "reserved", "active", "draining", "released"
+        if not ID_RE.fullmatch(placement_group_id) or state not in {
+            "reserved",
+            "active",
+            "draining",
+            "released",
         }:
-            raise SiteError("device allocation transition is invalid")
+            raise SiteError("placement allocation transition is invalid")
         current = [
             dict(row)
             for row in self.connection.execute(
-                "SELECT * FROM device_allocations WHERE group_id=? ORDER BY member_id,device_uuid",
-                (group_id,),
+                "SELECT * FROM device_allocations WHERE placement_id IN "
+                "(SELECT placement_id FROM placements WHERE placement_group_id=?) "
+                "ORDER BY placement_id,device_uuid",
+                (placement_group_id,),
             )
         ]
         if not current:
-            raise SiteError("engine group has no device allocation")
+            raise SiteError("placement group has no device allocation")
         allowed = {
-            # Recovery deliberately stops every member before starting it.
-            # A cleanly stopped group keeps its devices reserved, so that
-            # idempotent stop must be allowed to enter the draining phase.
             "reserved": {"reserved", "active", "draining", "released"},
             "active": {"active", "draining"},
             "draining": {"draining", "reserved", "released"},
@@ -2337,7 +2561,7 @@ class SiteStore:
         )
         if invalid:
             raise SiteError(
-                "device allocation transition is invalid: "
+                "placement allocation transition is invalid: "
                 + ",".join(invalid)
                 + f" -> {state}"
             )
@@ -2345,8 +2569,10 @@ class SiteStore:
 
         def update(connection: sqlite3.Connection) -> list[dict[str, Any]]:
             connection.execute(
-                "UPDATE device_allocations SET state=?,updated_at_unix=? WHERE group_id=?",
-                (state, now, group_id),
+                "UPDATE device_allocations SET state=?,updated_at_unix=? "
+                "WHERE placement_id IN "
+                "(SELECT placement_id FROM placements WHERE placement_group_id=?)",
+                (state, now, placement_group_id),
             )
             return [
                 {**row, "state": state, "updated_at_unix": now}
@@ -2354,8 +2580,8 @@ class SiteStore:
             ]
 
         return self.mutate(
-            action=f"allocation.{state}",
-            target=group_id,
+            action=f"placement.{state}",
+            target=placement_group_id,
             before=current,
             callback=update,
             after=lambda _connection, result: result,
@@ -2374,271 +2600,19 @@ class SiteStore:
             for row in self.connection.execute(
                 "SELECT * FROM device_allocations"
                 + where
-                + " ORDER BY member_id,device_uuid,group_id"
+                + " ORDER BY node_id,device_uuid,placement_id"
             )
         ]
 
-    def set_placement(self, placement: Mapping[str, Any]) -> dict[str, Any]:
-        required = {
-            "placement_id", "service_id", "model", "runtime", "target", "strategy", "state",
-            "topology_sha256", "members", "endpoints", "capacity",
-        }
-        if set(placement) != required:
-            raise SiteError("placement document has invalid fields")
-        if not isinstance(placement["placement_id"], str) or not ID_RE.fullmatch(placement["placement_id"]):
-            raise SiteError("placement identity is invalid")
-        if not isinstance(placement["service_id"], str) or not ID_RE.fullmatch(placement["service_id"]):
-            raise SiteError("placement service identity is invalid")
-        for key in ("model", "runtime", "target"):
-            value = placement[key]
-            if (
-                not isinstance(value, str)
-                or not value
-                or len(value.encode("utf-8")) > 1024
-                or any(unicodedata.category(character).startswith("C") for character in value)
-            ):
-                raise SiteError(f"placement {key} is invalid")
-        if placement["strategy"] not in {"single", "parallel"}:
-            raise SiteError("placement strategy is invalid")
-        if placement["state"] not in {"starting", "running", "draining", "stopped", "failed"}:
-            raise SiteError("placement state is invalid")
-        if not isinstance(placement["topology_sha256"], str) or not SHA256_RE.fullmatch(placement["topology_sha256"]):
-            raise SiteError("placement topology identity is invalid")
-        members = placement["members"]
-        if (
-            not isinstance(members, list)
-            or not 1 <= len(members) <= MAX_PLACEMENT_MEMBERS
-            or any(not isinstance(member, str) or not ID_RE.fullmatch(member) for member in members)
-            or len(members) != len(set(members))
-        ):
-            raise SiteError("placement members are invalid")
-        if placement["strategy"] == "single" and len(members) != 1:
-            raise SiteError("single placement requires exactly one member")
-        if placement["strategy"] == "parallel" and not members:
-            raise SiteError("parallel placement requires at least one member")
-
-        endpoints = placement["endpoints"]
-        capacity = placement["capacity"]
-        if not isinstance(endpoints, list) or not isinstance(capacity, dict):
-            raise SiteError("placement endpoint or capacity is invalid")
-        capacity_fields = {
-            "max_connections", "max_active_requests", "max_context_tokens", "interconnect"
-        }
-        if not set(capacity).issubset(capacity_fields):
-            raise SiteError("placement capacity has invalid fields")
-        for key in ("max_connections", "max_active_requests", "max_context_tokens"):
-            value = capacity.get(key)
-            if value is not None and (
-                not isinstance(value, int) or isinstance(value, bool) or value <= 0
-            ):
-                raise SiteError(f"placement capacity {key} must be positive")
-        interconnect = capacity.get("interconnect")
-        if interconnect is not None:
-            if not isinstance(interconnect, dict) or set(interconnect) != {
-                "kind", "rdma_required", "minimum_speed_mbps", "minimum_mtu"
-            }:
-                raise SiteError("placement interconnect has invalid fields")
-            if interconnect["kind"] not in {
-                "any", "connectx", "ethernet", "wifi", "other"
-            } or not isinstance(interconnect["rdma_required"], bool):
-                raise SiteError("placement interconnect is invalid")
-            for key in ("minimum_speed_mbps", "minimum_mtu"):
-                value = interconnect[key]
-                if (
-                    not isinstance(value, int)
-                    or isinstance(value, bool)
-                    or value < 0
-                ):
-                    raise SiteError(f"placement interconnect {key} must be non-negative")
-            if placement["strategy"] != "parallel" and (
-                interconnect["kind"] != "any"
-                or interconnect["rdma_required"]
-                or interconnect["minimum_speed_mbps"]
-                or interconnect["minimum_mtu"]
-            ):
-                raise SiteError("placement interconnect requires a parallel strategy")
-
-        endpoint_required = {
-            "member_id", "url", "credential_file", "ca_file", "max_active_requests",
-            "max_context_tokens", "healthy", "memory_pressure", "temperature_c", "prefix_keys",
-        }
-        endpoint_allowed = endpoint_required | {
-            "model",
-            "token_count_path",
-            "token_count_protocol",
-        }
-        endpoint_members: list[str] = []
-        endpoint_keys: set[tuple[str, str]] = set()
-        for endpoint in endpoints:
-            if (
-                not isinstance(endpoint, dict)
-                or not endpoint_required.issubset(endpoint)
-                or not set(endpoint).issubset(endpoint_allowed)
-            ):
-                raise SiteError("placement endpoint has invalid fields")
-            member_id = endpoint["member_id"]
-            if not isinstance(member_id, str) or member_id not in members:
-                raise SiteError("placement endpoint member is invalid")
-            if endpoint.get("model") is not None and endpoint["model"] != placement["model"]:
-                raise SiteError("placement endpoint model is invalid")
-            url = endpoint["url"]
-            if not isinstance(url, str) or len(url) > 2048:
-                raise SiteError("placement endpoint URL is invalid")
-            try:
-                parsed = urllib.parse.urlsplit(url)
-                port = parsed.port
-            except ValueError as error:
-                raise SiteError("placement endpoint URL is invalid") from error
-            if (
-                parsed.scheme not in {"http", "https"}
-                or not parsed.hostname
-                or port is None
-                or port not in range(1, 65536)
-                or parsed.username is not None
-                or parsed.password is not None
-                or parsed.path not in {"", "/"}
-                or parsed.query
-                or parsed.fragment
-            ):
-                raise SiteError("placement endpoint URL is invalid")
-            if parsed.scheme == "http" and parsed.hostname not in {
-                "127.0.0.1", "::1", "localhost"
-            }:
-                raise SiteError("plaintext placement endpoint must be loopback-local")
-            credential_file = endpoint["credential_file"]
-            ca_file = endpoint["ca_file"]
-            if (
-                not isinstance(credential_file, str)
-                or not pathlib.Path(credential_file).is_absolute()
-                or (ca_file is not None and (
-                    not isinstance(ca_file, str) or not pathlib.Path(ca_file).is_absolute()
-                ))
-                or (parsed.scheme == "https" and ca_file is None)
-            ):
-                raise SiteError("placement endpoint credential paths are invalid")
-            token_count_path = endpoint.get("token_count_path")
-            token_count_protocol = endpoint.get("token_count_protocol")
-            if token_count_path is not None and (
-                not isinstance(token_count_path, str)
-                or not re.fullmatch(r"/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{1,255}", token_count_path)
-            ):
-                raise SiteError("placement endpoint token-count path is invalid")
-            if (token_count_path is None) != (token_count_protocol is None) or (
-                token_count_protocol is not None
-                and token_count_protocol not in TOKEN_COUNT_PROTOCOLS
-            ):
-                raise SiteError("placement endpoint token-count protocol is invalid")
-            for key in ("max_active_requests", "max_context_tokens"):
-                value = endpoint[key]
-                if (
-                    not isinstance(value, int)
-                    or isinstance(value, bool)
-                    or value <= 0
-                ):
-                    raise SiteError(f"placement endpoint {key} must be positive")
-            if not isinstance(endpoint["healthy"], bool) or not isinstance(
-                endpoint["memory_pressure"], bool
-            ):
-                raise SiteError("placement endpoint health flags are invalid")
-            temperature = endpoint["temperature_c"]
-            if (
-                not isinstance(temperature, (int, float))
-                or isinstance(temperature, bool)
-                or not math.isfinite(float(temperature))
-                or not -1 <= float(temperature) <= 250
-            ):
-                raise SiteError("placement endpoint temperature is invalid")
-            prefix_keys = endpoint["prefix_keys"]
-            if (
-                not isinstance(prefix_keys, list)
-                or len(prefix_keys) > MAX_PLACEMENT_PREFIX_KEYS
-                or len(prefix_keys) != len(set(prefix_keys))
-                or any(
-                    not isinstance(prefix, str)
-                    or not prefix
-                    or len(prefix.encode("utf-8")) > 256
-                    for prefix in prefix_keys
-                )
-            ):
-                raise SiteError("placement endpoint prefix keys are invalid")
-            endpoint_key = (member_id, url)
-            if endpoint_key in endpoint_keys or member_id in endpoint_members:
-                raise SiteError("placement contains duplicate member endpoints")
-            endpoint_keys.add(endpoint_key)
-            endpoint_members.append(member_id)
-        if len(endpoints) > 1:
-            raise SiteError("an engine group permits only one inference endpoint")
-        if placement["state"] == "running" and (
-            not endpoints
-            or not {"max_active_requests", "max_context_tokens"}.issubset(capacity)
-        ):
-            raise SiteError("running placement has incomplete serving capacity")
-        current = self.connection.execute(
-            "SELECT * FROM placements WHERE placement_id=?", (placement["placement_id"],)
-        ).fetchone()
-        service = self.connection.execute(
-            "SELECT model FROM model_services WHERE service_id=?",
-            (placement["service_id"],),
-        ).fetchone()
-        if service is None or service["model"] != placement["model"]:
-            raise SiteError("placement does not belong to its logical model service")
-        before = {"placement": {} if current is None else dict(current)}
-        row = {
-            "placement_id": placement["placement_id"], "service_id": placement["service_id"],
-            "model": placement["model"],
-            "runtime": placement["runtime"], "target": placement["target"],
-            "strategy": placement["strategy"], "state": placement["state"],
-            "topology_sha256": placement["topology_sha256"],
-            "members_json": _safe_json(placement["members"]),
-            "endpoints_json": _safe_json(placement["endpoints"]),
-            "capacity_json": _safe_json(placement["capacity"]),
-            "updated_at_unix": int(time.time()),
-        }
-
-        def update(connection: sqlite3.Connection) -> dict[str, Any]:
-            connection.execute(
-                """INSERT INTO placements
-                   (placement_id,service_id,model,runtime,target,strategy,state,topology_sha256,
-                    members_json,endpoints_json,capacity_json,updated_at_unix)
-                   VALUES(:placement_id,:service_id,:model,:runtime,:target,:strategy,:state,:topology_sha256,
-                          :members_json,:endpoints_json,:capacity_json,:updated_at_unix)
-                   ON CONFLICT(placement_id) DO UPDATE SET
-                    service_id=excluded.service_id,model=excluded.model,
-                    runtime=excluded.runtime,target=excluded.target,
-                    strategy=excluded.strategy,state=excluded.state,
-                    topology_sha256=excluded.topology_sha256,members_json=excluded.members_json,
-                    endpoints_json=excluded.endpoints_json,capacity_json=excluded.capacity_json,
-                    updated_at_unix=excluded.updated_at_unix""",
-                row,
-            )
-            return dict(placement)
-
-        return self.mutate(
-            action="placement.set", target=placement["placement_id"], before=before,
-            callback=update, after=lambda _connection, result: result,
-            actor_type="system", actor_id="main", origin_interface="orchestrator",
-        )
-
-    def placements(self) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
-        for row_value in self.connection.execute("SELECT * FROM placements ORDER BY model,placement_id"):
-            row = dict(row_value)
-            row["members"] = json.loads(row.pop("members_json"))
-            row["endpoints"] = json.loads(row.pop("endpoints_json"))
-            row["capacity"] = json.loads(row.pop("capacity_json"))
-            result.append(row)
-        return result
-
-    def set_engine_group(
+    def set_placement_group(
         self,
-        group: Mapping[str, Any],
+        placement_group: Mapping[str, Any],
         *,
-        placement_id: str,
         source: str,
         engine_credential_sha256: str,
         desired_state: str,
         state: str,
-        members: Sequence[Mapping[str, Any]],
+        placements: Sequence[Mapping[str, Any]],
         action: str,
         error: str | None = None,
         actor_type: str = "system",
@@ -2646,151 +2620,111 @@ class SiteStore:
         origin_interface: str = "orchestrator",
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        """Atomically persist and audit one exact engine-group transition."""
+        """Atomically persist one placement-group and all placement states."""
+
         try:
-            document = validate_group_document(dict(group))
+            document = validate_placement_group_document(dict(placement_group))
         except OrchestrationError as validation_error:
             raise SiteError(str(validation_error)) from validation_error
-        if not ID_RE.fullmatch(placement_id):
-            raise SiteError("engine-group placement identity is invalid")
-        placement = self.connection.execute(
-            "SELECT * FROM placements WHERE placement_id=?", (placement_id,)
+        placement_group_id = document["placement_group_id"]
+        current = self.connection.execute(
+            "SELECT * FROM placement_groups WHERE placement_group_id=?",
+            (placement_group_id,),
         ).fetchone()
-        if placement is None:
-            raise SiteError("engine-group placement is not registered")
+        if current is None:
+            raise SiteError("placement group is not registered")
+        plan_sha256 = hashlib.sha256(_canonical_bytes(document)).hexdigest()
         if (
-            placement["service_id"] != document["service_id"]
-            or placement["strategy"] != document["strategy"]
-            or placement["topology_sha256"] != document["topology_sha256"]
-            or set(json.loads(placement["members_json"]))
-            != {item["node_id"] for item in document["resources"]}
+            current["plan_sha256"] != plan_sha256
+            or current["source"] != source
+            or current["engine_credential_sha256"] != engine_credential_sha256
         ):
-            raise SiteError("engine-group plan does not match its placement")
-        if not is_immutable_runtime_source(source):
-            raise SiteError("engine-group source must be immutable")
-        if source != document["release"]["source"]:
-            raise SiteError("engine-group source differs from its signed release")
-        if not isinstance(engine_credential_sha256, str) or not SHA256_RE.fullmatch(engine_credential_sha256):
-            raise SiteError("engine-group credential digest is invalid")
+            raise SiteError("placement-group immutable identity changed")
         if desired_state not in {"running", "stopped", "removed"}:
-            raise SiteError("engine-group desired state is invalid")
+            raise SiteError("placement-group desired state is invalid")
         allowed_states = {
-            "staging", "staged", "starting", "running", "degraded", "stopping",
-            "stopped", "recovering", "removing", "removed", "failed",
+            "staging",
+            "staged",
+            "starting",
+            "running",
+            "degraded",
+            "stopping",
+            "stopped",
+            "recovering",
+            "removing",
+            "removed",
+            "failed",
         }
         if state not in allowed_states:
-            raise SiteError("engine-group observed state is invalid")
+            raise SiteError("placement-group observed state is invalid")
         if action not in {
-            "group.stage", "group.start", "group.stop", "group.remove",
-            "group.reconcile", "group.recover",
+            "placement_group.stage",
+            "placement_group.start",
+            "placement_group.stop",
+            "placement_group.remove",
+            "placement_group.reconcile",
+            "placement_group.recover",
         }:
-            raise SiteError("engine-group audit action is invalid")
-        member_fields = {"member_id", "task_id", "state", "operation_id", "error"}
-        safe_members = [dict(item) for item in members]
+            raise SiteError("placement-group audit action is invalid")
+        planned_ids = [item["placement_id"] for item in document["placements"]]
+        safe_placements = [dict(item) for item in placements]
+        fields = {
+            "placement_id",
+            "node_id",
+            "task_id",
+            "state",
+            "operation_id",
+            "error",
+        }
         if (
-            len(safe_members) != len(document["resources"])
-            or any(set(item) != member_fields for item in safe_members)
-            or [item["member_id"] for item in safe_members]
-            != [item["node_id"] for item in document["resources"]]
+            len(safe_placements) != len(planned_ids)
+            or any(set(item) != fields for item in safe_placements)
+            or [item["placement_id"] for item in safe_placements] != planned_ids
         ):
-            raise SiteError("engine-group member state does not match its plan")
-        for item, planned in zip(safe_members, document["resources"]):
-            if item["task_id"] != planned["task_id"]:
-                raise SiteError("engine-group task does not match its resource plan")
-            if item["state"] not in {
-                "pending", "staging", "staged", "starting", "running", "stopping",
-                "stopped", "removing", "removed", "failed", "unreachable",
-            }:
-                raise SiteError("engine-group member state is invalid")
-            if item["operation_id"] is not None and (
-                not isinstance(item["operation_id"], str)
-                or not ID_RE.fullmatch(item["operation_id"])
-            ):
-                raise SiteError("engine-group member operation identity is invalid")
-            if item["error"] is not None and (
-                not isinstance(item["error"], str)
-                or len(item["error"].encode("utf-8")) > MAX_REASON_BYTES
-            ):
-                raise SiteError("engine-group member error is invalid")
-        plan_json = _safe_json(document)
-        members_json = _safe_json(safe_members)
-        if len(plan_json.encode("utf-8")) > 64 * 1024 or len(members_json.encode("utf-8")) > 64 * 1024:
-            raise SiteError("engine-group state exceeds its bounded storage")
+            raise SiteError("placement state does not match its placement group")
         now = int(time.time())
-        plan_sha256 = hashlib.sha256(_canonical_bytes(document)).hexdigest()
-        current = self.connection.execute(
-            "SELECT * FROM engine_groups WHERE group_id=?", (document["group_id"],)
-        ).fetchone()
-        before = {} if current is None else dict(current)
-        created_at = now if current is None else int(current["created_at_unix"])
-        row = {
-            "group_id": document["group_id"],
-            "placement_id": placement_id,
-            "source": source,
-            "runtime_digest": document["runtime_digest"],
-            "manifest_sha256": document["manifest_sha256"],
-            "topology_sha256": document["topology_sha256"],
-            "engine_credential_sha256": engine_credential_sha256,
-            "strategy": document["strategy"],
-            "runtime_execution_contract_sha256": document["runtime_execution_contract_sha256"],
-            "failure_policy": document["failure_policy"],
-            "required_tasks": len(document["resources"]),
-            "plan_json": plan_json,
-            "plan_sha256": plan_sha256,
-            "desired_state": desired_state,
-            "state": state,
-            "members_json": members_json,
-            "last_error": _bounded_reason(error),
-            "created_at_unix": created_at,
-            "updated_at_unix": now,
+        before = {
+            "placement_group": dict(current),
+            "placements": [
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT * FROM placements WHERE placement_group_id=? "
+                    "ORDER BY task_id",
+                    (placement_group_id,),
+                )
+            ],
         }
 
-        def update(connection: sqlite3.Connection) -> dict[str, Any]:
+        def update(connection: sqlite3.Connection) -> str:
             connection.execute(
-                """INSERT INTO engine_groups
-                   (group_id,placement_id,source,runtime_digest,manifest_sha256,
-                    topology_sha256,engine_credential_sha256,strategy,
-                    runtime_execution_contract_sha256,failure_policy,required_tasks,
-                    plan_json,plan_sha256,desired_state,state,
-                    members_json,last_error,created_at_unix,updated_at_unix)
-                   VALUES(:group_id,:placement_id,:source,:runtime_digest,:manifest_sha256,
-                    :topology_sha256,:engine_credential_sha256,:strategy,
-                    :runtime_execution_contract_sha256,:failure_policy,:required_tasks,
-                    :plan_json,:plan_sha256,:desired_state,:state,
-                    :members_json,:last_error,:created_at_unix,:updated_at_unix)
-                   ON CONFLICT(group_id) DO UPDATE SET
-                    placement_id=excluded.placement_id,source=excluded.source,
-                    runtime_digest=excluded.runtime_digest,
-                    manifest_sha256=excluded.manifest_sha256,
-                    topology_sha256=excluded.topology_sha256,
-                    engine_credential_sha256=excluded.engine_credential_sha256,
-                    strategy=excluded.strategy,
-                    runtime_execution_contract_sha256=excluded.runtime_execution_contract_sha256,
-                    failure_policy=excluded.failure_policy,
-                    required_tasks=excluded.required_tasks,
-                    plan_json=excluded.plan_json,plan_sha256=excluded.plan_sha256,
-                    desired_state=excluded.desired_state,state=excluded.state,
-                    members_json=excluded.members_json,last_error=excluded.last_error,
-                    updated_at_unix=excluded.updated_at_unix""",
-                row,
+                "UPDATE placement_groups SET desired_state=?,state=?,last_error=?,"
+                "updated_at_unix=? WHERE placement_group_id=?",
+                (
+                    desired_state,
+                    state,
+                    _bounded_reason(error),
+                    now,
+                    placement_group_id,
+                ),
             )
-            return {
-                **document,
-                "placement_id": placement_id,
-                "source": source,
-                "engine_credential_sha256": engine_credential_sha256,
-                "plan_sha256": plan_sha256,
-                "desired_state": desired_state,
-                "state": state,
-                "member_states": safe_members,
-                "last_error": row["last_error"],
-                "created_at_unix": created_at,
-                "updated_at_unix": now,
-            }
+            for placement in safe_placements:
+                connection.execute(
+                    "UPDATE placements SET state=?,operation_id=?,error=?,"
+                    "updated_at_unix=? WHERE placement_id=? AND placement_group_id=?",
+                    (
+                        placement["state"],
+                        placement["operation_id"],
+                        _bounded_reason(placement["error"]),
+                        now,
+                        placement["placement_id"],
+                        placement_group_id,
+                    ),
+                )
+            return placement_group_id
 
-        return self.mutate(
+        identifier = self.mutate(
             action=action,
-            target=document["group_id"],
+            target=placement_group_id,
             before=before,
             callback=update,
             after=lambda _connection, result: result,
@@ -2799,17 +2733,217 @@ class SiteStore:
             origin_interface=origin_interface,
             correlation_id=correlation_id,
         )
+        return self.placement_group(identifier)
 
-    def engine_groups(self) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
-        for value in self.connection.execute(
-            "SELECT * FROM engine_groups ORDER BY created_at_unix,group_id"
+    def set_placement_group_endpoint(
+        self,
+        placement_group_id: str,
+        endpoint: Mapping[str, Any] | None,
+        *,
+        state: str,
+    ) -> dict[str, Any]:
+        if not ID_RE.fullmatch(placement_group_id):
+            raise SiteError("placement-group identity is invalid")
+        if state not in {
+            "staging",
+            "staged",
+            "starting",
+            "running",
+            "degraded",
+            "stopping",
+            "stopped",
+            "recovering",
+            "removing",
+            "removed",
+            "failed",
+        }:
+            raise SiteError("placement-group endpoint state is invalid")
+        group = self.placement_group(placement_group_id)
+        safe_endpoint = None if endpoint is None else dict(endpoint)
+        if safe_endpoint is not None:
+            required = {
+                "placement_id",
+                "node_id",
+                "url",
+                "credential_file",
+                "ca_file",
+                "token_count_path",
+                "token_count_protocol",
+                "max_active_requests",
+                "max_context_tokens",
+                "healthy",
+                "memory_pressure",
+                "temperature_c",
+                "prefix_keys",
+            }
+            if set(safe_endpoint) != required:
+                raise SiteError("placement-group endpoint has invalid fields")
+            endpoint_placement = next(
+                (
+                    placement
+                    for placement in group["placements"]
+                    if placement["placement_id"] == safe_endpoint["placement_id"]
+                ),
+                None,
+            )
+            if endpoint_placement is None:
+                raise SiteError("placement-group endpoint placement is invalid")
+            if (
+                endpoint_placement["endpoint_owner"] is not True
+                or safe_endpoint["node_id"] != endpoint_placement["node_id"]
+            ):
+                raise SiteError("placement-group endpoint owner is invalid")
+            if not isinstance(safe_endpoint["url"], str):
+                raise SiteError("placement-group endpoint URL is invalid")
+            try:
+                parsed_url = urllib.parse.urlsplit(safe_endpoint["url"])
+                endpoint_port = parsed_url.port
+            except (UnicodeError, ValueError) as error:
+                raise SiteError("placement-group endpoint URL is invalid") from error
+            if (
+                parsed_url.scheme not in {"http", "https"}
+                or not parsed_url.hostname
+                or parsed_url.username is not None
+                or parsed_url.password is not None
+                or parsed_url.query
+                or parsed_url.fragment
+                or parsed_url.path not in {"", "/"}
+            ):
+                raise SiteError("placement-group endpoint URL is invalid")
+            if endpoint_port is None or not 1 <= endpoint_port <= 65535:
+                raise SiteError("placement-group endpoint URL port is invalid")
+            for field in ("credential_file", "ca_file"):
+                value = safe_endpoint[field]
+                if value is None and field == "ca_file":
+                    continue
+                if (
+                    not isinstance(value, str)
+                    or not value
+                    or not pathlib.PurePath(value).is_absolute()
+                    or "\x00" in value
+                ):
+                    raise SiteError(
+                        f"placement-group endpoint {field.replace('_', ' ')} is invalid"
+                    )
+            token_count_path = safe_endpoint["token_count_path"]
+            token_count_protocol = safe_endpoint["token_count_protocol"]
+            if (token_count_path is None) != (token_count_protocol is None):
+                raise SiteError("placement-group endpoint token-count contract is incomplete")
+            if token_count_path is not None and (
+                not isinstance(token_count_path, str)
+                or not token_count_path.startswith("/")
+                or "://" in token_count_path
+                or "\x00" in token_count_path
+                or token_count_protocol not in TOKEN_COUNT_PROTOCOLS
+            ):
+                raise SiteError("placement-group endpoint token-count contract is invalid")
+            for field in ("max_active_requests", "max_context_tokens"):
+                value = safe_endpoint[field]
+                if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                    raise SiteError(f"placement-group endpoint {field} must be positive")
+            if not isinstance(safe_endpoint["healthy"], bool) or not isinstance(
+                safe_endpoint["memory_pressure"], bool
+            ):
+                raise SiteError("placement-group endpoint health is invalid")
+            temperature = safe_endpoint["temperature_c"]
+            if (
+                not isinstance(temperature, (int, float))
+                or isinstance(temperature, bool)
+                or not math.isfinite(float(temperature))
+                or not -1 <= float(temperature) <= 250
+            ):
+                raise SiteError("placement-group endpoint temperature is invalid")
+            prefix_keys = safe_endpoint["prefix_keys"]
+            if (
+                not isinstance(prefix_keys, list)
+                or len(prefix_keys) > MAX_PLACEMENT_PREFIX_KEYS
+                or len(prefix_keys) != len(set(prefix_keys))
+                or any(
+                    not isinstance(prefix, str)
+                    or not prefix
+                    or len(prefix.encode("utf-8")) > MAX_TAG_BYTES
+                    for prefix in prefix_keys
+                )
+            ):
+                raise SiteError("placement-group endpoint prefix keys are invalid")
+        if state == "running" and safe_endpoint is None:
+            raise SiteError("running placement group requires one endpoint")
+        if state == "running" and any(
+            placement["state"] != "running" for placement in group["placements"]
         ):
-            row = dict(value)
-            row["plan"] = json.loads(row.pop("plan_json"))
-            row["members"] = json.loads(row.pop("members_json"))
+            raise SiteError(
+                "running placement group requires every placement to be running"
+            )
+        now = int(time.time())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.connection.execute(
+                "UPDATE placement_groups SET state=?,endpoint_json=?,updated_at_unix=? "
+                "WHERE placement_group_id=?",
+                (
+                    state,
+                    None if safe_endpoint is None else _safe_json(safe_endpoint),
+                    now,
+                    placement_group_id,
+                ),
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        return self.placement_group(placement_group_id)
+
+    def placement_group(self, placement_group_id: str) -> dict[str, Any]:
+        if not isinstance(placement_group_id, str) or not ID_RE.fullmatch(
+            placement_group_id
+        ):
+            raise SiteError("placement-group identity is invalid")
+        row_value = self.connection.execute(
+            "SELECT * FROM placement_groups WHERE placement_group_id=?",
+            (placement_group_id,),
+        ).fetchone()
+        if row_value is None:
+            raise SiteError("placement group is not registered")
+        row = dict(row_value)
+        row["plan"] = json.loads(row.pop("plan_json"))
+        row["capacity"] = json.loads(row.pop("capacity_json"))
+        endpoint_json = row.pop("endpoint_json")
+        row["endpoint"] = (
+            None if endpoint_json is None else json.loads(endpoint_json)
+        )
+        row["placements"] = []
+        for placement_value in self.connection.execute(
+            "SELECT * FROM placements WHERE placement_group_id=? ORDER BY task_id",
+            (placement_group_id,),
+        ):
+            placement = dict(placement_value)
+            placement["device_uuids"] = json.loads(
+                placement.pop("device_uuids_json")
+            )
+            placement["endpoint_owner"] = bool(placement["endpoint_owner"])
+            row["placements"].append(placement)
+        return row
+
+    def placement_groups(self) -> list[dict[str, Any]]:
+        return [
+            self.placement_group(str(row["placement_group_id"]))
+            for row in self.connection.execute(
+                "SELECT placement_group_id FROM placement_groups "
+                "ORDER BY created_at_unix,placement_group_id"
+            )
+        ]
+
+    def placements(self) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for row_value in self.connection.execute(
+            "SELECT * FROM placements ORDER BY placement_group_id,task_id"
+        ):
+            row = dict(row_value)
+            row["device_uuids"] = json.loads(row.pop("device_uuids_json"))
+            row["endpoint_owner"] = bool(row["endpoint_owner"])
             result.append(row)
         return result
+
 
     def create_topology_plan(
         self,

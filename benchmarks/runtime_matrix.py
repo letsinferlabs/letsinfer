@@ -363,9 +363,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--active-container", action="store_true", help=argparse.SUPPRESS
     )
-    parser.add_argument("--active-group", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--active-placement-group", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
-        "--active-group-container", action="store_true", help=argparse.SUPPRESS
+        "--active-placement-container", action="store_true", help=argparse.SUPPRESS
     )
     parser.add_argument(
         "--prompt-domain", choices=prompt_generator.DOMAINS, help=argparse.SUPPRESS
@@ -1534,8 +1534,8 @@ def _worker_command(
         domain,
         "--active-container",
     ]
-    if getattr(arguments, "active_group", False):
-        command.append("--active-group-container")
+    if getattr(arguments, "active_placement_group", False):
+        command.append("--active-placement-container")
     if arguments.source_attestation is not None:
         command.extend(["--source-attestation", str(arguments.source_attestation)])
     return command
@@ -1708,10 +1708,10 @@ def run_isolated_matrix(
     shared_stream_prefix = bool(
         shared_matrix and execution.get("stream_prefix") == "shared-body"
     )
-    active_group = bool(getattr(arguments, "active_group", False))
-    if active_group and not shared_matrix:
+    active_placement_group = bool(getattr(arguments, "active_placement_group", False))
+    if active_placement_group and not shared_matrix:
         raise RuntimeMatrixError(
-            "active engine-group benchmarking requires a fresh-matrix shared contract"
+            "active placement-group benchmarking requires a fresh-matrix shared contract"
         )
     expected_low, expected_high = expected_duration_range(
         selected,
@@ -1758,7 +1758,7 @@ def run_isolated_matrix(
         materialization_started = False
         materialization_error: BaseException | None = None
         try:
-            if not active_group:
+            if not active_placement_group:
                 materialization_started = True
                 with benchmark_activity(
                     "Preparing prompts · loading tokenizer runtime",
@@ -1870,7 +1870,7 @@ def run_isolated_matrix(
         cell_output = results_root / name
         cell_store = stores_root / ("matrix" if shared_matrix else name)
         cell_launch = launches_root / ("matrix" if shared_matrix else name)
-        launch_attempted = shared_matrix and not active_group
+        launch_attempted = shared_matrix and not active_placement_group
         cell_error: BaseException | None = None
         row: dict[str, Any] | None = None
         try:
@@ -2320,9 +2320,9 @@ def main() -> int:
         )
     if plan_path is None:
         raise RuntimeMatrixError("active benchmark worker requires --prompt-plan")
-    if arguments.active_group_container and not arguments.active_container:
+    if arguments.active_placement_container and not arguments.active_container:
         raise RuntimeMatrixError(
-            "active group-container mode requires the active benchmark worker"
+            "active placement-container mode requires the active benchmark worker"
         )
     if arguments.output_directory.exists():
         raise RuntimeMatrixError(
@@ -2337,7 +2337,7 @@ def main() -> int:
     before = common.validate_container(
         before_inspection,
         manifest,
-        require_docker_health=not arguments.active_group_container,
+        require_docker_health=not arguments.active_placement_container,
     )
     server_command = resolved_container_command(before_inspection)
     output = arguments.output_directory
@@ -2354,7 +2354,7 @@ def main() -> int:
         arguments.sample_interval_seconds,
         manifest["container"].get("runtime_min_available_gib", 16),
         arguments.watchdog_trip_file,
-        require_docker_health=not arguments.active_group_container,
+        require_docker_health=not arguments.active_placement_container,
     )
     results: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
@@ -2371,7 +2371,7 @@ def main() -> int:
                 current = common.validate_container(
                     common.docker_inspect(container),
                     manifest,
-                    require_docker_health=not arguments.active_group_container,
+                    require_docker_health=not arguments.active_placement_container,
                 )
                 if (
                     current["id"] != before["id"]
@@ -2421,7 +2421,7 @@ def main() -> int:
         after = common.validate_container(
             after_inspection,
             manifest,
-            require_docker_health=not arguments.active_group_container,
+            require_docker_health=not arguments.active_placement_container,
         )
     except BaseException as error:
         postcondition_error = error

@@ -796,7 +796,7 @@ def _protection_trip_exists(path: pathlib.Path) -> bool:
         raise InventoryError("protection trip root is not a directory")
     children = list(path.iterdir())
     if len(children) > 64:
-        raise InventoryError("protection trip root exceeds the engine-group limit")
+        raise InventoryError("protection trip root exceeds the placement-group limit")
     for child in children:
         if not re.fullmatch(r"[0-9a-f]{32}", child.name):
             continue
