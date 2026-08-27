@@ -2811,6 +2811,13 @@ def load_catalog(
                             "benchmark_record_sha256",
                             "execution_contract_sha256",
                         }
+                        revocable = (
+                            "consensus_sha256" in verification
+                            or "consensus_sha256" in provenance
+                        )
+                        if revocable:
+                            verification_fields.add("consensus_sha256")
+                            provenance_fields.add("consensus_sha256")
                         from_version = verification.get("from_version")
                         if (
                             set(verification) != verification_fields
@@ -2837,6 +2844,16 @@ def load_catalog(
                             != provenance.get("execution_contract_sha256")
                             or not SHA256_RE.fullmatch(
                                 str(verification.get("execution_contract_sha256"))
+                            )
+                            or (
+                                revocable
+                                and (
+                                    verification.get("consensus_sha256")
+                                    != provenance.get("consensus_sha256")
+                                    or not SHA256_RE.fullmatch(
+                                        str(verification.get("consensus_sha256"))
+                                    )
+                                )
                             )
                             or not isinstance(verification.get("verifiers"), list)
                         ):
@@ -2967,7 +2984,9 @@ def catalog_release(
     recommendation = target_record["recommended"]
     if runtime is None and recommendation is None:
         raise RuntimePackError(
-            f"runtime catalog has no qualified candidate for {model}/{selected_target}"
+            f"runtime catalog has no recommended candidate for {model}/{selected_target}; "
+            f"run `letsinfer model list {model} --versions` and select an exact "
+            "unscored candidate with --runtime"
         )
     selected_runtime = runtime or recommendation["candidate"]
     candidate = target_record["candidates"].get(selected_runtime)
