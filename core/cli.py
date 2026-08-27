@@ -1905,27 +1905,37 @@ def parse_linux_installed_memory_gib(
         block_text = (root / "block_size_bytes").read_text(
             encoding="ascii"
         ).strip()
-        online_text = (root / "online").read_text(encoding="ascii").strip()
+        entries = sorted(root.iterdir(), key=lambda path: path.name)
     except (OSError, UnicodeDecodeError) as error:
         raise LetsInferError("Linux installed-memory inventory is unavailable") from error
-    if not re.fullmatch(r"[0-9a-fA-F]+", block_text) or not re.fullmatch(
-        r"[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*",
-        online_text,
-    ):
-        raise LetsInferError("Linux installed-memory inventory is invalid")
+    if not re.fullmatch(r"[0-9a-fA-F]+", block_text):
+        raise LetsInferError("Linux memory-block size is invalid")
     block_bytes = int(block_text, 16)
     if block_bytes <= 0 or block_bytes > 1024**4:
         raise LetsInferError("Linux memory-block size is invalid")
+    memory_blocks = [
+        entry for entry in entries if re.fullmatch(r"memory[0-9]+", entry.name)
+    ]
+    if not memory_blocks or len(memory_blocks) > 1_048_576:
+        raise LetsInferError("Linux installed-memory block inventory is invalid")
     block_count = 0
-    previous_end = -1
-    for token in online_text.split(","):
-        fields = token.split("-", 1)
-        start = int(fields[0])
-        end = int(fields[-1])
-        if start > end or start <= previous_end:
-            raise LetsInferError("Linux online-memory block ranges are invalid")
-        block_count += end - start + 1
-        previous_end = end
+    for block in memory_blocks:
+        try:
+            state = (block / "state").read_text(encoding="ascii").strip()
+        except (OSError, UnicodeDecodeError):
+            try:
+                online = (block / "online").read_text(encoding="ascii").strip()
+            except (OSError, UnicodeDecodeError) as error:
+                raise LetsInferError(
+                    f"Linux memory-block state is unavailable: {block.name}"
+                ) from error
+            state = {"0": "offline", "1": "online"}.get(online, "")
+        if state == "online":
+            block_count += 1
+        elif state != "offline":
+            raise LetsInferError(
+                f"Linux memory-block state is invalid: {block.name}"
+            )
     total_bytes = block_count * block_bytes
     if total_bytes <= 0 or total_bytes > 1024**5:
         raise LetsInferError("Linux installed-memory capacity is invalid")
