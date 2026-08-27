@@ -750,12 +750,15 @@ class TelemetryMonitor:
         interval: int,
         runtime_min_available_gib: int,
         protection_trip_path: pathlib.Path,
+        *,
+        require_docker_health: bool = True,
     ) -> None:
         self.path = path
         self.container = container
         self.interval = interval
         self.runtime_min_available_gib = runtime_min_available_gib
         self.protection_trip_path = protection_trip_path
+        self.require_docker_health = require_docker_health
         self.stop_event = threading.Event()
         self.fault_event = threading.Event()
         self.errors: list[str] = []
@@ -813,7 +816,10 @@ class TelemetryMonitor:
             if isinstance(container, dict) and (
                 container.get("running") is not True
                 or container.get("status") != "running"
-                or container.get("health") != "healthy"
+                or (
+                    self.require_docker_health
+                    and container.get("health") != "healthy"
+                )
                 or container.get("oom_killed") is True
             ):
                 self._record_error(

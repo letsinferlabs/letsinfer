@@ -346,6 +346,34 @@ class OpenAILoadTests(unittest.TestCase):
             records = [json.loads(line) for line in evidence.read_text().splitlines()]
             self.assertEqual(records[-1]["container_fault"], monitor.errors[0])
 
+    def test_group_monitor_uses_runtime_readiness_without_docker_health(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            monitor = LOAD.TelemetryMonitor(
+                pathlib.Path(directory) / "telemetry.jsonl",
+                "letsinfer-group-test",
+                5,
+                16,
+                pathlib.Path(directory) / "protection-trip.json",
+                require_docker_health=False,
+            )
+            with mock.patch.object(
+                LOAD,
+                "telemetry_sample",
+                return_value={
+                    "host": {"MemAvailable_kib": 32 * 1048576},
+                    "container": {
+                        "running": True,
+                        "status": "running",
+                        "health": None,
+                        "oom_killed": False,
+                    },
+                },
+            ):
+                self.assertTrue(
+                    monitor._capture_once()  # pylint: disable=protected-access
+                )
+            self.assertEqual(monitor.errors, [])
+
     def test_monitor_fails_closed_on_latched_watchdog_trip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             trip = pathlib.Path(directory) / "protection-trip.json"

@@ -565,6 +565,8 @@ def docker_inspect(container: str) -> dict[str, Any]:
 def validate_container(
     inspection: dict[str, Any],
     manifest: dict[str, Any],
+    *,
+    require_docker_health: bool = True,
 ) -> dict[str, Any]:
     state = inspection.get("State")
     config = inspection.get("Config")
@@ -594,7 +596,9 @@ def validate_container(
         "started_at": state.get("StartedAt"),
         "labels": {key: labels.get(key) for key in sorted(expected)},
     }
-    if not summary["running"] or summary["health"] != "healthy":
+    if not summary["running"] or (
+        require_docker_health and summary["health"] != "healthy"
+    ):
         raise QualificationError("container is not running and healthy")
     if summary["oom_killed"]:
         raise QualificationError("container reports OOMKilled")
