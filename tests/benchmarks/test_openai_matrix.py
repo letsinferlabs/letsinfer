@@ -424,6 +424,38 @@ class OpenAIMatrixTests(unittest.TestCase):
         with self.assertRaisesRegex(MATRIX.QualificationError, "identity mismatch"):
             MATRIX.validate_container(inspection, release)
 
+    def test_group_container_uses_runtime_readiness_without_docker_health(self) -> None:
+        release = self.release()
+        inspection = {
+            "Id": "group-container-id",
+            "Image": release["image"]["immutable_id"],
+            "RestartCount": 0,
+            "Config": {
+                "Labels": {
+                    "io.letsinfer.managed": "true",
+                    "io.letsinfer.release": "example-r1",
+                    "io.letsinfer.model": "example",
+                    "io.letsinfer.engine": "sglang",
+                }
+            },
+            "State": {
+                "Running": True,
+                "Status": "running",
+                "OOMKilled": False,
+                "StartedAt": "2026-08-12T00:00:00Z",
+            },
+        }
+        with self.assertRaisesRegex(
+            MATRIX.QualificationError, "not running and healthy"
+        ):
+            MATRIX.validate_container(inspection, release)
+
+        summary = MATRIX.validate_container(
+            inspection, release, require_docker_health=False
+        )
+        self.assertTrue(summary["running"])
+        self.assertIsNone(summary["health"])
+
     def test_pair_equality_compares_output_tokens_and_finish_reason(self) -> None:
         row = {
             "fixture": "first",

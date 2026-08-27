@@ -121,6 +121,40 @@ class RuntimePackTests(unittest.TestCase):
                     runtime_packs._companion_executable("oras"), str(companion)
                 )
 
+    def test_native_oci_uses_plain_http_only_for_loopback(self) -> None:
+        self.assertEqual(runtime_packs._oci_registry_scheme("127.0.0.1:5000"), "http")
+        self.assertEqual(runtime_packs._oci_registry_scheme("localhost:5000"), "http")
+        self.assertEqual(runtime_packs._oci_registry_scheme("registry.example"), "https")
+
+    def test_native_oci_pull_accepts_digest_verified_loopback_http(self) -> None:
+        payload = b"runtime-pack"
+        manifest = self._oci_manifest(payload)
+        manifest_digest = hashlib.sha256(manifest).hexdigest()
+        reference = f"127.0.0.1:5000/owner/runtime@sha256:{manifest_digest}"
+        manifest_url = (
+            "http://127.0.0.1:5000/v2/owner/runtime/manifests/sha256:"
+            + manifest_digest
+        )
+        layer_url = (
+            "http://127.0.0.1:5000/v2/owner/runtime/blobs/sha256:"
+            + hashlib.sha256(payload).hexdigest()
+        )
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            runtime_packs,
+            "_oci_open",
+            side_effect=[
+                self._Response(manifest, manifest_url),
+                self._Response(
+                    payload,
+                    layer_url,
+                    {"Content-Length": str(len(payload))},
+                ),
+            ],
+        ):
+            destination = pathlib.Path(directory)
+            runtime_packs._native_pull_public_oci(reference, destination)
+            self.assertEqual((destination / "runtime.letsinfer").read_bytes(), payload)
+
     def test_native_public_oci_pull_verifies_manifest_and_layer(self) -> None:
         payload = b"runtime-pack"
         manifest = self._oci_manifest(payload)

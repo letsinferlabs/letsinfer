@@ -175,6 +175,197 @@ class LinuxHardwareInventoryTests(unittest.TestCase):
 
 
 class RuntimeCandidateCliTests(unittest.TestCase):
+    def test_child_status_uses_the_actual_local_soc_name(self) -> None:
+        identity = types.SimpleNamespace(role="child")
+        hardware = {
+            "accelerator": {"names": ["NVIDIA GB10"]},
+        }
+        with (
+            mock.patch.object(cli, "identity_json", return_value={"role": "child"}),
+            mock.patch.object(cli.socket, "gethostname", return_value="node-2"),
+        ):
+            node = cli._local_status_node(identity, hardware)
+
+        self.assertEqual(node["hardware_name"], "NVIDIA GB10")
+        self.assertEqual(node["hostname"], "node-2")
+
+    def test_cached_inventory_prefers_soc_over_chassis_name(self) -> None:
+        self.assertEqual(
+            cli._hardware_display_name(
+                None,
+                {
+                    "gpu_name": "NVIDIA GB10",
+                    "dgx_name": "NVIDIA DGX Spark",
+                    "product_name": "GX10",
+                },
+            ),
+            "NVIDIA GB10",
+        )
+
+    def test_child_status_projects_its_validated_local_group_task(self) -> None:
+        member_id = "a" * 32
+        group_id = "b" * 32
+        identity = types.SimpleNamespace(member_id=member_id)
+        task = {"task_id": "task-1"}
+        row = {
+            "group_id": group_id,
+            "member_id": member_id,
+            "plan_sha256": "c" * 64,
+            "runtime_digest": "d" * 64,
+            "manifest_sha256": "e" * 64,
+            "topology_sha256": "f" * 64,
+            "engine_credential_sha256": "1" * 64,
+            "task": task,
+            "state": "running",
+            "updated_at_unix": 1_800_000_000,
+        }
+        config = {
+            **{
+                key: row[key]
+                for key in (
+                    "member_id",
+                    "plan_sha256",
+                    "runtime_digest",
+                    "manifest_sha256",
+                    "topology_sha256",
+                )
+            },
+            "_credential_sha256": row["engine_credential_sha256"],
+            "runtime_version": "0.1.0-rc.2",
+            "task": task,
+            "_manifest": {
+                "model": {"alias": "qwen3.8-flash-next"},
+                "serving": {
+                    "max_connections": 32,
+                    "max_active_requests": 4,
+                    "max_context_tokens": 65536,
+                },
+            },
+            "_group": {"strategy": "parallel"},
+        }
+        store = mock.Mock()
+        store.groups.return_value = [
+            {
+                **row,
+                "group_id": "2" * 32,
+                "runtime_digest": "3" * 64,
+                "state": "stopped",
+            },
+            row,
+        ]
+        store_context = mock.MagicMock()
+        store_context.__enter__.return_value = store
+        read_config = mock.Mock(return_value=config)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "member-jobs.sqlite3").write_bytes(b"journal")
+            with (
+                mock.patch.object(cli, "site_data_root", return_value=root),
+                mock.patch.object(cli, "MemberJobStore", return_value=store_context),
+                mock.patch.object(
+                    cli, "_read_engine_group_config", read_config
+                ),
+                mock.patch.object(
+                    cli,
+                    "adapter_for",
+                    return_value=types.SimpleNamespace(name="sglang"),
+                ),
+                mock.patch.object(
+                    cli,
+                    "target_contract",
+                    return_value={"id": "dgx-spark-connectx-2"},
+                ),
+            ):
+                groups = cli._local_engine_group_status(identity)
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["group_id"], group_id)
+        self.assertEqual(groups[0]["model"], "qwen3.8-flash-next")
+        self.assertEqual(groups[0]["state"], "running")
+        self.assertTrue(groups[0]["local_task"])
+        self.assertEqual(groups[0]["members"][0]["task_id"], "task-1")
+        read_config.assert_called_once_with(group_id, repair_tls=False)
+
+    def test_running_engine_group_projects_into_the_runtime_dashboard(self) -> None:
+        group_id = "a" * 32
+        group = {
+            "group_id": group_id,
+            "model": "qwen3.8-flash-next",
+            "runtime": (
+                "qwen3.8-flash-next/sglang/dgx-spark-connectx-2@0.1.0-rc.2"
+                "@sha256:" + "b" * 64
+            ),
+            "target": "dgx-spark-connectx-2",
+            "capacity": {
+                "max_connections": 16,
+                "max_active_requests": 4,
+                "max_context_tokens": 65536,
+            },
+            "desired_state": "running",
+            "state": "running",
+        }
+        inspection = {
+            "Id": "c" * 64,
+            "State": {"Status": "running"},
+        }
+        with (
+            mock.patch.object(cli, "container_inspect", return_value=inspection),
+            mock.patch.object(
+                cli,
+                "protection_status",
+                return_value={
+                    "phase": "armed",
+                    "armed": True,
+                    "trip_latched": False,
+                },
+            ),
+        ):
+            projection = cli._engine_group_dashboard_projection([group])
+
+        self.assertIsNotNone(projection)
+        assert projection is not None
+        self.assertEqual(projection["container"]["model"], group["model"])
+        self.assertEqual(projection["container"]["engine"], "sglang")
+        self.assertEqual(
+            projection["container"]["target"], "dgx-spark-connectx-2"
+        )
+        self.assertEqual(projection["container"]["runtime_version"], "0.1.0-rc.2")
+        self.assertTrue(projection["container"]["healthy"])
+        self.assertEqual(projection["container"]["docker_health"], "none")
+        self.assertEqual(
+            cli._engine_group_dashboard_lifecycle(
+                {
+                    "state": "ready",
+                    "reason": "runtime-not-installed",
+                    "ready_services": 3,
+                    "total_services": 3,
+                },
+                projection,
+            ),
+            {
+                "ready": True,
+                "transitional": False,
+                "runtime_ready": True,
+                "ready_services": 3,
+                "total_services": 3,
+                "state": "ready",
+                "reason": "engine-group-ready",
+            },
+        )
+
+    def test_dashboard_projection_requires_one_exact_runtime_identity(self) -> None:
+        self.assertIsNone(cli._engine_group_dashboard_projection([]))
+        self.assertIsNone(
+            cli._engine_group_dashboard_projection([
+                {
+                    "group_id": "a" * 32,
+                    "model": "qwen3.8-flash-next",
+                    "runtime": "runtime-a",
+                    "target": "dgx-spark-connectx-2",
+                }
+            ])
+        )
+
     def test_group_link_health_applies_only_to_sealed_connections(self) -> None:
         now = 1_800_000_000
         main_id = "a" * 32
@@ -898,6 +1089,77 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         self.assertEqual(groups, ())
         topology.assert_not_called()
 
+    def test_parallel_benchmark_binds_one_exact_installed_group(self) -> None:
+        member_ids = ("a" * 32, "b" * 32)
+        group_id = "c" * 32
+        manifest_sha256 = "d" * 64
+        identity = types.SimpleNamespace(
+            site_id="e" * 32,
+            coordinator_id=member_ids[0],
+        )
+        graph = mock.Mock()
+        graph.members = {
+            member_id: {"member_id": member_id} for member_id in member_ids
+        }
+        graph.resolve.side_effect = cli.TopologyError("devices are allocated")
+        placement = types.SimpleNamespace(
+            strategy="parallel",
+            member_ids=member_ids,
+            device_uuids={
+                member_ids[0]: ("GPU-0",),
+                member_ids[1]: ("GPU-1",),
+            },
+            topology_sha256="f" * 64,
+        )
+        unallocated = mock.Mock()
+        unallocated.resolve.return_value = placement
+        store = mock.Mock()
+        store.device_allocations.return_value = [
+            {
+                "group_id": group_id,
+                "member_id": member_id,
+                "device_uuid": device_uuid,
+            }
+            for member_id, device_uuid in zip(member_ids, ("GPU-0", "GPU-1"))
+        ]
+        store.engine_groups.return_value = [
+            {
+                "group_id": group_id,
+                "manifest_sha256": manifest_sha256,
+                "state": "running",
+                "desired_state": "running",
+                "plan": {
+                    "resources": [
+                        {
+                            "node_id": member_id,
+                            "device_uuids": [device_uuid],
+                        }
+                        for member_id, device_uuid in zip(
+                            member_ids, ("GPU-0", "GPU-1")
+                        )
+                    ]
+                },
+            }
+        ]
+        store_context = mock.MagicMock()
+        store_context.__enter__.return_value = store
+        manifest = cli.runtime_execution_manifest(
+            runtime_candidate(), qualified=False
+        )
+        with (
+            mock.patch.object(
+                cli, "_fresh_site_topology", return_value=(identity, graph)
+            ),
+            mock.patch.object(cli, "TopologyGraph", return_value=unallocated),
+            mock.patch.object(cli, "_site_store", return_value=store_context),
+        ):
+            resolved, groups = cli.resolve_benchmark_service_placement(
+                manifest, manifest_sha256
+            )
+
+        self.assertEqual(groups, (group_id,))
+        self.assertEqual(resolved["placement_strategy"], "parallel")
+
     def test_qualification_reuses_only_a_stopped_resident_group_slot(self) -> None:
         group_id = "a" * 32
         placement = {"placement_id": "b" * 32}
@@ -995,6 +1257,58 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                             ["matrix"], resident_group_ids=(group_id,)
                         )
                 self.assertEqual(events, ["idle", "stop", "benchmark", "start"])
+
+    def test_parallel_benchmark_restarts_and_keeps_running_exact_group(self) -> None:
+        group_id = "a" * 32
+        events: list[str] = []
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(
+                    cli,
+                    "qualification_service_config_path",
+                    return_value=pathlib.Path(directory) / "missing.json",
+                ),
+                mock.patch.object(
+                    cli, "protection_trip_latched", return_value=False
+                ),
+                mock.patch.object(
+                    cli,
+                    "_unit_enabled_active",
+                    return_value=("disabled", "inactive"),
+                ),
+                mock.patch.object(
+                    cli,
+                    "_benchmark_engine_group_intents",
+                    return_value={group_id: True},
+                ),
+                mock.patch.object(
+                    cli,
+                    "_gateway_is_idle",
+                    side_effect=lambda: events.append("idle"),
+                ),
+                mock.patch.object(
+                    cli,
+                    "_stop_engine_group_by_id",
+                    side_effect=lambda _group_id: events.append("stop"),
+                ),
+                mock.patch.object(
+                    cli,
+                    "_start_engine_group_by_id",
+                    side_effect=lambda _group_id: events.append("start"),
+                ),
+                mock.patch.object(
+                    cli,
+                    "run_passthrough",
+                    side_effect=lambda *_args, **_kwargs: events.append("benchmark"),
+                ),
+            ):
+                cli._run_benchmark_with_service_isolation(
+                    ["matrix"],
+                    resident_group_ids=(group_id,),
+                    benchmark_group_id=group_id,
+                )
+
+        self.assertEqual(events, ["idle", "stop", "start", "benchmark"])
 
     def test_stopped_engine_group_restoration_uses_start(self) -> None:
         group_id = "a" * 32
@@ -1707,6 +2021,47 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         execution = cli.runtime_execution_manifest(validated, qualified=False)
         self.assertEqual(execution["engine"]["name"], "future-engine")
         self.assertEqual(execution["image"]["reference"], runtime["engine"]["distribution"]["reference"])
+
+    def test_parallel_runtime_derives_a_valid_execution_manifest(self) -> None:
+        runtime = runtime_candidate()
+        runtime["target"]["placement"] = {
+            "strategy": "parallel",
+            "node_count": 2,
+            "interconnect": {
+                "kind": "connectx",
+                "rdma_required": True,
+                "minimum_speed_mbps": 200000,
+                "minimum_mtu": 1500,
+            },
+        }
+        runtime["orchestration"] = {
+            "schema_version": 3,
+            "failure_policy": "whole-group",
+            "endpoint_owner": "task-0",
+            "startup_order": [["task-0", "task-1"]],
+            "tasks": [
+                {
+                    "task_id": f"task-{index}",
+                    "launcher": "runtime-command",
+                    "port_count": 4,
+                    "command": ["/opt/runtime/launch", f"task-{index}"],
+                    "environment": {},
+                    "readiness": {
+                        "kind": "exec",
+                        "command": ["/opt/runtime/ready"],
+                        "interval_seconds": 1,
+                        "timeout_seconds": 2,
+                        "retries": 60,
+                    },
+                }
+                for index in range(2)
+            ],
+        }
+
+        execution = cli.runtime_execution_manifest(runtime, qualified=False)
+
+        self.assertEqual(execution["orchestration"], runtime["orchestration"])
+        cli.validate_manifest(execution)
 
     def test_execution_manifest_accepts_normalized_engine_payload_identity(self) -> None:
         runtime = runtime_candidate()

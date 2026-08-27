@@ -31,6 +31,42 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
+    def test_active_group_is_an_internal_outer_matrix_mode(self) -> None:
+        with mock.patch.object(
+            runtime_matrix.sys,
+            "argv",
+            ["runtime_matrix.py", "--runtime", "fixture", "--active-group"],
+        ):
+            arguments = runtime_matrix.parse_arguments()
+
+        self.assertTrue(arguments.active_group)
+        self.assertFalse(arguments.active_container)
+
+    def test_active_group_worker_uses_group_container_validation(self) -> None:
+        arguments = types.SimpleNamespace(
+            token_count_api_key_file=None,
+            api_key_file=pathlib.Path("api-key"),
+            engine_port=18000,
+            ca_cert_file=pathlib.Path("server.crt"),
+            container="letsinfer-group-fixture",
+            measured_commit="a" * 40,
+            watchdog_trip_file=pathlib.Path("trip.json"),
+            timeout=3600,
+            sample_interval_seconds=5,
+            source_attestation=None,
+            active_group=True,
+        )
+        command = runtime_matrix._worker_command(
+            arguments,
+            pathlib.Path("runtime-execution.json"),
+            pathlib.Path("prompt-plan.json"),
+            {"name": "32k-code-c1"},
+            pathlib.Path("output"),
+        )
+
+        self.assertIn("--active-container", command)
+        self.assertIn("--active-group-container", command)
+
     def test_failed_command_preserves_stderr_warning_and_stdout_error(self) -> None:
         result = types.SimpleNamespace(
             returncode=1,
@@ -248,6 +284,91 @@ class RuntimeMatrixTests(unittest.TestCase):
             ):
                 loaded = runtime_matrix.load_benchmark_contract(
                     path, {"image": {"immutable_id": "sha256:" + "2" * 64}}
+                )
+
+        self.assertEqual(loaded, contract)
+
+    def test_runtime_config_accepts_an_ordered_context_subset(self) -> None:
+        contract = {
+            "tokenizer": {
+                "model_sha256": "1" * 64,
+                "engine_image_sha256": "2" * 64,
+            },
+            "cases": [
+                {"id": context, "concurrencies": [1, 2, 4]}
+                for context in ("32k", "64k")
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "runtime.json"
+            path.write_text(
+                json.dumps({"benchmark": {"contract": contract}}),
+                encoding="ascii",
+            )
+            with (
+                mock.patch.object(
+                    runtime_matrix.prompt_generator, "validate_benchmark_contract"
+                ),
+                mock.patch.object(
+                    runtime_matrix, "benchmark_model_sha256", return_value="1" * 64
+                ),
+            ):
+                loaded = runtime_matrix.load_benchmark_contract(
+                    path, {"image": {"immutable_id": "sha256:" + "2" * 64}}
+                )
+
+        self.assertEqual(loaded, contract)
+
+        contract["cases"].reverse()
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "runtime.json"
+            path.write_text(
+                json.dumps({"benchmark": {"contract": contract}}),
+                encoding="ascii",
+            )
+            with (
+                mock.patch.object(
+                    runtime_matrix.prompt_generator, "validate_benchmark_contract"
+                ),
+                mock.patch.object(
+                    runtime_matrix, "benchmark_model_sha256", return_value="1" * 64
+                ),
+                self.assertRaisesRegex(
+                    runtime_matrix.RuntimeMatrixError, "ordered subset"
+                ),
+            ):
+                runtime_matrix.load_benchmark_contract(
+                    path, {"image": {"immutable_id": "sha256:" + "2" * 64}}
+                )
+
+    def test_runtime_config_binds_execution_payload_identity(self) -> None:
+        contract = {
+            "schema_version": runtime_matrix.EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
+            "tokenizer": {
+                "model_sha256": "1" * 64,
+                "engine_payload_sha256": "3" * 64,
+            },
+            "cases": [
+                {"id": context, "concurrencies": list(runtime_matrix.CONCURRENCIES)}
+                for context in runtime_matrix.CONTEXTS
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "runtime.json"
+            path.write_text(
+                json.dumps({"benchmark": {"contract": contract}}),
+                encoding="ascii",
+            )
+            with (
+                mock.patch.object(
+                    runtime_matrix.prompt_generator, "validate_benchmark_contract"
+                ),
+                mock.patch.object(
+                    runtime_matrix, "benchmark_model_sha256", return_value="1" * 64
+                ),
+            ):
+                loaded = runtime_matrix.load_benchmark_contract(
+                    path, {"image": {"payload_id": "sha256:" + "3" * 64}}
                 )
 
         self.assertEqual(loaded, contract)
@@ -1351,7 +1472,51 @@ class RuntimeMatrixTests(unittest.TestCase):
                 ["shared-container", "shared-container"],
             )
 
+            arguments.output_directory = root / "active-group-evidence"
+            arguments.active_group = True
+            process_number = 0
+            with (
+                mock.patch.object(runtime_matrix, "_command_output") as group_lifecycle,
+                mock.patch.object(
+                    runtime_matrix.common, "read_private_file", return_value="secret"
+                ),
+                mock.patch.object(runtime_matrix.ssl, "create_default_context"),
+                mock.patch.object(runtime_matrix, "token_count_client", return_value=len),
+                mock.patch.object(
+                    runtime_matrix.prompt_generator,
+                    "materialize",
+                    return_value=plan_path,
+                ),
+                mock.patch.object(
+                    runtime_matrix,
+                    "load_prompt_plan",
+                    return_value=({}, {cell["name"]: cell for cell in cells}),
+                ),
+                mock.patch.object(
+                    runtime_matrix.common, "run_command", side_effect=worker
+                ),
+                mock.patch.object(
+                    runtime_matrix.watchdog_client,
+                    "query_range",
+                    return_value=telemetry,
+                ),
+            ):
+                runtime_matrix.run_isolated_matrix(
+                    arguments,
+                    manifest_path,
+                    "model/engine/target",
+                    manifest,
+                    None,
+                    cells[:1],
+                    {"commit": "a" * 40},
+                    contract,
+                )
+
+            group_lifecycle.assert_not_called()
+            self.assertEqual(process_number, 1)
+
             arguments.output_directory = root / "failed-evidence"
+            arguments.active_group = False
             process_number = 0
             with (
                 mock.patch.object(

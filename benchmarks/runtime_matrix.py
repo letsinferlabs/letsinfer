@@ -44,6 +44,7 @@ from core.exact_tokens import (  # pylint: disable=wrong-import-position
     prepare_token_count_request,
 )
 from core.runtime_packs import (  # pylint: disable=wrong-import-position
+    EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     RuntimePackError,
     TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
     benchmark_model_sha256,
@@ -362,6 +363,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--active-container", action="store_true", help=argparse.SUPPRESS
     )
+    parser.add_argument("--active-group", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--active-group-container", action="store_true", help=argparse.SUPPRESS
+    )
     parser.add_argument(
         "--prompt-domain", choices=prompt_generator.DOMAINS, help=argparse.SUPPRESS
     )
@@ -475,9 +480,15 @@ def load_benchmark_contract(
         raise RuntimeMatrixError(str(error)) from error
     assert isinstance(contract, dict)
     cases = contract["cases"]
-    if [row["id"] for row in cases] != list(CONTEXTS):
+    case_ids = [row["id"] for row in cases]
+    if (
+        not case_ids
+        or len(case_ids) != len(set(case_ids))
+        or case_ids != [context for context in CONTEXTS if context in case_ids]
+    ):
         raise RuntimeMatrixError(
-            "runtime benchmark cases must be ordered 32k, 64k, 128k, and 256k"
+            "runtime benchmark cases must be a non-empty ordered subset of "
+            "32k, 64k, 128k, and 256k"
         )
     declared = cases[0]["concurrencies"]
     if (
@@ -493,13 +504,25 @@ def load_benchmark_contract(
         model_sha = benchmark_model_sha256(manifest)
     except RuntimePackError as error:
         raise RuntimeMatrixError(str(error)) from error
-    image_id = manifest.get("image", {}).get("immutable_id", "")
-    image_sha = image_id.removeprefix("sha256:")
     if tokenizer["model_sha256"] != model_sha:
         raise RuntimeMatrixError(
             "runtime benchmark tokenizer model identity does not match the release"
         )
-    if tokenizer["engine_image_sha256"] != image_sha:
+    execution_payload_contract = (
+        contract.get("schema_version")
+        == EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION
+    )
+    engine_identity_field = (
+        "engine_payload_sha256"
+        if execution_payload_contract
+        else "engine_image_sha256"
+    )
+    manifest_identity_field = "payload_id" if execution_payload_contract else "immutable_id"
+    engine_sha = (
+        str(manifest.get("image", {}).get(manifest_identity_field, ""))
+        .removeprefix("sha256:")
+    )
+    if tokenizer[engine_identity_field] != engine_sha:
         raise RuntimeMatrixError(
             "runtime benchmark tokenizer engine identity does not match the release"
         )
@@ -1511,6 +1534,8 @@ def _worker_command(
         domain,
         "--active-container",
     ]
+    if getattr(arguments, "active_group", False):
+        command.append("--active-group-container")
     if arguments.source_attestation is not None:
         command.extend(["--source-attestation", str(arguments.source_attestation)])
     return command
@@ -1683,6 +1708,11 @@ def run_isolated_matrix(
     shared_stream_prefix = bool(
         shared_matrix and execution.get("stream_prefix") == "shared-body"
     )
+    active_group = bool(getattr(arguments, "active_group", False))
+    if active_group and not shared_matrix:
+        raise RuntimeMatrixError(
+            "active engine-group benchmarking requires a fresh-matrix shared contract"
+        )
     expected_low, expected_high = expected_duration_range(
         selected,
         includes_materializer=benchmark_contract is not None,
@@ -1728,23 +1758,24 @@ def run_isolated_matrix(
         materialization_started = False
         materialization_error: BaseException | None = None
         try:
-            materialization_started = True
-            with benchmark_activity(
-                "Preparing prompts · loading tokenizer runtime",
-                done="Tokenizer runtime ready",
-                phase="loading-model",
-            ):
-                launch_output = _command_output(
-                    _serve_command(
-                        arguments,
-                        runtime_selector,
-                        materialization_store,
-                        materialization_launch,
-                    ),
-                    "launching benchmark prompt materializer",
-                )
-            if launch_output.strip():
-                print(launch_output.strip(), flush=True)
+            if not active_group:
+                materialization_started = True
+                with benchmark_activity(
+                    "Preparing prompts · loading tokenizer runtime",
+                    done="Tokenizer runtime ready",
+                    phase="loading-model",
+                ):
+                    launch_output = _command_output(
+                        _serve_command(
+                            arguments,
+                            runtime_selector,
+                            materialization_store,
+                            materialization_launch,
+                        ),
+                        "launching benchmark prompt materializer",
+                    )
+                if launch_output.strip():
+                    print(launch_output.strip(), flush=True)
             token_count_api_key = common.read_private_file(
                 arguments.token_count_api_key_file,
                 "engine token-count API-key file",
@@ -1839,7 +1870,7 @@ def run_isolated_matrix(
         cell_output = results_root / name
         cell_store = stores_root / ("matrix" if shared_matrix else name)
         cell_launch = launches_root / ("matrix" if shared_matrix else name)
-        launch_attempted = shared_matrix
+        launch_attempted = shared_matrix and not active_group
         cell_error: BaseException | None = None
         row: dict[str, Any] | None = None
         try:
@@ -2289,6 +2320,10 @@ def main() -> int:
         )
     if plan_path is None:
         raise RuntimeMatrixError("active benchmark worker requires --prompt-plan")
+    if arguments.active_group_container and not arguments.active_container:
+        raise RuntimeMatrixError(
+            "active group-container mode requires the active benchmark worker"
+        )
     if arguments.output_directory.exists():
         raise RuntimeMatrixError(
             f"refusing existing output directory: {arguments.output_directory}"
@@ -2299,7 +2334,11 @@ def main() -> int:
     tls_context = ssl.create_default_context(cafile=str(arguments.ca_cert_file))
     container = arguments.container or discover_container(release)
     before_inspection = common.docker_inspect(container)
-    before = common.validate_container(before_inspection, manifest)
+    before = common.validate_container(
+        before_inspection,
+        manifest,
+        require_docker_health=not arguments.active_group_container,
+    )
     server_command = resolved_container_command(before_inspection)
     output = arguments.output_directory
     raw = output / "cells"
@@ -2315,6 +2354,7 @@ def main() -> int:
         arguments.sample_interval_seconds,
         manifest["container"].get("runtime_min_available_gib", 16),
         arguments.watchdog_trip_file,
+        require_docker_health=not arguments.active_group_container,
     )
     results: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
@@ -2329,7 +2369,9 @@ def main() -> int:
                     raise RuntimeMatrixError(f"unsafe cell name: {cell['name']}")
                 print(f"RUN {cell['name']}", flush=True)
                 current = common.validate_container(
-                    common.docker_inspect(container), manifest
+                    common.docker_inspect(container),
+                    manifest,
+                    require_docker_health=not arguments.active_group_container,
                 )
                 if (
                     current["id"] != before["id"]
@@ -2376,7 +2418,11 @@ def main() -> int:
     after: dict[str, Any] | None = None
     postcondition_error: BaseException | None = None
     try:
-        after = common.validate_container(after_inspection, manifest)
+        after = common.validate_container(
+            after_inspection,
+            manifest,
+            require_docker_health=not arguments.active_group_container,
+        )
     except BaseException as error:
         postcondition_error = error
     try:
