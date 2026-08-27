@@ -21,6 +21,7 @@ from unittest import mock
 from core import cli
 from core.engine_protocol import artifact_storage_slug
 from core.runtime_packs import RuntimePackError, candidate_id, validate_runtime_config
+from tests.orchestration.helpers import parallel_contract
 from tests.runtime_fixture import runtime_candidate
 
 
@@ -1571,6 +1572,24 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             cli.LetsInferError, "must be a SHA-256 execution payload"
         ):
             cli.validate_manifest(execution)
+
+    def test_execution_manifest_accepts_parallel_orchestration(self) -> None:
+        runtime = runtime_candidate()
+        runtime["target"]["placement"] = {
+            "strategy": "parallel",
+            "node_count": 3,
+            "interconnect": {
+                "kind": "ethernet",
+                "rdma_required": False,
+                "minimum_speed_mbps": 100_000,
+                "minimum_mtu": 9_000,
+            },
+        }
+        runtime["orchestration"] = parallel_contract()
+
+        execution = cli.runtime_execution_manifest(runtime, qualified=True)
+
+        self.assertEqual(execution["orchestration"], runtime["orchestration"])
 
     def test_rc80_execution_manifest_acquisition_is_normalized_exactly(self) -> None:
         execution = cli.runtime_execution_manifest(
