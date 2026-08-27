@@ -33,22 +33,122 @@ def member_identity() -> SiteIdentity:
 
 
 class CoreServiceTests(unittest.TestCase):
-    def test_macos_node_agent_pins_the_running_python(self) -> None:
+    def test_macos_node_facts_use_the_apple_collector(self) -> None:
+        expected = {"schema_version": 1}
+        data_root = pathlib.Path("/private/letsinfer/state")
+        with (
+            mock.patch.object(cli.platform, "system", return_value="Darwin"),
+            mock.patch.object(cli, "site_data_root", return_value=data_root),
+            mock.patch(
+                "core.apple_hardware.member_facts", return_value=expected
+            ) as collect,
+            mock.patch.object(cli, "collect_local_facts") as linux_collect,
+        ):
+            result = cli._collect_local_member_facts("1" * 32)
+        self.assertEqual(result, expected)
+        collect.assert_called_once_with(
+            "1" * 32,
+            data_path=data_root,
+            product_version=cli.PRODUCT_VERSION,
+        )
+        linux_collect.assert_not_called()
+
+    def test_linux_node_facts_keep_the_linux_collector(self) -> None:
+        expected = {"schema_version": 1}
+        links = ({"kind": "ethernet"},)
+        with (
+            mock.patch.object(cli.platform, "system", return_value="Linux"),
+            mock.patch.object(cli, "host_device_fingerprint", return_value={}),
+            mock.patch.object(cli, "site_data_root", return_value=pathlib.Path("/state")),
+            mock.patch.object(
+                cli, "default_watchdog_data_root", return_value=pathlib.Path("/watchdog")
+            ),
+            mock.patch.object(
+                cli, "active_memory_pressure_available_bytes", return_value=123
+            ),
+            mock.patch.object(
+                cli, "collect_local_facts", return_value=expected
+            ) as collect,
+        ):
+            result = cli._collect_local_member_facts("2" * 32, links=links)
+        self.assertEqual(result, expected)
+        collect.assert_called_once_with(
+            "2" * 32,
+            {},
+            data_path=pathlib.Path("/state"),
+            protection_trip_path=pathlib.Path("/watchdog")
+            / cli.PROTECTION_ROOT_NAME,
+            memory_pressure_available_bytes=123,
+            product_version=cli.PRODUCT_VERSION,
+            links=links,
+        )
+
+    def test_macos_node_agent_pins_the_runtime_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
+            home = root / "letsinfer-home"
+            openssl = root / "bin/openssl"
             executable = root / "bin/letsinfer"
             executable.parent.mkdir()
             executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            openssl.write_text("#!/bin/sh\n", encoding="utf-8")
             with (
                 mock.patch.object(cli.platform, "system", return_value="Darwin"),
                 mock.patch.object(cli, "user_lingering_enabled", return_value=True),
+                mock.patch.object(cli, "letsinfer_home_root", return_value=home),
+                mock.patch.object(cli.shutil, "which", return_value=str(openssl)),
                 mock.patch.object(
                     cli.macos_services, "install_launch_agent"
                 ) as install_agent,
             ):
                 cli.install_node_service_only(executable_root=root)
         agent = install_agent.call_args.args[0]
+        self.assertEqual(agent.environment["LETSINFER_HOME"], str(home))
         self.assertEqual(agent.environment["LETSINFER_PYTHON"], sys.executable)
+        self.assertEqual(
+            agent.environment["PATH"],
+            f"{openssl.parent}:/usr/bin:/bin:/usr/sbin:/sbin",
+        )
+
+    def test_macos_gateway_pins_the_runtime_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            home = root / "letsinfer-home"
+            config_root = root / "config"
+            telemetry = root / "state/gateway/telemetry.state"
+            openssl = root / "bin/openssl"
+            executable = root / "bin/letsinfer"
+            executable.parent.mkdir()
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            openssl.write_text("#!/bin/sh\n", encoding="utf-8")
+            config = {
+                "gateway_listen": "0.0.0.0",
+                "gateway_port": 8000,
+                "gateway_telemetry_file": str(telemetry),
+                "gateway_queue_timeout_seconds": 0,
+                "gateway_max_connections": 256,
+            }
+            with (
+                mock.patch.object(cli.platform, "system", return_value="Darwin"),
+                mock.patch.object(cli, "core_gateway_config", return_value=config),
+                mock.patch.object(cli, "site_config_root", return_value=config_root),
+                mock.patch.object(
+                    cli, "default_gateway_telemetry_path", return_value=telemetry
+                ),
+                mock.patch.object(cli, "letsinfer_home_root", return_value=home),
+                mock.patch.object(cli.shutil, "which", return_value=str(openssl)),
+                mock.patch.object(
+                    cli.macos_services, "install_launch_agent"
+                ) as install_agent,
+            ):
+                cli.install_core_gateway_service(executable_root=root)
+        agent = install_agent.call_args.args[0]
+        self.assertEqual(agent.environment["LETSINFER_HOME"], str(home))
+        self.assertEqual(agent.environment["LETSINFER_PYTHON"], sys.executable)
+        self.assertEqual(
+            agent.environment["PATH"],
+            f"{openssl.parent}:/usr/bin:/bin:/usr/sbin:/sbin",
+        )
 
     def test_gateway_unit_is_lan_http_without_client_certificate_flags(self) -> None:
         config = {
