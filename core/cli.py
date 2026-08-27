@@ -13791,6 +13791,9 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
             (
                 "direct"
                 if row["verification"] is None
+                else "carried"
+                if row["verification"].get("method")
+                == "runtime-contract-migration-v1"
                 else str(len(row["verification"]["verifiers"]))
                 if "consensus_path" in row["verification"]
                 else "legacy"

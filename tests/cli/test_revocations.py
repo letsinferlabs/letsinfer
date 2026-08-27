@@ -59,6 +59,24 @@ class RevocationTests(unittest.TestCase):
         self.assertEqual(target["candidates"], {})
         self.assertIsNone(target["recommended"])
 
+    def test_revoked_carried_release_is_removed_from_active_selection_view(self) -> None:
+        document = catalog()
+        release = document["models"]["qwen3.8-27b"]["targets"]["dgx-spark"][
+            "candidates"
+        ][CANDIDATE]["releases"]["0.1.0-rc.12"]
+        consensus = "8" * 64
+        release["verification"] = {
+            "method": "runtime-contract-migration-v1",
+            "consensus_sha256": consensus,
+        }
+        digest = release["source"].rsplit("@", 1)[-1]
+        active = revocations.apply_to_catalog(
+            document, self.ledger(digest, consensus)
+        )
+        target = active["models"]["qwen3.8-27b"]["targets"]["dgx-spark"]
+        self.assertEqual(target["candidates"], {})
+        self.assertIsNone(target["recommended"])
+
     def test_signed_ledger_round_trip_uses_catalog_trust_key(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
