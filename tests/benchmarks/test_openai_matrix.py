@@ -427,7 +427,7 @@ class OpenAIMatrixTests(unittest.TestCase):
     def test_group_container_uses_runtime_readiness_without_docker_health(self) -> None:
         release = self.release()
         inspection = {
-            "Id": "group-container-id",
+            "Id": "placement-container-id",
             "Image": release["image"]["immutable_id"],
             "RestartCount": 0,
             "Config": {

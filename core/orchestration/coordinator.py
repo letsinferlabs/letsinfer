@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Coordinator-owned, fail-closed lifecycle for immutable engine groups."""
+"""Coordinator-owned, fail-closed lifecycle for immutable placement groups."""
 
 from __future__ import annotations
 
@@ -16,27 +16,27 @@ from core.site.state import SiteError, SiteStore
 from core.runtime_sources import is_immutable_runtime_source
 
 from .contracts import (
-    GroupPlan,
-    TaskAssignment,
-    validate_group_document,
+    PlacementGroupPlan,
+    Placement,
+    validate_placement_group_document,
     validate_orchestration_contract,
 )
 from .credentials import (
-    GroupCredentialError,
+    PlacementGroupCredentialError,
     credential_sha256,
-    derive_group_credential,
+    derive_placement_group_credential,
 )
 from .member import PROTOCOL, canonical_bytes
 
 
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 JOB_LIFETIME_SECONDS = 120
-GROUP_PORT_MIN = 18000
-GROUP_PORT_MAX = 60000
+PLACEMENT_PORT_MIN = 18000
+PLACEMENT_PORT_MAX = 60000
 
 
-class GroupOrchestrationError(RuntimeError):
-    """A member group could not reach or retain its qualified topology."""
+class PlacementGroupOrchestrationError(RuntimeError):
+    """A placement group could not reach or retain its qualified topology."""
 
 
 SubmitJob = Callable[[Mapping[str, Any], Mapping[str, Any], Optional[str]], Mapping[str, Any]]
@@ -51,7 +51,7 @@ JOB_TIMEOUT_SECONDS = {
 }
 
 
-def allocate_group_ports(
+def allocate_placement_ports(
     contract: Mapping[str, Any],
     *,
     member_ids: tuple[str, ...],
@@ -64,9 +64,9 @@ def allocate_group_ports(
         or len(set(member_ids)) != len(member_ids)
         or any(not ID_RE.fullmatch(item) for item in member_ids)
     ):
-        raise GroupOrchestrationError("port allocation members are invalid")
+        raise PlacementGroupOrchestrationError("port allocation members are invalid")
     if set(occupied) - set(member_ids):
-        raise GroupOrchestrationError("port allocation contains an unrelated member")
+        raise PlacementGroupOrchestrationError("port allocation contains an unrelated member")
     result: dict[str, int] = {}
     for index, member_id in enumerate(member_ids):
         count = validated["tasks"][index]["port_count"]
@@ -81,21 +81,21 @@ def allocate_group_ports(
                 or base < 1
                 or base + length > 65536
             ):
-                raise GroupOrchestrationError("occupied member port range is invalid")
+                raise PlacementGroupOrchestrationError("occupied member port range is invalid")
         selected: int | None = None
-        for base in range(GROUP_PORT_MIN, GROUP_PORT_MAX - count + 1):
+        for base in range(PLACEMENT_PORT_MIN, PLACEMENT_PORT_MAX - count + 1):
             if all(base + count <= used or used + length <= base for used, length in ranges):
                 selected = base
                 break
         if selected is None:
-            raise GroupOrchestrationError(f"no contiguous engine ports remain on member {member_id}")
+            raise PlacementGroupOrchestrationError(f"no contiguous engine ports remain on member {member_id}")
         result[member_id] = selected
     return result
 
 
-def group_job(
-    plan: GroupPlan,
-    assignment: TaskAssignment,
+def placement_job(
+    plan: PlacementGroupPlan,
+    placement: Placement,
     *,
     action: str,
     source: str | None,
@@ -105,53 +105,55 @@ def group_job(
 ) -> dict[str, Any]:
     """Create one exact, short-lived member operation from a sealed plan."""
     if action not in {"stage", "start", "recover", "stop", "remove"}:
-        raise GroupOrchestrationError("engine-group action is invalid")
+        raise PlacementGroupOrchestrationError("placement-group action is invalid")
     if action == "stage":
         if not is_immutable_runtime_source(source):
-            raise GroupOrchestrationError("stage requires an immutable runtime source")
+            raise PlacementGroupOrchestrationError("stage requires an immutable runtime source")
     elif source is not None:
-        raise GroupOrchestrationError("only stage may carry a runtime source")
+        raise PlacementGroupOrchestrationError("only stage may carry a runtime source")
     identifier = operation_id or uuid.uuid4().hex
     if not ID_RE.fullmatch(identifier):
-        raise GroupOrchestrationError("engine-group operation identity is invalid")
-    group = validate_group_document(plan.document())
+        raise PlacementGroupOrchestrationError("placement-group operation identity is invalid")
+    placement_group = validate_placement_group_document(plan.document())
     return {
         "protocol": PROTOCOL,
         "operation_id": identifier,
-        "group_id": plan.group_id,
+        "placement_group_id": plan.placement_group_id,
+        "placement_id": placement.placement_id,
         "action": action,
-        "member_id": assignment.member_id,
-        "plan_sha256": hashlib.sha256(canonical_bytes(group)).hexdigest(),
+        "node_id": placement.node_id,
+        "plan_sha256": hashlib.sha256(canonical_bytes(placement_group)).hexdigest(),
         "runtime_digest": plan.runtime_digest,
         "manifest_sha256": plan.manifest_sha256,
         "topology_sha256": plan.topology_sha256,
         "engine_credential_sha256": engine_credential_sha256,
         "expires_at_unix": (int(time.time()) if now is None else now) + JOB_LIFETIME_SECONDS,
         "source": source,
-        "task": {
-            "task_id": assignment.task_id,
-            "port_base": assignment.port_base,
-            "port_count": assignment.port_count,
-            "launcher": assignment.launcher,
-            "command": list(assignment.command),
-            "environment": dict(assignment.environment),
-            "endpoint_owner": assignment.endpoint_owner,
-            "readiness": dict(assignment.readiness),
-            "device_uuids": list(assignment.device_uuids),
+        "placement": {
+            "placement_id": placement.placement_id,
+            "node_id": placement.node_id,
+            "task_id": placement.task_id,
+            "port_base": placement.port_base,
+            "port_count": placement.port_count,
+            "launcher": placement.launcher,
+            "command": list(placement.command),
+            "environment": dict(placement.environment),
+            "endpoint_owner": placement.endpoint_owner,
+            "readiness": dict(placement.readiness),
+            "device_uuids": list(placement.device_uuids),
         },
-        "group": group,
+        "placement_group": placement_group,
     }
 
 
-class EngineGroupOrchestrator:
+class PlacementGroupOrchestrator:
     """Execute ordered lifecycle transitions and durably audit every step."""
 
     def __init__(
         self,
         *,
         store: SiteStore,
-        plan: GroupPlan,
-        placement_id: str,
+        plan: PlacementGroupPlan,
         source: str,
         members: Mapping[str, Mapping[str, Any]],
         submit: SubmitJob,
@@ -163,13 +165,13 @@ class EngineGroupOrchestrator:
         correlation_id: str | None = None,
         engine_credential: str | None = None,
     ) -> None:
-        validate_group_document(plan.document())
-        if not ID_RE.fullmatch(placement_id):
-            raise GroupOrchestrationError("engine-group placement identity is invalid")
+        validate_placement_group_document(plan.document())
         if not is_immutable_runtime_source(source):
-            raise GroupOrchestrationError("engine-group source must be immutable")
-        if set(members) != {item.member_id for item in plan.assignments}:
-            raise GroupOrchestrationError("engine-group member controls are incomplete")
+            raise PlacementGroupOrchestrationError("placement-group source must be immutable")
+        if set(members) != {item.node_id for item in plan.placements}:
+            raise PlacementGroupOrchestrationError(
+                "placement-group node controls are incomplete"
+            )
         for member_id, member in members.items():
             if (
                 member.get("member_id") != member_id
@@ -178,10 +180,11 @@ class EngineGroupOrchestrator:
                 or not isinstance(member.get("certificate_sha256"), str)
                 or not re.fullmatch(r"[0-9a-f]{64}", member["certificate_sha256"])
             ):
-                raise GroupOrchestrationError("engine-group member control identity is invalid")
+                raise PlacementGroupOrchestrationError(
+                    "placement-group node control identity is invalid"
+                )
         self.store = store
         self.plan = plan
-        self.placement_id = placement_id
         self.source = source
         self.members = {key: dict(value) for key, value in members.items()}
         self.submit = submit
@@ -193,26 +196,27 @@ class EngineGroupOrchestrator:
         self.correlation_id = correlation_id or uuid.uuid4().hex
         try:
             self.engine_credential = (
-                derive_group_credential(plan.group_id)
+                derive_placement_group_credential(plan.placement_group_id)
                 if engine_credential is None
                 else engine_credential
             )
             self.engine_credential_sha256 = credential_sha256(self.engine_credential)
-        except GroupCredentialError as error:
-            raise GroupOrchestrationError(str(error)) from error
+        except PlacementGroupCredentialError as error:
+            raise PlacementGroupOrchestrationError(str(error)) from error
         self.states = {
-            item.member_id: {
-                "member_id": item.member_id,
+            item.placement_id: {
+                "placement_id": item.placement_id,
+                "node_id": item.node_id,
                 "task_id": item.task_id,
                 "state": "pending",
                 "operation_id": None,
                 "error": None,
             }
-            for item in plan.assignments
+            for item in plan.placements
         }
         self.results: dict[str, dict[str, Any]] = {}
         self.protection_trips: dict[str, bool] = {
-            item.member_id: False for item in plan.assignments
+            item.placement_id: False for item in plan.placements
         }
         self.persisted_state: str | None = None
 
@@ -225,14 +229,15 @@ class EngineGroupOrchestrator:
         error: str | None = None,
     ) -> dict[str, Any]:
         try:
-            result = self.store.set_engine_group(
+            result = self.store.set_placement_group(
                 self.plan.document(),
-                placement_id=self.placement_id,
                 source=self.source,
                 engine_credential_sha256=self.engine_credential_sha256,
                 desired_state=desired_state,
                 state=state,
-                members=[self.states[item.member_id] for item in self.plan.assignments],
+                placements=[
+                    self.states[item.placement_id] for item in self.plan.placements
+                ],
                 action=action,
                 error=error,
                 actor_type=self.actor_type,
@@ -243,11 +248,11 @@ class EngineGroupOrchestrator:
             self.persisted_state = state
             return result
         except SiteError as persistence_error:
-            raise GroupOrchestrationError(str(persistence_error)) from persistence_error
+            raise PlacementGroupOrchestrationError(str(persistence_error)) from persistence_error
 
-    def _invoke(self, assignment: TaskAssignment, action: str) -> Mapping[str, Any]:
+    def _invoke(self, placement: Placement, action: str) -> Mapping[str, Any]:
         operation_id = uuid.uuid4().hex
-        state = self.states[assignment.member_id]
+        state = self.states[placement.placement_id]
         state["operation_id"] = operation_id
         state["state"] = {
             "stage": "staging", "start": "starting", "recover": "starting",
@@ -256,10 +261,16 @@ class EngineGroupOrchestrator:
         state["error"] = None
         if action == "remove":
             status = self.fetch_status(
-                self.members[assignment.member_id], self.plan.group_id
+                self.members[placement.node_id], self.plan.placement_group_id
             )
-            group = status.get("group") if isinstance(status, Mapping) else None
-            group_state = group.get("state") if isinstance(group, Mapping) else None
+            observed_placement = (
+                status.get("placement") if isinstance(status, Mapping) else None
+            )
+            placement_state = (
+                observed_placement.get("state")
+                if isinstance(observed_placement, Mapping)
+                else None
+            )
             trip = (
                 status.get("protection_trip_latched")
                 if isinstance(status, Mapping)
@@ -270,41 +281,46 @@ class EngineGroupOrchestrator:
                 or status.get("protocol") != PROTOCOL
                 or not isinstance(trip, bool)
                 or (
-                    group is not None
+                    observed_placement is not None
                     and (
-                        not isinstance(group, Mapping)
-                        or group.get("group_id") != self.plan.group_id
-                        or group_state
+                        not isinstance(observed_placement, Mapping)
+                        or observed_placement.get("placement_group_id")
+                        != self.plan.placement_group_id
+                        or observed_placement.get("placement_id")
+                        != placement.placement_id
+                        or placement_state
                         not in {"staged", "running", "stopped", "failed", "removed"}
                     )
                 )
             ):
-                raise GroupOrchestrationError("member group status is invalid")
-            self.protection_trips[assignment.member_id] = trip
-            if (group is None or group_state == "removed") and trip:
-                raise GroupOrchestrationError(
+                raise PlacementGroupOrchestrationError(
+                    "node placement status is invalid"
+                )
+            self.protection_trips[placement.placement_id] = trip
+            if (observed_placement is None or placement_state == "removed") and trip:
+                raise PlacementGroupOrchestrationError(
                     "refusing to finalize a removed member with a protection trip"
                 )
-            if group is None or group_state == "removed":
+            if observed_placement is None or placement_state == "removed":
                 response = {
                     "protocol": PROTOCOL,
                     "operation_id": operation_id,
                     "state": "succeeded",
                     "result": {"state": "removed"},
                 }
-                self.results[assignment.member_id] = dict(response["result"])
+                self.results[placement.placement_id] = dict(response["result"])
                 state["state"] = "removed"
                 return response
-        job = group_job(
+        job = placement_job(
             self.plan,
-            assignment,
+            placement,
             action=action,
             source=self.source if action == "stage" else None,
             engine_credential_sha256=self.engine_credential_sha256,
             operation_id=operation_id,
         )
         response = self.submit(
-            self.members[assignment.member_id],
+            self.members[placement.node_id],
             job,
             self.engine_credential if action == "stage" else None,
         )
@@ -314,12 +330,12 @@ class EngineGroupOrchestrator:
             or response.get("operation_id") != operation_id
             or response.get("state") not in {"running", "succeeded"}
         ):
-            raise GroupOrchestrationError("member returned an invalid engine-group response")
+            raise PlacementGroupOrchestrationError("member returned an invalid placement-group response")
         if response["state"] == "running":
             deadline = time.monotonic() + JOB_TIMEOUT_SECONDS[action]
             while time.monotonic() < deadline:
                 status = self.fetch_job_status(
-                    self.members[assignment.member_id], operation_id
+                    self.members[placement.node_id], operation_id
                 )
                 if (
                     not isinstance(status, Mapping)
@@ -327,8 +343,8 @@ class EngineGroupOrchestrator:
                     or not isinstance(status.get("job"), Mapping)
                     or status["job"].get("operation_id") != operation_id
                 ):
-                    raise GroupOrchestrationError(
-                        "member returned an invalid engine-group job status"
+                    raise PlacementGroupOrchestrationError(
+                        "member returned an invalid placement-group job status"
                     )
                 member_job = status["job"]
                 if member_job.get("state") == "succeeded":
@@ -340,22 +356,22 @@ class EngineGroupOrchestrator:
                     }
                     break
                 if member_job.get("state") == "failed":
-                    raise GroupOrchestrationError(
-                        f"member engine-group {action} failed: "
+                    raise PlacementGroupOrchestrationError(
+                        f"member placement-group {action} failed: "
                         f"{member_job.get('error') or 'unknown'}"
                     )
                 if member_job.get("state") != "running":
-                    raise GroupOrchestrationError(
-                        "member engine-group job entered an invalid state"
+                    raise PlacementGroupOrchestrationError(
+                        "member placement-group job entered an invalid state"
                     )
                 time.sleep(1.0)
             else:
-                raise GroupOrchestrationError(
-                    f"member engine-group {action} timed out"
+                raise PlacementGroupOrchestrationError(
+                    f"member placement-group {action} timed out"
                 )
         if not isinstance(response.get("result"), Mapping):
-            raise GroupOrchestrationError("member engine-group result is invalid")
-        self.results[assignment.member_id] = dict(response["result"])
+            raise PlacementGroupOrchestrationError("member placement-group result is invalid")
+        self.results[placement.placement_id] = dict(response["result"])
         state["state"] = {
             "stage": "staged", "start": "running", "recover": "running",
             "stop": "stopped", "remove": "removed",
@@ -363,84 +379,88 @@ class EngineGroupOrchestrator:
         return response
 
     def stage(self) -> dict[str, Any]:
-        self._persist(action="group.stage", desired_state="running", state="staging")
-        completed: list[TaskAssignment] = []
+        self._persist(action="placement_group.stage", desired_state="running", state="staging")
+        completed: list[Placement] = []
         try:
-            for assignment in self.plan.assignments:
-                self._invoke(assignment, "stage")
-                completed.append(assignment)
-                self._persist(action="group.stage", desired_state="running", state="staging")
+            for placement in self.plan.placements:
+                self._invoke(placement, "stage")
+                completed.append(placement)
+                self._persist(action="placement_group.stage", desired_state="running", state="staging")
         except BaseException as error:
             failing = next(
-                (item for item in self.plan.assignments if self.states[item.member_id]["state"] == "staging"),
+                (item for item in self.plan.placements if self.states[item.placement_id]["state"] == "staging"),
                 None,
             )
             if failing is not None:
-                self.states[failing.member_id]["state"] = "failed"
-                self.states[failing.member_id]["error"] = type(error).__name__
-            for assignment in reversed(completed):
+                self.states[failing.placement_id]["state"] = "failed"
+                self.states[failing.placement_id]["error"] = type(error).__name__
+            for placement in reversed(completed):
                 try:
-                    self._invoke(assignment, "remove")
+                    self._invoke(placement, "remove")
                 except BaseException:
-                    self.states[assignment.member_id]["state"] = "failed"
-                    self.states[assignment.member_id]["error"] = "rollback_failed"
+                    self.states[placement.placement_id]["state"] = "failed"
+                    self.states[placement.placement_id]["error"] = "rollback_failed"
             self._persist(
-                action="group.stage", desired_state="stopped", state="failed",
+                action="placement_group.stage", desired_state="stopped", state="failed",
                 error=type(error).__name__,
             )
-            if isinstance(error, GroupOrchestrationError):
+            if isinstance(error, PlacementGroupOrchestrationError):
                 raise
-            raise GroupOrchestrationError(f"engine-group staging failed: {type(error).__name__}") from error
-        return self._persist(action="group.stage", desired_state="running", state="staged")
+            raise PlacementGroupOrchestrationError(f"placement-group staging failed: {type(error).__name__}") from error
+        return self._persist(action="placement_group.stage", desired_state="running", state="staged")
 
-    def _task_order(self, *, reverse: bool = False) -> list[TaskAssignment]:
+    def _task_order(self, *, reverse: bool = False) -> list[Placement]:
         return [item for phase in self._task_phases(reverse=reverse) for item in phase]
 
-    def _task_phases(self, *, reverse: bool = False) -> list[list[TaskAssignment]]:
+    def _task_phases(self, *, reverse: bool = False) -> list[list[Placement]]:
         phases = list(self.plan.startup_order)
         if reverse:
             phases.reverse()
-        by_task = {item.task_id: item for item in self.plan.assignments}
-        result: list[list[TaskAssignment]] = []
+        by_placement = {
+            item.placement_id: item for item in self.plan.placements
+        }
+        result: list[list[Placement]] = []
         for phase in phases:
-            task_ids = tuple(reversed(phase)) if reverse else phase
-            result.append([by_task[task_id] for task_id in task_ids])
+            placement_ids = tuple(reversed(phase)) if reverse else phase
+            result.append(
+                [by_placement[placement_id] for placement_id in placement_ids]
+            )
         return result
 
     def _invoke_phase(
         self,
-        assignments: list[TaskAssignment],
+        placements: list[Placement],
         action: str,
-    ) -> tuple[list[TaskAssignment], list[tuple[TaskAssignment, BaseException]]]:
+    ) -> tuple[list[Placement], list[tuple[Placement, BaseException]]]:
         """Invoke one runtime-declared phase concurrently and await every task."""
         completed = [
-            assignment
-            for assignment in assignments
+            placement
+            for placement in placements
             if action == "remove"
-            and self.states[assignment.member_id]["state"] == "removed"
+            and self.states[placement.placement_id]["state"] == "removed"
         ]
-        pending = [assignment for assignment in assignments if assignment not in completed]
-        failures: list[tuple[TaskAssignment, BaseException]] = []
+        pending = [placement for placement in placements if placement not in completed]
+        failures: list[tuple[Placement, BaseException]] = []
         if not pending:
             return completed, failures
         with ThreadPoolExecutor(
             max_workers=len(pending),
-            thread_name_prefix=f"letsinfer-group-{action}",
+            thread_name_prefix=f"letsinfer-placement-{action}",
         ) as executor:
             futures = {
-                executor.submit(self._invoke, assignment, action): assignment
-                for assignment in pending
+                executor.submit(self._invoke, placement, action): placement
+                for placement in pending
             }
             for future in as_completed(futures):
-                assignment = futures[future]
+                placement = futures[future]
                 try:
                     future.result()
-                    completed.append(assignment)
+                    completed.append(placement)
                 except BaseException as error:
-                    member_state = self.states[assignment.member_id]
+                    member_state = self.states[placement.placement_id]
                     member_state["state"] = "failed"
                     member_state["error"] = type(error).__name__
-                    failures.append((assignment, error))
+                    failures.append((placement, error))
         completed.sort(key=lambda item: item.task_id)
         failures.sort(key=lambda item: item[0].task_id)
         return completed, failures
@@ -454,9 +474,9 @@ class EngineGroupOrchestrator:
         desired_state: str,
         state: str,
         stop_on_failure: bool = True,
-    ) -> tuple[list[TaskAssignment], list[tuple[TaskAssignment, BaseException]]]:
-        completed: list[TaskAssignment] = []
-        failures: list[tuple[TaskAssignment, BaseException]] = []
+    ) -> tuple[list[Placement], list[tuple[Placement, BaseException]]]:
+        completed: list[Placement] = []
+        failures: list[tuple[Placement, BaseException]] = []
         for phase in self._task_phases(reverse=reverse):
             phase_completed, phase_failures = self._invoke_phase(phase, action)
             completed.extend(phase_completed)
@@ -471,37 +491,37 @@ class EngineGroupOrchestrator:
         return completed, failures
 
     def start(self) -> dict[str, Any]:
-        self._persist(action="group.start", desired_state="running", state="starting")
-        started: list[TaskAssignment] = []
+        self._persist(action="placement_group.start", desired_state="running", state="starting")
+        started: list[Placement] = []
         try:
             started, failures = self._run_phases(
                 "start",
-                audit_action="group.start",
+                audit_action="placement_group.start",
                 desired_state="running",
                 state="starting",
             )
             if failures:
-                raise GroupOrchestrationError(
-                    "engine-group start failed on task(s): "
+                raise PlacementGroupOrchestrationError(
+                    "placement-group start failed on task(s): "
                     + ",".join(item.task_id for item, _error in failures)
                 )
         except BaseException as error:
-            for assignment in reversed(started):
+            for placement in reversed(started):
                 try:
-                    self._invoke(assignment, "stop")
+                    self._invoke(placement, "stop")
                 except BaseException:
-                    self.states[assignment.member_id]["state"] = "failed"
-                    self.states[assignment.member_id]["error"] = "rollback_failed"
+                    self.states[placement.placement_id]["state"] = "failed"
+                    self.states[placement.placement_id]["error"] = "rollback_failed"
             self._persist(
-                action="group.start", desired_state="stopped", state="failed",
+                action="placement_group.start", desired_state="stopped", state="failed",
                 error=type(error).__name__,
             )
-            if isinstance(error, GroupOrchestrationError):
+            if isinstance(error, PlacementGroupOrchestrationError):
                 raise
-            raise GroupOrchestrationError(f"engine-group start failed: {type(error).__name__}") from error
-        result = self._persist(action="group.start", desired_state="running", state="running")
-        self.store.set_group_allocation_state(
-            self.plan.group_id,
+            raise PlacementGroupOrchestrationError(f"placement-group start failed: {type(error).__name__}") from error
+        result = self._persist(action="placement_group.start", desired_state="running", state="running")
+        self.store.set_placement_group_allocation_state(
+            self.plan.placement_group_id,
             "active",
             actor_type=self.actor_type,
             actor_id=self.actor_id,
@@ -511,35 +531,35 @@ class EngineGroupOrchestrator:
         return result
 
     def stop(self) -> dict[str, Any]:
-        self.store.set_group_allocation_state(
-            self.plan.group_id,
+        self.store.set_placement_group_allocation_state(
+            self.plan.placement_group_id,
             "draining",
             actor_type=self.actor_type,
             actor_id=self.actor_id,
             origin_interface=self.origin_interface,
             correlation_id=self.correlation_id,
         )
-        self._persist(action="group.stop", desired_state="stopped", state="stopping")
+        self._persist(action="placement_group.stop", desired_state="stopped", state="stopping")
         _completed, failures = self._run_phases(
             "stop",
             reverse=True,
-            audit_action="group.stop",
+            audit_action="placement_group.stop",
             desired_state="stopped",
             state="stopping",
             stop_on_failure=False,
         )
         if failures:
             self._persist(
-                action="group.stop", desired_state="stopped", state="failed",
-                error="member_stop_failed",
+                action="placement_group.stop", desired_state="stopped", state="failed",
+                error="placement_stop_failed",
             )
-            raise GroupOrchestrationError(
-                "engine-group stop failed on task(s): "
+            raise PlacementGroupOrchestrationError(
+                "placement-group stop failed on task(s): "
                 + ",".join(item.task_id for item, _error in failures)
             )
-        result = self._persist(action="group.stop", desired_state="stopped", state="stopped")
-        self.store.set_group_allocation_state(
-            self.plan.group_id,
+        result = self._persist(action="placement_group.stop", desired_state="stopped", state="stopped")
+        self.store.set_placement_group_allocation_state(
+            self.plan.placement_group_id,
             "reserved",
             actor_type=self.actor_type,
             actor_id=self.actor_id,
@@ -549,27 +569,27 @@ class EngineGroupOrchestrator:
         return result
 
     def remove(self) -> dict[str, Any]:
-        self._persist(action="group.remove", desired_state="removed", state="removing")
+        self._persist(action="placement_group.remove", desired_state="removed", state="removing")
         _completed, failures = self._run_phases(
             "remove",
             reverse=True,
-            audit_action="group.remove",
+            audit_action="placement_group.remove",
             desired_state="removed",
             state="removing",
             stop_on_failure=False,
         )
         if failures:
             self._persist(
-                action="group.remove", desired_state="removed", state="failed",
-                error="member_remove_failed",
+                action="placement_group.remove", desired_state="removed", state="failed",
+                error="placement_remove_failed",
             )
-            raise GroupOrchestrationError(
-                "engine-group removal failed on task(s): "
+            raise PlacementGroupOrchestrationError(
+                "placement-group removal failed on task(s): "
                 + ",".join(item.task_id for item, _error in failures)
             )
-        result = self._persist(action="group.remove", desired_state="removed", state="removed")
-        self.store.set_group_allocation_state(
-            self.plan.group_id,
+        result = self._persist(action="placement_group.remove", desired_state="removed", state="removed")
+        self.store.set_placement_group_allocation_state(
+            self.plan.placement_group_id,
             "released",
             actor_type=self.actor_type,
             actor_id=self.actor_id,
@@ -583,97 +603,107 @@ class EngineGroupOrchestrator:
             member_id: dict(value) for member_id, value in self.states.items()
         }
         running = 0
-        for assignment in self.plan.assignments:
-            state = self.states[assignment.member_id]
+        for placement in self.plan.placements:
+            state = self.states[placement.placement_id]
             try:
-                response = self.fetch_status(self.members[assignment.member_id], self.plan.group_id)
-                group = response.get("group")
+                response = self.fetch_status(self.members[placement.node_id], self.plan.placement_group_id)
+                observed_placement = response.get("placement")
                 trip = response.get("protection_trip_latched")
                 if (
-                    not isinstance(group, Mapping)
-                    or group.get("group_id") != self.plan.group_id
+                    not isinstance(observed_placement, Mapping)
+                    or observed_placement.get("placement_group_id")
+                    != self.plan.placement_group_id
+                    or observed_placement.get("placement_id")
+                    != placement.placement_id
                     or not isinstance(trip, bool)
                 ):
-                    raise GroupOrchestrationError("member group status is invalid")
-                self.protection_trips[assignment.member_id] = trip
-                observed = group.get("state")
+                    raise PlacementGroupOrchestrationError(
+                        "node placement status is invalid"
+                    )
+                self.protection_trips[placement.placement_id] = trip
+                observed = observed_placement.get("state")
                 if observed not in {"staged", "running", "stopped", "failed", "removed"}:
-                    raise GroupOrchestrationError("member group state is invalid")
+                    raise PlacementGroupOrchestrationError(
+                        "node placement state is invalid"
+                    )
                 state["state"] = observed
                 state["error"] = None
                 if observed == "running":
                     running += 1
             except BaseException:
                 state["state"] = "unreachable"
-                state["error"] = "member_unreachable"
-                self.protection_trips[assignment.member_id] = False
-        if running == len(self.plan.assignments):
+                state["error"] = "node_unreachable"
+                self.protection_trips[placement.placement_id] = False
+        if running == len(self.plan.placements):
             group_state = "running"
         else:
             group_state = "failed"
         if self.persisted_state == group_state and previous_states == self.states:
             return {
                 **self.plan.document(),
-                "placement_id": self.placement_id,
                 "source": self.source,
                 "engine_credential_sha256": self.engine_credential_sha256,
                 "desired_state": "running",
                 "state": group_state,
-                "member_states": [
-                    dict(self.states[item.member_id])
-                    for item in self.plan.assignments
+                "placement_states": [
+                    dict(self.states[item.placement_id])
+                    for item in self.plan.placements
                 ],
                 "last_error": None,
             }
         return self._persist(
-            action="group.reconcile",
+            action="placement_group.reconcile",
             desired_state="running",
             state=group_state,
-            error=None if group_state in {"running", "degraded"} else "insufficient_healthy_members",
+            error=(
+                None
+                if group_state in {"running", "degraded"}
+                else "insufficient_healthy_placements"
+            ),
         )
 
     def recover(self, *, acknowledge_trips: bool = False) -> dict[str, Any]:
         """Restart the complete group, clearing trips only for an explicit action."""
-        self._persist(action="group.recover", desired_state="running", state="recovering")
+        self._persist(action="placement_group.recover", desired_state="running", state="recovering")
         self.stop()
-        self._persist(action="group.recover", desired_state="running", state="recovering")
-        started: list[TaskAssignment] = []
+        self._persist(action="placement_group.recover", desired_state="running", state="recovering")
+        started: list[Placement] = []
         action = "recover" if acknowledge_trips else "start"
         try:
             started, failures = self._run_phases(
                 action,
-                audit_action="group.recover",
+                audit_action="placement_group.recover",
                 desired_state="running",
                 state="recovering",
             )
             if failures:
-                raise GroupOrchestrationError(
-                    "engine-group recovery failed on task(s): "
+                raise PlacementGroupOrchestrationError(
+                    "placement-group recovery failed on task(s): "
                     + ",".join(item.task_id for item, _error in failures)
                 )
         except BaseException as error:
-            for assignment in reversed(started):
+            for placement in reversed(started):
                 try:
-                    self._invoke(assignment, "stop")
+                    self._invoke(placement, "stop")
                 except BaseException:
-                    self.states[assignment.member_id]["state"] = "failed"
-                    self.states[assignment.member_id]["error"] = "rollback_failed"
+                    self.states[placement.placement_id]["state"] = "failed"
+                    self.states[placement.placement_id]["error"] = "rollback_failed"
             self._persist(
-                action="group.recover",
+                action="placement_group.recover",
                 desired_state="running",
                 state="failed",
                 error=type(error).__name__,
             )
-            if isinstance(error, GroupOrchestrationError):
+            if isinstance(error, PlacementGroupOrchestrationError):
                 raise
-            raise GroupOrchestrationError(
-                f"engine-group recovery failed: {type(error).__name__}"
+            raise PlacementGroupOrchestrationError(
+                f"placement-group recovery failed: {type(error).__name__}"
             ) from error
         result = self._persist(
-            action="group.recover", desired_state="running", state="running"
+            action="placement_group.recover", desired_state="running", state="running"
         )
-        self.store.set_group_allocation_state(
-            self.plan.group_id,
+        self.store.set_placement_group_allocation_state(
+            self.plan.placement_group_id,
             "active",
             actor_type=self.actor_type,
             actor_id=self.actor_id,

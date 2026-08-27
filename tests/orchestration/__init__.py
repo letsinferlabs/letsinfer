@@ -1,1 +1,1 @@
-"""Engine-group orchestration tests."""
+"""Placement and placement-group orchestration tests."""

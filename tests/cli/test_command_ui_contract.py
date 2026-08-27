@@ -129,7 +129,7 @@ def topology_payload() -> dict[str, object]:
         ],
         "links": [
             {
-                "members": ["1" * 32, "2" * 32],
+                "nodes": ["1" * 32, "2" * 32],
                 "kind": "connectx",
                 "speed_mbps": 200000,
                 "mtu": 9000,
@@ -693,30 +693,37 @@ class ImmutableStatusContractTests(unittest.TestCase):
             },
         ]
         store.__enter__.return_value.device_allocations.return_value = []
-        store.__enter__.return_value.placements.return_value = [
+        store.__enter__.return_value.placement_groups.return_value = [
             {
-                "placement_id": "3" * 32,
+                "placement_group_id": "4" * 32,
                 "model": "deepseek-v4-flash",
                 "runtime": "runtime@1",
                 "target": "dgx-spark",
-            },
-            {
-                "placement_id": "5" * 32,
-                "model": "nemotron-3.5-lightning",
-                "runtime": "qualification@1",
-                "target": "dgx-spark",
-                "state": "running",
-                "members": [main_id],
-            },
-        ]
-        store.__enter__.return_value.engine_groups.return_value = [
-            {
-                "placement_id": "3" * 32,
-                "group_id": "4" * 32,
                 "state": "running",
                 "desired_state": "running",
-                "plan": {"resources": [{"node_id": child_id}]},
-            }
+                "placements": [
+                    {
+                        "placement_id": "3" * 32,
+                        "node_id": child_id,
+                        "state": "running",
+                    }
+                ],
+            },
+            {
+                "placement_group_id": "6" * 32,
+                "model": "nemotron-3.5-lightning",
+                "runtime": "runtime@2",
+                "target": "dgx-spark",
+                "state": "running",
+                "desired_state": "running",
+                "placements": [
+                    {
+                        "placement_id": "5" * 32,
+                        "node_id": main_id,
+                        "state": "running",
+                    }
+                ],
+            },
         ]
         telemetry = {
             "members": [
@@ -755,7 +762,7 @@ class ImmutableStatusContractTests(unittest.TestCase):
         self.assertEqual(child["models"][0]["model"], "deepseek-v4-flash")
         self.assertEqual(main["models"][0]["model"], "nemotron-3.5-lightning")
         self.assertEqual(main["models"][0]["state"], "running")
-        self.assertIsNone(main["models"][0]["group_id"])
+        self.assertEqual(main["models"][0]["placement_group_id"], "6" * 32)
         self.assertEqual(child["traffic"]["tx_kib_s"], 34)
         self.assertTrue(child["traffic"]["fresh"])
 

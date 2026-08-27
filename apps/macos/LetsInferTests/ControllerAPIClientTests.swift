@@ -7,7 +7,7 @@ struct ControllerAPIClientTests {
     func malformedSignedMemberFactsFailClosed() {
         let memberData = Data("""
         {
-          "member_id":"33333333333333333333333333333333",
+          "node_id":"33333333333333333333333333333333",
           "display_name":"Desk",
           "role":"main",
           "address":"home.local",
@@ -32,7 +32,7 @@ struct ControllerAPIClientTests {
           "protocol":"letsinfer-controller-control-v1",
           "controller":{"id":"11111111111111111111111111111111","role":"viewer"},
           "node":{
-            "schema_version":2,
+            "schema_version":3,
             "identity":{
               "node_id":"22222222222222222222222222222222",
               "machine_id":"33333333333333333333333333333333",
@@ -42,8 +42,8 @@ struct ControllerAPIClientTests {
               "main_address":"home.local",
               "machine_public_key_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             },
-            "machines":[{
-              "member_id":"33333333333333333333333333333333",
+            "nodes":[{
+              "node_id":"33333333333333333333333333333333",
               "display_name":"Desk",
               "role":"main",
               "address":"home.local",
@@ -117,28 +117,30 @@ struct ControllerAPIClientTests {
               "service_id":"66666666666666666666666666666666",
               "model":"qwen3.8-27b",
               "desired_state":"running",
-              "groups":[{
-              "placement_id":"44444444444444444444444444444444",
+              "placement_groups":[{
+              "placement_group_id":"77777777777777777777777777777777",
               "model":"qwen3.8-27b",
               "runtime":"qwen3.8-27b/sglang/dgx-spark@0.1.0-rc.2@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
               "target":"dgx-spark",
-              "strategy":"single",
               "state":"running",
-              "group_id":"77777777777777777777777777777777",
-              "endpoint_owner":"task-0",
-              "resource_assignments":[{
+              "desired_state":"running",
+              "placements":[{
+                "placement_id":"44444444444444444444444444444444",
                 "node_id":"33333333333333333333333333333333",
                 "address":"homeai.local:9770",
                 "task_id":"task-0",
                 "port_base":18000,
                 "port_count":2,
-                "device_uuids":["GPU-11111111-2222-3333-4444-555555555555"]
-              }],
-              "task_states":[{
-                "node_id":"33333333333333333333333333333333",
-                "task_id":"task-0",
+                "device_uuids":["GPU-11111111-2222-3333-4444-555555555555"],
+                "rdma_interface":null,
+                "endpoint_owner":true,
                 "state":"running",
-                "error":null
+                "operation_id":null,
+                "error":null,
+                "device_allocations":[{
+                  "device_uuid":"GPU-11111111-2222-3333-4444-555555555555",
+                  "state":"active"
+                }]
               }],
               "connections":[{
                 "nodes":["33333333333333333333333333333333","77777777777777777777777777777777"],
@@ -147,26 +149,52 @@ struct ControllerAPIClientTests {
                 "mtu":9000,
                 "rdma":true
               }],
-              "members":["33333333333333333333333333333333"],
-              "endpoints":[{
-                "member_id":"33333333333333333333333333333333",
+              "endpoint":{
+                "placement_id":"44444444444444444444444444444444",
+                "node_id":"33333333333333333333333333333333",
+                "url":"https://127.0.0.1:18000",
                 "max_active_requests":10,
-                "max_context_tokens":1000000
-              }],
+                "max_context_tokens":1000000,
+                "healthy":true,
+                "memory_pressure":false,
+                "temperature_c":61,
+                "prefix_keys":[]
+              },
               "capacity":{
                 "max_connections":128,
                 "max_active_requests":10,
                 "max_context_tokens":1000000
               },
+              "last_error":null,
               "updated_at_unix":1700000010
             },{
-              "placement_id":"55555555555555555555555555555555",
+              "placement_group_id":"88888888888888888888888888888888",
               "model":"qwen3.8-27b",
               "runtime":"qwen3.8-27b/sglang/dgx-spark@0.1.0-rc.1",
               "target":"fixture-target",
-              "strategy":"single",
               "state":"stopped",
-              "members":["33333333333333333333333333333333"],
+              "desired_state":"stopped",
+              "placements":[{
+                "placement_id":"55555555555555555555555555555555",
+                "node_id":"33333333333333333333333333333333",
+                "address":"homeai.local:9770",
+                "task_id":"task-0",
+                "port_base":18002,
+                "port_count":2,
+                "device_uuids":["GPU-11111111-2222-3333-4444-555555555555"],
+                "rdma_interface":null,
+                "endpoint_owner":true,
+                "state":"stopped",
+                "operation_id":null,
+                "error":null,
+                "device_allocations":[]
+              }],
+              "endpoint":null,
+              "capacity":null,
+              "release":null,
+              "connections":[],
+              "telemetry":null,
+              "last_error":null,
               "updated_at_unix":1700000002
               }],
               "telemetry":{"active_requests":2,"queued_requests":1,"available":true}
@@ -185,20 +213,20 @@ struct ControllerAPIClientTests {
         """.utf8)
         let site = try JSONDecoder().decode(ControllerSiteEnvelope.self, from: siteData)
         #expect(site.site.identity.displayName == "Home")
-        #expect(site.site.members.first?.role == "main")
-        #expect(site.site.placements.first?.strategy == "single")
-        #expect(site.site.currentPlacements.count == 1)
-        #expect(site.site.currentPlacements.first?.state == "running")
-        #expect(site.site.currentPlacements.first?.capacity?.maxActiveRequests == 10)
-        #expect(site.site.currentPlacements.first?.endpointOwner == "task-0")
-        #expect(site.site.currentPlacements.first?.resourceAssignments.first?.taskID == "task-0")
-        #expect(site.site.currentPlacements.first?.taskStates.first?.state == "running")
-        #expect(site.site.currentPlacements.first?.connections.first?.rdma == true)
-        #expect(site.site.activeMemberCount == 1)
+        #expect(site.site.nodes.first?.role == "main")
+        #expect(site.site.placementGroups.first?.placements.count == 1)
+        #expect(site.site.currentPlacementGroups.count == 1)
+        #expect(site.site.currentPlacementGroups.first?.state == "running")
+        #expect(site.site.currentPlacementGroups.first?.capacity?.maxActiveRequests == 10)
+        #expect(site.site.currentPlacementGroups.first?.endpoint?.placementID == "44444444444444444444444444444444")
+        #expect(site.site.currentPlacementGroups.first?.placements.first?.taskID == "task-0")
+        #expect(site.site.currentPlacementGroups.first?.placements.first?.state == "running")
+        #expect(site.site.currentPlacementGroups.first?.connections.first?.rdma == true)
+        #expect(site.site.activeNodeCount == 1)
         #expect(site.site.exposure.state == "disabled")
-        #expect(site.site.members.first?.facts?.inventory?.hostname == "homeai")
+        #expect(site.site.nodes.first?.facts?.inventory?.hostname == "homeai")
         let siteID = UUID()
-        let facts = try #require(site.site.members.first?.facts)
+        let facts = try #require(site.site.nodes.first?.facts)
         let snapshot = try #require(
             SiteSnapshot.controllerFacts(
                 siteID: siteID,
@@ -256,8 +284,8 @@ struct ControllerAPIClientTests {
                 containerName: nil
             )
         )
-        let placement = try #require(site.site.currentPlacements.first)
-        let activeRuntimeSnapshot = staleRuntimeSnapshot.enriched(with: placement)
+        let placementGroup = try #require(site.site.currentPlacementGroups.first)
+        let activeRuntimeSnapshot = staleRuntimeSnapshot.enriched(with: placementGroup)
         #expect(activeRuntimeSnapshot.letsinfer?.model == "qwen3.8-27b")
         #expect(activeRuntimeSnapshot.letsinfer?.engine == "sglang")
         #expect(activeRuntimeSnapshot.letsinfer?.runtimeVersion == "0.1.0-rc.2")

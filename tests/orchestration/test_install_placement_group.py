@@ -23,7 +23,7 @@ class _Store:
     ) -> None:
         self._members = members or []
         self.service_id = service_id
-        self.placements: list[dict] = []
+        self.groups: list[dict] = []
         self.allocation_states: list[tuple[str, str]] = []
 
     def __enter__(self):
@@ -35,24 +35,38 @@ class _Store:
     def members(self):
         return list(self._members)
 
-    def engine_groups(self):
+    def placement_groups(self):
         return []
 
-    def set_placement(self, placement):
-        self.placements.append(dict(placement))
-        return dict(placement)
+    def register_placement_group(self, plan, **kwargs):
+        value = {
+            "placement_group_id": plan["placement_group_id"],
+            "state": "staging",
+            "endpoint": None,
+        }
+        self.groups.append(value)
+        return value
+
+    def set_placement_group_endpoint(self, placement_group_id, endpoint, *, state):
+        value = {
+            "placement_group_id": placement_group_id,
+            "state": state,
+            "endpoint": endpoint,
+        }
+        self.groups.append(value)
+        return value
 
     def ensure_model_service(self, _model):
         return {"service_id": self.service_id}
 
-    def reserve_group_devices(self, _group_id, _assignments):
+    def reserve_placement_devices(self, _placement_group_id, _placements):
         return None
 
-    def set_group_allocation_state(self, group_id, state):
-        self.allocation_states.append((group_id, state))
+    def set_placement_group_allocation_state(self, placement_group_id, state):
+        self.allocation_states.append((placement_group_id, state))
 
 
-class EngineGroupInstallTests(unittest.TestCase):
+class PlacementGroupInstallTests(unittest.TestCase):
     def test_site_control_endpoint_preserves_ports_and_brackets_ipv6(self) -> None:
         self.assertEqual(
             cli._site_control_endpoint("child.example:9770"),
@@ -95,8 +109,7 @@ class EngineGroupInstallTests(unittest.TestCase):
         service_id = cli.logical_service_id(node_id, "example-model")
         store = _Store(records, service_id=service_id)
         placement = types.SimpleNamespace(
-            strategy="single",
-            member_ids=member_ids,
+            node_ids=member_ids,
             topology_sha256="4" * 64,
             device_uuids={member_ids[0]: ("GPU-fixture",)},
         )
@@ -130,6 +143,7 @@ class EngineGroupInstallTests(unittest.TestCase):
             def __init__(self, **kwargs):
                 self.plan = kwargs["plan"]
                 self.engine_credential = "x" * 48
+                self.engine_credential_sha256 = "5" * 64
                 self.results = {}
                 self.stop_calls = 0
                 instances.append(self)
@@ -143,12 +157,12 @@ class EngineGroupInstallTests(unittest.TestCase):
                     "-----END CERTIFICATE-----\n"
                 )
                 self.results = {
-                    assignment.member_id: {
+                    placement.placement_id: {
                         "endpoint": "https://192.0.2.10:18000",
                         "tls_certificate_pem": certificate,
                         "tls_certificate_sha256": "6" * 64,
                     }
-                    for assignment in self.plan.assignments
+                    for placement in self.plan.placements
                 }
 
             def stop(self):
@@ -190,7 +204,7 @@ class EngineGroupInstallTests(unittest.TestCase):
                     return_value={"placement_id": "8" * 32},
                 ),
                 mock.patch.object(cli, "_site_store", return_value=store),
-                mock.patch.object(cli, "EngineGroupOrchestrator", Orchestrator),
+                mock.patch.object(cli, "PlacementGroupOrchestrator", Orchestrator),
                 mock.patch.object(cli, "site_config_root", return_value=pathlib.Path(directory)),
                 mock.patch.object(
                     cli,
@@ -205,7 +219,7 @@ class EngineGroupInstallTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(cli.LetsInferError, "runtime receipt failed"),
             ):
-                cli.install_engine_group(
+                cli.install_placement_group(
                     arguments,
                     source="registry.example/runtime@sha256:" + "9" * 64,
                     manifest_path=pathlib.Path("/control/release.json"),
@@ -216,8 +230,8 @@ class EngineGroupInstallTests(unittest.TestCase):
                 )
 
         self.assertEqual(instances[0].stop_calls, 1)
-        self.assertEqual(store.placements[-1]["state"], "failed")
-        self.assertEqual(store.placements[-1]["endpoints"], [])
+        self.assertEqual(store.groups[-1]["state"], "failed")
+        self.assertIsNone(store.groups[-1]["endpoint"])
         self.assertEqual(store.allocation_states[-1][1], "released")
 
 

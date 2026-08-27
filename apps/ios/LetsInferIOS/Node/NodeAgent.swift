@@ -24,7 +24,7 @@ final class NodeAgent: ObservableObject {
     let identityStore: NodeIdentityStore
     let inference: InferenceService
     let inferenceServer: InferenceHTTPServer
-    let embeddedGroups: EmbeddedGroupManager
+    let embeddedPlacements: EmbeddedPlacementManager
     private let engineAccessKeys = EngineAccessKeyStore()
 
     private var identity: ProvisionalNodeIdentity?
@@ -45,7 +45,7 @@ final class NodeAgent: ObservableObject {
         let inference = inference ?? InferenceService()
         self.inference = inference
         self.inferenceServer = InferenceHTTPServer(inference: inference)
-        self.embeddedGroups = EmbeddedGroupManager(
+        self.embeddedPlacements = EmbeddedPlacementManager(
             inference: inference,
             identityStore: identityStore
         )
@@ -89,7 +89,7 @@ final class NodeAgent: ObservableObject {
             state = .starting
             try startControlServer()
             startFactsTimer()
-            if embeddedGroups.requiredEngineID == "mlc-metal" {
+            if embeddedPlacements.requiredEngineID == "mlc-metal" {
                 Task { await inference.loadInstalledMLCModel() }
             } else {
                 Task { await inference.loadInstalledModel() }
@@ -296,12 +296,12 @@ final class NodeAgent: ObservableObject {
                 return .forbidden(error.localizedDescription)
             }
         }
-        if request.method == "POST", request.path == "/node/v1/group-job" {
+        if request.method == "POST", request.path == "/node/v1/placement-job" {
             do {
                 guard let identity else {
                     throw NodeError.invalidData("Node identity is unavailable")
                 }
-                return .ok(try embeddedGroups.handle(
+                return .ok(try embeddedPlacements.handle(
                     object: request.json,
                     engineCredential: request.headers[
                         "x-letsinfer-engine-credential"
@@ -312,10 +312,12 @@ final class NodeAgent: ObservableObject {
                 return .forbidden(error.localizedDescription)
             }
         }
-        let groupPrefix = "/node/v1/groups/"
-        if request.method == "GET", request.path.hasPrefix(groupPrefix) {
-            return .ok(embeddedGroups.status(
-                groupID: String(request.path.dropFirst(groupPrefix.count))
+        let placementGroupPrefix = "/node/v1/placement-groups/"
+        if request.method == "GET", request.path.hasPrefix(placementGroupPrefix) {
+            return .ok(embeddedPlacements.status(
+                placementGroupID: String(
+                    request.path.dropFirst(placementGroupPrefix.count)
+                )
             ))
         }
         return .notFound()

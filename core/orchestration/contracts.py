@@ -23,7 +23,8 @@ from core.engine_distribution import (
 from core.runtime_sources import is_immutable_runtime_source, local_runtime_digest
 
 
-SCHEMA_VERSION = 3
+PLACEMENT_GROUP_SCHEMA_VERSION = 1
+RUNTIME_ORCHESTRATION_SCHEMA_VERSION = 3
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
@@ -55,12 +56,13 @@ FORBIDDEN_EXECUTABLES = {
 
 
 class OrchestrationError(ValueError):
-    """A runtime topology or group plan is incomplete or unsafe."""
+    """A runtime topology or placement-group plan is incomplete or unsafe."""
 
 
 @dataclasses.dataclass(frozen=True)
-class TaskAssignment:
-    member_id: str
+class Placement:
+    placement_id: str
+    node_id: str
     address: str
     task_id: str
     port_base: int
@@ -73,55 +75,52 @@ class TaskAssignment:
     device_uuids: tuple[str, ...]
     rdma_interface: str | None = None
 
+    def document(self) -> dict[str, Any]:
+        return {
+            "placement_id": self.placement_id,
+            "node_id": self.node_id,
+            "address": self.address,
+            "task_id": self.task_id,
+            "port_base": self.port_base,
+            "port_count": self.port_count,
+            "device_uuids": list(self.device_uuids),
+            **(
+                {"rdma_interface": self.rdma_interface}
+                if self.rdma_interface is not None
+                else {}
+            ),
+        }
+
 
 @dataclasses.dataclass(frozen=True)
-class GroupPlan:
-    group_id: str
+class PlacementGroupPlan:
+    placement_group_id: str
     service_id: str
     release: Mapping[str, Any]
-    strategy: str
-    failure_policy: str
     topology_sha256: str
     manifest_sha256: str
     runtime_digest: str
     runtime_execution_contract_sha256: str
-    endpoint_owner: str
+    endpoint_placement_id: str
     startup_order: tuple[tuple[str, ...], ...]
     connections: tuple[Mapping[str, Any], ...]
-    assignments: tuple[TaskAssignment, ...]
+    placements: tuple[Placement, ...]
 
     def document(self) -> dict[str, Any]:
-        """Return the immutable, engine-consumable group document."""
+        """Return the immutable placement-group document."""
         return {
-            "schema_version": SCHEMA_VERSION,
-            "group_id": self.group_id,
+            "schema_version": PLACEMENT_GROUP_SCHEMA_VERSION,
+            "placement_group_id": self.placement_group_id,
             "service_id": self.service_id,
             "release": json.loads(json.dumps(self.release)),
-            "strategy": self.strategy,
-            "failure_policy": self.failure_policy,
             "topology_sha256": self.topology_sha256,
             "manifest_sha256": self.manifest_sha256,
             "runtime_digest": self.runtime_digest,
             "runtime_execution_contract_sha256": self.runtime_execution_contract_sha256,
-            "endpoint_owner": self.endpoint_owner,
+            "endpoint_placement_id": self.endpoint_placement_id,
             "startup_order": [list(phase) for phase in self.startup_order],
             "connections": [dict(item) for item in self.connections],
-            "resources": [
-                {
-                    "node_id": assignment.member_id,
-                    "address": assignment.address,
-                    "task_id": assignment.task_id,
-                    "port_base": assignment.port_base,
-                    "port_count": assignment.port_count,
-                    "device_uuids": list(assignment.device_uuids),
-                    **(
-                        {"rdma_interface": assignment.rdma_interface}
-                        if assignment.rdma_interface is not None
-                        else {}
-                    ),
-                }
-                for assignment in self.assignments
-            ],
+            "placements": [placement.document() for placement in self.placements],
         }
 
 
@@ -133,7 +132,7 @@ def _canonical_bytes(value: Any) -> bytes:
 
 
 def validate_release_identity(value: Any) -> dict[str, Any]:
-    """Validate the immutable signed-catalog release bound to one group."""
+    """Validate the immutable signed-catalog release bound to a placement group."""
     required = {
         "logical_model", "candidate_id", "version", "source",
         "runtime_digest", "manifest_sha256", "engine_distribution", "model_uri",
@@ -141,21 +140,21 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
         "benchmark", "authors", "license", "native_execution",
     }
     if not isinstance(value, dict) or set(value) != required:
-        raise OrchestrationError("engine-group release identity is incomplete")
+        raise OrchestrationError("placement-group release identity is incomplete")
     for key in ("logical_model", "target_id"):
         if not isinstance(value.get(key), str) or not SAFE_NAME_RE.fullmatch(value[key]):
-            raise OrchestrationError(f"engine-group release {key} is invalid")
+            raise OrchestrationError(f"placement-group release {key} is invalid")
     candidate_id = value.get("candidate_id")
     if (
         not isinstance(candidate_id, str)
         or len(candidate_id.encode("utf-8")) > 512
         or CANDIDATE_ID_RE.fullmatch(candidate_id) is None
     ):
-        raise OrchestrationError("engine-group release candidate_id is invalid")
+        raise OrchestrationError("placement-group release candidate_id is invalid")
     if not isinstance(value.get("version"), str) or not VERSION_RE.fullmatch(value["version"]):
-        raise OrchestrationError("engine-group release version is invalid")
+        raise OrchestrationError("placement-group release version is invalid")
     if not is_immutable_runtime_source(value.get("source")):
-        raise OrchestrationError("engine-group release source is not immutable")
+        raise OrchestrationError("placement-group release source is not immutable")
     try:
         distribution = validate_engine_distribution(value.get("engine_distribution"))
     except EngineDistributionError as error:
@@ -163,7 +162,7 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
     native_execution = value.get("native_execution")
     if distribution["kind"] == "oci-container":
         if native_execution is not None:
-            raise OrchestrationError("OCI engine-group release cannot carry native execution")
+            raise OrchestrationError("OCI placement-group release cannot carry native execution")
     elif (
         not isinstance(native_execution, dict)
         or set(native_execution) != {"engine", "model", "artifacts", "cache", "serving"}
@@ -175,14 +174,14 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
         or not isinstance(native_execution.get("serving"), dict)
         or len(_canonical_bytes(native_execution)) > 12 * 1024
     ):
-        raise OrchestrationError("native engine-group execution projection is invalid")
+        raise OrchestrationError("native placement-group execution projection is invalid")
     for key in ("runtime_digest", "manifest_sha256", "target_contract_sha256"):
         if not isinstance(value.get(key), str) or not SHA256_RE.fullmatch(value[key]):
-            raise OrchestrationError(f"engine-group release {key} is invalid")
+            raise OrchestrationError(f"placement-group release {key} is invalid")
     source_digest = local_runtime_digest(value["source"])
     if source_digest is not None and source_digest != value["runtime_digest"]:
         raise OrchestrationError(
-            "engine-group local source differs from its runtime digest"
+            "placement-group local source differs from its runtime digest"
         )
     model_uri = value.get("model_uri")
     if (
@@ -190,7 +189,7 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
         or not model_uri.startswith("hf://")
         or len(model_uri.encode("utf-8")) > 512
     ):
-        raise OrchestrationError("engine-group release model URI is invalid")
+        raise OrchestrationError("placement-group release model URI is invalid")
     artifacts = value.get("artifacts")
     artifact_fields = {"name", "uri", "revision", "sha256"}
     if (
@@ -199,7 +198,7 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
         or len(artifacts) > 64
         or any(not isinstance(item, dict) or set(item) != artifact_fields for item in artifacts)
     ):
-        raise OrchestrationError("engine-group release artifacts are invalid")
+        raise OrchestrationError("placement-group release artifacts are invalid")
     artifact_names: set[str] = set()
     for artifact in artifacts:
         if (
@@ -219,13 +218,13 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
                 )
             )
         ):
-            raise OrchestrationError("engine-group release artifact identity is invalid")
+            raise OrchestrationError("placement-group release artifact identity is invalid")
         artifact_names.add(artifact["name"])
     if value.get("qualification") not in {"qualified", "unqualified"}:
-        raise OrchestrationError("engine-group release qualification is invalid")
+        raise OrchestrationError("placement-group release qualification is invalid")
     if value["qualification"] == "qualified" and source_digest is not None:
         raise OrchestrationError(
-            "qualified engine-group release requires a published OCI source"
+            "qualified placement-group release requires a published OCI source"
         )
     benchmark = value.get("benchmark")
     if (
@@ -244,7 +243,7 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
             )
         )
     ):
-        raise OrchestrationError("engine-group release benchmark identity is invalid")
+        raise OrchestrationError("placement-group release benchmark identity is invalid")
     authors = value.get("authors")
     qualified = value["qualification"] == "qualified"
     if (
@@ -259,153 +258,219 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
             for author in authors
         )
     ):
-        raise OrchestrationError("engine-group release authors are invalid")
+        raise OrchestrationError("placement-group release authors are invalid")
     license_value = value.get("license")
     if qualified and (
         not isinstance(license_value, str)
         or not license_value
         or len(license_value.encode("utf-8")) > 128
     ):
-        raise OrchestrationError("engine-group release license is invalid")
+        raise OrchestrationError("placement-group release license is invalid")
     if not qualified and license_value is not None and (
         not isinstance(license_value, str)
         or not license_value
         or len(license_value.encode("utf-8")) > 128
     ):
-        raise OrchestrationError("engine-group release license is invalid")
+        raise OrchestrationError("placement-group release license is invalid")
     return value
 
 
-def validate_group_document(value: Any) -> dict[str, Any]:
-    """Validate the immutable, engine-neutral resource plan for one group."""
+def _placement_id(
+    placement: Mapping[str, Any],
+    *,
+    service_id: str,
+    runtime_digest: str,
+    manifest_sha256: str,
+    topology_sha256: str,
+) -> str:
+    identity = {
+        "contract": "letsinfer-placement-v1",
+        "service_id": service_id,
+        "runtime_digest": runtime_digest,
+        "manifest_sha256": manifest_sha256,
+        "topology_sha256": topology_sha256,
+        **{key: placement[key] for key in placement if key != "placement_id"},
+    }
+    return hashlib.sha256(_canonical_bytes(identity)).hexdigest()[:32]
+
+
+def validate_placement_group_document(value: Any) -> dict[str, Any]:
+    """Validate one immutable atomic endpoint and its exact placements."""
+
     required = {
-        "schema_version", "group_id", "service_id", "release", "strategy",
-        "failure_policy", "topology_sha256", "manifest_sha256", "runtime_digest",
-        "runtime_execution_contract_sha256", "endpoint_owner", "startup_order",
-        "connections", "resources",
+        "schema_version",
+        "placement_group_id",
+        "service_id",
+        "release",
+        "topology_sha256",
+        "manifest_sha256",
+        "runtime_digest",
+        "runtime_execution_contract_sha256",
+        "endpoint_placement_id",
+        "startup_order",
+        "connections",
+        "placements",
     }
     if (
         not isinstance(value, dict)
         or set(value) != required
         or type(value.get("schema_version")) is not int
-        or value.get("schema_version") != SCHEMA_VERSION
+        or value.get("schema_version") != PLACEMENT_GROUP_SCHEMA_VERSION
     ):
-        raise OrchestrationError("engine-group document schema is invalid")
-    for key, label in (("group_id", "identity"), ("service_id", "service identity")):
+        raise OrchestrationError("placement-group document schema is invalid")
+    for key, label in (
+        ("placement_group_id", "identity"),
+        ("service_id", "service identity"),
+    ):
         if not isinstance(value.get(key), str) or not ID_RE.fullmatch(value[key]):
-            raise OrchestrationError(f"engine-group document {label} is invalid")
+            raise OrchestrationError(f"placement-group document {label} is invalid")
     release = validate_release_identity(value.get("release"))
-    strategy = value.get("strategy")
-    if strategy not in {"single", "parallel"}:
-        raise OrchestrationError("engine-group document strategy is invalid")
     for key in (
-        "topology_sha256", "manifest_sha256", "runtime_digest",
+        "topology_sha256",
+        "manifest_sha256",
+        "runtime_digest",
         "runtime_execution_contract_sha256",
     ):
         if not isinstance(value.get(key), str) or not SHA256_RE.fullmatch(value[key]):
-            raise OrchestrationError(f"engine-group document {key} is invalid")
+            raise OrchestrationError(f"placement-group document {key} is invalid")
     if (
         release["runtime_digest"] != value["runtime_digest"]
         or release["manifest_sha256"] != value["manifest_sha256"]
     ):
-        raise OrchestrationError("engine-group release does not match its sealed bytes")
-    resources = value.get("resources")
-    resource_fields = {
-        "node_id", "address", "task_id", "port_base", "port_count", "device_uuids",
+        raise OrchestrationError("placement-group release does not match its sealed bytes")
+
+    placements = value.get("placements")
+    placement_fields = {
+        "placement_id",
+        "node_id",
+        "address",
+        "task_id",
+        "port_base",
+        "port_count",
+        "device_uuids",
     }
     if (
-        not isinstance(resources, list)
-        or len(resources) not in range(1, 65)
+        not isinstance(placements, list)
+        or len(placements) not in range(1, 65)
         or any(
             not isinstance(item, dict)
-            or set(item) not in (resource_fields, resource_fields | {"rdma_interface"})
-            for item in resources
+            or set(item) not in (
+                placement_fields,
+                placement_fields | {"rdma_interface"},
+            )
+            for item in placements
         )
     ):
-        raise OrchestrationError("engine-group resources are invalid")
+        raise OrchestrationError("placement-group placements are invalid")
+
+    placement_ids: list[str] = []
     node_ids: list[str] = []
     task_ids: list[str] = []
     all_devices: list[str] = []
     rdma_nodes: list[str] = []
-    for item in resources:
-        node_id = item.get("node_id")
-        task_id = item.get("task_id")
-        address = item.get("address")
-        port_base = item.get("port_base")
-        port_count = item.get("port_count")
-        devices = item.get("device_uuids")
-        rdma_interface = item.get("rdma_interface")
+    for placement in placements:
+        placement_id = placement.get("placement_id")
+        node_id = placement.get("node_id")
+        task_id = placement.get("task_id")
+        address = placement.get("address")
+        port_base = placement.get("port_base")
+        port_count = placement.get("port_count")
+        devices = placement.get("device_uuids")
+        rdma_interface = placement.get("rdma_interface")
+        if not isinstance(placement_id, str) or not ID_RE.fullmatch(placement_id):
+            raise OrchestrationError("placement identity is invalid")
         if not isinstance(node_id, str) or not ID_RE.fullmatch(node_id):
-            raise OrchestrationError("engine-group resource node identity is invalid")
-        if not isinstance(task_id, str) or re.fullmatch(r"task-(?:0|[1-9][0-9]*)", task_id) is None:
-            raise OrchestrationError("engine-group resource task identity is invalid")
-        if not isinstance(address, str) or not address or len(address.encode("utf-8")) > 255:
-            raise OrchestrationError("engine-group resource address is invalid")
+            raise OrchestrationError("placement node identity is invalid")
         if (
-            not isinstance(port_base, int) or isinstance(port_base, bool)
-            or port_base not in range(1024, 65536)
-            or not isinstance(port_count, int) or isinstance(port_count, bool)
-            or port_count not in range(1, 33) or port_base + port_count > 65536
+            not isinstance(task_id, str)
+            or re.fullmatch(r"task-(?:0|[1-9][0-9]*)", task_id) is None
         ):
-            raise OrchestrationError("engine-group resource port range is invalid")
+            raise OrchestrationError("placement task identity is invalid")
+        if not isinstance(address, str) or not address or len(address.encode("utf-8")) > 255:
+            raise OrchestrationError("placement address is invalid")
         if (
-            not isinstance(devices, list) or not devices
+            not isinstance(port_base, int)
+            or isinstance(port_base, bool)
+            or port_base not in range(1024, 65536)
+            or not isinstance(port_count, int)
+            or isinstance(port_count, bool)
+            or port_count not in range(1, 33)
+            or port_base + port_count > 65536
+        ):
+            raise OrchestrationError("placement port range is invalid")
+        if (
+            not isinstance(devices, list)
+            or not devices
             or len(devices) != len(set(devices))
             or any(
-                not isinstance(device, str) or not device
-                or len(device.encode("utf-8")) > 255 for device in devices
+                not isinstance(device, str)
+                or not device
+                or len(device.encode("utf-8")) > 255
+                for device in devices
             )
         ):
-            raise OrchestrationError("engine-group resource device allocation is invalid")
+            raise OrchestrationError("placement device allocation is invalid")
+        if rdma_interface is not None and (
+            not isinstance(rdma_interface, str)
+            or not INTERFACE_RE.fullmatch(rdma_interface)
+        ):
+            raise OrchestrationError("placement RDMA interface is invalid")
+        if placement_id != _placement_id(
+            placement,
+            service_id=value["service_id"],
+            runtime_digest=value["runtime_digest"],
+            manifest_sha256=value["manifest_sha256"],
+            topology_sha256=value["topology_sha256"],
+        ):
+            raise OrchestrationError("placement identity does not match its contents")
+        placement_ids.append(placement_id)
         node_ids.append(node_id)
         task_ids.append(task_id)
         all_devices.extend(devices)
         if rdma_interface is not None:
-            if not isinstance(rdma_interface, str) or not INTERFACE_RE.fullmatch(
-                rdma_interface
-            ):
-                raise OrchestrationError(
-                    "engine-group resource RDMA interface is invalid"
-                )
             rdma_nodes.append(node_id)
-    expected_tasks = [f"task-{index}" for index in range(len(resources))]
+    expected_tasks = [f"task-{index}" for index in range(len(placements))]
     if (
-        len(node_ids) != len(set(node_ids))
+        len(placement_ids) != len(set(placement_ids))
+        or len(node_ids) != len(set(node_ids))
         or task_ids != expected_tasks
         or len(all_devices) != len(set(all_devices))
     ):
-        raise OrchestrationError("engine-group resources overlap or have unstable task identities")
+        raise OrchestrationError(
+            "placement-group placements overlap or have unstable identities"
+        )
+
     connections = value.get("connections")
     connection_fields = {"nodes", "kind", "speed_mbps", "mtu", "rdma"}
     if not isinstance(connections, list) or any(
         not isinstance(item, dict) or set(item) != connection_fields
         for item in connections
     ):
-        raise OrchestrationError("engine-group connections are invalid")
+        raise OrchestrationError("placement-group connections are invalid")
     pairs: list[tuple[str, str]] = []
-    for item in connections:
-        nodes = item["nodes"]
+    for connection in connections:
+        nodes = connection["nodes"]
         if (
             not isinstance(nodes, list)
             or len(nodes) != 2
             or nodes != sorted(nodes)
             or nodes[0] == nodes[1]
             or any(node not in node_ids for node in nodes)
-            or item["kind"] not in {"connectx", "ethernet", "wifi", "other"}
-            or not isinstance(item["rdma"], bool)
-            or not isinstance(item["speed_mbps"], int)
-            or isinstance(item["speed_mbps"], bool)
-            or item["speed_mbps"] < 0
-            or not isinstance(item["mtu"], int)
-            or isinstance(item["mtu"], bool)
-            or item["mtu"] <= 0
+            or connection["kind"] not in {"connectx", "ethernet", "wifi", "other"}
+            or not isinstance(connection["rdma"], bool)
+            or not isinstance(connection["speed_mbps"], int)
+            or isinstance(connection["speed_mbps"], bool)
+            or connection["speed_mbps"] < 0
+            or not isinstance(connection["mtu"], int)
+            or isinstance(connection["mtu"], bool)
+            or connection["mtu"] <= 0
         ):
-            raise OrchestrationError("engine-group connection fact is invalid")
+            raise OrchestrationError("placement-group connection fact is invalid")
         pairs.append((nodes[0], nodes[1]))
     if pairs != sorted(set(pairs)):
-        raise OrchestrationError("engine-group connections must be unique and ordered")
+        raise OrchestrationError("placement-group connections must be unique and ordered")
     if len(node_ids) == 1 and connections:
-        raise OrchestrationError("single-node engine groups cannot contain connections")
+        raise OrchestrationError("one-placement groups cannot contain connections")
     if len(node_ids) > 1:
         reached = {node_ids[0]}
         while True:
@@ -418,16 +483,16 @@ def validate_group_document(value: Any) -> dict[str, Any]:
                 break
             reached = expanded
         if reached != set(node_ids):
-            raise OrchestrationError("engine-group connections do not join every node")
+            raise OrchestrationError("placement-group connections do not join every node")
     if rdma_nodes:
-        if strategy != "parallel" or sorted(rdma_nodes) != sorted(node_ids):
+        if sorted(rdma_nodes) != sorted(node_ids):
             raise OrchestrationError(
-                "engine-group RDMA interfaces must bind every parallel node"
+                "placement-group RDMA interfaces must bind every placement"
             )
         rdma_pairs = [
-            (item["nodes"][0], item["nodes"][1])
-            for item in connections
-            if item["rdma"] is True
+            (connection["nodes"][0], connection["nodes"][1])
+            for connection in connections
+            if connection["rdma"] is True
         ]
         reached = {node_ids[0]}
         while True:
@@ -441,35 +506,49 @@ def validate_group_document(value: Any) -> dict[str, Any]:
             reached = expanded
         if reached != set(node_ids):
             raise OrchestrationError(
-                "engine-group RDMA connections do not join every node"
+                "placement-group RDMA connections do not join every placement"
             )
-    endpoint_owner = value.get("endpoint_owner")
-    if endpoint_owner not in task_ids:
-        raise OrchestrationError("engine-group endpoint owner is not an assigned task")
+
+    endpoint_placement_id = value.get("endpoint_placement_id")
+    if endpoint_placement_id not in placement_ids:
+        raise OrchestrationError(
+            "placement-group endpoint owner is not an assigned placement"
+        )
     startup_order = value.get("startup_order")
+    flattened = (
+        [placement_id for phase in startup_order for placement_id in phase]
+        if isinstance(startup_order, list)
+        and all(isinstance(phase, list) and phase for phase in startup_order)
+        else []
+    )
     if (
-        not isinstance(startup_order, list) or not startup_order
-        or any(not isinstance(phase, list) or not phase for phase in startup_order)
-        or sorted(task for phase in startup_order for task in phase) != sorted(task_ids)
-        or len([task for phase in startup_order for task in phase]) != len(task_ids)
+        not flattened
+        or sorted(flattened) != sorted(placement_ids)
+        or len(flattened) != len(set(flattened))
     ):
-        raise OrchestrationError("engine-group startup order must contain every task exactly once")
-    if strategy == "single":
-        if (
-            len(resources) != 1
-            or value.get("failure_policy") != "independent"
-            or endpoint_owner != "task-0"
-            or startup_order != [["task-0"]]
-        ):
-            raise OrchestrationError("single engine-group document is inconsistent")
-    elif value.get("failure_policy") != "whole-group":
-        raise OrchestrationError("parallel engine-group document must be atomic")
+        raise OrchestrationError(
+            "placement-group startup order must contain every placement exactly once"
+        )
+    if len(placements) == 1 and (
+        endpoint_placement_id != placement_ids[0]
+        or startup_order != [[placement_ids[0]]]
+    ):
+        raise OrchestrationError("one-placement group document is inconsistent")
+
     identity = {
-        "contract": "letsinfer-execution-group-v3",
-        **{key: value[key] for key in required - {"schema_version", "group_id"}},
+        "contract": "letsinfer-placement-group-v1",
+        **{
+            key: value[key]
+            for key in required - {"schema_version", "placement_group_id"}
+        },
     }
-    if hashlib.sha256(_canonical_bytes(identity)).hexdigest()[:32] != value["group_id"]:
-        raise OrchestrationError("engine-group document identity does not match its contents")
+    if (
+        hashlib.sha256(_canonical_bytes(identity)).hexdigest()[:32]
+        != value["placement_group_id"]
+    ):
+        raise OrchestrationError(
+            "placement-group document identity does not match its contents"
+        )
     return value
 
 
@@ -556,7 +635,7 @@ def validate_orchestration_contract(value: Any) -> dict[str, Any]:
         )
     if (
         type(value.get("schema_version")) is not int
-        or value.get("schema_version") != SCHEMA_VERSION
+        or value.get("schema_version") != RUNTIME_ORCHESTRATION_SCHEMA_VERSION
     ):
         raise OrchestrationError("unsupported runtime.orchestration schema_version")
     if value.get("failure_policy") != "whole-group":
@@ -624,7 +703,7 @@ def validate_target_binding(value: Any, placement: Mapping[str, Any]) -> dict[st
     return contract
 
 
-def bind_endpoint_member(
+def bind_endpoint_node(
     value: Any,
     member_ids: Sequence[str],
     endpoint_member_id: str,
@@ -640,7 +719,7 @@ def bind_endpoint_member(
         or endpoint_member_id not in members
     ):
         raise OrchestrationError(
-            "engine-group endpoint owner requires the selected main node"
+            "placement-group endpoint owner requires the selected main node"
         )
     endpoint_index = next(
         index
@@ -656,21 +735,18 @@ def bind_endpoint_member(
     return tuple(ordered)
 
 
-def validate_group_target_interconnect(
+def validate_placement_group_target_interconnect(
     value: Any,
     placement: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Bind generated group resources to the runtime target's link contract."""
-    group = validate_group_document(value)
+    group = validate_placement_group_document(value)
     if not isinstance(placement, Mapping) or set(placement) != {
         "strategy", "node_count", "interconnect"
     }:
         raise OrchestrationError("runtime target placement is invalid")
-    if (
-        group["strategy"] != placement["strategy"]
-        or len(group["resources"]) != placement["node_count"]
-    ):
-        raise OrchestrationError("engine-group plan differs from the release target")
+    if len(group["placements"]) != placement["node_count"]:
+        raise OrchestrationError("placement-group plan differs from the release target")
     interconnect = placement["interconnect"]
     if not isinstance(interconnect, Mapping) or set(interconnect) != {
         "kind", "rdma_required", "minimum_speed_mbps", "minimum_mtu"
@@ -699,7 +775,7 @@ def validate_group_target_interconnect(
             and connection["mtu"] >= interconnect["minimum_mtu"]
         ):
             matching_pairs.append(tuple(connection["nodes"]))
-    node_ids = [resource["node_id"] for resource in group["resources"]]
+    node_ids = [item["node_id"] for item in group["placements"]]
     if len(node_ids) > 1:
         reached = {node_ids[0]}
         while True:
@@ -713,12 +789,12 @@ def validate_group_target_interconnect(
             reached = expanded
         if reached != set(node_ids):
             raise OrchestrationError(
-                "engine-group connections do not satisfy the release target"
+                "placement-group connections do not satisfy the release target"
             )
     bound_nodes = {
-        resource["node_id"]
-        for resource in group["resources"]
-        if "rdma_interface" in resource
+        item["node_id"]
+        for item in group["placements"]
+        if "rdma_interface" in item
     }
     if interconnect["rdma_required"]:
         if bound_nodes != set(node_ids):
@@ -740,7 +816,107 @@ def orchestration_contract_sha256(value: Mapping[str, Any] | None) -> str:
     return hashlib.sha256(_canonical_bytes(document)).hexdigest()
 
 
-def build_group_plan(
+def _bound_placement(
+    *,
+    service_id: str,
+    runtime_digest: str,
+    manifest_sha256: str,
+    topology_sha256: str,
+    node_id: str,
+    address: str,
+    task: Mapping[str, Any],
+    port_base: int,
+    device_uuids: Sequence[str],
+    endpoint_owner: bool,
+    rdma_interface: str | None = None,
+) -> Placement:
+    placement_document = {
+        "node_id": node_id,
+        "address": address,
+        "task_id": task["task_id"],
+        "port_base": port_base,
+        "port_count": task["port_count"],
+        "device_uuids": list(device_uuids),
+        **(
+            {"rdma_interface": rdma_interface}
+            if rdma_interface is not None
+            else {}
+        ),
+    }
+    return Placement(
+        placement_id=_placement_id(
+            placement_document,
+            service_id=service_id,
+            runtime_digest=runtime_digest,
+            manifest_sha256=manifest_sha256,
+            topology_sha256=topology_sha256,
+        ),
+        node_id=node_id,
+        address=address,
+        task_id=task["task_id"],
+        port_base=port_base,
+        port_count=task["port_count"],
+        launcher=task["launcher"],
+        command=tuple(task.get("command", ())),
+        environment=_environment(
+            task["environment"],
+            f"runtime.orchestration.tasks[{task['task_id']}].environment",
+        ),
+        endpoint_owner=endpoint_owner,
+        readiness=_readiness(
+            task["readiness"],
+            task["launcher"],
+            f"runtime.orchestration.tasks[{task['task_id']}].readiness",
+        ),
+        device_uuids=tuple(device_uuids),
+        rdma_interface=rdma_interface,
+    )
+
+
+def _placement_group_plan(
+    *,
+    service_id: str,
+    release: Mapping[str, Any],
+    topology_sha256: str,
+    manifest_sha256: str,
+    runtime_digest: str,
+    runtime_execution_contract_sha256: str,
+    endpoint_placement_id: str,
+    startup_order: Sequence[Sequence[str]],
+    connections: Sequence[Mapping[str, Any]],
+    placements: Sequence[Placement],
+) -> PlacementGroupPlan:
+    identity = {
+        "contract": "letsinfer-placement-group-v1",
+        "service_id": service_id,
+        "release": dict(release),
+        "topology_sha256": topology_sha256,
+        "manifest_sha256": manifest_sha256,
+        "runtime_digest": runtime_digest,
+        "runtime_execution_contract_sha256": runtime_execution_contract_sha256,
+        "endpoint_placement_id": endpoint_placement_id,
+        "startup_order": [list(phase) for phase in startup_order],
+        "connections": [dict(connection) for connection in connections],
+        "placements": [placement.document() for placement in placements],
+    }
+    plan = PlacementGroupPlan(
+        placement_group_id=hashlib.sha256(_canonical_bytes(identity)).hexdigest()[:32],
+        service_id=service_id,
+        release=dict(release),
+        topology_sha256=topology_sha256,
+        manifest_sha256=manifest_sha256,
+        runtime_digest=runtime_digest,
+        runtime_execution_contract_sha256=runtime_execution_contract_sha256,
+        endpoint_placement_id=endpoint_placement_id,
+        startup_order=tuple(tuple(phase) for phase in startup_order),
+        connections=tuple(dict(connection) for connection in connections),
+        placements=tuple(placements),
+    )
+    validate_placement_group_document(plan.document())
+    return plan
+
+
+def build_placement_group_plan(
     value: Any,
     *,
     member_ids: Sequence[str],
@@ -755,156 +931,92 @@ def build_group_plan(
     connections: Sequence[Mapping[str, Any]],
     member_rdma_interfaces: Mapping[str, str] | None = None,
     endpoint_member_id: str | None = None,
-) -> GroupPlan:
-    """Expand one validated runtime contract across an authenticated placement."""
+) -> PlacementGroupPlan:
+    """Bind runtime-owned tasks to exact Core placements and one endpoint."""
+
     contract = validate_orchestration_contract(value)
     safe_release = validate_release_identity(dict(release))
-    if not isinstance(service_id, str) or not ID_RE.fullmatch(service_id):
-        raise OrchestrationError("group service identity is invalid")
+    members = tuple(member_ids)
+    if (
+        not isinstance(service_id, str)
+        or not ID_RE.fullmatch(service_id)
+        or len(members) != len(contract["tasks"])
+        or len(set(members)) != len(members)
+        or any(not isinstance(node, str) or not ID_RE.fullmatch(node) for node in members)
+    ):
+        raise OrchestrationError("placement-group node assignments are invalid")
+    if set(member_addresses) != set(members):
+        raise OrchestrationError("placement-group node addresses are incomplete")
+    if set(member_port_bases) != set(members):
+        raise OrchestrationError("placement-group port assignments are incomplete")
+    if set(member_device_uuids) != set(members):
+        raise OrchestrationError("placement-group device assignments are incomplete")
     if (
         safe_release["runtime_digest"] != runtime_digest
         or safe_release["manifest_sha256"] != manifest_sha256
     ):
-        raise OrchestrationError("group release identity does not match runtime bytes")
-    members = tuple(member_ids)
-    if (
-        len(members) != len(contract["tasks"])
-        or len(set(members)) != len(members)
-        or any(not isinstance(item, str) or not ID_RE.fullmatch(item) for item in members)
-    ):
-        raise OrchestrationError("group members do not match the runtime member count")
-    for value_hash, label in (
+        raise OrchestrationError("placement-group release identity changed")
+    for digest, label in (
         (topology_sha256, "topology"),
         (manifest_sha256, "manifest"),
         (runtime_digest, "runtime"),
     ):
-        if not isinstance(value_hash, str) or not SHA256_RE.fullmatch(value_hash):
-            raise OrchestrationError(f"group {label} identity must be a SHA-256")
-    if set(member_addresses) != set(members) or any(
-        not isinstance(member_addresses[item], str)
-        or not member_addresses[item]
-        or len(member_addresses[item].encode("utf-8")) > 255
-        for item in members
-    ):
-        raise OrchestrationError("group member addresses are incomplete or invalid")
-    if set(member_port_bases) != set(members):
-        raise OrchestrationError("group member port assignments are incomplete")
-    if set(member_device_uuids) != set(members):
-        raise OrchestrationError("group member device assignments are incomplete")
-    rdma_interfaces = dict(member_rdma_interfaces or {})
-    if rdma_interfaces and (
-        set(rdma_interfaces) != set(members)
-        or any(
-            not isinstance(name, str) or not INTERFACE_RE.fullmatch(name)
-            for name in rdma_interfaces.values()
-        )
-    ):
-        raise OrchestrationError("group member RDMA assignments are invalid")
-    if any(
-        not isinstance(member_device_uuids[item], Sequence)
-        or isinstance(member_device_uuids[item], (str, bytes))
-        or not member_device_uuids[item]
-        or len(member_device_uuids[item]) != len(set(member_device_uuids[item]))
-        or any(
-            not isinstance(device_uuid, str)
-            or not device_uuid
-            or len(device_uuid.encode("utf-8")) > 255
-            for device_uuid in member_device_uuids[item]
-        )
-        for item in members
-    ):
-        raise OrchestrationError("group member device assignments are invalid")
-
-    assignments: list[TaskAssignment] = []
-    for index, member_id in enumerate(members):
-        task = contract["tasks"][index]
-        port_base = member_port_bases[member_id]
-        port_count = task["port_count"]
-        if (
-            not isinstance(port_base, int)
-            or isinstance(port_base, bool)
-            or port_base not in range(1024, 65536)
-            or port_base + port_count > 65536
-        ):
-            raise OrchestrationError("group member port range is invalid")
-        assignments.append(
-            TaskAssignment(
-                member_id=member_id,
-                address=member_addresses[member_id],
-                task_id=task["task_id"],
-                port_base=port_base,
-                port_count=port_count,
-                launcher=task["launcher"],
-                command=tuple(task.get("command", ())),
-                environment=_environment(
-                    task["environment"],
-                    f"runtime.orchestration.tasks[{index}].environment",
-                ),
-                endpoint_owner=task["task_id"] == contract["endpoint_owner"],
-                readiness=_readiness(
-                    task["readiness"],
-                    task["launcher"],
-                    f"runtime.orchestration.tasks[{index}].readiness",
-                ),
-                device_uuids=tuple(member_device_uuids[member_id]),
-                rdma_interface=rdma_interfaces.get(member_id),
-            )
-        )
-    if endpoint_member_id is not None:
-        owners = [item for item in assignments if item.endpoint_owner]
-        if len(owners) != 1 or owners[0].member_id != endpoint_member_id:
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             raise OrchestrationError(
-                "engine-group endpoint owner is not assigned to the main node"
+                f"placement-group {label} identity must be a SHA-256"
             )
-    safe_connections = [dict(item) for item in connections]
-    identity = {
-        "contract": "letsinfer-execution-group-v3",
-        "service_id": service_id,
-        "release": safe_release,
-        "strategy": "parallel",
-        "failure_policy": contract["failure_policy"],
-        "topology_sha256": topology_sha256,
-        "manifest_sha256": manifest_sha256,
-        "runtime_digest": runtime_digest,
-        "runtime_execution_contract_sha256": orchestration_contract_sha256(contract),
-        "endpoint_owner": contract["endpoint_owner"],
-        "startup_order": contract["startup_order"],
-        "connections": safe_connections,
-        "resources": [
-            {
-                "node_id": item.member_id, "address": item.address,
-                "task_id": item.task_id, "port_base": item.port_base,
-                "port_count": item.port_count,
-                "device_uuids": list(item.device_uuids),
-                **(
-                    {"rdma_interface": item.rdma_interface}
-                    if item.rdma_interface is not None
-                    else {}
-                ),
-            }
-            for item in assignments
-        ],
-    }
-    plan = GroupPlan(
-        group_id=hashlib.sha256(_canonical_bytes(identity)).hexdigest()[:32],
+    rdma_interfaces = dict(member_rdma_interfaces or {})
+    if rdma_interfaces and set(rdma_interfaces) != set(members):
+        raise OrchestrationError("placement-group RDMA assignments are incomplete")
+
+    placements = tuple(
+        _bound_placement(
+            service_id=service_id,
+            runtime_digest=runtime_digest,
+            manifest_sha256=manifest_sha256,
+            topology_sha256=topology_sha256,
+            node_id=node_id,
+            address=member_addresses[node_id],
+            task=contract["tasks"][index],
+            port_base=member_port_bases[node_id],
+            device_uuids=member_device_uuids[node_id],
+            endpoint_owner=(
+                contract["tasks"][index]["task_id"] == contract["endpoint_owner"]
+            ),
+            rdma_interface=rdma_interfaces.get(node_id),
+        )
+        for index, node_id in enumerate(members)
+    )
+    endpoint_placements = [
+        placement for placement in placements if placement.endpoint_owner
+    ]
+    if len(endpoint_placements) != 1 or (
+        endpoint_member_id is not None
+        and endpoint_placements[0].node_id != endpoint_member_id
+    ):
+        raise OrchestrationError(
+            "placement-group endpoint is not assigned to the selected main node"
+        )
+    by_task = {placement.task_id: placement.placement_id for placement in placements}
+    startup_order = [
+        [by_task[task_id] for task_id in phase]
+        for phase in contract["startup_order"]
+    ]
+    return _placement_group_plan(
         service_id=service_id,
         release=safe_release,
-        strategy="parallel",
-        failure_policy=contract["failure_policy"],
         topology_sha256=topology_sha256,
         manifest_sha256=manifest_sha256,
         runtime_digest=runtime_digest,
         runtime_execution_contract_sha256=orchestration_contract_sha256(contract),
-        endpoint_owner=contract["endpoint_owner"],
-        startup_order=tuple(tuple(phase) for phase in contract["startup_order"]),
-        connections=tuple(safe_connections),
-        assignments=tuple(assignments),
+        endpoint_placement_id=endpoint_placements[0].placement_id,
+        startup_order=startup_order,
+        connections=connections,
+        placements=placements,
     )
-    validate_group_document(plan.document())
-    return plan
 
 
-def build_single_group_plan(
+def build_single_placement_group_plan(
     *,
     member_id: str,
     member_address: str,
@@ -916,108 +1028,39 @@ def build_single_group_plan(
     release: Mapping[str, Any],
     port_base: int,
     port_count: int = 1,
-) -> GroupPlan:
-    """Build one ordinary engine as a one-endpoint, one-member group."""
+) -> PlacementGroupPlan:
+    """Build one placement and its atomic placement group."""
+
     safe_release = validate_release_identity(dict(release))
-    if not isinstance(service_id, str) or not ID_RE.fullmatch(service_id):
-        raise OrchestrationError("single group service identity is invalid")
-    if (
-        safe_release["runtime_digest"] != runtime_digest
-        or safe_release["manifest_sha256"] != manifest_sha256
-    ):
-        raise OrchestrationError("single group release identity does not match runtime bytes")
-    if not isinstance(member_id, str) or not ID_RE.fullmatch(member_id):
-        raise OrchestrationError("single group member identity is invalid")
-    if (
-        not isinstance(member_address, str)
-        or not member_address
-        or len(member_address.encode("utf-8")) > 255
-    ):
-        raise OrchestrationError("single group member address is invalid")
-    if (
-        not isinstance(device_uuids, Sequence)
-        or isinstance(device_uuids, (str, bytes))
-        or not device_uuids
-        or len(device_uuids) != len(set(device_uuids))
-        or any(
-            not isinstance(device_uuid, str)
-            or not device_uuid
-            or len(device_uuid.encode("utf-8")) > 255
-            for device_uuid in device_uuids
-        )
-    ):
-        raise OrchestrationError("single group device assignment is invalid")
-    for value_hash, label in (
-        (topology_sha256, "topology"),
-        (manifest_sha256, "manifest"),
-        (runtime_digest, "runtime"),
-    ):
-        if not isinstance(value_hash, str) or not SHA256_RE.fullmatch(value_hash):
-            raise OrchestrationError(f"single group {label} identity must be a SHA-256")
-    if (
-        not isinstance(port_base, int)
-        or isinstance(port_base, bool)
-        or port_base not in range(1024, 65536)
-    ):
-        raise OrchestrationError("single group port is invalid")
-    if (
-        not isinstance(port_count, int)
-        or isinstance(port_count, bool)
-        or port_count not in range(1, 33)
-        or port_base + port_count > 65536
-    ):
-        raise OrchestrationError("single group port count is invalid")
-    assignment = TaskAssignment(
-        member_id=member_id,
-        address=member_address,
-        task_id="task-0",
-        port_base=port_base,
-        port_count=port_count,
-        launcher="manifest",
-        command=(),
-        environment=(),
-        endpoint_owner=True,
-        readiness={"kind": "manifest"},
-        device_uuids=tuple(device_uuids),
-    )
-    identity = {
-        "contract": "letsinfer-execution-group-v3",
-        "service_id": service_id,
-        "release": safe_release,
-        "strategy": "single",
-        "failure_policy": "independent",
-        "topology_sha256": topology_sha256,
-        "manifest_sha256": manifest_sha256,
-        "runtime_digest": runtime_digest,
-        "runtime_execution_contract_sha256": orchestration_contract_sha256(None),
-        "endpoint_owner": "task-0",
-        "startup_order": [["task-0"]],
-        "connections": [],
-        "resources": [
-            {
-                "node_id": member_id,
-                "address": member_address,
-                "task_id": "task-0",
-                "port_base": port_base,
-                "port_count": port_count,
-                "device_uuids": list(device_uuids),
-            }
-        ],
+    task = {
+        "task_id": "task-0",
+        "launcher": "manifest",
+        "command": [],
+        "environment": {},
+        "port_count": port_count,
+        "readiness": {"kind": "manifest"},
     }
-    plan = GroupPlan(
-        group_id=hashlib.sha256(_canonical_bytes(identity)).hexdigest()[:32],
+    placement = _bound_placement(
+        service_id=service_id,
+        runtime_digest=runtime_digest,
+        manifest_sha256=manifest_sha256,
+        topology_sha256=topology_sha256,
+        node_id=member_id,
+        address=member_address,
+        task=task,
+        port_base=port_base,
+        device_uuids=device_uuids,
+        endpoint_owner=True,
+    )
+    return _placement_group_plan(
         service_id=service_id,
         release=safe_release,
-        strategy="single",
-        failure_policy="independent",
         topology_sha256=topology_sha256,
         manifest_sha256=manifest_sha256,
         runtime_digest=runtime_digest,
         runtime_execution_contract_sha256=orchestration_contract_sha256(None),
-        endpoint_owner="task-0",
-        startup_order=(("task-0",),),
+        endpoint_placement_id=placement.placement_id,
+        startup_order=((placement.placement_id,),),
         connections=(),
-        assignments=(assignment,),
+        placements=(placement,),
     )
-    validate_group_document(plan.document())
-    return plan

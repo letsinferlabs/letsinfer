@@ -1,7 +1,7 @@
 # Let's Infer for iOS
 
 This is the native iPhone/iPad Let's Infer node. It implements the code-less
-`letsinfer node add` LAN flow and can host an Engine group while the app is
+`letsinfer node add` LAN flow and can host a placement group while the app is
 active. The default build embeds llama.cpp; the optional MLC build embeds MLC
 LLM's Metal runtime and a compiled model library. Metal is the accelerator
 backend, not a separate Engine.
@@ -23,7 +23,7 @@ backend, not a separate Engine.
   `/v1/chat/completions`, `/v1/letsinfer/token-count`, and
   `/v1/letsinfer/telemetry`;
 - thermal, low-battery, Low Power Mode, and app-lifecycle admission gates;
-- Engine group `stage`, `start`, `recover`, `stop`, `remove`, and status jobs
+- placement-group `stage`, `start`, `recover`, `stop`, `remove`, and status jobs
   for the two exact embedded runtime candidates;
 - one last signed offline fact before background suspension when iOS grants
   the normal transition window;
@@ -33,7 +33,7 @@ backend, not a separate Engine.
   borderless rounded activity surfaces, and the canonical eight-color palette.
 
 The app never attempts to run a Linux Engine OCI. Runtime schema 6 carries an
-explicit `embedded-application` distribution, and group-job protocol 2 sends a
+explicit `embedded-application` distribution, and placement-job protocol 1 sends a
 bounded native execution projection to the enrolled app over its existing mTLS
 control channel. Stage fails closed unless the matching embedded Engine and
 exact model are already loaded on the device.
@@ -114,7 +114,7 @@ libraries, model code, weights, and Xcode projects remain outside Git.
 5. Select the iPhone/iPad and tap **Accept** in the app.
 
 The main records an active child and receives signed facts. Installing either
-unqualified iOS runtime candidate can then place its one-member Engine group on
+unqualified iOS runtime candidate can then create its one-placement group on
 the device after the matching model is loaded. The direct Engine endpoint is
 also available at `https://<device-address>:18000`; use the displayed
 certificate SHA-256 and bearer key rather than disabling TLS verification.
@@ -129,7 +129,7 @@ app foregrounded, which is the supported inference deployment mode.
 
 Inference pauses at serious/critical thermal state, in Low Power Mode, or below
 15% battery while unplugged. `/health` becomes unavailable during those states;
-the group becomes unavailable rather than being silently moved to another
+the placement group becomes unavailable rather than being silently moved to another
 runtime. The model and verified download remain on disk for explicit recovery.
 
 ## Security boundary
