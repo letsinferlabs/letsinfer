@@ -268,20 +268,21 @@ def facts_sha256(value: dict[str, Any]) -> str:
 
 
 @dataclasses.dataclass(frozen=True)
-class Placement:
-    strategy: str
-    member_ids: tuple[str, ...]
+class ResolvedPlacementGroup:
+    """Nodes and devices selected before opaque runtime tasks are bound."""
+
+    node_ids: tuple[str, ...]
     device_uuids: Mapping[str, tuple[str, ...]]
     topology_sha256: str
     reason: str
 
 
 @dataclasses.dataclass(frozen=True)
-class TargetPlacement:
+class ResolvedTargetPlacementGroup:
     """The sole highest-priority catalog target that fits this site."""
 
     target_id: str
-    placement: Placement
+    placement_group: ResolvedPlacementGroup
 
 
 class TopologyGraph:
@@ -442,39 +443,40 @@ class TopologyGraph:
                     queue.append(candidate)
         return visited == required
 
-    def placement_available(
+    def placement_group_available(
         self,
-        members: Sequence[str],
+        node_ids: Sequence[str],
         *,
-        strategy: str,
         interconnect: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Return whether an existing placement is safe on the current graph."""
+        """Return whether every placement in one group remains available."""
+
         if (
-            strategy not in {"single", "parallel"}
-            or not members
-            or len(members) != len(set(members))
-            or any(member_id not in self.members for member_id in members)
+            not node_ids
+            or len(node_ids) != len(set(node_ids))
+            or any(node_id not in self.members for node_id in node_ids)
             or any(
-                not member_available(self.members[member_id]["health"])
-                for member_id in members
+                not member_available(self.members[node_id]["health"])
+                for node_id in node_ids
             )
         ):
             return False
-        if strategy != "parallel" or len(members) == 1:
+        if len(node_ids) == 1:
             return True
         if not isinstance(interconnect, Mapping):
-            raise TopologyError(
-                "parallel placement has no interconnect contract"
-            )
-        return self._connected(tuple(members), interconnect)
+            raise TopologyError("multi-node placement group has no interconnect contract")
+        return self._connected(tuple(node_ids), interconnect)
 
-    def resolve(self, target: Mapping[str, Any], *, coordinator_id: str) -> Placement:
+    def resolve(
+        self, target: Mapping[str, Any], *, coordinator_id: str
+    ) -> ResolvedPlacementGroup:
         placement = target["placement"]
         compatible = sorted(
             member_id for member_id, facts in self.members.items() if self._member_matches(facts, target)
         )
         strategy = placement["strategy"]
+        if strategy not in {"single", "parallel"}:
+            raise TopologyError(f"target {target['id']} placement strategy is invalid")
         count = placement["node_count"]
         if strategy == "single":
             count = 1
@@ -499,21 +501,20 @@ class TopologyGraph:
             member_id: self.available_devices(member_id)[:devices_per_member]
             for member_id in selected
         }
-        return Placement(
-            strategy=strategy,
-            member_ids=selected,
+        return ResolvedPlacementGroup(
+            node_ids=selected,
             device_uuids=device_uuids,
             topology_sha256=self.sha256(),
-            reason=f"qualified {strategy} target {target['id']}",
+            reason=f"qualified target {target['id']}",
         )
 
     def engine_addresses(
         self,
-        placement: Placement,
+        placement_group: ResolvedPlacementGroup,
         interconnect: Mapping[str, Any],
     ) -> dict[str, str]:
         """Select one verified engine-traffic address on each distributed member."""
-        interfaces = self.engine_interfaces(placement, interconnect)
+        interfaces = self.engine_interfaces(placement_group, interconnect)
         result: dict[str, str] = {}
         for member_id, interface_name in interfaces.items():
             facts = self.members[member_id]
@@ -540,7 +541,7 @@ class TopologyGraph:
             addresses.sort(key=lambda item: (item.version != 4, int(item)))
             if not addresses:
                 raise TopologyError(
-                    f"parallel member {member_id} has no usable engine address"
+                    f"placement-group node {member_id} has no usable engine address"
                 )
             chosen = str(addresses[0])
             result[member_id] = (
@@ -550,21 +551,21 @@ class TopologyGraph:
 
     def engine_interfaces(
         self,
-        placement: Placement,
+        placement_group: ResolvedPlacementGroup,
         interconnect: Mapping[str, Any],
     ) -> dict[str, str]:
-        """Select one verified engine-traffic interface on every group member."""
+        """Select one verified engine-traffic interface on every group node."""
         if (
-            placement.strategy != "parallel"
-            or placement.topology_sha256 != self.sha256()
-            or set(placement.member_ids) - set(self.members)
+            len(placement_group.node_ids) < 2
+            or placement_group.topology_sha256 != self.sha256()
+            or set(placement_group.node_ids) - set(self.members)
         ):
             raise TopologyError(
-                "engine interfaces require this exact parallel placement"
+                "engine interfaces require this exact multi-node placement group"
             )
-        selected = set(placement.member_ids)
+        selected = set(placement_group.node_ids)
         result: dict[str, str] = {}
-        for member_id in placement.member_ids:
+        for member_id in placement_group.node_ids:
             facts = self.members[member_id]
             links = [
                 link
@@ -577,7 +578,7 @@ class TopologyGraph:
             interfaces = {link["interface"] for link in links}
             if not links or len(interfaces) != 1:
                 raise TopologyError(
-                    f"parallel member {member_id} has no single verified engine interface"
+                    f"placement-group node {member_id} has no single verified engine interface"
                 )
             interface_name = next(iter(interfaces))
             interface = next(
@@ -592,19 +593,23 @@ class TopologyGraph:
                 raise TopologyError("verified engine interface disappeared from member facts")
             if interconnect.get("rdma_required") is True and interface["rdma"] is not True:
                 raise TopologyError(
-                    f"parallel member {member_id} engine interface is not RDMA-capable"
+                    f"placement-group node {member_id} engine interface is not RDMA-capable"
                 )
             result[member_id] = interface_name
         return result
 
-    def placement_connections(self, placement: Placement) -> list[dict[str, Any]]:
-        """Return the verified link facts connecting one exact placement."""
+    def placement_group_connections(
+        self, placement_group: ResolvedPlacementGroup
+    ) -> list[dict[str, Any]]:
+        """Return verified link facts connecting one exact placement group."""
         if (
-            placement.topology_sha256 != self.sha256()
-            or set(placement.member_ids) - set(self.members)
+            placement_group.topology_sha256 != self.sha256()
+            or set(placement_group.node_ids) - set(self.members)
         ):
-            raise TopologyError("connection facts require this exact placement")
-        selected = set(placement.member_ids)
+            raise TopologyError(
+                "connection facts require this exact placement group"
+            )
+        selected = set(placement_group.node_ids)
         return [
             {
                 "nodes": list(key),
@@ -622,7 +627,7 @@ class TopologyGraph:
         targets: Mapping[str, Mapping[str, Any]],
         *,
         coordinator_id: str,
-    ) -> TargetPlacement:
+    ) -> ResolvedTargetPlacementGroup:
         """Select one catalog target using the product placement policy.
 
         Parallel and single-member targets are considered in that order. More
@@ -633,7 +638,7 @@ class TopologyGraph:
         if not targets:
             raise TopologyError("catalog model has no target variants")
         priority = {"parallel": 0, "single": 1}
-        candidates: list[TargetPlacement] = []
+        candidates: list[tuple[int, ResolvedTargetPlacementGroup]] = []
         failures: list[str] = []
         for target_id in sorted(targets):
             target = targets[target_id]
@@ -642,13 +647,19 @@ class TopologyGraph:
                     f"catalog target key {target_id} differs from target contract identity"
                 )
             try:
+                strategy = target["placement"]["strategy"]
                 candidates.append(
-                    TargetPlacement(
-                        target_id=target_id,
-                        placement=self.resolve(target, coordinator_id=coordinator_id),
+                    (
+                        priority[strategy],
+                        ResolvedTargetPlacementGroup(
+                            target_id=target_id,
+                            placement_group=self.resolve(
+                                target, coordinator_id=coordinator_id
+                            ),
+                        ),
                     )
                 )
-            except TopologyError as error:
+            except (KeyError, TopologyError) as error:
                 failures.append(f"{target_id}: {error}")
         if not candidates:
             detail = "; ".join(failures)
@@ -656,13 +667,11 @@ class TopologyGraph:
                 "catalog has no topology-compatible target"
                 + (f" ({detail})" if detail else "")
             )
-        best_priority = min(
-            priority[candidate.placement.strategy] for candidate in candidates
-        )
+        best_priority = min(candidate_priority for candidate_priority, _ in candidates)
         best = [
             candidate
-            for candidate in candidates
-            if priority[candidate.placement.strategy] == best_priority
+            for candidate_priority, candidate in candidates
+            if candidate_priority == best_priority
         ]
         if len(best) != 1:
             choices = ", ".join(candidate.target_id for candidate in best)

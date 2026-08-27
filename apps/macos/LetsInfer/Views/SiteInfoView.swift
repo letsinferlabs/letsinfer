@@ -33,7 +33,7 @@ struct SiteInfoView: View {
                     row("Access role", siteView.controller.role.capitalized)
                 }
                 Section("Main and children") {
-                    ForEach(siteView.site.members) { member in
+                    ForEach(siteView.site.nodes) { member in
                         let telemetry = memberTelemetry(member.memberID)
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
@@ -258,7 +258,7 @@ struct SiteInfoView: View {
             }
             Button("Cancel", role: .cancel) { memberToRemove = nil }
         } message: { member in
-            Text("The child must not be part of a running group. Its model and cache data remain on that node.")
+            Text("The child must not own a placement in an installed placement group. Its model and cache data remain on that node.")
         }
         .sheet(item: $editingKey) { key in
             APIKeyPolicyEditor(key: key) { policy in
@@ -310,20 +310,18 @@ struct SiteInfoView: View {
                     ProgressView().controlSize(.small)
                 }
             }
-            if envelope.site.activeMemberCount > 1 {
+            if envelope.site.activeNodeCount > 1 {
                 ForEach(envelope.site.services) { service in
                     DisclosureGroup {
-                        ForEach(service.groups.sorted { $0.groupID < $1.groupID }) { group in
+                        ForEach(service.placementGroups.sorted { $0.placementGroupID < $1.placementGroupID }) { placementGroup in
                             LabeledContent(
-                                group.members.compactMap { machineID in
-                                    envelope.site.members.first {
-                                        $0.memberID == machineID
+                                placementGroup.placements.compactMap { placement in
+                                    envelope.site.nodes.first {
+                                        $0.memberID == placement.nodeID
                                     }?.displayName
                                 }.joined(separator: " + ")
                             ) {
-                                Text(
-                                    "\(group.strategy.capitalized) · \(group.state.capitalized)"
-                                )
+                                Text(placementGroup.state.capitalized)
                                 .font(.caption.monospaced())
                             }
                         }
@@ -332,8 +330,9 @@ struct SiteInfoView: View {
                             Text(service.model)
                             Spacer()
                             Text(
-                                service.groups.count == 1
-                                    ? "1 group" : "\(service.groups.count) replicas"
+                                service.placementGroups.count == 1
+                                    ? "1 placement group"
+                                    : "\(service.placementGroups.count) placement groups"
                             )
                             .foregroundStyle(.secondary)
                             Button("Plan placement") {

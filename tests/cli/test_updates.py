@@ -191,7 +191,7 @@ class UpdateManagerTests(unittest.TestCase):
         self.assertRegex(first, r"^[0-9a-f]{64}$")
         self.assertEqual(first, second)
 
-    def test_update_components_use_engine_group_releases_without_service_json(self):
+    def test_update_components_use_placement_group_releases_without_service_json(self):
         identity_path = pathlib.Path(self.temporary.name) / "site.json"
         identity_path.write_text("{}\n", encoding="utf-8")
         placement_id = "a" * 32
@@ -214,15 +214,15 @@ class UpdateManagerTests(unittest.TestCase):
                 "model": release["logical_model"],
             }
         ]
-        store.engine_groups.return_value = [
+        store.placement_groups.return_value = [
             {
-                "placement_id": placement_id,
+                "model": release["logical_model"],
                 "state": "running",
                 "desired_state": "running",
                 "plan": {"release": release},
             },
             {
-                "placement_id": placement_id,
+                "model": release["logical_model"],
                 "state": "stopped",
                 "desired_state": "stopped",
                 "plan": {"release": release},
@@ -280,7 +280,7 @@ class UpdateManagerTests(unittest.TestCase):
             placements.append({"placement_id": placement_id, "model": model})
             groups.append(
                 {
-                    "placement_id": placement_id,
+                    "model": model,
                     "state": "running",
                     "desired_state": "running",
                     "plan": {"release": release},
@@ -288,7 +288,7 @@ class UpdateManagerTests(unittest.TestCase):
             )
         store = mock.MagicMock()
         store.placements.return_value = placements
-        store.engine_groups.return_value = groups
+        store.placement_groups.return_value = groups
         store_context = mock.MagicMock()
         store_context.__enter__.return_value = store
         missing = pathlib.Path(self.temporary.name) / "missing-service.json"
@@ -318,7 +318,7 @@ class UpdateManagerTests(unittest.TestCase):
         identity_path.write_text("{}\n", encoding="utf-8")
         group_root = pathlib.Path(self.temporary.name) / "groups" / ("a" * 32)
         group_root.mkdir(parents=True)
-        group_file = group_root / "group.json"
+        group_file = group_root / "placement-group.json"
         group_file.write_text(
             json.dumps({"padding": "x" * 64}) + "\n", encoding="utf-8"
         )
@@ -342,11 +342,11 @@ class UpdateManagerTests(unittest.TestCase):
             ),
             mock.patch.object(
                 cli,
-                "default_engine_group_root",
+                "default_placement_group_root",
                 return_value=group_root.parent,
             ),
             mock.patch.object(
-                cli, "validate_group_document", return_value={"release": release}
+                cli, "validate_placement_group_document", return_value={"release": release}
             ),
             mock.patch.object(cli, "_core_update_identity", return_value="core-a"),
             mock.patch.object(

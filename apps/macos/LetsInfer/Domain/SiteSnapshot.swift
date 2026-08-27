@@ -498,23 +498,24 @@ extension SiteSnapshot {
         )
     }
 
-    func enriched(with placement: SitePlacementRecord) -> SiteSnapshot {
+    func enriched(with placementGroup: SitePlacementGroupRecord) -> SiteSnapshot {
         guard let current = letsinfer,
-              let runtime = PlacementRuntimeIdentity(placement.runtime) else {
+              let runtime = PlacementRuntimeIdentity(placementGroup.runtime) else {
             return self
         }
-        let capacity = placement.capacity
+        let capacity = placementGroup.capacity
         let maxActive = capacity?.maxActiveRequests
-            ?? placement.endpoints.map(\.maxActiveRequests).compactMap { $0 }.reduce(0, +)
+            ?? placementGroup.endpoint?.maxActiveRequests
+            ?? 0
         let maxContext = capacity?.maxContextTokens
-            ?? placement.endpoints.map(\.maxContextTokens).compactMap { $0 }.max()
+            ?? placementGroup.endpoint?.maxContextTokens
         let resolvedContext = maxContext.flatMap { $0 > 0 ? $0 : nil }
             ?? current.maxContextTokens
         let maxConnections = capacity?.maxConnections ?? max(maxActive, current.maxConnections)
         let status = SiteStatus(
             installationID: current.installationID,
             release: runtime.version ?? current.release,
-            model: placement.model,
+            model: placementGroup.model,
             engine: runtime.engine,
             runtimeName: runtime.name,
             runtimeVersion: runtime.version,
@@ -526,7 +527,7 @@ extension SiteSnapshot {
             maxActiveRequests: maxActive > 0 ? maxActive : current.maxActiveRequests,
             maxContextTokens: resolvedContext,
             serviceState: current.serviceState,
-            engineState: placement.state,
+            engineState: placementGroup.state,
             protectionPhase: current.protectionPhase,
             protectionArmed: current.protectionArmed,
             tripLatched: current.tripLatched,
@@ -537,7 +538,7 @@ extension SiteSnapshot {
             LLMMetrics(
                 id: value.id,
                 backend: runtime.engine,
-                model: placement.model,
+                model: placementGroup.model,
                 generationTokensPerSecond: value.generationTokensPerSecond,
                 aggregateTokensPerSecond: value.aggregateTokensPerSecond,
                 prefillTokensPerSecond: value.prefillTokensPerSecond,

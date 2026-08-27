@@ -11,80 +11,86 @@ import unittest
 from unittest import mock
 
 from core import cli
+from core.orchestration import build_placement_group_plan
+from core.orchestration.coordinator import placement_job
+from tests.orchestration.helpers import (
+    parallel_connections,
+    parallel_contract,
+    release_identity,
+)
 
 
-class LocalEngineGroupExecutorTests(unittest.TestCase):
+class LocalPlacementExecutorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = pathlib.Path(self.temporary.name)
-        self.member_id = "a" * 32
-        self.group_id = "b" * 32
-        self.task = {
-            "task_id": "task-1",
-            "port_base": 18000,
-            "port_count": 2,
-            "launcher": "runtime-command",
-            "command": ["/opt/runtime/member"],
-            "environment": {"RUNTIME_MODE": "member"},
-            "endpoint_owner": False,
-            "readiness": {
-                "kind": "exec",
-                "command": ["/opt/runtime/ready"],
-                "interval_seconds": 1,
-                "timeout_seconds": 1,
-                "retries": 2,
+        self.node_id = "a" * 32
+        contract = parallel_contract(2)
+        contract["tasks"][1].update(
+            {
+                "launcher": "runtime-command",
+                "command": ["/opt/runtime/member"],
+                "environment": {"RUNTIME_MODE": "member"},
+                "port_count": 2,
+                "readiness": {
+                    "kind": "exec",
+                    "command": ["/opt/runtime/ready"],
+                    "interval_seconds": 1,
+                    "timeout_seconds": 1,
+                    "retries": 2,
+                },
+            }
+        )
+        contract["tasks"][0]["port_count"] = 2
+        nodes = ("c" * 32, self.node_id)
+        release = release_identity(
+            manifest_sha256="2" * 64,
+            runtime_digest="3" * 64,
+        )
+        self.plan = build_placement_group_plan(
+            contract,
+            member_ids=nodes,
+            member_addresses={
+                nodes[0]: "coordinator.local:9770",
+                nodes[1]: "member.local:9770",
             },
-        }
-        self.group = {
-            "schema_version": 3,
-            "group_id": self.group_id,
-            "service": "fixture-model",
-            "release": {"qualification": "qualified"},
-            "strategy": "parallel",
-            "failure_policy": "whole-group",
-            "topology_sha256": "1" * 64,
-            "manifest_sha256": "2" * 64,
-            "runtime_digest": "3" * 64,
-            "runtime_execution_contract_sha256": "7" * 64,
-            "endpoint_owner": "task-0",
-            "startup_order": [["task-1"], ["task-0"]],
-            "connections": [
-                {
-                    "nodes": sorted(("c" * 32, self.member_id)),
-                    "kind": "connectx",
-                    "speed_mbps": 200000,
-                    "mtu": 9000,
-                    "rdma": True,
-                }
-            ],
-            "resources": [
-                {
-                    "node_id": "c" * 32,
-                    "address": "coordinator.local:9770",
-                    "task_id": "task-0",
-                    "port_base": 18000,
-                    "port_count": 2,
-                    "device_uuids": ["GPU-fixture-0"],
-                },
-                {
-                    "node_id": self.member_id,
-                    "address": "member.local:9770",
-                    "task_id": "task-1",
-                    "port_base": 18000,
-                    "port_count": 2,
-                    "device_uuids": ["GPU-fixture-1"],
-                },
-            ],
-        }
+            topology_sha256="1" * 64,
+            manifest_sha256="2" * 64,
+            runtime_digest="3" * 64,
+            service_id="d" * 32,
+            release=release,
+            member_port_bases={node: 18000 for node in nodes},
+            member_device_uuids={
+                nodes[0]: ["GPU-fixture-0"],
+                nodes[1]: ["GPU-fixture-1"],
+            },
+            connections=parallel_connections(nodes),
+        )
+        self.placement_group_id = self.plan.placement_group_id
+        self.group = self.plan.document()
+        self.local_placement = next(
+            item for item in self.plan.placements if item.node_id == self.node_id
+        )
+        self.job = placement_job(
+            self.plan,
+            self.local_placement,
+            action="stage",
+            source=str(release["source"]),
+            engine_credential_sha256="6" * 64,
+            operation_id="e" * 32,
+        )
+        self.task = self.job["placement"]
         self.config = {
-            "group_id": self.group_id,
-            "member_id": self.member_id,
-            "plan_sha256": "4" * 64,
-            "source": "registry.example/runtime@sha256:" + "5" * 64,
+            "schema_version": 2,
+            "placement_group_id": self.placement_group_id,
+            "placement_id": self.local_placement.placement_id,
+            "node_id": self.node_id,
+            "plan_sha256": self.job["plan_sha256"],
+            "source": str(release["source"]),
             "runtime_digest": "3" * 64,
             "manifest_sha256": "2" * 64,
             "topology_sha256": "1" * 64,
-            "task": self.task,
+            "placement": self.task,
             "object_root": str(root / "object"),
             "model_cache": str(root / "model"),
             "plugin_root": str(root / "plugins"),
@@ -93,9 +99,12 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             "credential_file": str(root / "engine.key"),
             "tls_certificate_file": str(root / "engine.crt"),
             "tls_key_file": str(root / "engine-tls.key"),
-            "group_file": str(root / "group.json"),
-            "container_name": "letsinfer-group-" + self.group_id,
-            "protection_root": str(root / "watchdog" / "protected-engines" / self.group_id),
+            "placement_group_file": str(root / "placement-group.json"),
+            "container_name": "letsinfer-placement-" + self.local_placement.placement_id,
+            "protection_root": str(
+                root / "watchdog" / "protected-placements"
+                / self.local_placement.placement_id
+            ),
             "_manifest": {
                 "serving": {},
                 "container": {
@@ -103,24 +112,14 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
                     "memory_bytes": 120259084288,
                 },
             },
-            "_group": self.group,
+            "_placement_group": self.group,
             "_credential_sha256": "6" * 64,
         }
+
         pathlib.Path(self.config["tls_certificate_file"]).write_text(
             "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n",
             encoding="ascii",
         )
-        self.job = {
-            "group_id": self.group_id,
-            "member_id": self.member_id,
-            "plan_sha256": "4" * 64,
-            "runtime_digest": "3" * 64,
-            "manifest_sha256": "2" * 64,
-            "topology_sha256": "1" * 64,
-            "engine_credential_sha256": "6" * 64,
-            "task": self.task,
-            "group": self.group,
-        }
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -131,9 +130,9 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             "State": {"Running": True},
             "Config": {"Labels": {}},
         }
-        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        executor = cli.LocalPlacementExecutor(self.node_id)
         with (
-            mock.patch.object(cli, "_read_engine_group_config", return_value=self.config),
+            mock.patch.object(cli, "_read_placement_group_config", return_value=self.config),
             mock.patch.object(
                 cli, "storage_lock", return_value=contextlib.nullcontext()
             ),
@@ -171,17 +170,17 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         run.assert_called_once_with(["docker", "run"])
         ready.assert_called_once_with(self.config["container_name"], self.task["readiness"])
         self.assertEqual([call.args[2] for call in protect.call_args_list], ["pending", "starting", "armed"])
-        self.assertEqual(command.call_args.kwargs["group_context"]["task_id"], "task-1")
+        self.assertEqual(command.call_args.kwargs["placement_context"]["task_id"], "task-1")
 
     def test_main_node_endpoint_owner_advertises_its_loopback_listener(self) -> None:
         task = {**self.task, "endpoint_owner": True}
-        config = {**self.config, "task": task}
-        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        config = {**self.config, "placement": task}
+        executor = cli.LocalPlacementExecutor(self.node_id)
         with (
             mock.patch.object(
                 cli,
                 "read_site_identity",
-                return_value=mock.Mock(role="main", member_id=self.member_id),
+                return_value=mock.Mock(role="main", member_id=self.node_id),
             ),
             mock.patch.object(cli, "certificate_sha256", return_value="7" * 64),
         ):
@@ -192,7 +191,7 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             mock.patch.object(
                 cli,
                 "read_site_identity",
-                return_value=mock.Mock(role="child", member_id=self.member_id),
+                return_value=mock.Mock(role="child", member_id=self.node_id),
             ),
             mock.patch.object(cli, "certificate_sha256", return_value="7" * 64),
         ):
@@ -201,8 +200,8 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
 
     def test_unqualified_group_uses_the_ordinary_managed_launch(self) -> None:
         config = copy.deepcopy(self.config)
-        config["_group"]["release"]["qualification"] = "unqualified"
-        qualification_mode, evidence = cli._engine_group_launch_mode(config)
+        config["_placement_group"]["release"]["qualification"] = "unqualified"
+        qualification_mode, evidence = cli._placement_group_launch_mode(config)
 
         self.assertFalse(qualification_mode)
         self.assertIsNone(evidence)
@@ -213,7 +212,7 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             mock.patch.object(cli, "read_api_key", return_value="secret") as read_key,
             mock.patch.object(cli, "collect_container_evidence") as collect,
         ):
-            evidence = cli._collect_engine_group_launch_failure(
+            evidence = cli._collect_placement_group_launch_failure(
                 self.config, str(evidence_root)
             )
 
@@ -229,16 +228,16 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         )
 
     def test_stage_preserves_unqualified_group_manifest_identity(self) -> None:
-        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        executor = cli.LocalPlacementExecutor(self.node_id)
         job = copy.deepcopy(self.job)
         job["source"] = self.config["source"]
-        job["group"]["release"] = {"qualification": "unqualified"}
+        job["placement_group"]["release"] = {"qualification": "unqualified"}
         root = pathlib.Path(self.temporary.name) / "new-group"
         with (
-            mock.patch.object(cli, "_engine_group_path", return_value=root),
+            mock.patch.object(cli, "_placement_group_path", return_value=root),
             mock.patch.object(
                 cli,
-                "default_engine_group_root",
+                "default_placement_group_root",
                 return_value=pathlib.Path(self.temporary.name),
             ),
             mock.patch.object(
@@ -283,7 +282,7 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
 
     def test_group_rdma_binding_uses_only_the_sealed_interface_and_peers(self) -> None:
         group = copy.deepcopy(self.group)
-        group["resources"][1]["rdma_interface"] = "enp1s0"
+        group["placements"][1]["rdma_interface"] = "enp1s0"
         resolved = {
             "interface": "enp1s0",
             "device": "mlx5_0",
@@ -298,7 +297,7 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             cli, "resolve_connectx_rdma_binding", return_value=resolved
         ) as resolver:
             self.assertEqual(
-                cli._engine_group_rdma_binding(group, self.member_id), resolved
+                cli._placement_group_rdma_binding(group, self.node_id), resolved
             )
         resolver.assert_called_once_with(
             "enp1s0",
@@ -308,7 +307,7 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             minimum_mtu=9000,
         )
         self.assertIsNone(
-            cli._engine_group_rdma_binding(self.group, self.member_id)
+            cli._placement_group_rdma_binding(self.group, self.node_id)
         )
 
     def test_reused_rdma_container_must_match_devices_memlock_and_binding(self) -> None:
@@ -350,9 +349,9 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             cli._require_matching_rdma_container(inspection, None, 1024)
 
     def test_stop_disarms_before_removing_the_exact_managed_container(self) -> None:
-        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        executor = cli.LocalPlacementExecutor(self.node_id)
         with (
-            mock.patch.object(cli, "_read_engine_group_config", return_value=self.config),
+            mock.patch.object(cli, "_read_placement_group_config", return_value=self.config),
             mock.patch.object(cli, "disarm_protection") as disarm,
             mock.patch.object(cli, "_stop_managed_container", return_value=0) as stop,
             mock.patch.object(cli, "certificate_sha256", return_value="7" * 64),
@@ -366,9 +365,9 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         )
 
     def test_stop_refuses_to_exit_before_watchdog_disarm_ack(self) -> None:
-        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        executor = cli.LocalPlacementExecutor(self.node_id)
         with (
-            mock.patch.object(cli, "_read_engine_group_config", return_value=self.config),
+            mock.patch.object(cli, "_read_placement_group_config", return_value=self.config),
             mock.patch.object(
                 cli,
                 "disarm_protection",
@@ -383,9 +382,9 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         stop.assert_not_called()
 
     def test_explicit_recovery_clears_only_its_trip_before_start(self) -> None:
-        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        executor = cli.LocalPlacementExecutor(self.node_id)
         with (
-            mock.patch.object(cli, "_read_engine_group_config", return_value=self.config),
+            mock.patch.object(cli, "_read_placement_group_config", return_value=self.config),
             mock.patch.object(cli, "clear_protection_trip") as clear,
             mock.patch.object(
                 executor, "_start_config", return_value={"state": "running"}
@@ -398,20 +397,21 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         start.assert_called_once_with(self.config)
 
     def test_observation_rejects_stale_running_journal_without_container(self) -> None:
-        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        executor = cli.LocalPlacementExecutor(self.node_id)
         journal = {
-            "group_id": self.group_id,
-            "member_id": self.member_id,
+            "placement_group_id": self.placement_group_id,
+            "placement_id": self.local_placement.placement_id,
+            "node_id": self.node_id,
             "plan_sha256": self.config["plan_sha256"],
             "runtime_digest": self.config["runtime_digest"],
             "manifest_sha256": self.config["manifest_sha256"],
             "topology_sha256": self.config["topology_sha256"],
             "engine_credential_sha256": self.config["_credential_sha256"],
-            "task": self.task,
+            "placement": self.task,
             "state": "running",
         }
         with (
-            mock.patch.object(cli, "_read_engine_group_config", return_value=self.config),
+            mock.patch.object(cli, "_read_placement_group_config", return_value=self.config),
             mock.patch.object(cli, "container_inspect", return_value=None),
             mock.patch.object(
                 cli,
@@ -425,10 +425,10 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         )
 
     def test_job_identity_mismatch_fails_before_side_effects(self) -> None:
-        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        executor = cli.LocalPlacementExecutor(self.node_id)
         changed = dict(self.job)
         changed["runtime_digest"] = "9" * 64
-        with mock.patch.object(cli, "_read_engine_group_config", return_value=self.config):
+        with mock.patch.object(cli, "_read_placement_group_config", return_value=self.config):
             with self.assertRaisesRegex(cli.LetsInferError, "differs from the staged"):
                 executor.start(changed)
 
@@ -444,10 +444,10 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             },
         }
         native = {**self.config, "_manifest": native_manifest}
-        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        executor = cli.LocalPlacementExecutor(self.node_id)
         with (
             mock.patch.object(cli.platform, "system", return_value="Darwin"),
-            mock.patch.object(cli, "_read_engine_group_config", return_value=native),
+            mock.patch.object(cli, "_read_placement_group_config", return_value=native),
             mock.patch.object(
                 cli, "storage_lock", return_value=contextlib.nullcontext()
             ),

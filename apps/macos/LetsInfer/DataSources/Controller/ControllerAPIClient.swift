@@ -169,7 +169,7 @@ struct SiteMemberRecord: Decodable, Equatable, Identifiable, Sendable {
     let updatedAtUnix: Int
 
     enum CodingKeys: String, CodingKey {
-        case memberID = "member_id"
+        case memberID = "node_id"
         case displayName = "display_name"
         case role, address, state
         case certificateSHA256 = "certificate_sha256"
@@ -194,117 +194,67 @@ struct SiteMemberRecord: Decodable, Equatable, Identifiable, Sendable {
     }
 }
 
-struct SitePlacementRecord: Decodable, Equatable, Identifiable, Sendable {
-    var id: String { placementID }
-    let groupID: String
-    let placementID: String
+struct SitePlacementGroupRecord: Decodable, Equatable, Identifiable, Sendable {
+    var id: String { placementGroupID }
+    let placementGroupID: String
     let model: String
     let runtime: String
     let target: String
-    let strategy: String
     let state: String
-    let members: [String]
-    let endpoints: [SitePlacementEndpoint]
+    let desiredState: String
+    let placements: [SitePlacementRecord]
+    let endpoint: SitePlacementEndpoint?
     let capacity: SitePlacementCapacity?
     let release: SiteRuntimeRelease?
-    let endpointOwner: String?
-    let resourceAssignments: [SiteResourceAssignment]
-    let taskStates: [SiteTaskState]
-    let connections: [SiteGroupConnection]
-    let deviceAllocations: [SiteDeviceAllocation]
-    let telemetry: SiteGroupTelemetry?
+    let connections: [SitePlacementGroupConnection]
+    let telemetry: SitePlacementGroupTelemetry?
+    let lastError: String?
     let updatedAtUnix: Int
 
     enum CodingKeys: String, CodingKey {
-        case groupID = "group_id"
-        case placementID = "placement_id"
-        case model, runtime, target, strategy, state, members, endpoints, capacity
-        case release
-        case endpointOwner = "endpoint_owner"
-        case resourceAssignments = "resource_assignments"
-        case taskStates = "task_states"
-        case connections
-        case deviceAllocations = "device_allocations"
-        case telemetry
+        case placementGroupID = "placement_group_id"
+        case model, runtime, target, state, placements, endpoint, capacity, release
+        case desiredState = "desired_state"
+        case connections, telemetry
+        case lastError = "last_error"
         case updatedAtUnix = "updated_at_unix"
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        placementID = try container.decode(String.self, forKey: .placementID)
-        groupID = try container.decodeIfPresent(String.self, forKey: .groupID)
-            ?? placementID
-        model = try container.decode(String.self, forKey: .model)
-        runtime = try container.decode(String.self, forKey: .runtime)
-        target = try container.decode(String.self, forKey: .target)
-        strategy = try container.decode(String.self, forKey: .strategy)
-        state = try container.decode(String.self, forKey: .state)
-        members = try container.decode([String].self, forKey: .members)
-        endpoints = try container.decodeIfPresent(
-            [SitePlacementEndpoint].self, forKey: .endpoints
-        ) ?? []
-        capacity = try container.decodeIfPresent(
-            SitePlacementCapacity.self, forKey: .capacity
-        )
-        release = try container.decodeIfPresent(
-            SiteRuntimeRelease.self, forKey: .release
-        )
-        endpointOwner = try container.decodeIfPresent(
-            String.self, forKey: .endpointOwner
-        )
-        resourceAssignments = try container.decodeIfPresent(
-            [SiteResourceAssignment].self, forKey: .resourceAssignments
-        ) ?? []
-        taskStates = try container.decodeIfPresent(
-            [SiteTaskState].self, forKey: .taskStates
-        ) ?? []
-        connections = try container.decodeIfPresent(
-            [SiteGroupConnection].self, forKey: .connections
-        ) ?? []
-        deviceAllocations = try container.decodeIfPresent(
-            [SiteDeviceAllocation].self, forKey: .deviceAllocations
-        ) ?? []
-        telemetry = try container.decodeIfPresent(
-            SiteGroupTelemetry.self, forKey: .telemetry
-        )
-        updatedAtUnix = try container.decodeIfPresent(
-            Int.self, forKey: .updatedAtUnix
-        ) ?? 0
     }
 }
 
-struct SiteResourceAssignment: Decodable, Equatable, Sendable {
+struct SitePlacementRecord: Decodable, Equatable, Identifiable, Sendable {
+    var id: String { placementID }
+    let placementID: String
     let nodeID: String
     let address: String
     let taskID: String
     let portBase: Int
     let portCount: Int
     let deviceUUIDs: [String]
+    let rdmaInterface: String?
+    let endpointOwner: Bool
+    let state: String
+    let operationID: String?
+    let error: String?
+    let deviceAllocations: [SiteDeviceAllocation]
 
     enum CodingKeys: String, CodingKey {
+        case placementID = "placement_id"
         case nodeID = "node_id"
         case address
         case taskID = "task_id"
         case portBase = "port_base"
         case portCount = "port_count"
         case deviceUUIDs = "device_uuids"
+        case rdmaInterface = "rdma_interface"
+        case endpointOwner = "endpoint_owner"
+        case state
+        case operationID = "operation_id"
+        case error
+        case deviceAllocations = "device_allocations"
     }
 }
 
-struct SiteTaskState: Decodable, Equatable, Sendable {
-    let nodeID: String
-    let taskID: String
-    let state: String
-    let error: String?
-
-    enum CodingKeys: String, CodingKey {
-        case nodeID = "node_id"
-        case taskID = "task_id"
-        case state, error
-    }
-}
-
-struct SiteGroupConnection: Decodable, Equatable, Sendable {
+struct SitePlacementGroupConnection: Decodable, Equatable, Sendable {
     let nodes: [String]
     let kind: String
     let speedMbps: Int
@@ -330,18 +280,16 @@ struct SiteRuntimeRelease: Decodable, Equatable, Sendable {
 }
 
 struct SiteDeviceAllocation: Decodable, Equatable, Sendable {
-    let machineID: String
     let deviceUUID: String
     let state: String
 
     enum CodingKeys: String, CodingKey {
-        case machineID = "machine_id"
         case deviceUUID = "device_uuid"
         case state
     }
 }
 
-struct SiteGroupTelemetry: Decodable, Equatable, Sendable {
+struct SitePlacementGroupTelemetry: Decodable, Equatable, Sendable {
     let activeRequests: Int
     let maxActiveRequests: Int
 
@@ -352,14 +300,25 @@ struct SiteGroupTelemetry: Decodable, Equatable, Sendable {
 }
 
 struct SitePlacementEndpoint: Decodable, Equatable, Sendable {
-    let memberID: String
+    let placementID: String
+    let nodeID: String
+    let url: String
     let maxActiveRequests: Int?
     let maxContextTokens: Int?
+    let healthy: Bool
+    let memoryPressure: Bool
+    let temperatureCelsius: Double
+    let prefixKeys: [String]
 
     enum CodingKeys: String, CodingKey {
-        case memberID = "member_id"
+        case placementID = "placement_id"
+        case nodeID = "node_id"
+        case url, healthy
         case maxActiveRequests = "max_active_requests"
         case maxContextTokens = "max_context_tokens"
+        case memoryPressure = "memory_pressure"
+        case temperatureCelsius = "temperature_c"
+        case prefixKeys = "prefix_keys"
     }
 }
 
@@ -423,7 +382,7 @@ struct SiteTopologyPlanRecord: Decodable, Equatable, Identifiable, Sendable {
 struct ControllerSiteDocument: Decodable, Equatable, Sendable {
     let schemaVersion: Int
     let identity: LogicalSiteIdentity
-    let members: [SiteMemberRecord]
+    let nodes: [SiteMemberRecord]
     let topology: SiteTopologyRecord
     let services: [ControllerModelService]
     let pendingTopologyPlans: [SiteTopologyPlanRecord]
@@ -431,41 +390,40 @@ struct ControllerSiteDocument: Decodable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
-        case identity, topology, services, exposure
-        case members = "machines"
+        case identity, nodes, topology, services, exposure
         case pendingTopologyPlans = "pending_topology_plans"
     }
 
-    var activeMemberCount: Int {
-        members.count { $0.state == "active" }
+    var activeNodeCount: Int {
+        nodes.count { $0.state == "active" }
     }
 
-    var placements: [SitePlacementRecord] {
-        services.flatMap(\.groups)
+    var placementGroups: [SitePlacementGroupRecord] {
+        services.flatMap(\.placementGroups)
     }
 
-    var currentPlacements: [SitePlacementRecord] {
-        var selected: [String: (record: SitePlacementRecord, priority: (Int, Int, String))] = [:]
+    var currentPlacementGroups: [SitePlacementGroupRecord] {
+        var selected: [String: (record: SitePlacementGroupRecord, priority: (Int, Int, String))] = [:]
         var modelOrder: [String] = []
-        for placement in placements {
-            if selected[placement.model] == nil {
-                modelOrder.append(placement.model)
+        for placementGroup in placementGroups {
+            if selected[placementGroup.model] == nil {
+                modelOrder.append(placementGroup.model)
             }
             let candidate = (
-                placement.updatedAtUnix,
-                Self.placementPriority(placement.state),
-                placement.placementID
+                placementGroup.updatedAtUnix,
+                Self.placementGroupPriority(placementGroup.state),
+                placementGroup.placementGroupID
             )
-            if let current = selected[placement.model],
+            if let current = selected[placementGroup.model],
                !Self.isNewer(candidate, than: current.priority) {
                 continue
             }
-            selected[placement.model] = (placement, candidate)
+            selected[placementGroup.model] = (placementGroup, candidate)
         }
         return modelOrder.compactMap { selected[$0]?.record }
     }
 
-    private static func placementPriority(_ state: String) -> Int {
+    private static func placementGroupPriority(_ state: String) -> Int {
         switch state {
         case "failed": 0
         case "stopped": 1
@@ -491,12 +449,13 @@ struct ControllerModelService: Decodable, Equatable, Identifiable, Sendable {
     let serviceID: String
     let model: String
     let desiredState: String
-    let groups: [SitePlacementRecord]
+    let placementGroups: [SitePlacementGroupRecord]
     let telemetry: SiteServiceTelemetry
 
     enum CodingKeys: String, CodingKey {
         case serviceID = "service_id"
-        case model, groups, telemetry
+        case model, telemetry
+        case placementGroups = "placement_groups"
         case desiredState = "desired_state"
     }
 }
@@ -870,15 +829,18 @@ struct SiteMovePlan: Decodable, Equatable, Sendable {
 struct SiteMovePlacement: Decodable, Equatable, Identifiable, Sendable {
     var id: String { placementID }
     let placementID: String
+    let placementGroupID: String
+    let nodeID: String
     let model: String
     let runtime: String
     let target: String
-    let strategy: String
     let state: String
 
     enum CodingKeys: String, CodingKey {
         case placementID = "placement_id"
-        case model, runtime, target, strategy, state
+        case placementGroupID = "placement_group_id"
+        case nodeID = "node_id"
+        case model, runtime, target, state
     }
 }
 

@@ -1,46 +1,46 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Runtime-owned engine topology and core-owned group lifecycle contracts."""
+"""Runtime-owned execution topology and Core-owned placement-group contracts."""
 
 from .contracts import (
-    GroupPlan,
+    PlacementGroupPlan,
     OrchestrationError,
-    TaskAssignment,
-    bind_endpoint_member,
-    build_group_plan,
-    build_single_group_plan,
+    Placement,
+    bind_endpoint_node,
+    build_placement_group_plan,
+    build_single_placement_group_plan,
     validate_orchestration_contract,
-    validate_group_document,
-    validate_group_target_interconnect,
+    validate_placement_group_document,
+    validate_placement_group_target_interconnect,
     validate_target_binding,
     orchestration_contract_sha256,
 )
 from .member import MemberAgent, MemberJobError, MemberJobStore, PROTOCOL as MEMBER_JOB_PROTOCOL
 from .credentials import (
-    GroupCredentialError,
+    PlacementGroupCredentialError,
     credential_sha256,
-    derive_group_credential,
-    ensure_master as ensure_group_credential_master,
+    derive_placement_group_credential,
+    ensure_master as ensure_placement_group_credential_master,
 )
 
 __all__ = [
-    "GroupPlan",
+    "PlacementGroupPlan",
     "OrchestrationError",
-    "TaskAssignment",
-    "bind_endpoint_member",
-    "build_group_plan",
-    "build_single_group_plan",
+    "Placement",
+    "bind_endpoint_node",
+    "build_placement_group_plan",
+    "build_single_placement_group_plan",
     "MemberAgent",
     "MemberJobError",
     "MemberJobStore",
     "MEMBER_JOB_PROTOCOL",
-    "GroupCredentialError",
+    "PlacementGroupCredentialError",
     "credential_sha256",
-    "derive_group_credential",
-    "ensure_group_credential_master",
+    "derive_placement_group_credential",
+    "ensure_placement_group_credential_master",
     "validate_orchestration_contract",
-    "validate_group_document",
-    "validate_group_target_interconnect",
+    "validate_placement_group_document",
+    "validate_placement_group_target_interconnect",
     "validate_target_binding",
     "orchestration_contract_sha256",
 ]

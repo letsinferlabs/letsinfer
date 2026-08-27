@@ -34,7 +34,7 @@ llama_payload=$(
       "$source_root/Inference/InferenceService.swift" \
       "$source_root/Inference/InferenceHTTPServer.swift" \
       "$source_root/Inference/EngineAccessKeyStore.swift" \
-      "$source_root/Inference/EmbeddedGroupManager.swift" \
+      "$source_root/Inference/EmbeddedPlacementManager.swift" \
       "$source_root/Node/NodeHTTPServer.swift"
     do
       hash_file "$path"
@@ -59,7 +59,7 @@ mlc_payload=$(
       "$source_root/Inference/InferenceService.swift" \
       "$source_root/Inference/InferenceHTTPServer.swift" \
       "$source_root/Inference/EngineAccessKeyStore.swift" \
-      "$source_root/Inference/EmbeddedGroupManager.swift" \
+      "$source_root/Inference/EmbeddedPlacementManager.swift" \
       "$source_root/Node/NodeHTTPServer.swift" \
       "$mlc_candidate/engine/mlc-package-config.json" \
       "$mlc_candidate/engine/model-files.sha256" \

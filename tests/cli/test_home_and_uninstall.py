@@ -224,7 +224,7 @@ class UninstallFlowTests(unittest.TestCase):
             mock.patch.object(cli, "site_identity_path", return_value=pathlib.Path("/absent")),
             mock.patch.object(cli, "_remove_public_exposure"),
             mock.patch.object(
-                cli, "has_active_engine_groups_for_cleanup", return_value=False
+                cli, "has_active_placement_groups_for_cleanup", return_value=False
             ),
             mock.patch.object(cli, "_retire_qualification_candidate"),
             mock.patch.object(cli.platform, "system", return_value="Linux"),
@@ -262,9 +262,9 @@ class UninstallFlowTests(unittest.TestCase):
             mock.patch.object(cli.benchmark_jobs, "active_state", return_value=None),
             mock.patch.object(cli, "_remove_public_exposure"),
             mock.patch.object(
-                cli, "has_active_engine_groups_for_cleanup", return_value=False
+                cli, "has_active_placement_groups_for_cleanup", return_value=False
             ),
-            mock.patch.object(cli, "_remove_all_engine_groups") as remove_groups,
+            mock.patch.object(cli, "_remove_all_placement_groups") as remove_groups,
             mock.patch.object(cli, "_retire_qualification_candidate"),
             mock.patch.object(cli.platform, "system", return_value="Linux"),
             mock.patch.object(cli, "_remove_linux_services"),
@@ -293,7 +293,7 @@ class UninstallFlowTests(unittest.TestCase):
             mock.patch.object(cli.benchmark_jobs, "active_state", return_value=None),
             mock.patch.object(cli, "_remove_public_exposure"),
             mock.patch.object(
-                cli, "has_active_engine_groups_for_cleanup", return_value=True
+                cli, "has_active_placement_groups_for_cleanup", return_value=True
             ),
             mock.patch.object(cli, "_remove_linux_services") as remove_services,
             mock.patch.object(cli, "_remove_managed_home") as remove_home,
@@ -301,7 +301,7 @@ class UninstallFlowTests(unittest.TestCase):
             mock.patch.object(cli, "_human_presenter", return_value=None),
         ):
             with self.assertRaisesRegex(
-                cli.LetsInferError, "unreadable node identity owns active engine groups"
+                cli.LetsInferError, "unreadable node identity owns active placement groups"
             ):
                 cli.uninstall(arguments)
         remove_services.assert_not_called()
@@ -333,7 +333,7 @@ class UninstallFlowTests(unittest.TestCase):
             mock.patch.object(cli, "site_identity_path", return_value=pathlib.Path("/absent")),
             mock.patch.object(cli, "_remove_public_exposure"),
             mock.patch.object(
-                cli, "has_active_engine_groups_for_cleanup", return_value=False
+                cli, "has_active_placement_groups_for_cleanup", return_value=False
             ),
             mock.patch.object(cli, "_retire_qualification_candidate"),
             mock.patch.object(cli.platform, "system", return_value="Linux"),

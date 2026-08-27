@@ -23,7 +23,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from core.orchestration.member import MemberAgent, MemberJobError
-from core.orchestration.member import PROTOCOL as GROUP_JOB_PROTOCOL
+from core.orchestration.member import PROTOCOL as PLACEMENT_JOB_PROTOCOL
 
 from .state import (
     SiteError,
@@ -864,8 +864,10 @@ def _member_control_request(
     if payload is not None:
         headers["Content-Type"] = "application/json"
     if engine_credential is not None:
-        if path != "/node/v1/group-job" or not re.fullmatch(r"[A-Za-z0-9_-]{43}", engine_credential):
-            raise ControlError("engine-group credential is invalid")
+        if path != "/node/v1/placement-job" or not re.fullmatch(
+            r"[A-Za-z0-9_-]{43}", engine_credential
+        ):
+            raise ControlError("placement-group credential is invalid")
         headers["X-Letsinfer-Engine-Credential"] = engine_credential
     try:
         connection.connect()
@@ -1095,7 +1097,7 @@ def request_self_member_state(
     return value
 
 
-def submit_member_group_job(
+def submit_member_placement_job(
     endpoint: str,
     *,
     expected_member_id: str,
@@ -1109,12 +1111,12 @@ def submit_member_group_job(
         expected_member_id=expected_member_id,
         expected_certificate_sha256=expected_certificate_sha256,
         method="POST",
-        path="/node/v1/group-job",
+        path="/node/v1/placement-job",
         body=job,
         engine_credential=engine_credential,
     )
     if (
-        value.get("protocol") != GROUP_JOB_PROTOCOL
+        value.get("protocol") != PLACEMENT_JOB_PROTOCOL
         or value.get("operation_id") != job.get("operation_id")
         or set(value) != {
             "protocol", "operation_id", "replayed", "state", "result"
@@ -1123,7 +1125,7 @@ def submit_member_group_job(
         or (value["state"] == "running" and value["result"] is not None)
         or (value["state"] == "succeeded" and not isinstance(value["result"], dict))
     ):
-        raise ControlError("member group-job response schema is invalid")
+        raise ControlError("member placement-job response schema is invalid")
     return value
 
 
@@ -1135,7 +1137,7 @@ def fetch_member_job_status(
     operation_id: str,
 ) -> dict[str, Any]:
     if not ID_RE.fullmatch(operation_id):
-        raise ControlError("engine-group operation identity is invalid")
+        raise ControlError("placement-group operation identity is invalid")
     value = _member_control_request(
         endpoint,
         expected_member_id=expected_member_id,
@@ -1143,13 +1145,16 @@ def fetch_member_job_status(
         method="GET",
         path=f"/node/v1/jobs/{operation_id}",
     )
-    if value.get("protocol") != GROUP_JOB_PROTOCOL or set(value) != {"protocol", "job"}:
+    if value.get("protocol") != PLACEMENT_JOB_PROTOCOL or set(value) != {
+        "protocol",
+        "job",
+    }:
         raise ControlError("member job-status response schema is invalid")
     job = value["job"]
     if job is not None and (
         not isinstance(job, dict)
         or set(job) != {
-            "operation_id", "group_id", "action", "state", "result", "error",
+            "operation_id", "placement_group_id", "action", "state", "result", "error",
             "received_at_unix", "finished_at_unix",
         }
         or job.get("operation_id") != operation_id
@@ -1159,32 +1164,32 @@ def fetch_member_job_status(
     return value
 
 
-def fetch_member_group_status(
+def fetch_member_placement_group_status(
     endpoint: str,
     *,
     expected_member_id: str,
     expected_certificate_sha256: str,
-    group_id: str,
+    placement_group_id: str,
 ) -> dict[str, Any]:
-    if not ID_RE.fullmatch(group_id):
-        raise ControlError("engine-group identity is invalid")
+    if not ID_RE.fullmatch(placement_group_id):
+        raise ControlError("placement-group identity is invalid")
     value = _member_control_request(
         endpoint,
         expected_member_id=expected_member_id,
         expected_certificate_sha256=expected_certificate_sha256,
         method="GET",
-        path=f"/node/v1/groups/{group_id}",
+        path=f"/node/v1/placement-groups/{placement_group_id}",
     )
     if (
-        value.get("protocol") != GROUP_JOB_PROTOCOL
-        or set(value) != {"protocol", "group", "protection_trip_latched"}
+        value.get("protocol") != PLACEMENT_JOB_PROTOCOL
+        or set(value) != {"protocol", "placement", "protection_trip_latched"}
         or not isinstance(value.get("protection_trip_latched"), bool)
         or (
-            value.get("group") is not None
-            and not isinstance(value.get("group"), dict)
+            value.get("placement") is not None
+            and not isinstance(value.get("placement"), dict)
         )
     ):
-        raise ControlError("member group-status response schema is invalid")
+        raise ControlError("member placement-group status response schema is invalid")
     return value
 
 
@@ -1651,14 +1656,14 @@ class SiteControlState:
             raise ControlError(str(error)) from error
         return {"protocol": TELEMETRY_PROTOCOL, "accepted": True}
 
-    def execute_group_job(
+    def execute_placement_job(
         self,
         payload: Mapping[str, Any],
         *,
         engine_credential: str | None = None,
     ) -> dict[str, Any]:
         if self.member_agent is None:
-            raise ControlError("engine-group lifecycle is unavailable on this member")
+            raise ControlError("placement-group lifecycle is unavailable on this member")
         try:
             return self.member_agent.submit(
                 payload, engine_credential=engine_credential
@@ -1666,17 +1671,17 @@ class SiteControlState:
         except MemberJobError as error:
             raise ControlError(str(error)) from error
 
-    def group_status(self, group_id: str) -> dict[str, Any]:
+    def placement_group_status(self, placement_group_id: str) -> dict[str, Any]:
         if self.member_agent is None:
-            raise ControlError("engine-group lifecycle is unavailable on this member")
+            raise ControlError("placement-group lifecycle is unavailable on this member")
         try:
-            return self.member_agent.status(group_id)
+            return self.member_agent.status(placement_group_id)
         except MemberJobError as error:
             raise ControlError(str(error)) from error
 
     def job_status(self, operation_id: str) -> dict[str, Any]:
         if self.member_agent is None:
-            raise ControlError("engine-group lifecycle is unavailable on this member")
+            raise ControlError("placement-group lifecycle is unavailable on this member")
         try:
             return self.member_agent.job_status(operation_id)
         except MemberJobError as error:
@@ -1770,20 +1775,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     raise ControlError("node-add request identity is invalid")
                 self._respond(200, self.state.node_add_status(request_id))
                 return
-            group_prefix = "/node/v1/groups/"
-            if self.path.startswith(group_prefix):
+            placement_group_prefix = "/node/v1/placement-groups/"
+            if self.path.startswith(placement_group_prefix):
                 self._require_coordinator()
-                group_id = self.path.removeprefix(group_prefix)
-                if not ID_RE.fullmatch(group_id):
-                    raise ControlError("engine-group identity is invalid")
-                self._respond(200, self.state.group_status(group_id))
+                placement_group_id = self.path.removeprefix(placement_group_prefix)
+                if not ID_RE.fullmatch(placement_group_id):
+                    raise ControlError("placement-group identity is invalid")
+                self._respond(
+                    200, self.state.placement_group_status(placement_group_id)
+                )
                 return
             job_prefix = "/node/v1/jobs/"
             if self.path.startswith(job_prefix):
                 self._require_coordinator()
                 operation_id = self.path.removeprefix(job_prefix)
                 if not ID_RE.fullmatch(operation_id):
-                    raise ControlError("engine-group operation identity is invalid")
+                    raise ControlError("placement-group operation identity is invalid")
                 self._respond(200, self.state.job_status(operation_id))
                 return
             self._respond(404, {"error": "not found"})
@@ -1795,7 +1802,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if self.path not in {
             "/node/v1/enroll", "/node/v1/link-challenge", "/node/v1/link-probe",
-            "/node/v1/telemetry", "/node/v1/facts", "/node/v1/group-job",
+            "/node/v1/telemetry", "/node/v1/facts", "/node/v1/placement-job",
             "/node/v1/adopt", "/node/v1/add-request", "/node/v1/detach",
             "/node/v1/member-state",
         }:
@@ -1848,9 +1855,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 response = self.state.accept_facts(
                     value, requester_member_id=self._require_site_member()
                 )
-            elif self.path == "/node/v1/group-job":
+            elif self.path == "/node/v1/placement-job":
                 self._require_coordinator()
-                response = self.state.execute_group_job(
+                response = self.state.execute_placement_job(
                     value,
                     engine_credential=self.headers.get(
                         "X-Letsinfer-Engine-Credential"

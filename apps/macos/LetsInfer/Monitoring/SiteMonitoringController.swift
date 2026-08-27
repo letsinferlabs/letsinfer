@@ -178,14 +178,14 @@ final class SiteMonitoringController: ObservableObject {
     func runtimeAction(
         _ action: ControllerSiteAction,
         model: String,
-        placementID: String,
+        placementGroupID: String,
         site: SavedSite
     ) async {
         await siteAction(
             action,
             model: model,
             engine: nil,
-            resourceKey: "placement:\(placementID)",
+            resourceKey: "placement-group:\(placementGroupID)",
             site: site
         )
     }
@@ -285,8 +285,13 @@ final class SiteMonitoringController: ObservableObject {
         throw ControllerAPIError.rejected("Node action timed out.")
     }
 
-    func runtimeActionPending(siteID: SavedSite.ID, placementID: String) -> Bool {
-        siteActionPending(siteID: siteID, resource: "placement:\(placementID)")
+    func runtimeActionPending(
+        siteID: SavedSite.ID, placementGroupID: String
+    ) -> Bool {
+        siteActionPending(
+            siteID: siteID,
+            resource: "placement-group:\(placementGroupID)"
+        )
     }
 
     func siteActionPending(siteID: SavedSite.ID, resource: String) -> Bool {
@@ -307,14 +312,14 @@ final class SiteMonitoringController: ObservableObject {
         for savedSite: SavedSite,
         site: ControllerSiteEnvelope
     ) {
-        for placement in site.site.placements {
+        for placementGroup in site.site.placementGroups {
             let key = siteActionKey(
                 site: savedSite.id,
-                resource: "placement:\(placement.placementID)"
+                resource: "placement-group:\(placementGroup.placementGroupID)"
             )
             guard let pending = siteActions[key] else { continue }
-            if (pending.action == "stop" && placement.state == "stopped")
-                || (pending.action == "restart" && placement.state == "running") {
+            if (pending.action == "stop" && placementGroup.state == "stopped")
+                || (pending.action == "restart" && placementGroup.state == "running") {
                 siteActions.removeValue(forKey: key)
             }
         }
@@ -478,14 +483,14 @@ final class SiteMonitoringController: ObservableObject {
         siteViews[siteID].flatMap(coordinatorFacts(in:))
     }
 
-    private func currentPlacement(for siteID: SavedSite.ID) -> SitePlacementRecord? {
+    private func currentPlacement(for siteID: SavedSite.ID) -> SitePlacementGroupRecord? {
         siteViews[siteID].flatMap(currentPlacement(in:))
     }
 
     private func currentPlacement(
         in envelope: ControllerSiteEnvelope
-    ) -> SitePlacementRecord? {
-        let current = envelope.site.currentPlacements
+    ) -> SitePlacementGroupRecord? {
+        let current = envelope.site.currentPlacementGroups
         return current.first { $0.state == "running" }
             ?? current.first { $0.state == "starting" }
             ?? current.first { $0.state == "draining" }
@@ -496,7 +501,7 @@ final class SiteMonitoringController: ObservableObject {
         in envelope: ControllerSiteEnvelope
     ) -> SiteMemberFacts? {
         let coordinatorID = envelope.site.identity.coordinatorID
-        guard let member = envelope.site.members.first(where: {
+        guard let member = envelope.site.nodes.first(where: {
             $0.memberID == coordinatorID
         }), let facts = member.facts, facts.memberID == member.memberID else {
             return nil

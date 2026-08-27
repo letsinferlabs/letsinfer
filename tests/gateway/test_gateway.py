@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -11,12 +12,21 @@ import unittest
 from unittest import mock
 
 from core.gateway import server
+from core.orchestration import (
+    build_placement_group_plan,
+    build_single_placement_group_plan,
+)
 from core.site import state
 from tests.gateway.helpers import (
     insert_member,
     routing_facts,
     routing_link,
     set_member_facts,
+)
+from tests.orchestration.helpers import (
+    parallel_connections,
+    parallel_contract,
+    release_identity,
 )
 
 
@@ -42,7 +52,7 @@ class GatewayPolicyTests(unittest.TestCase):
             )
             store.set_alias("fixture", "fixture-model")
             self.service_id = store.ensure_model_service("fixture-model")["service_id"]
-            store.set_placement(self.placement())
+            self.register_placement_group(store)
 
     def tearDown(self) -> None:
         self.environment.stop()
@@ -54,53 +64,120 @@ class GatewayPolicyTests(unittest.TestCase):
         )
         self.assertEqual(arguments.queue_timeout, 0)
 
-    def placement(self, *, temperature: float = 45.0) -> dict:
-        return {
-            "placement_id": "a" * 32,
-            "service_id": self.service_id,
-            "model": "fixture-model",
-            "runtime": "fixture-model/fixture-engine/fixture-target",
-            "target": "fixture-target",
-            "strategy": "single",
-            "state": "running",
-            "topology_sha256": "b" * 64,
-            "members": [self.identity.member_id],
-            "endpoints": [{
-                "member_id": self.identity.member_id,
-                "url": "http://127.0.0.1:18000",
-                "credential_file": str(state.config_root() / "backend-api-key"),
-                "ca_file": None,
-                "token_count_path": "/v1/letsinfer/token-count",
-                "token_count_protocol": "letsinfer-token-count-v1",
-                "max_active_requests": 1,
-                "max_context_tokens": 557056,
-                "healthy": True,
-                "memory_pressure": False,
-                "temperature_c": temperature,
-                "prefix_keys": ["shared"],
-            }],
-            "capacity": {"max_active_requests": 1, "max_context_tokens": 557056},
-        }
-
-    def replica_placement(
+    def register_placement_group(
         self,
-        member_id: str,
+        store: state.SiteStore,
         *,
-        temperature: float = 50.0,
+        node_ids: tuple[str, ...] | None = None,
+        engine: str = "fixture-engine",
+        temperature: float = 45.0,
         prefix_keys: list[str] | None = None,
+        max_active_requests: int = 1,
+        topology_digit: str = "b",
     ) -> dict:
-        placement = self.placement(temperature=temperature)
-        placement["placement_id"] = "c" * 32
-        placement["topology_sha256"] = "d" * 64
-        placement["members"] = [member_id]
-        placement["endpoints"] = [{
-            **placement["endpoints"][0],
-            "member_id": member_id,
-            "url": "http://127.0.0.1:18001",
+        selected = node_ids or (self.identity.member_id,)
+        runtime_digest = hashlib.sha256(
+            f"{engine}:{topology_digit}:{','.join(selected)}".encode()
+        ).hexdigest()
+        manifest_sha256 = "2" * 64
+        release = release_identity(
+            manifest_sha256=manifest_sha256,
+            runtime_digest=runtime_digest,
+        )
+        if len(selected) == 1:
+            plan = build_single_placement_group_plan(
+                member_id=selected[0],
+                member_address=f"{selected[0]}.local:9770",
+                device_uuids=[f"GPU-{selected[0][:8]}"],
+                topology_sha256=topology_digit * 64,
+                manifest_sha256=manifest_sha256,
+                runtime_digest=runtime_digest,
+                service_id=self.service_id,
+                release=release,
+                port_base=18000 + int(topology_digit, 16),
+            )
+        else:
+            plan = build_placement_group_plan(
+                parallel_contract(len(selected)),
+                member_ids=selected,
+                member_addresses={
+                    node_id: f"{node_id}.local:9770" for node_id in selected
+                },
+                topology_sha256=topology_digit * 64,
+                manifest_sha256=manifest_sha256,
+                runtime_digest=runtime_digest,
+                service_id=self.service_id,
+                release=release,
+                member_port_bases={
+                    node_id: 18000 + index * 16
+                    for index, node_id in enumerate(selected)
+                },
+                member_device_uuids={
+                    node_id: [f"GPU-{node_id[:8]}"] for node_id in selected
+                },
+                connections=parallel_connections(selected),
+                endpoint_member_id=selected[0],
+            )
+        interconnect = {
+            "kind": "connectx" if len(selected) > 1 else "any",
+            "rdma_required": len(selected) > 1,
+            "minimum_speed_mbps": 100_000 if len(selected) > 1 else 0,
+            "minimum_mtu": 9000 if len(selected) > 1 else 0,
+        }
+        store.register_placement_group(
+            plan.document(),
+            source=str(release["source"]),
+            model="fixture-model",
+            runtime=f"fixture-model/{engine}/fixture-target@1",
+            target="fixture-target",
+            capacity={
+                "max_connections": 16,
+                "max_active_requests": max_active_requests,
+                "max_context_tokens": 557056,
+                "interconnect": interconnect,
+            },
+            engine_credential_sha256="6" * 64,
+        )
+        store.set_placement_group(
+            plan.document(),
+            source=str(release["source"]),
+            engine_credential_sha256="6" * 64,
+            desired_state="running",
+            state="running",
+            placements=[
+                {
+                    "placement_id": placement.placement_id,
+                    "node_id": placement.node_id,
+                    "task_id": placement.task_id,
+                    "state": "running",
+                    "operation_id": "operation-fixture",
+                    "error": None,
+                }
+                for placement in plan.placements
+            ],
+            action="placement_group.start",
+        )
+        endpoint_placement = next(
+            placement for placement in plan.placements if placement.endpoint_owner
+        )
+        endpoint = {
+            "placement_id": endpoint_placement.placement_id,
+            "node_id": endpoint_placement.node_id,
+            "url": f"http://127.0.0.1:{endpoint_placement.port_base}",
+            "credential_file": str(state.config_root() / "backend-api-key"),
+            "ca_file": None,
+            "token_count_path": "/v1/letsinfer/token-count",
+            "token_count_protocol": "letsinfer-token-count-v1",
+            "max_active_requests": max_active_requests,
+            "max_context_tokens": 557056,
+            "healthy": True,
+            "memory_pressure": False,
             "temperature_c": temperature,
-            "prefix_keys": list(prefix_keys or []),
-        }]
-        return placement
+            "prefix_keys": list(["shared"] if prefix_keys is None else prefix_keys),
+        }
+        return store.set_placement_group_endpoint(
+            plan.placement_group_id, endpoint, state="running"
+        )
 
     def test_metrics_publisher_fails_startup_on_unsafe_destination(self) -> None:
         root = pathlib.Path(self.temporary.name)
@@ -113,8 +190,9 @@ class GatewayPolicyTests(unittest.TestCase):
 
     def test_backend_response_timeout_supports_long_context_prefill(self) -> None:
         backend = server.Backend(
+            placement_group_id="c" * 32,
             placement_id="a" * 32,
-            member_id="b" * 32,
+            node_id="b" * 32,
             model="fixture-model",
             url="http://127.0.0.1:18000",
             credential_file="/api-key",
@@ -145,8 +223,9 @@ class GatewayPolicyTests(unittest.TestCase):
 
     def test_engine_protocol_token_count_is_forwarded_and_normalized(self) -> None:
         backend = server.Backend(
+            placement_group_id="c" * 32,
             placement_id="a" * 32,
-            member_id="b" * 32,
+            node_id="b" * 32,
             model="fixture-model",
             url="http://127.0.0.1:18000",
             credential_file="/api-key",
@@ -191,8 +270,9 @@ class GatewayPolicyTests(unittest.TestCase):
 
     def test_engine_protocol_forwards_reasoning_history_without_translation(self) -> None:
         backend = server.Backend(
+            placement_group_id="c" * 32,
             placement_id="a" * 32,
-            member_id="b" * 32,
+            node_id="b" * 32,
             model="fixture-model",
             url="http://127.0.0.1:18000",
             credential_file="/api-key",
@@ -271,15 +351,14 @@ class GatewayPolicyTests(unittest.TestCase):
 
     def test_corrupt_persisted_capacity_cannot_coerce_into_gateway_limits(self) -> None:
         with state.SiteStore(identity=self.identity) as store:
-            placement = self.placement()
-            placement["endpoints"][0]["max_active_requests"] = True
+            placement_group = store.placement_groups()[0]
+            endpoint = dict(placement_group["endpoint"])
+            endpoint["max_active_requests"] = True
             store.connection.execute(
-                "UPDATE placements SET endpoints_json=? WHERE placement_id=?",
+                "UPDATE placement_groups SET endpoint_json=? WHERE placement_group_id=?",
                 (
-                    json.dumps(
-                        placement["endpoints"], sort_keys=True, separators=(",", ":")
-                    ),
-                    placement["placement_id"],
+                    json.dumps(endpoint, sort_keys=True, separators=(",", ":")),
+                    placement_group["placement_group_id"],
                 ),
             )
         with self.assertRaisesRegex(server.GatewayError, "capacity is invalid"):
@@ -309,7 +388,11 @@ class GatewayPolicyTests(unittest.TestCase):
             "fixture-model", prefix_key="shared", timeout=0.1
         )
         with state.SiteStore(identity=self.identity) as store:
-            store.set_placement(self.placement(temperature=50.0))
+            placement_group = store.placement_groups()[0]
+            endpoint = {**placement_group["endpoint"], "temperature_c": 50.0}
+            store.set_placement_group_endpoint(
+                placement_group["placement_group_id"], endpoint, state="running"
+            )
         policy.reload(force=True)
         policy.release_backend(selected)
         replacement, _ = policy.acquire_backend(
@@ -341,7 +424,7 @@ class GatewayPolicyTests(unittest.TestCase):
         )
         policy.release_backend(resumed)
 
-    def test_distributed_placement_fails_closed_when_any_member_is_draining(self) -> None:
+    def test_multi_node_placement_group_fails_closed_when_any_node_is_draining(self) -> None:
         other = "e" * 32
         with state.SiteStore(identity=self.identity) as store:
             self.add_member(store, other)
@@ -379,28 +462,23 @@ class GatewayPolicyTests(unittest.TestCase):
                     ],
                 ),
             )
-            placement = self.placement()
-            placement["strategy"] = "parallel"
-            placement["members"] = [self.identity.member_id, other]
-            placement["capacity"]["interconnect"] = {
-                "kind": "connectx",
-                "rdma_required": True,
-                "minimum_speed_mbps": 100_000,
-                "minimum_mtu": 9000,
-            }
-            store.set_placement(placement)
+            self.register_placement_group(
+                store,
+                node_ids=(self.identity.member_id, other),
+                topology_digit="d",
+            )
         policy = server.PolicySnapshot(self.identity)
         policy.reload(force=True)
-        self.assertEqual(len(policy.backends), 1)
+        self.assertEqual(len(policy.backends), 2)
 
         with state.SiteStore(identity=self.identity) as store:
             store.set_member_draining(other, True)
         policy.reload(force=True)
-        self.assertEqual(policy.backends, [])
+        self.assertEqual(len(policy.backends), 1)
         with state.SiteStore(identity=self.identity) as store:
             store.set_member_draining(other, False)
         policy.reload(force=True)
-        self.assertEqual(len(policy.backends), 1)
+        self.assertEqual(len(policy.backends), 2)
 
         with state.SiteStore(identity=self.identity) as store:
             stale = int(time.time()) - 60
@@ -420,9 +498,9 @@ class GatewayPolicyTests(unittest.TestCase):
                 ),
             )
         policy.reload(force=True)
-        self.assertEqual(policy.backends, [])
+        self.assertEqual(len(policy.backends), 1)
 
-    def test_distributed_placement_rejects_multiple_inference_endpoints(self) -> None:
+    def test_placement_group_rejects_an_endpoint_from_a_non_owner_placement(self) -> None:
         other = "e" * 32
         with state.SiteStore(identity=self.identity) as store:
             self.add_member(store, other)
@@ -459,42 +537,45 @@ class GatewayPolicyTests(unittest.TestCase):
                     ],
                 ),
             )
-            placement = self.placement()
-            placement["strategy"] = "parallel"
-            placement["members"] = [self.identity.member_id, other]
-            placement["endpoints"].append(
-                {
-                    **placement["endpoints"][0],
-                    "member_id": other,
-                    "url": "http://127.0.0.1:18001",
-                }
+            placement_group = self.register_placement_group(
+                store,
+                node_ids=(self.identity.member_id, other),
+                topology_digit="d",
             )
-            placement["capacity"]["interconnect"] = {
-                "kind": "connectx",
-                "rdma_required": True,
-                "minimum_speed_mbps": 100_000,
-                "minimum_mtu": 9000,
+            non_owner = next(
+                placement
+                for placement in placement_group["placements"]
+                if placement["endpoint_owner"] is False
+            )
+            endpoint = {
+                **placement_group["endpoint"],
+                "placement_id": non_owner["placement_id"],
+                "node_id": non_owner["node_id"],
             }
-            with self.assertRaisesRegex(
-                state.SiteError, "permits only one inference endpoint"
-            ):
-                store.set_placement(placement)
+            with self.assertRaisesRegex(state.SiteError, "endpoint owner"):
+                store.set_placement_group_endpoint(
+                    placement_group["placement_group_id"], endpoint, state="running"
+                )
 
-    def test_replica_placement_keeps_only_active_member_endpoints(self) -> None:
+    def test_replica_placement_group_keeps_only_active_node_endpoints(self) -> None:
         other = "e" * 32
         with state.SiteStore(identity=self.identity) as store:
             self.add_member(store, other)
-            store.set_placement(self.replica_placement(other))
+            self.register_placement_group(
+                store, node_ids=(other,), topology_digit="d", prefix_keys=[]
+            )
             store.set_member_draining(self.identity.member_id, True)
         policy = server.PolicySnapshot(self.identity)
         policy.reload(force=True)
-        self.assertEqual([backend.member_id for backend in policy.backends], [other])
+        self.assertEqual([backend.node_id for backend in policy.backends], [other])
 
     def test_replica_load_balancing_queues_until_capacity_is_released(self) -> None:
         other = "e" * 32
         with state.SiteStore(identity=self.identity) as store:
             self.add_member(store, other)
-            store.set_placement(self.replica_placement(other))
+            self.register_placement_group(
+                store, node_ids=(other,), topology_digit="d", prefix_keys=[]
+            )
 
         policy = server.PolicySnapshot(self.identity)
         policy.reload(force=True)
@@ -504,7 +585,7 @@ class GatewayPolicyTests(unittest.TestCase):
         second, _ = policy.acquire_backend(
             "fixture-model", prefix_key=None, timeout=0.1
         )
-        self.assertNotEqual(first.member_id, second.member_id)
+        self.assertNotEqual(first.node_id, second.node_id)
 
         completed = threading.Event()
         selected: list[server.Backend] = []
@@ -572,12 +653,32 @@ class GatewayPolicyTests(unittest.TestCase):
             )
         for engine in ("example-engine", "future-engine"):
             with self.subTest(engine=engine):
-                placement = self.placement()
-                placement["runtime"] = f"fixture-model/{engine}/fixture-target"
-                placement["endpoints"][0]["max_active_requests"] = 2
-                placement["capacity"]["max_active_requests"] = 2
                 with state.SiteStore(identity=self.identity) as store:
-                    store.set_placement(placement)
+                    placement_group = store.placement_groups()[0]
+                    endpoint = {
+                        **placement_group["endpoint"],
+                        "max_active_requests": 2,
+                    }
+                    capacity = {
+                        **placement_group["capacity"],
+                        "max_active_requests": 2,
+                    }
+                    store.connection.execute(
+                        "UPDATE placement_groups SET runtime=?,capacity_json=? "
+                        "WHERE placement_group_id=?",
+                        (
+                            f"fixture-model/{engine}/fixture-target@1",
+                            json.dumps(
+                                capacity, sort_keys=True, separators=(",", ":")
+                            ),
+                            placement_group["placement_group_id"],
+                        ),
+                    )
+                    store.set_placement_group_endpoint(
+                        placement_group["placement_group_id"],
+                        endpoint,
+                        state="running",
+                    )
                 policy.reload(force=True)
                 first, _ = policy.acquire_backend(
                     "fixture-model", prefix_key=None, timeout=0.1
@@ -638,7 +739,9 @@ class GatewayPolicyTests(unittest.TestCase):
         other = "e" * 32
         with state.SiteStore(identity=self.identity) as store:
             insert_member(store, other)
-            store.set_placement(self.replica_placement(other))
+            self.register_placement_group(
+                store, node_ids=(other,), topology_digit="d", prefix_keys=[]
+            )
         policy = server.PolicySnapshot(self.identity)
         policy.reload(force=True)
         first, _ = policy.acquire_backend(
@@ -646,14 +749,14 @@ class GatewayPolicyTests(unittest.TestCase):
         )
         policy.release_backend(first)
         affinity_target = next(
-            backend for backend in policy.backends if backend.member_id == other
+            backend for backend in policy.backends if backend.node_id == other
         )
         policy.record_prefix_affinity(affinity_target, "conversation")
         policy.reload(force=True)
         selected, _ = policy.acquire_backend(
             "fixture-model", prefix_key="conversation", timeout=0.1
         )
-        self.assertEqual(selected.member_id, other)
+        self.assertEqual(selected.node_id, other)
         policy.release_backend(selected)
 
         with mock.patch.object(server, "PREFIX_AFFINITY_MAX_ENTRIES", 2):
@@ -803,8 +906,9 @@ class GatewayPolicyTests(unittest.TestCase):
 
     def test_protocol_stream_instrumentation_preserves_request_fields(self) -> None:
         backend = server.Backend(
+            placement_group_id="c" * 32,
             placement_id="a" * 32,
-            member_id="b" * 32,
+            node_id="b" * 32,
             model="fixture-model",
             url="http://127.0.0.1:18000",
             credential_file="/api-key",
@@ -835,8 +939,9 @@ class GatewayPolicyTests(unittest.TestCase):
     def test_arbitrary_engine_uses_the_same_exact_stream_usage_contract(self) -> None:
         body = json.dumps({"model": "fixture-model", "stream": True}).encode()
         base = server.Backend(
+            placement_group_id="c" * 32,
             placement_id="a" * 32,
-            member_id="b" * 32,
+            node_id="b" * 32,
             model="fixture-model",
             url="http://127.0.0.1:18000",
             credential_file="/api-key",

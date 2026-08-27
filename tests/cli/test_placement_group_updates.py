@@ -28,7 +28,7 @@ class _Store:
     def placements(self):
         return [dict(value) for value in self._placements]
 
-    def engine_groups(self):
+    def placement_groups(self):
         return [dict(value) for value in self._groups]
 
 
@@ -53,15 +53,21 @@ def _group(
     updated_at_unix: int = 1,
 ) -> dict:
     return {
-        "group_id": digit * 32,
-        "placement_id": placement_digit * 32,
+        "placement_group_id": digit * 32,
+        "model": "example-model",
+        "target": "fixture-target",
         "source": release["source"],
         "state": state,
         "desired_state": desired_state,
         "updated_at_unix": updated_at_unix,
         "plan": {
             "release": dict(release),
-            "resources": [{"node_id": member_digit * 32}],
+            "placements": [
+                {
+                    "placement_id": placement_digit * 32,
+                    "node_id": member_digit * 32,
+                }
+            ],
         },
     }
 
@@ -120,7 +126,7 @@ class QualifiedGroupUpdateTests(unittest.TestCase):
             ),
             mock.patch.object(cli, "verify_descriptor", return_value=descriptor),
             mock.patch.object(cli, "sha256_file", return_value="5" * 64),
-            mock.patch.object(cli, "_group_release_identity", return_value=self.new),
+            mock.patch.object(cli, "_placement_group_release_identity", return_value=self.new),
             mock.patch.object(
                 cli,
                 "_fresh_site_topology",
@@ -128,7 +134,7 @@ class QualifiedGroupUpdateTests(unittest.TestCase):
             ),
             mock.patch.object(
                 cli,
-                "_group_upgrade_placement",
+                "_placement_group_upgrade_resolution",
                 return_value=(mock.sentinel.constrained, mock.sentinel.placement),
             ),
         )
@@ -144,22 +150,22 @@ class QualifiedGroupUpdateTests(unittest.TestCase):
             for patcher in patches:
                 stack.enter_context(patcher)
             remove = stack.enter_context(
-                mock.patch.object(cli, "_remove_engine_groups_by_id")
+                mock.patch.object(cli, "_remove_placement_groups_by_id")
             )
-            install = stack.enter_context(mock.patch.object(cli, "install_engine_group"))
+            install = stack.enter_context(mock.patch.object(cli, "install_placement_group"))
             stack.enter_context(mock.patch.object(
                 cli,
-                "_active_group_id_for_release",
+                "_active_placement_group_id_for_release",
                 side_effect=["c" * 32, "d" * 32],
             ))
             stop = stack.enter_context(
-                mock.patch.object(cli, "_stop_engine_group_by_id")
+                mock.patch.object(cli, "_stop_placement_group_by_id")
             )
             self.assertEqual(cli.upgrade_runtime(self.arguments), 0)
 
         self.assertEqual(
             remove.call_args_list,
-            [mock.call([first["group_id"]]), mock.call([second["group_id"]])],
+            [mock.call([first["placement_group_id"]]), mock.call([second["placement_group_id"]])],
         )
         self.assertEqual(install.call_count, 2)
         stop.assert_called_once_with("d" * 32)
@@ -171,12 +177,12 @@ class QualifiedGroupUpdateTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for patcher in patches:
                 stack.enter_context(patcher)
-            stack.enter_context(mock.patch.object(cli, "_remove_engine_groups_by_id"))
+            stack.enter_context(mock.patch.object(cli, "_remove_placement_groups_by_id"))
             stack.enter_context(mock.patch.object(
-                cli, "install_engine_group", side_effect=RuntimeError("synthetic")
+                cli, "install_placement_group", side_effect=RuntimeError("synthetic")
             ))
             cleanup = stack.enter_context(
-                mock.patch.object(cli, "_cleanup_failed_group_release")
+                mock.patch.object(cli, "_cleanup_failed_placement_group_release")
             )
             restore = stack.enter_context(mock.patch.object(
                 cli, "_install_retained_group_release", return_value="e" * 32
@@ -204,14 +210,14 @@ class QualifiedGroupUpdateTests(unittest.TestCase):
         store = _Store(self.placements()[:1], [previous, current])
         with (
             mock.patch.object(cli, "_site_store", return_value=store),
-            mock.patch.object(cli, "_remove_engine_groups_by_id") as remove,
+            mock.patch.object(cli, "_remove_placement_groups_by_id") as remove,
             mock.patch.object(
                 cli, "_install_retained_group_release", return_value="f" * 32
             ) as restore,
         ):
             self.assertEqual(cli.rollback_runtime(self.arguments), 0)
 
-        remove.assert_called_once_with([current["group_id"]])
+        remove.assert_called_once_with([current["placement_group_id"]])
         self.assertEqual(restore.call_args.kwargs["release"], self.old)
         self.assertEqual(restore.call_args.kwargs["member_ids"], ("a" * 32,))
 

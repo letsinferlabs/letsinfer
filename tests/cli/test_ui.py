@@ -1008,7 +1008,7 @@ class TerminalTests(unittest.TestCase):
             ],
             "links": [
                 {
-                    "members": ["1" * 32, "2" * 32],
+                    "nodes": ["1" * 32, "2" * 32],
                     "kind": "connectx",
                     "speed_mbps": 200000,
                     "mtu": 9000,

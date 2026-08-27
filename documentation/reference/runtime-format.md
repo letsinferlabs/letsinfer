@@ -263,8 +263,8 @@ The endpoint is published only after every required task is ready.
 The task identifier is deliberately opaque. Your Engine distribution maps it to any TP,
 PP, expert, sequence, data, or hybrid strategy; ranks, stages, rendezvous,
 collectives, and engine flags never enter core schemas. A one-node parallel
-runtime may receive multiple GPU UUIDs in `task-0`. Complete parallel groups
-may be replicated behind the gateway exactly like independent groups.
+runtime may receive multiple GPU UUIDs in `task-0`. Complete parallel placement
+groups may be replicated behind the gateway like independent placement groups.
 
 When `target.placement.interconnect.rdma_required` is true, core assigns the
 endpoint-owner task to the main node, seals one verified interface into every

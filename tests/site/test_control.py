@@ -115,10 +115,10 @@ class SiteControlTests(unittest.TestCase):
         self.assertTrue(control.SiteControlServer.allow_reuse_address)
         self.assertTrue(controller.ControllerServer.allow_reuse_address)
 
-    def test_group_status_client_preserves_protection_state(self) -> None:
+    def test_placement_group_status_client_preserves_protection_state(self) -> None:
         response = {
-            "protocol": control.GROUP_JOB_PROTOCOL,
-            "group": None,
+            "protocol": control.PLACEMENT_JOB_PROTOCOL,
+            "placement": None,
             "protection_trip_latched": False,
         }
         with mock.patch.object(
@@ -127,36 +127,36 @@ class SiteControlTests(unittest.TestCase):
             return_value=response,
         ) as request:
             self.assertEqual(
-                control.fetch_member_group_status(
+                control.fetch_member_placement_group_status(
                     "https://node.example:9770",
                     expected_member_id="a" * 32,
                     expected_certificate_sha256="b" * 64,
-                    group_id="c" * 32,
+                    placement_group_id="c" * 32,
                 ),
                 response,
             )
         self.assertEqual(
             request.call_args.kwargs["path"],
-            f"/node/v1/groups/{'c' * 32}",
+            f"/node/v1/placement-groups/{'c' * 32}",
         )
 
-    def test_group_status_client_rejects_missing_protection_state(self) -> None:
+    def test_placement_group_status_client_rejects_missing_protection_state(self) -> None:
         with (
             mock.patch.object(
                 control,
                 "_member_control_request",
                 return_value={
-                    "protocol": control.GROUP_JOB_PROTOCOL,
-                    "group": None,
+                    "protocol": control.PLACEMENT_JOB_PROTOCOL,
+                    "placement": None,
                 },
             ),
             self.assertRaisesRegex(control.ControlError, "response schema"),
         ):
-            control.fetch_member_group_status(
+            control.fetch_member_placement_group_status(
                 "https://node.example:9770",
                 expected_member_id="a" * 32,
                 expected_certificate_sha256="b" * 64,
-                group_id="c" * 32,
+                placement_group_id="c" * 32,
             )
 
     def test_remote_enrollment_requires_comparison_code(self) -> None:

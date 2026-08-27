@@ -17,7 +17,7 @@ struct MenuBarContentView: View {
     @State private var errorMessage: String?
     @State private var expandedMetrics: Set<ExpandedMetric> = []
     @State private var expandedServiceIDs: Set<String> = []
-    @State private var expandedGroupIDs: Set<String> = []
+    @State private var expandedPlacementGroupIDs: Set<String> = []
     @State private var isHistoryExpanded = false
 
     var body: some View {
@@ -145,13 +145,13 @@ struct MenuBarContentView: View {
         let document = envelope?.site
         let snapshot = monitoring.snapshots[site.id]
         let error = monitoring.errors[site.id] ?? monitoring.controllerErrors[site.id]
-        let coordinator = document?.members.first {
+        let coordinator = document?.nodes.first {
             $0.memberID == document?.identity.coordinatorID
         }
-        let members = document?.members.filter {
+        let children = document?.nodes.filter {
             $0.memberID != document?.identity.coordinatorID
         } ?? []
-        let runningModels = document?.currentPlacements
+        let runningModels = document?.currentPlacementGroups
             .filter { $0.state == "running" }
             .map(\.model)
             .sorted() ?? []
@@ -178,7 +178,7 @@ struct MenuBarContentView: View {
                 SiteTopologyGraph(
                     coordinatorName: coordinator?.displayName ?? site.name,
                     coordinatorState: coordinator?.state ?? statusText(snapshot: snapshot, error: error).lowercased(),
-                    members: members
+                    members: children
                 )
 
                 HStack(spacing: 6) {
@@ -192,7 +192,7 @@ struct MenuBarContentView: View {
                         }
                     }
                     Spacer()
-                    Text("\((document?.members.count ?? 1)) nodes")
+                    Text("\((document?.nodes.count ?? 1)) nodes")
                         .foregroundStyle(.secondary)
                 }
                 .font(.caption)
@@ -222,13 +222,13 @@ struct MenuBarContentView: View {
                     metrics: snapshot?.metrics,
                     history: monitoring.history[site.id] ?? [],
                     placement: preferredPlacement(
-                        siteView?.site.currentPlacements ?? [],
+                        siteView?.site.currentPlacementGroups ?? [],
                         model: status.model
                     ),
                     service: siteView?.site.services.first { $0.model == status.model },
-                    machines: siteView?.site.members ?? [],
+                    machines: siteView?.site.nodes ?? [],
                     controllerRole: siteView?.controller.role,
-                    activeMemberCount: siteView?.site.activeMemberCount ?? 0,
+                    activeNodeCount: siteView?.site.activeNodeCount ?? 0,
                     savedSite: site
                 )
             }
@@ -359,11 +359,11 @@ struct MenuBarContentView: View {
         status: SiteStatus,
         metrics: MemberMetrics?,
         history: [MetricHistoryPoint],
-        placement: SitePlacementRecord?,
+        placement: SitePlacementGroupRecord?,
         service: ControllerModelService?,
         machines: [SiteMemberRecord],
         controllerRole: String?,
-        activeMemberCount: Int,
+        activeNodeCount: Int,
         savedSite: SavedSite
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -398,7 +398,7 @@ struct MenuBarContentView: View {
                             site: savedSite,
                             role: controllerRole,
                             tripLatched: status.tripLatched,
-                            allowsPlacementPlanning: activeMemberCount > 1
+                            allowsPlacementPlanning: activeNodeCount > 1
                         )
                     }
                 }
@@ -455,7 +455,7 @@ struct MenuBarContentView: View {
                 }
             }
 
-            if let service, !service.groups.isEmpty {
+            if let service, !service.placementGroups.isEmpty {
                 Divider()
                 DisclosureGroup(
                     isExpanded: Binding(
@@ -470,14 +470,18 @@ struct MenuBarContentView: View {
                     )
                 ) {
                     VStack(spacing: 5) {
-                        ForEach(service.groups.sorted { $0.groupID < $1.groupID }) { group in
-                            engineGroupRow(group, machines: machines)
+                        ForEach(service.placementGroups.sorted { $0.placementGroupID < $1.placementGroupID }) { placementGroup in
+                            placementGroupRow(placementGroup, nodes: machines)
                         }
                     }
                     .padding(.top, 5)
                 } label: {
                     HStack {
-                        Text(service.groups.count == 1 ? "1 engine group" : "\(service.groups.count) replica groups")
+                        Text(
+                            service.placementGroups.count == 1
+                                ? "1 placement group"
+                                : "\(service.placementGroups.count) placement groups"
+                        )
                             .font(.caption.weight(.semibold))
                         Spacer()
                         Text(
@@ -502,15 +506,15 @@ struct MenuBarContentView: View {
         }
     }
 
-    private func engineGroupRow(
-        _ group: SitePlacementRecord,
-        machines: [SiteMemberRecord]
+    private func placementGroupRow(
+        _ placementGroup: SitePlacementGroupRecord,
+        nodes: [SiteMemberRecord]
     ) -> some View {
-        let names = group.members.map { machineID in
-            machines.first { $0.memberID == machineID }?.displayName
-                ?? String(machineID.prefix(8))
+        let names = placementGroup.placements.map { placement in
+            nodes.first { $0.memberID == placement.nodeID }?.displayName
+                ?? String(placement.nodeID.prefix(8))
         }
-        let stateColor: Color = switch group.state.lowercased() {
+        let stateColor: Color = switch placementGroup.state.lowercased() {
         case "running": .green
         case "starting", "draining", "stopped": .orange
         case "failed": .red
@@ -518,37 +522,36 @@ struct MenuBarContentView: View {
         }
         return DisclosureGroup(
             isExpanded: Binding(
-                get: { expandedGroupIDs.contains(group.groupID) },
+                get: { expandedPlacementGroupIDs.contains(placementGroup.placementGroupID) },
                 set: { expanded in
                     if expanded {
-                        expandedGroupIDs.insert(group.groupID)
+                        expandedPlacementGroupIDs.insert(placementGroup.placementGroupID)
                     } else {
-                        expandedGroupIDs.remove(group.groupID)
+                        expandedPlacementGroupIDs.remove(placementGroup.placementGroupID)
                     }
                 }
             )
         ) {
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(group.resourceAssignments, id: \.taskID) { assignment in
-                    let task = group.taskStates.first { $0.taskID == assignment.taskID }
+                ForEach(placementGroup.placements) { placement in
                     HStack(spacing: 5) {
-                        Text(assignment.taskID)
+                        Text(placement.taskID)
                             .font(.caption2.weight(.semibold).monospaced())
                         Text(
-                            machines.first { $0.memberID == assignment.nodeID }?.displayName
-                                ?? String(assignment.nodeID.prefix(8))
+                            nodes.first { $0.memberID == placement.nodeID }?.displayName
+                                ?? String(placement.nodeID.prefix(8))
                         )
                         .font(.caption2)
-                        Text("\(assignment.deviceUUIDs.count) GPU")
+                        Text("\(placement.deviceUUIDs.count) GPU")
                             .font(.caption2.monospaced())
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Text((task?.state ?? "unknown").uppercased())
+                        Text(placement.state.uppercased())
                             .font(.caption2.weight(.semibold).monospaced())
-                            .foregroundStyle(task?.state == "running" ? .green : .secondary)
+                            .foregroundStyle(placement.state == "running" ? .green : .secondary)
                     }
                 }
-                ForEach(Array(group.connections.enumerated()), id: \.offset) { _, link in
+                ForEach(Array(placementGroup.connections.enumerated()), id: \.offset) { _, link in
                     Text(
                         [
                             link.kind.uppercased(),
@@ -571,19 +574,18 @@ struct MenuBarContentView: View {
                         .font(.caption.weight(.medium))
                         .lineLimit(1)
                     Text([
-                        group.strategy.capitalized,
-                        group.release?.version,
-                        group.deviceAllocations.isEmpty
+                        placementGroup.release?.version,
+                        placementGroup.placements.flatMap(\.deviceAllocations).isEmpty
                             ? nil
-                            : "\(group.deviceAllocations.count) GPU",
-                        group.telemetry.map { "\($0.activeRequests)/\($0.maxActiveRequests) active" }
+                            : "\(placementGroup.placements.flatMap(\.deviceAllocations).count) GPU",
+                        placementGroup.telemetry.map { "\($0.activeRequests)/\($0.maxActiveRequests) active" }
                     ].compactMap { $0 }.joined(separator: " · "))
                         .font(.caption2.monospaced())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 Spacer()
-                Text(group.state.uppercased())
+                Text(placementGroup.state.uppercased())
                     .font(.caption2.weight(.bold).monospaced())
                     .foregroundStyle(stateColor)
             }
@@ -592,16 +594,16 @@ struct MenuBarContentView: View {
     }
 
     private func preferredPlacement(
-        _ placements: [SitePlacementRecord],
+        _ placements: [SitePlacementGroupRecord],
         model: String
-    ) -> SitePlacementRecord? {
+    ) -> SitePlacementGroupRecord? {
         placements.first { $0.model == model }
             ?? placements.first { $0.state == "running" }
             ?? placements.first
     }
 
     private func placementMenu(
-        _ placement: SitePlacementRecord,
+        _ placement: SitePlacementGroupRecord,
         site: SavedSite,
         role: String?,
         tripLatched: Bool,
@@ -613,7 +615,7 @@ struct MenuBarContentView: View {
                     await monitoring.runtimeAction(
                         .start,
                         model: placement.model,
-                        placementID: placement.placementID,
+                        placementGroupID: placement.placementGroupID,
                         site: site
                     )
                 }
@@ -624,7 +626,7 @@ struct MenuBarContentView: View {
                     await monitoring.runtimeAction(
                         .restart,
                         model: placement.model,
-                        placementID: placement.placementID,
+                        placementGroupID: placement.placementGroupID,
                         site: site
                     )
                 }
@@ -635,7 +637,7 @@ struct MenuBarContentView: View {
                         await monitoring.runtimeAction(
                             .recover,
                             model: placement.model,
-                            placementID: placement.placementID,
+                            placementGroupID: placement.placementGroupID,
                             site: site
                         )
                     }
@@ -646,7 +648,7 @@ struct MenuBarContentView: View {
                     await monitoring.runtimeAction(
                         .stop,
                         model: placement.model,
-                        placementID: placement.placementID,
+                        placementGroupID: placement.placementGroupID,
                         site: site
                     )
                 }
@@ -671,7 +673,7 @@ struct MenuBarContentView: View {
         .disabled(
             monitoring.runtimeActionPending(
                 siteID: site.id,
-                placementID: placement.placementID
+                placementGroupID: placement.placementGroupID
             )
         )
     }
