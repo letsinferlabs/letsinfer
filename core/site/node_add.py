@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import time
+import unicodedata
 import urllib.parse
 import uuid
 from collections.abc import Mapping
@@ -287,21 +288,35 @@ def query_request_status(
 
 
 def _decode_avahi_text(value: str) -> str:
-    """Decode Avahi's parsable ``\\DDD`` decimal byte escapes as UTF-8."""
+    """Decode Avahi decimal-byte and escaped-punctuation text as UTF-8."""
 
     raw = bytearray()
     index = 0
     while index < len(value):
-        if (
-            value[index] == "\\"
-            and index + 3 < len(value)
-            and value[index + 1:index + 4].isdigit()
-        ):
-            byte = int(value[index + 1:index + 4], 10)
-            if byte > 255:
+        if value[index] == "\\":
+            if index + 1 >= len(value):
                 raise NodeAddError("node discovery contains an invalid Avahi escape")
-            raw.append(byte)
-            index += 4
+            if value[index + 1].isdigit():
+                if (
+                    index + 3 >= len(value)
+                    or not value[index + 1:index + 4].isdigit()
+                ):
+                    raise NodeAddError(
+                        "node discovery contains an invalid Avahi escape"
+                    )
+                byte = int(value[index + 1:index + 4], 10)
+                if byte > 255:
+                    raise NodeAddError(
+                        "node discovery contains an invalid Avahi escape"
+                    )
+                raw.append(byte)
+                index += 4
+                continue
+            escaped = value[index + 1]
+            if unicodedata.category(escaped).startswith("C"):
+                raise NodeAddError("node discovery contains an invalid Avahi escape")
+            raw.extend(escaped.encode("utf-8"))
+            index += 2
             continue
         raw.extend(value[index].encode("utf-8"))
         index += 1
@@ -340,7 +355,10 @@ def _address_rank(value: str) -> tuple[int, bytes]:
 
 
 def _parse_avahi(output: str) -> list[dict[str, Any]]:
-    records: dict[str, tuple[dict[str, Any], tuple[str, str, int, str, str]]] = {}
+    records: dict[
+        tuple[str, str],
+        tuple[dict[str, Any], tuple[str, str, int, str, str]],
+    ] = {}
     for line in output.splitlines():
         fields = line.split(";")
         if len(fields) < 10 or fields[0] != "=" or fields[4] != SERVICE_TYPE:
@@ -386,7 +404,11 @@ def _parse_avahi(output: str) -> list[dict[str, Any]]:
             record["role"],
             record["state"],
         )
-        previous = records.get(record["node_id"])
+        # A main and all of its children intentionally advertise one shared
+        # site/node ID. Their physical machine IDs distinguish the endpoints;
+        # only two records for the same physical member may conflict.
+        discovery_key = (record["node_id"], record["machine_id"])
+        previous = records.get(discovery_key)
         if previous is not None and previous[1] != identity:
             raise NodeAddError(
                 "node discovery found conflicting advertisements for one node"
@@ -394,10 +416,14 @@ def _parse_avahi(output: str) -> list[dict[str, Any]]:
         if previous is None or _address_rank(address) < _address_rank(
             str(previous[0]["address"])
         ):
-            records[record["node_id"]] = (record, identity)
+            records[discovery_key] = (record, identity)
     return sorted(
         (record for record, _identity in records.values()),
-        key=lambda record: (str(record["name"]).casefold(), str(record["node_id"])),
+        key=lambda record: (
+            str(record["name"]).casefold(),
+            str(record["node_id"]),
+            str(record["machine_id"]),
+        ),
     )
 
 
