@@ -340,7 +340,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         self.assertFalse(store.placement["endpoints"][0]["healthy"])
         self.assertNotIn("updated_at_unix", store.placement)
 
-    def test_unqualified_running_group_never_publishes_an_endpoint(self) -> None:
+    def test_unqualified_running_group_publishes_its_healthy_endpoint(self) -> None:
         for release_identity in (
             {"release": {"qualification": "unqualified"}},
             {"plan": {"release": {"qualification": "unqualified"}}},
@@ -360,8 +360,8 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                     ],
                 }
                 cli._sync_group_placement(store, group)
-                self.assertEqual(store.placement["state"], "starting")
-                self.assertEqual(store.placement["endpoints"], [])
+                self.assertEqual(store.placement["state"], "running")
+                self.assertTrue(store.placement["endpoints"][0]["healthy"])
 
     def test_start_of_cleanly_stopped_group_skips_recovery_stop(self) -> None:
         store = _Store()

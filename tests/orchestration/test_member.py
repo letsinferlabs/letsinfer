@@ -78,7 +78,7 @@ class MemberJobTests(unittest.TestCase):
             validate_group_job(changed, expected_member_id=self.member_id)
         changed = self.job()
         changed["source"] = "registry.example/runtime:latest"
-        with self.assertRaisesRegex(MemberJobError, "digest-pinned"):
+        with self.assertRaisesRegex(MemberJobError, "immutable"):
             validate_group_job(changed, expected_member_id=self.member_id)
 
     def test_agent_is_idempotent_and_rejects_changed_replay(self) -> None:

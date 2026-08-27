@@ -199,17 +199,13 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             remote = executor._safe_result(config, "running")
         self.assertEqual(remote["endpoint"], "https://member.local:18000")
 
-    def test_unqualified_group_uses_private_qualification_evidence(self) -> None:
+    def test_unqualified_group_uses_the_ordinary_managed_launch(self) -> None:
         config = copy.deepcopy(self.config)
         config["_group"]["release"]["qualification"] = "unqualified"
-        root = pathlib.Path(self.temporary.name) / "evidence"
-        with mock.patch.object(cli, "evidence_root", return_value=root):
-            qualification_mode, evidence = cli._engine_group_qualification_launch(config)
+        qualification_mode, evidence = cli._engine_group_launch_mode(config)
 
-        self.assertTrue(qualification_mode)
-        expected = root / "engine-groups" / self.group_id / "qualification"
-        self.assertEqual(evidence, str(expected))
-        self.assertTrue(expected.is_dir())
+        self.assertFalse(qualification_mode)
+        self.assertIsNone(evidence)
 
     def test_group_launch_failure_captures_redacted_evidence(self) -> None:
         evidence_root = pathlib.Path(self.temporary.name) / "evidence"

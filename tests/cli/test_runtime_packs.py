@@ -19,6 +19,7 @@ import urllib.error
 from unittest import mock
 
 from core import runtime_packs
+from core.runtime_sources import local_runtime_source
 
 
 class RuntimePackTests(unittest.TestCase):
@@ -568,6 +569,22 @@ class RuntimePackTests(unittest.TestCase):
                     "example-engine--example--model--fixture-unified",
                 )
 
+    def test_stored_runtime_object_is_an_immutable_local_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            pack = runtime_packs.describe_source(self._source(root))
+            runtime_home = root / "runtime-home"
+            object_root = runtime_packs.store_pack(pack, runtime_home)
+
+            with (
+                mock.patch.object(
+                    runtime_packs, "default_runtime_home", return_value=runtime_home
+                ),
+                runtime_packs.materialize(local_runtime_source(pack.digest)) as installed,
+            ):
+                self.assertEqual(installed.digest, pack.digest)
+                self.assertEqual(installed.root.resolve(), object_root.resolve())
+
     def test_publication_metadata_is_not_executable_runtime_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -1006,7 +1023,8 @@ class RuntimePackTests(unittest.TestCase):
                     hardware_sha, "1" * 64, installed_at_ns
                 ),
                 "policy": "recommended",
-                "authorization": {"qualified": True, "authority": "signed-catalog"},
+                "source_authority": "signed-catalog",
+                "qualification": "qualified",
                 "source": "registry/one@sha256:" + "1" * 64,
                 "history": [],
             }
@@ -1032,6 +1050,26 @@ class RuntimePackTests(unittest.TestCase):
             self.assertEqual(selected["digest"], "2" * 64)
             self.assertEqual(selected["history"][-1]["digest"], "1" * 64)
 
+            legacy = dict(selected)
+            legacy["schema_version"] = 3
+            legacy.pop("source_authority")
+            legacy.pop("qualification")
+            legacy["authorization"] = {
+                "qualified": False,
+                "authority": "direct",
+            }
+            receipt_path = (
+                home
+                / "selections"
+                / f"{runtime_packs.selection_key(legacy['logical_model'])}.json"
+            )
+            receipt_path.write_bytes(runtime_packs.canonical_bytes(legacy))
+            migrated = runtime_packs.selections(home)[0]
+            self.assertEqual(migrated["schema_version"], 4)
+            self.assertEqual(migrated["source_authority"], "direct")
+            self.assertEqual(migrated["qualification"], "unqualified")
+            self.assertNotIn("authorization", migrated)
+
     def test_failed_activation_restores_exact_previous_selection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = pathlib.Path(directory)
@@ -1056,7 +1094,8 @@ class RuntimePackTests(unittest.TestCase):
                     hardware_sha, "1" * 64, installed_at_ns
                 ),
                 "policy": "recommended",
-                "authorization": {"qualified": True, "authority": "signed-catalog"},
+                "source_authority": "signed-catalog",
+                "qualification": "qualified",
                 "source": "registry/one@sha256:" + "1" * 64,
                 "history": [],
             }
@@ -1103,7 +1142,8 @@ class RuntimePackTests(unittest.TestCase):
                     hardware_sha, "1" * 64, installed_at_ns
                 ),
                 "policy": "recommended",
-                "authorization": {"qualified": True, "authority": "signed-catalog"},
+                "source_authority": "signed-catalog",
+                "qualification": "qualified",
                 "source": "registry/one@sha256:" + "1" * 64,
                 "history": [],
             }

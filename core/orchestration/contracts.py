@@ -20,6 +20,7 @@ from core.engine_distribution import (
     EngineDistributionError,
     validate_engine_distribution,
 )
+from core.runtime_sources import is_immutable_runtime_source, local_runtime_digest
 
 
 SCHEMA_VERSION = 3
@@ -153,10 +154,8 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
         raise OrchestrationError("engine-group release candidate_id is invalid")
     if not isinstance(value.get("version"), str) or not VERSION_RE.fullmatch(value["version"]):
         raise OrchestrationError("engine-group release version is invalid")
-    if not isinstance(value.get("source"), str) or not OCI_DIGEST_RE.fullmatch(
-        value["source"]
-    ):
-        raise OrchestrationError("engine-group release source is not digest-pinned OCI")
+    if not is_immutable_runtime_source(value.get("source")):
+        raise OrchestrationError("engine-group release source is not immutable")
     try:
         distribution = validate_engine_distribution(value.get("engine_distribution"))
     except EngineDistributionError as error:
@@ -180,6 +179,11 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
     for key in ("runtime_digest", "manifest_sha256", "target_contract_sha256"):
         if not isinstance(value.get(key), str) or not SHA256_RE.fullmatch(value[key]):
             raise OrchestrationError(f"engine-group release {key} is invalid")
+    source_digest = local_runtime_digest(value["source"])
+    if source_digest is not None and source_digest != value["runtime_digest"]:
+        raise OrchestrationError(
+            "engine-group local source differs from its runtime digest"
+        )
     model_uri = value.get("model_uri")
     if (
         not isinstance(model_uri, str)
@@ -219,6 +223,10 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
         artifact_names.add(artifact["name"])
     if value.get("qualification") not in {"qualified", "unqualified"}:
         raise OrchestrationError("engine-group release qualification is invalid")
+    if value["qualification"] == "qualified" and source_digest is not None:
+        raise OrchestrationError(
+            "qualified engine-group release requires a published OCI source"
+        )
     benchmark = value.get("benchmark")
     if (
         benchmark is not None
@@ -238,9 +246,10 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
     ):
         raise OrchestrationError("engine-group release benchmark identity is invalid")
     authors = value.get("authors")
+    qualified = value["qualification"] == "qualified"
     if (
         not isinstance(authors, list)
-        or not authors
+        or (qualified and not authors)
         or len(authors) > 32
         or len(authors) != len(set(authors))
         or any(
@@ -252,7 +261,13 @@ def validate_release_identity(value: Any) -> dict[str, Any]:
     ):
         raise OrchestrationError("engine-group release authors are invalid")
     license_value = value.get("license")
-    if (
+    if qualified and (
+        not isinstance(license_value, str)
+        or not license_value
+        or len(license_value.encode("utf-8")) > 128
+    ):
+        raise OrchestrationError("engine-group release license is invalid")
+    if not qualified and license_value is not None and (
         not isinstance(license_value, str)
         or not license_value
         or len(license_value.encode("utf-8")) > 128

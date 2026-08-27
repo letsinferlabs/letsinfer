@@ -111,6 +111,13 @@ runtime bytes, target contract, recipe, safety envelope, and benchmark record
 pass their declared gates. Evidence does not transfer across a changed Engine
 OCI, model revision, or runtime pack.
 
+Qualification is evidence and recommendation metadata. It is not permission
+to execute. A catalog install uses qualification to choose the recommended
+candidate; an explicit install of exact runtime bytes remains operator policy
+and enters the same managed engine-group placement, allocation, lifecycle,
+status, and routing path. Core never marks direct bytes qualified, and direct
+installation does not publish them or add them to the signed catalog.
+
 The generated root `manifest.json` is an append-only versioned release index.
 It retains every published candidate version, authors, license, immutable
 runtime OCI, optional benchmark score, structured verifier list, and consensus digest.
@@ -145,8 +152,11 @@ native content store. The last verified signed catalog lives below
 update checks.
 
 Receipts bind the candidate ID, version, pack digest, target contract, model,
-Engine distribution, installation identity, and selection policy. A bounded history
-supports explicit rollback.
+Engine distribution, installation identity, source authority, qualification
+state, and selection policy. Source authority records how exact bytes were
+selected; qualification records evidence status. Neither field substitutes
+for the placement's observed lifecycle. A bounded history supports explicit
+rollback, and schema-3 receipts are migrated when read.
 
 `letsinfer node usage` reports the local owned stores without double-counting
 Docker’s shared layer store. Its explicit cleanup preserves active snapshots
