@@ -221,8 +221,8 @@ def _edge_link(
         (
             link
             for link in links
-            if isinstance(link.get("members"), list)
-            and {str(value) for value in link["members"]} == wanted
+            if isinstance(link.get("nodes"), list)
+            and {str(value) for value in link["nodes"]} == wanted
         ),
         None,
     )

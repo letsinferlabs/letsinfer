@@ -91,8 +91,9 @@ class ClientDisconnected(Exception):
 
 @dataclasses.dataclass
 class Backend:
+    placement_group_id: str
     placement_id: str
-    member_id: str
+    node_id: str
     model: str
     url: str
     credential_file: str
@@ -109,7 +110,7 @@ class Backend:
 
     @property
     def key(self) -> tuple[str, str, str]:
-        return (self.placement_id, self.member_id, self.url)
+        return (self.placement_group_id, self.placement_id, self.url)
 
 
 @dataclasses.dataclass
@@ -286,8 +287,8 @@ class PolicySnapshot:
         self.backends: list[Backend] = []
         self.active: collections.Counter[tuple[str, str, str]] = collections.Counter()
         self.queued_by_model: collections.Counter[str] = collections.Counter()
-        self.group_counters: dict[str, collections.Counter[str]] = {}
-        self.group_windows: collections.deque[
+        self.placement_group_counters: dict[str, collections.Counter[str]] = {}
+        self.placement_group_windows: collections.deque[
             tuple[float, str, dict[str, int]]
         ] = collections.deque(maxlen=16_384)
         self.failure_counts: collections.Counter[tuple[str, str, str]] = collections.Counter()
@@ -314,9 +315,12 @@ class PolicySnapshot:
                 "SELECT member_id,state,certificate_sha256,facts_json,facts_sha256 FROM members "
                 "WHERE state!='removed'"
             ).fetchall()
-            placements = database.connection.execute(
-                "SELECT * FROM placements WHERE state='running' ORDER BY placement_id"
-            ).fetchall()
+            placement_groups = [
+                placement_group
+                for placement_group in database.placement_groups()
+                if placement_group["state"] == "running"
+                and placement_group["desired_state"] == "running"
+            ]
         finally:
             database.close()
         member_states: dict[str, str] = {}
@@ -362,126 +366,137 @@ class PolicySnapshot:
             except TopologyError as error:
                 raise GatewayError("current node topology is invalid") from error
         backends: list[Backend] = []
-        for placement_value in placements:
-            placement = dict(placement_value)
-            try:
-                members = json.loads(placement["members_json"])
-                endpoints = json.loads(placement["endpoints_json"])
-                capacity = json.loads(placement["capacity_json"])
-            except (TypeError, json.JSONDecodeError) as error:
-                raise GatewayError(f"placement {placement['placement_id']} metadata is invalid") from error
+        for placement_group in placement_groups:
+            placement_group_id = str(placement_group["placement_group_id"])
+            placements = placement_group.get("placements")
+            endpoint = placement_group.get("endpoint")
+            capacity = placement_group.get("capacity")
             if (
-                not isinstance(members, list)
-                or not members
-                or any(not isinstance(member, str) for member in members)
-                or not isinstance(endpoints, list)
+                not isinstance(placements, list)
+                or not placements
+                or any(not isinstance(placement, dict) for placement in placements)
+                or not isinstance(endpoint, dict)
                 or not isinstance(capacity, dict)
             ):
-                raise GatewayError(f"placement {placement['placement_id']} metadata is invalid")
-            runtime_parts = str(placement.get("runtime", "")).split("/", 2)
+                raise GatewayError(
+                    f"placement group {placement_group_id} metadata is invalid"
+                )
+            placement_ids = [str(placement.get("placement_id", "")) for placement in placements]
+            node_ids = [str(placement.get("node_id", "")) for placement in placements]
+            if (
+                len(placement_ids) != len(set(placement_ids))
+                or len(node_ids) != len(set(node_ids))
+                or any(placement.get("state") != "running" for placement in placements)
+            ):
+                continue
+            endpoint_placement = next(
+                (
+                    placement
+                    for placement in placements
+                    if placement.get("placement_id") == endpoint.get("placement_id")
+                ),
+                None,
+            )
+            if (
+                endpoint_placement is None
+                or endpoint_placement.get("endpoint_owner") is not True
+                or endpoint.get("node_id") != endpoint_placement.get("node_id")
+            ):
+                raise GatewayError(
+                    f"placement group {placement_group_id} endpoint owner is invalid"
+                )
+            runtime_parts = str(placement_group.get("runtime", "")).split("/", 2)
             if (
                 len(runtime_parts) != 3
                 or not runtime_parts[1]
             ):
                 raise GatewayError(
-                    f"placement {placement['placement_id']} runtime identity is invalid"
+                    f"placement group {placement_group_id} runtime identity is invalid"
                 )
             engine = runtime_parts[1]
-            if len(endpoints) != 1:
-                raise GatewayError(
-                    f"engine group {placement['placement_id']} must expose exactly one endpoint"
-                )
-            # Every placement is one atomic engine group. Losing any required
-            # member removes that group endpoint; sibling replica groups remain.
-            if any(
-                member_states.get(member) != "active" for member in members
-            ):
+            # A placement group is atomic. Losing any required placement removes
+            # its endpoint; sibling placement groups remain available replicas.
+            if any(member_states.get(node_id) != "active" for node_id in node_ids):
                 continue
-            if placement["strategy"] == "parallel":
+            if any(member_health.get(node_id) is None for node_id in node_ids):
+                continue
+            if len(node_ids) > 1:
                 try:
-                    if routing_graph is None or not routing_graph.placement_available(
-                        members,
-                        strategy="parallel",
+                    if routing_graph is None or not routing_graph.placement_group_available(
+                        node_ids,
                         interconnect=capacity.get("interconnect"),
                     ):
                         continue
                 except TopologyError as error:
                     raise GatewayError(
-                        f"placement {placement['placement_id']} topology contract is invalid"
+                        f"placement group {placement_group_id} topology contract is invalid"
                     ) from error
-            for endpoint in endpoints:
-                if not isinstance(endpoint, dict):
-                    raise GatewayError(f"placement {placement['placement_id']} endpoint is invalid")
-                endpoint_member = endpoint.get("member_id")
-                if not isinstance(endpoint_member, str) or endpoint_member not in members:
-                    raise GatewayError(
-                        f"placement {placement['placement_id']} endpoint member is invalid"
-                    )
-                if member_states.get(endpoint_member) != "active":
-                    continue
-                live_health = member_health.get(endpoint_member)
-                if live_health is None:
-                    continue
-                key = (placement["placement_id"], endpoint.get("member_id"), endpoint.get("url"))
-                prefix_keys = endpoint.get("prefix_keys", [])
-                token_count_path = endpoint.get("token_count_path")
-                token_count_protocol = endpoint.get("token_count_protocol")
-                max_active_requests = endpoint.get(
-                    "max_active_requests", capacity.get("max_active_requests", 1)
+            endpoint_node_id = str(endpoint["node_id"])
+            live_health = member_health[endpoint_node_id]
+            assert live_health is not None
+            prefix_keys = endpoint.get("prefix_keys", [])
+            token_count_path = endpoint.get("token_count_path")
+            token_count_protocol = endpoint.get("token_count_protocol")
+            max_active_requests = endpoint.get("max_active_requests")
+            max_context_tokens = endpoint.get("max_context_tokens")
+            if (
+                not isinstance(max_active_requests, int)
+                or isinstance(max_active_requests, bool)
+                or max_active_requests <= 0
+                or not isinstance(max_context_tokens, int)
+                or isinstance(max_context_tokens, bool)
+                or max_context_tokens <= 0
+            ):
+                raise GatewayError(
+                    f"placement group {placement_group_id} capacity is invalid"
                 )
-                max_context_tokens = endpoint.get(
-                    "max_context_tokens", capacity.get("max_context_tokens", 1)
+            if (
+                not isinstance(prefix_keys, list)
+                or any(not isinstance(prefix, str) for prefix in prefix_keys)
+            ):
+                raise GatewayError(
+                    f"placement group {placement_group_id} prefix identity is invalid"
                 )
-                if (
-                    not isinstance(max_active_requests, int)
-                    or isinstance(max_active_requests, bool)
-                    or max_active_requests <= 0
-                    or not isinstance(max_context_tokens, int)
-                    or isinstance(max_context_tokens, bool)
-                    or max_context_tokens <= 0
-                ):
-                    raise GatewayError(
-                        f"placement {placement['placement_id']} capacity is invalid"
-                    )
-                if (
-                    not isinstance(prefix_keys, list)
-                    or any(not isinstance(prefix, str) for prefix in prefix_keys)
-                ):
-                    raise GatewayError(
-                        f"placement {placement['placement_id']} prefix identity is invalid"
-                    )
-                if token_count_path is not None and (
-                    not isinstance(token_count_path, str)
-                    or not token_count_path.startswith("/")
-                    or "://" in token_count_path
-                ):
-                    raise GatewayError(
-                        f"placement {placement['placement_id']} token-count path is invalid"
-                    )
-                if (token_count_path is None) != (token_count_protocol is None) or (
-                    token_count_protocol is not None
-                    and token_count_protocol not in TOKEN_COUNT_PROTOCOLS
-                ):
-                    raise GatewayError(
-                        f"placement {placement['placement_id']} token-count protocol is invalid"
-                    )
-                endpoint_temperature = endpoint.get("temperature_c", -1)
-                if not isinstance(endpoint_temperature, (int, float)) or isinstance(
-                    endpoint_temperature, bool
-                ):
-                    raise GatewayError(
-                        f"placement {placement['placement_id']} endpoint temperature is invalid"
-                    )
-                live_temperature = live_health["max_temperature_c"]
-                temperatures = [
-                    float(value)
-                    for value in (endpoint_temperature, live_temperature)
-                    if float(value) >= 0
-                ]
-                backend = Backend(
-                    placement_id=placement["placement_id"],
-                    member_id=str(endpoint["member_id"]),
-                    model=placement["model"],
+            if token_count_path is not None and (
+                not isinstance(token_count_path, str)
+                or not token_count_path.startswith("/")
+                or "://" in token_count_path
+            ):
+                raise GatewayError(
+                    f"placement group {placement_group_id} token-count path is invalid"
+                )
+            if (token_count_path is None) != (token_count_protocol is None) or (
+                token_count_protocol is not None
+                and token_count_protocol not in TOKEN_COUNT_PROTOCOLS
+            ):
+                raise GatewayError(
+                    f"placement group {placement_group_id} token-count protocol is invalid"
+                )
+            endpoint_temperature = endpoint.get("temperature_c", -1)
+            if not isinstance(endpoint_temperature, (int, float)) or isinstance(
+                endpoint_temperature, bool
+            ):
+                raise GatewayError(
+                    f"placement group {placement_group_id} endpoint temperature is invalid"
+                )
+            temperatures = [
+                float(value)
+                for value in (
+                    endpoint_temperature,
+                    *(
+                        member_health[node_id]["max_temperature_c"]
+                        for node_id in node_ids
+                        if member_health[node_id] is not None
+                    ),
+                )
+                if float(value) >= 0
+            ]
+            backends.append(
+                Backend(
+                    placement_group_id=placement_group_id,
+                    placement_id=str(endpoint["placement_id"]),
+                    node_id=endpoint_node_id,
+                    model=str(placement_group["model"]),
                     url=str(endpoint["url"]),
                     credential_file=str(endpoint["credential_file"]),
                     ca_file=str(endpoint["ca_file"]) if endpoint.get("ca_file") else None,
@@ -492,13 +507,17 @@ class PolicySnapshot:
                     healthy=backend_is_operational(endpoint, live_health),
                     memory_pressure=(
                         endpoint.get("memory_pressure", False) is True
-                        or live_health["memory_pressure"] is True
+                        or any(
+                            bool(member_health[node_id]["memory_pressure"])
+                            for node_id in node_ids
+                            if member_health[node_id] is not None
+                        )
                     ),
                     temperature_c=max(temperatures) if temperatures else -1,
                     prefix_keys=set(prefix_keys),
                     engine=engine,
                 )
-                backends.append(backend)
+            )
         with self.condition:
             self.aliases = aliases
             self.backends = backends
@@ -593,7 +612,7 @@ class PolicySnapshot:
             key=lambda backend: (
                 backend.token_count_path is None,
                 -backend.max_context_tokens,
-                backend.member_id,
+                backend.node_id,
             )
         )
         return tuple(candidates)
@@ -656,7 +675,7 @@ class PolicySnapshot:
                             ),
                             self.active[backend.key] / backend.max_active_requests,
                             backend.temperature_c if backend.temperature_c >= 0 else 10_000,
-                            backend.member_id,
+                            backend.node_id,
                         )
                     )
                     selected = candidates[0]
@@ -689,8 +708,10 @@ class PolicySnapshot:
             else:
                 self.queued_by_model.pop(model, None)
 
-    def record_group_metrics(self, placement_id: str | None, **changes: int) -> None:
-        if placement_id is None or not changes:
+    def record_placement_group_metrics(
+        self, placement_group_id: str | None, **changes: int
+    ) -> None:
+        if placement_group_id is None or not changes:
             return
         bounded = {
             key: max(0, int(value))
@@ -700,54 +721,67 @@ class PolicySnapshot:
         if not bounded:
             return
         with self.condition:
-            counters = self.group_counters.setdefault(
-                placement_id, collections.Counter()
+            counters = self.placement_group_counters.setdefault(
+                placement_group_id, collections.Counter()
             )
             counters.update(bounded)
-            self.group_windows.append((time.monotonic(), placement_id, bounded))
+            self.placement_group_windows.append(
+                (time.monotonic(), placement_group_id, bounded)
+            )
 
     def activity_snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
         cutoff = now - 5.0
         with self.condition:
-            while self.group_windows and self.group_windows[0][0] < cutoff:
-                self.group_windows.popleft()
+            while (
+                self.placement_group_windows
+                and self.placement_group_windows[0][0] < cutoff
+            ):
+                self.placement_group_windows.popleft()
             recent: dict[str, collections.Counter[str]] = {}
             first: dict[str, float] = {}
-            for observed, placement_id, changes in self.group_windows:
-                recent.setdefault(placement_id, collections.Counter()).update(changes)
-                first.setdefault(placement_id, observed)
-            groups: dict[str, dict[str, Any]] = {}
+            for observed, placement_group_id, changes in self.placement_group_windows:
+                recent.setdefault(
+                    placement_group_id, collections.Counter()
+                ).update(changes)
+                first.setdefault(placement_group_id, observed)
+            placement_groups: dict[str, dict[str, Any]] = {}
             for backend in self.backends:
-                row = groups.setdefault(
-                    backend.placement_id,
+                row = placement_groups.setdefault(
+                    backend.placement_group_id,
                     {
                         "model": backend.model,
+                        "endpoint_placement_id": backend.placement_id,
+                        "endpoint_node_id": backend.node_id,
                         "active_requests": 0,
                         "max_active_requests": 0,
-                        "counters": dict(self.group_counters.get(backend.placement_id, {})),
+                        "counters": dict(
+                            self.placement_group_counters.get(
+                                backend.placement_group_id, {}
+                            )
+                        ),
                         "rates": {},
                     },
                 )
                 row["active_requests"] += self.active[backend.key]
                 row["max_active_requests"] += backend.max_active_requests
-            for placement_id, counters in recent.items():
-                if placement_id not in groups:
+            for placement_group_id, counters in recent.items():
+                if placement_group_id not in placement_groups:
                     continue
-                elapsed = max(1.0, now - first[placement_id])
-                groups[placement_id]["rates"] = {
+                elapsed = max(1.0, now - first[placement_group_id])
+                placement_groups[placement_group_id]["rates"] = {
                     "input_tokens_per_second": counters["input_tokens"] / elapsed,
                     "output_tokens_per_second": counters["output_tokens"] / elapsed,
                     "cached_tokens_per_second": counters["cached_tokens"] / elapsed,
                 }
             return {
-                "schema_version": 1,
+                "schema_version": 2,
                 "unix_ms": int(time.time() * 1000),
                 "models": {
                     model: {"queued_requests": amount}
                     for model, amount in sorted(self.queued_by_model.items())
                 },
-                "groups": groups,
+                "placement_groups": placement_groups,
             }
 
 
@@ -845,7 +879,7 @@ class MetricsPublisher:
         details_provider: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         self.path = path
-        self.details_path = path.with_name(path.name + ".groups.json")
+        self.details_path = path.with_name(path.name + ".placement-groups.json")
         self.details_provider = details_provider
         self.lock = threading.Lock()
         self.metrics = GatewayMetrics()
@@ -890,7 +924,9 @@ class MetricsPublisher:
                     json.dumps(details, sort_keys=True, separators=(",", ":")) + "\n"
                 ).encode("utf-8")
                 if len(details_body) > 1024 * 1024:
-                    raise GatewayError("gateway group telemetry exceeds its size limit")
+                    raise GatewayError(
+                        "gateway placement-group telemetry exceeds its size limit"
+                    )
                 details_temporary = self.details_path.with_name(
                     f".{self.details_path.name}.{os.getpid()}.{secrets.token_hex(4)}"
                 )
@@ -970,10 +1006,12 @@ class UsageWriter:
                     with store.transaction():
                         store.connection.execute(
                             """INSERT INTO request_summaries
-                               (request_id,key_id,model,placement_id,member_id,received_unix_ms,
+                               (request_id,key_id,model,placement_group_id,placement_id,
+                                node_id,received_unix_ms,
                                 completed_unix_ms,status,input_tokens,output_tokens,cached_tokens,
                                 queue_ms,ttft_ms,decode_ms,retries,exact_tokens)
-                               VALUES(:request_id,:key_id,:model,:placement_id,:member_id,:received_unix_ms,
+                               VALUES(:request_id,:key_id,:model,:placement_group_id,
+                                      :placement_id,:node_id,:received_unix_ms,
                                       :completed_unix_ms,:status,:input_tokens,:output_tokens,:cached_tokens,
                                       :queue_ms,:ttft_ms,:decode_ms,:retries,:exact_tokens)""",
                             row,
@@ -1511,8 +1549,9 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
 
         key_id = str(policy["key_id"])
         backend: Backend | None = None
+        selected_placement_group_id: str | None = None
         selected_placement_id: str | None = None
-        selected_member_id: str | None = None
+        selected_node_id: str | None = None
         usage = RequestUsage()
         streaming_usage = StreamingUsageTracker()
         queue_seconds = 0.0
@@ -1551,8 +1590,9 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                 self.gateway.metrics.update(active_requests=1)
                 active_metric = True
                 attempted.add(backend.key)
+                selected_placement_group_id = backend.placement_group_id
                 selected_placement_id = backend.placement_id
-                selected_member_id = backend.member_id
+                selected_node_id = backend.node_id
                 connection: http.client.HTTPConnection | None = None
                 try:
                     if (
@@ -1589,8 +1629,8 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                     headers["Content-Length"] = str(len(body))
                     if not request_admitted:
                         self.gateway.metrics.update(requests_admitted=1)
-                        self.gateway.policy.record_group_metrics(
-                            selected_placement_id, requests_admitted=1
+                        self.gateway.policy.record_placement_group_metrics(
+                            selected_placement_group_id, requests_admitted=1
                         )
                         request_admitted = True
                     dispatch_at = time.monotonic()
@@ -1628,8 +1668,8 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                         live_changes = streaming_usage.feed(chunk)
                         if any(live_changes.values()):
                             self.gateway.metrics.update(**live_changes)
-                            self.gateway.policy.record_group_metrics(
-                                selected_placement_id, **live_changes
+                            self.gateway.policy.record_placement_group_metrics(
+                                selected_placement_group_id, **live_changes
                             )
                         self.wfile.write(chunk)
                         self.wfile.flush()
@@ -1781,8 +1821,8 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                 else 0,
                 prefix_cache_hits=1 if (usage.cached_tokens or 0) > 0 else 0,
             )
-            self.gateway.policy.record_group_metrics(
-                selected_placement_id,
+            self.gateway.policy.record_placement_group_metrics(
+                selected_placement_group_id,
                 **usage_changes,
                 requests_completed=1 if status == "completed" else 0,
                 requests_failed=1 if status == "failed" else 0,
@@ -1792,8 +1832,9 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                 "request_id": request_id,
                 "key_id": key_id,
                 "model": model,
+                "placement_group_id": selected_placement_group_id,
                 "placement_id": selected_placement_id,
-                "member_id": selected_member_id,
+                "node_id": selected_node_id,
                 "received_unix_ms": received_unix_ms,
                 "completed_unix_ms": completed_unix_ms,
                 "status": status,

@@ -31,18 +31,18 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
-    def test_active_group_is_an_internal_outer_matrix_mode(self) -> None:
+    def test_active_placement_group_is_an_internal_outer_matrix_mode(self) -> None:
         with mock.patch.object(
             runtime_matrix.sys,
             "argv",
-            ["runtime_matrix.py", "--runtime", "fixture", "--active-group"],
+            ["runtime_matrix.py", "--runtime", "fixture", "--active-placement-group"],
         ):
             arguments = runtime_matrix.parse_arguments()
 
-        self.assertTrue(arguments.active_group)
+        self.assertTrue(arguments.active_placement_group)
         self.assertFalse(arguments.active_container)
 
-    def test_active_group_worker_uses_group_container_validation(self) -> None:
+    def test_active_placement_group_worker_uses_group_container_validation(self) -> None:
         arguments = types.SimpleNamespace(
             token_count_api_key_file=None,
             api_key_file=pathlib.Path("api-key"),
@@ -54,7 +54,7 @@ class RuntimeMatrixTests(unittest.TestCase):
             timeout=3600,
             sample_interval_seconds=5,
             source_attestation=None,
-            active_group=True,
+            active_placement_group=True,
         )
         command = runtime_matrix._worker_command(
             arguments,
@@ -65,7 +65,7 @@ class RuntimeMatrixTests(unittest.TestCase):
         )
 
         self.assertIn("--active-container", command)
-        self.assertIn("--active-group-container", command)
+        self.assertIn("--active-placement-container", command)
 
     def test_failed_command_preserves_stderr_warning_and_stdout_error(self) -> None:
         result = types.SimpleNamespace(
@@ -1472,8 +1472,8 @@ class RuntimeMatrixTests(unittest.TestCase):
                 ["shared-container", "shared-container"],
             )
 
-            arguments.output_directory = root / "active-group-evidence"
-            arguments.active_group = True
+            arguments.output_directory = root / "active-placement-group-evidence"
+            arguments.active_placement_group = True
             process_number = 0
             with (
                 mock.patch.object(runtime_matrix, "_command_output") as group_lifecycle,
@@ -1516,7 +1516,7 @@ class RuntimeMatrixTests(unittest.TestCase):
             self.assertEqual(process_number, 1)
 
             arguments.output_directory = root / "failed-evidence"
-            arguments.active_group = False
+            arguments.active_placement_group = False
             process_number = 0
             with (
                 mock.patch.object(

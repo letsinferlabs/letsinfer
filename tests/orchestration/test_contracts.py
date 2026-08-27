@@ -7,9 +7,9 @@ import unittest
 
 from core.orchestration import (
     OrchestrationError,
-    bind_endpoint_member,
-    build_group_plan,
-    validate_group_target_interconnect,
+    bind_endpoint_node,
+    build_placement_group_plan,
+    validate_placement_group_target_interconnect,
     validate_orchestration_contract,
     validate_target_binding,
 )
@@ -99,7 +99,7 @@ class OrchestrationContractTests(unittest.TestCase):
             validate_orchestration_contract(shell)
         protected = self.parallel()
         protected["tasks"][1]["environment"] = {
-            "LETSINFER_GROUP_ID": "forged"
+            "LETSINFER_PLACEMENT_GROUP_ID": "forged"
         }
         with self.assertRaisesRegex(OrchestrationError, "reserved for core"):
             validate_orchestration_contract(protected)
@@ -132,16 +132,16 @@ class OrchestrationContractTests(unittest.TestCase):
             },
             "connections": parallel_connections(members),
         }
-        first = build_group_plan(self.parallel(), **arguments)
-        second = build_group_plan(self.parallel(), **arguments)
+        first = build_placement_group_plan(self.parallel(), **arguments)
+        second = build_placement_group_plan(self.parallel(), **arguments)
         self.assertEqual(first, second)
-        self.assertEqual(first.assignments[0].member_id, "1" * 32)
+        self.assertEqual(first.placements[0].node_id, "1" * 32)
         self.assertEqual(
-            [item.task_id for item in first.assignments],
+            [item.task_id for item in first.placements],
             ["task-0", "task-1", "task-2"],
         )
-        self.assertRegex(first.group_id, r"^[0-9a-f]{32}$")
-        self.assertEqual(first.document()["resources"][0]["address"], "member-a.local:9770")
+        self.assertRegex(first.placement_group_id, r"^[0-9a-f]{32}$")
+        self.assertEqual(first.document()["placements"][0]["address"], "member-a.local:9770")
         self.assertNotIn("rank", first.document())
 
     def test_endpoint_owner_task_is_bound_to_main_node(self) -> None:
@@ -149,14 +149,14 @@ class OrchestrationContractTests(unittest.TestCase):
         main = "f" * 32
         third = "2" * 32
         contract = self.parallel()
-        ordered = bind_endpoint_member(contract, (child, third, main), main)
+        ordered = bind_endpoint_node(contract, (child, third, main), main)
         self.assertEqual(ordered, (main, third, child))
         with self.assertRaisesRegex(OrchestrationError, "selected main"):
-            bind_endpoint_member(contract, (child, third, "3" * 32), main)
+            bind_endpoint_node(contract, (child, third, "3" * 32), main)
 
     def test_rdma_group_seals_interfaces_and_matches_target(self) -> None:
         members = ("1" * 32, "2" * 32, "3" * 32)
-        plan = build_group_plan(
+        plan = build_placement_group_plan(
             self.parallel(),
             member_ids=members,
             member_addresses={member: f"192.0.2.{index + 10}" for index, member in enumerate(members)},
@@ -172,7 +172,7 @@ class OrchestrationContractTests(unittest.TestCase):
             endpoint_member_id=members[0],
         )
         document = plan.document()
-        self.assertEqual(document["resources"][0]["rdma_interface"], "mlx0")
+        self.assertEqual(document["placements"][0]["rdma_interface"], "mlx0")
         placement = {
             "strategy": "parallel",
             "node_count": 3,
@@ -184,15 +184,15 @@ class OrchestrationContractTests(unittest.TestCase):
             },
         }
         self.assertIs(
-            validate_group_target_interconnect(document, placement), document
+            validate_placement_group_target_interconnect(document, placement), document
         )
         non_rdma = {
             **placement,
             "interconnect": {**placement["interconnect"], "rdma_required": False},
         }
         with self.assertRaisesRegex(OrchestrationError, "non-RDMA"):
-            validate_group_target_interconnect(document, non_rdma)
-        unbound = build_group_plan(
+            validate_placement_group_target_interconnect(document, non_rdma)
+        unbound = build_placement_group_plan(
             self.parallel(),
             member_ids=members,
             member_addresses={member: f"192.0.2.{index + 10}" for index, member in enumerate(members)},
@@ -206,12 +206,12 @@ class OrchestrationContractTests(unittest.TestCase):
             connections=parallel_connections(members),
         ).document()
         with self.assertRaisesRegex(OrchestrationError, "sealed interface"):
-            validate_group_target_interconnect(unbound, placement)
+            validate_placement_group_target_interconnect(unbound, placement)
 
     def test_parallel_plan_rejects_disconnected_or_unverified_resources(self) -> None:
         members = ("1" * 32, "2" * 32, "3" * 32)
         with self.assertRaisesRegex(OrchestrationError, "do not join"):
-            build_group_plan(
+            build_placement_group_plan(
                 self.parallel(),
                 member_ids=members,
                 member_addresses={member: f"{index}.local" for index, member in enumerate(members)},
@@ -230,7 +230,7 @@ class OrchestrationContractTests(unittest.TestCase):
         placement = {"strategy": "parallel", "node_count": 1}
         self.assertIs(validate_target_binding(contract, placement), contract)
         member = "1" * 32
-        plan = build_group_plan(
+        plan = build_placement_group_plan(
             contract,
             member_ids=(member,),
             member_addresses={member: "node.local"},
@@ -243,12 +243,15 @@ class OrchestrationContractTests(unittest.TestCase):
             member_device_uuids={member: ["GPU-0", "GPU-1"]},
             connections=[],
         )
-        self.assertEqual(plan.strategy, "parallel")
-        self.assertEqual(plan.document()["resources"][0]["device_uuids"], ["GPU-0", "GPU-1"])
+        self.assertEqual(len(plan.placements), 1)
+        self.assertEqual(
+            plan.document()["placements"][0]["device_uuids"],
+            ["GPU-0", "GPU-1"],
+        )
 
     def test_group_plan_rejects_incomplete_member_addresses(self) -> None:
         with self.assertRaisesRegex(OrchestrationError, "addresses"):
-            build_group_plan(
+            build_placement_group_plan(
                 self.parallel(),
                 member_ids=("1" * 32, "2" * 32, "3" * 32),
                 member_addresses={"1" * 32: "a.local:9770"},

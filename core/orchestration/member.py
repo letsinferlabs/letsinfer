@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Bounded, idempotent member execution for engine-group lifecycle jobs."""
+"""Bounded, idempotent member execution for placement-group lifecycle jobs."""
 
 from __future__ import annotations
 
@@ -19,13 +19,13 @@ import unicodedata
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
-from .contracts import OrchestrationError, validate_group_document
-from .credentials import GroupCredentialError, credential_sha256
+from .contracts import OrchestrationError, validate_placement_group_document
+from .credentials import PlacementGroupCredentialError, credential_sha256
 from ..paths import data_root
 from ..runtime_sources import is_immutable_runtime_source
 
 
-PROTOCOL = "letsinfer-engine-group-job-v2"
+PROTOCOL = "letsinfer-placement-job-v1"
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_JOB_BYTES = 16 * 1024
@@ -34,7 +34,7 @@ MAX_CLOCK_SKEW_SECONDS = 30
 MAX_JOB_LIFETIME_SECONDS = 300
 MAX_QUEUED_JOBS = 16
 FINAL_JOB_STATES = {"succeeded", "failed"}
-GROUP_STATES = {"staged", "running", "stopped", "failed", "removed"}
+PLACEMENT_STATES = {"staged", "running", "stopped", "failed", "removed"}
 ACTION_RESULT_STATE = {
     "stage": "staged",
     "start": "running",
@@ -51,7 +51,7 @@ MAX_ERROR_CHARS = 512
 
 
 class MemberJobError(RuntimeError):
-    """A group job is unauthenticated, invalid, replayed, or failed."""
+    """A placement job is unauthenticated, invalid, replayed, or failed."""
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -121,19 +121,20 @@ def _safe_error(error: BaseException) -> str:
     return f"{name}: {detail}"
 
 
-def validate_group_job(
+def validate_placement_job(
     value: Any,
     *,
-    expected_member_id: str,
+    expected_node_id: str,
     now: int | None = None,
 ) -> dict[str, Any]:
     """Validate an exact coordinator-issued member lifecycle job."""
     required = {
         "protocol",
         "operation_id",
-        "group_id",
+        "placement_group_id",
+        "placement_id",
         "action",
-        "member_id",
+        "node_id",
         "plan_sha256",
         "runtime_digest",
         "manifest_sha256",
@@ -141,25 +142,25 @@ def validate_group_job(
         "engine_credential_sha256",
         "expires_at_unix",
         "source",
-        "task",
-        "group",
+        "placement",
+        "placement_group",
     }
     if not isinstance(value, dict) or set(value) != required or value.get("protocol") != PROTOCOL:
-        raise MemberJobError("engine-group job schema is invalid")
-    for key in ("operation_id", "group_id", "member_id"):
+        raise MemberJobError("placement-group job schema is invalid")
+    for key in ("operation_id", "placement_group_id", "placement_id", "node_id"):
         if not isinstance(value.get(key), str) or not ID_RE.fullmatch(value[key]):
-            raise MemberJobError(f"engine-group job {key} is invalid")
-    if value["member_id"] != expected_member_id:
-        raise MemberJobError("engine-group job targets a different member")
+            raise MemberJobError(f"placement-group job {key} is invalid")
+    if value["node_id"] != expected_node_id:
+        raise MemberJobError("placement job targets a different node")
     for key in (
         "plan_sha256", "runtime_digest", "manifest_sha256", "topology_sha256",
         "engine_credential_sha256",
     ):
         if not isinstance(value.get(key), str) or not SHA256_RE.fullmatch(value[key]):
-            raise MemberJobError(f"engine-group job {key} is invalid")
+            raise MemberJobError(f"placement-group job {key} is invalid")
     action = value.get("action")
     if action not in ACTION_RESULT_STATE:
-        raise MemberJobError("engine-group job action is invalid")
+        raise MemberJobError("placement-group job action is invalid")
     source = value.get("source")
     if action == "stage":
         if not is_immutable_runtime_source(source):
@@ -174,49 +175,65 @@ def validate_group_job(
         or expires < current - MAX_CLOCK_SKEW_SECONDS
         or expires > current + MAX_JOB_LIFETIME_SECONDS
     ):
-        raise MemberJobError("engine-group job expiry is invalid")
+        raise MemberJobError("placement-group job expiry is invalid")
     try:
-        group = validate_group_document(value.get("group"))
+        placement_group = validate_placement_group_document(
+            value.get("placement_group")
+        )
     except OrchestrationError as error:
         raise MemberJobError(str(error)) from error
     if (
-        group.get("group_id") != value["group_id"]
-        or group.get("topology_sha256") != value["topology_sha256"]
-        or group.get("manifest_sha256") != value["manifest_sha256"]
-        or group.get("runtime_digest") != value["runtime_digest"]
+        placement_group.get("placement_group_id") != value["placement_group_id"]
+        or placement_group.get("topology_sha256") != value["topology_sha256"]
+        or placement_group.get("manifest_sha256") != value["manifest_sha256"]
+        or placement_group.get("runtime_digest") != value["runtime_digest"]
     ):
-        raise MemberJobError("engine-group job group document is invalid")
-    if action == "stage" and source != group["release"]["source"]:
-        raise MemberJobError("stage job source does not match the sealed group release")
-    if hashlib.sha256(canonical_bytes(group)).hexdigest() != value["plan_sha256"]:
-        raise MemberJobError("engine-group job plan digest is invalid")
-    matching_resources = [
+        raise MemberJobError("placement-group job group document is invalid")
+    if action == "stage" and source != placement_group["release"]["source"]:
+        raise MemberJobError(
+            "stage job source does not match the sealed placement-group release"
+        )
+    if (
+        hashlib.sha256(canonical_bytes(placement_group)).hexdigest()
+        != value["plan_sha256"]
+    ):
+        raise MemberJobError("placement-group job plan digest is invalid")
+    matching_placements = [
         item
-        for item in group["resources"]
-        if isinstance(item, dict) and item.get("node_id") == expected_member_id
+        for item in placement_group["placements"]
+        if isinstance(item, dict)
+        and item.get("placement_id") == value["placement_id"]
+        and item.get("node_id") == expected_node_id
     ]
-    task = value.get("task")
-    if len(matching_resources) != 1 or not isinstance(task, dict):
-        raise MemberJobError("engine-group job resource assignment is invalid")
-    assignment = matching_resources[0]
-    required_task = {
-        "task_id", "port_base", "port_count", "launcher", "command", "environment",
-        "endpoint_owner", "readiness", "device_uuids",
+    placement = value.get("placement")
+    if len(matching_placements) != 1 or not isinstance(placement, dict):
+        raise MemberJobError("placement job assignment is invalid")
+    planned = matching_placements[0]
+    required_placement = {
+        "placement_id", "node_id", "task_id", "port_base", "port_count",
+        "launcher", "command", "environment", "endpoint_owner", "readiness",
+        "device_uuids",
     }
     if (
-        set(task) != required_task
-        or task.get("task_id") != assignment.get("task_id")
-        or task.get("port_base") != assignment.get("port_base")
-        or task.get("port_count") != assignment.get("port_count")
-        or task.get("endpoint_owner") is not (task.get("task_id") == group["endpoint_owner"])
-        or task.get("device_uuids") != assignment.get("device_uuids")
-        or task.get("launcher") not in {"manifest", "runtime-command"}
-        or not isinstance(task.get("command"), list)
-        or not isinstance(task.get("environment"), dict)
-        or not isinstance(task.get("readiness"), dict)
+        set(placement) != required_placement
+        or placement.get("placement_id") != planned.get("placement_id")
+        or placement.get("node_id") != planned.get("node_id")
+        or placement.get("task_id") != planned.get("task_id")
+        or placement.get("port_base") != planned.get("port_base")
+        or placement.get("port_count") != planned.get("port_count")
+        or placement.get("endpoint_owner")
+        is not (
+            placement.get("placement_id")
+            == placement_group["endpoint_placement_id"]
+        )
+        or placement.get("device_uuids") != planned.get("device_uuids")
+        or placement.get("launcher") not in {"manifest", "runtime-command"}
+        or not isinstance(placement.get("command"), list)
+        or not isinstance(placement.get("environment"), dict)
+        or not isinstance(placement.get("readiness"), dict)
     ):
-        raise MemberJobError("engine-group job task does not match its resource assignment")
-    _bounded_json(value, "engine-group job", MAX_JOB_BYTES)
+        raise MemberJobError("placement job does not match its sealed assignment")
+    _bounded_json(value, "placement job", MAX_JOB_BYTES)
     return value
 
 
@@ -240,15 +257,16 @@ class MemberJobStore:
         self.connection.execute("PRAGMA synchronous=FULL")
         self.connection.executescript(
             """
-            CREATE TABLE IF NOT EXISTS groups (
-                group_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS placements (
+                placement_id TEXT PRIMARY KEY,
+                placement_group_id TEXT NOT NULL UNIQUE,
                 plan_sha256 TEXT NOT NULL,
                 runtime_digest TEXT NOT NULL,
                 manifest_sha256 TEXT NOT NULL,
                 topology_sha256 TEXT NOT NULL,
                 engine_credential_sha256 TEXT NOT NULL,
-                member_id TEXT NOT NULL,
-                task_json TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                placement_json TEXT NOT NULL,
                 source TEXT,
                 state TEXT NOT NULL CHECK(state IN ('staged','running','stopped','failed','removed')),
                 last_operation_id TEXT NOT NULL,
@@ -257,7 +275,8 @@ class MemberJobStore:
             CREATE TABLE IF NOT EXISTS jobs (
                 operation_id TEXT PRIMARY KEY,
                 job_sha256 TEXT NOT NULL,
-                group_id TEXT NOT NULL,
+                placement_group_id TEXT NOT NULL,
+                placement_id TEXT NOT NULL,
                 action TEXT NOT NULL CHECK(action IN ('stage','start','recover','stop','remove')),
                 state TEXT NOT NULL CHECK(state IN ('running','succeeded','failed')),
                 result_json TEXT,
@@ -267,14 +286,6 @@ class MemberJobStore:
             ) STRICT;
             """
         )
-        columns = {
-            str(row["name"])
-            for row in self.connection.execute("PRAGMA table_info(groups)")
-        }
-        if "role_json" in columns and "task_json" not in columns:
-            self.connection.execute(
-                "ALTER TABLE groups RENAME COLUMN role_json TO task_json"
-            )
         if recover_incomplete:
             self.connection.execute(
                 "UPDATE jobs SET state='failed',"
@@ -314,7 +325,7 @@ class MemberJobStore:
             self._secure_files()
 
     def begin(self, job: Mapping[str, Any]) -> dict[str, Any] | None:
-        serialized = _bounded_json(dict(job), "engine-group job", MAX_JOB_BYTES)
+        serialized = _bounded_json(dict(job), "placement-group job", MAX_JOB_BYTES)
         job_sha256 = hashlib.sha256((serialized + "\n").encode("utf-8")).hexdigest()
         with self.transaction():
             existing = self.connection.execute(
@@ -323,46 +334,53 @@ class MemberJobStore:
             if existing is not None:
                 row = dict(existing)
                 if row["job_sha256"] != job_sha256:
-                    raise MemberJobError("engine-group operation identity was replayed with different bytes")
+                    raise MemberJobError("placement-group operation identity was replayed with different bytes")
                 if row["state"] == "succeeded":
                     return json.loads(row["result_json"])
                 if row["state"] == "failed":
-                    raise MemberJobError(str(row["error"] or "engine-group operation failed"))
-                raise MemberJobError("engine-group operation is already running")
-            group = self.connection.execute(
-                "SELECT * FROM groups WHERE group_id=?", (job["group_id"],)
+                    raise MemberJobError(str(row["error"] or "placement-group operation failed"))
+                raise MemberJobError("placement-group operation is already running")
+            placement = self.connection.execute(
+                "SELECT * FROM placements WHERE placement_id=?", (job["placement_id"],)
             ).fetchone()
-            if group is not None:
-                current = dict(group)
+            if placement is not None:
+                current = dict(placement)
                 for key in (
                     "plan_sha256", "runtime_digest", "manifest_sha256", "topology_sha256",
-                    "engine_credential_sha256", "member_id",
+                    "engine_credential_sha256", "placement_group_id", "node_id",
                 ):
                     if current[key] != job[key]:
-                        raise MemberJobError("engine-group identity changed without a new group identity")
+                        raise MemberJobError(
+                            "placement identity changed without a new placement identity"
+                        )
                 if current["state"] == "running" and job["action"] in {"stage", "remove"}:
-                    raise MemberJobError("a running engine group must be stopped before this action")
+                    raise MemberJobError("a running placement must be stopped before this action")
                 if job["action"] == "start" and current["state"] not in {"staged", "stopped", "running"}:
-                    raise MemberJobError("engine group is not staged for start")
+                    raise MemberJobError("placement is not staged for start")
                 if job["action"] == "recover" and current["state"] not in {
                     "staged", "stopped", "running", "failed",
                 }:
-                    raise MemberJobError("engine group is not available for recovery")
+                    raise MemberJobError("placement is not available for recovery")
             elif job["action"] != "stage":
-                raise MemberJobError("engine group must be staged before lifecycle actions")
+                raise MemberJobError("placement must be staged before lifecycle actions")
             self.connection.execute(
-                "INSERT INTO jobs(operation_id,job_sha256,group_id,action,state,received_at_unix) "
-                "VALUES(?,?,?,?, 'running',?)",
-                (job["operation_id"], job_sha256, job["group_id"], job["action"], int(time.time())),
+                "INSERT INTO jobs(operation_id,job_sha256,placement_group_id,placement_id,action,state,received_at_unix) "
+                "VALUES(?,?,?,?,?, 'running',?)",
+                (
+                    job["operation_id"], job_sha256, job["placement_group_id"],
+                    job["placement_id"], job["action"], int(time.time()),
+                ),
             )
         return None
 
     def finish(self, job: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
         if _contains_sensitive_key(result):
-            raise MemberJobError("engine-group result cannot contain credentials or secrets")
+            raise MemberJobError("placement-group result cannot contain credentials or secrets")
         safe_result = dict(result)
-        result_json = _bounded_json(safe_result, "engine-group result", MAX_RESULT_BYTES)
-        task_json = _bounded_json(job["task"], "engine-group task", MAX_JOB_BYTES)
+        result_json = _bounded_json(safe_result, "placement-group result", MAX_RESULT_BYTES)
+        placement_json = _bounded_json(
+            job["placement"], "placement", MAX_JOB_BYTES
+        )
         state = ACTION_RESULT_STATE[job["action"]]
         now = int(time.time())
         with self.transaction():
@@ -372,24 +390,26 @@ class MemberJobStore:
                 (result_json, now, job["operation_id"]),
             ).rowcount
             if changed != 1:
-                raise MemberJobError("engine-group operation state changed concurrently")
+                raise MemberJobError("placement-group operation state changed concurrently")
             self.connection.execute(
-                """INSERT INTO groups
-                   (group_id,plan_sha256,runtime_digest,manifest_sha256,topology_sha256,
-                    engine_credential_sha256,member_id,task_json,source,state,
+                """INSERT INTO placements
+                   (placement_id,placement_group_id,plan_sha256,runtime_digest,
+                    manifest_sha256,topology_sha256,engine_credential_sha256,
+                    node_id,placement_json,source,state,
                     last_operation_id,updated_at_unix)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(group_id) DO UPDATE SET
-                    task_json=excluded.task_json,
-                    source=COALESCE(excluded.source,groups.source),
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(placement_id) DO UPDATE SET
+                    placement_json=excluded.placement_json,
+                    source=COALESCE(excluded.source,placements.source),
                     state=excluded.state,
                     last_operation_id=excluded.last_operation_id,
                     updated_at_unix=excluded.updated_at_unix""",
                 (
-                    job["group_id"], job["plan_sha256"], job["runtime_digest"],
+                    job["placement_id"], job["placement_group_id"],
+                    job["plan_sha256"], job["runtime_digest"],
                     job["manifest_sha256"], job["topology_sha256"],
-                    job["engine_credential_sha256"], job["member_id"], task_json,
-                    job["source"], state, job["operation_id"], now,
+                    job["engine_credential_sha256"], job["node_id"],
+                    placement_json, job["source"], state, job["operation_id"], now,
                 ),
             )
         return safe_result
@@ -403,38 +423,38 @@ class MemberJobStore:
                 (reason, int(time.time()), job["operation_id"]),
             )
             self.connection.execute(
-                "UPDATE groups SET state='failed',last_operation_id=?,updated_at_unix=? "
-                "WHERE group_id=?",
-                (job["operation_id"], int(time.time()), job["group_id"]),
+                "UPDATE placements SET state='failed',last_operation_id=?,updated_at_unix=? "
+                "WHERE placement_id=?",
+                (job["operation_id"], int(time.time()), job["placement_id"]),
             )
 
-    def group(self, group_id: str) -> dict[str, Any] | None:
-        if not ID_RE.fullmatch(group_id):
-            raise MemberJobError("engine-group identity is invalid")
+    def placement_for_group(self, placement_group_id: str) -> dict[str, Any] | None:
+        if not ID_RE.fullmatch(placement_group_id):
+            raise MemberJobError("placement-group identity is invalid")
         row = self.connection.execute(
-            "SELECT * FROM groups WHERE group_id=?", (group_id,)
+            "SELECT * FROM placements WHERE placement_group_id=?", (placement_group_id,)
         ).fetchone()
         if row is None:
             return None
         result = dict(row)
-        result["task"] = json.loads(result.pop("task_json"))
+        result["placement"] = json.loads(result.pop("placement_json"))
         return result
 
-    def groups(self) -> list[dict[str, Any]]:
+    def placements(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for value in self.connection.execute(
-            "SELECT * FROM groups ORDER BY updated_at_unix,group_id"
+            "SELECT * FROM placements ORDER BY updated_at_unix,placement_id"
         ):
             row = dict(value)
-            row["task"] = json.loads(row.pop("task_json"))
+            row["placement"] = json.loads(row.pop("placement_json"))
             result.append(row)
         return result
 
     def job(self, operation_id: str) -> dict[str, Any] | None:
         if not ID_RE.fullmatch(operation_id):
-            raise MemberJobError("engine-group operation identity is invalid")
+            raise MemberJobError("placement-group operation identity is invalid")
         row = self.connection.execute(
-            "SELECT operation_id,group_id,action,state,result_json,error,"
+            "SELECT operation_id,placement_group_id,placement_id,action,state,result_json,error,"
             "received_at_unix,finished_at_unix FROM jobs WHERE operation_id=?",
             (operation_id,),
         ).fetchone()
@@ -451,7 +471,7 @@ class MemberJobStore:
 
 
 class MemberAgent:
-    """Execute only schema-validated group lifecycle operations."""
+    """Execute only schema-validated placement lifecycle operations."""
 
     def __init__(
         self,
@@ -463,7 +483,7 @@ class MemberAgent:
     ) -> None:
         if not ID_RE.fullmatch(member_id):
             raise MemberJobError("member agent identity is invalid")
-        self.member_id = member_id
+        self.node_id = member_id
         self.handler = handler
         self.observer = observer
         self.store_path = store_path
@@ -482,15 +502,15 @@ class MemberAgent:
     def _validated(
         self, payload: Any, engine_credential: str | None
     ) -> dict[str, Any]:
-        job = validate_group_job(payload, expected_member_id=self.member_id)
+        job = validate_placement_job(payload, expected_node_id=self.node_id)
         if job["action"] == "stage":
             try:
                 if engine_credential is None or credential_sha256(engine_credential) != job["engine_credential_sha256"]:
-                    raise MemberJobError("engine-group stage credential does not match its digest")
-            except GroupCredentialError as error:
+                    raise MemberJobError("placement-group stage credential does not match its digest")
+            except PlacementGroupCredentialError as error:
                 raise MemberJobError(str(error)) from error
         elif engine_credential is not None:
-            raise MemberJobError("engine-group credentials are accepted only during stage")
+            raise MemberJobError("placement-group credentials are accepted only during stage")
         return job
 
     def _work(self) -> None:
@@ -526,7 +546,7 @@ class MemberAgent:
             try:
                 replay = store.begin(job)
             except MemberJobError as error:
-                if str(error) != "engine-group operation is already running":
+                if str(error) != "placement-group operation is already running":
                     raise
                 return {
                     "protocol": PROTOCOL,
@@ -574,27 +594,27 @@ class MemberAgent:
                 store.fail(job, error)
                 if isinstance(error, MemberJobError):
                     raise
-                raise MemberJobError(f"engine-group {job['action']} failed: {type(error).__name__}") from error
+                raise MemberJobError(f"placement-group {job['action']} failed: {type(error).__name__}") from error
         return {"protocol": PROTOCOL, "operation_id": job["operation_id"], "replayed": False, "result": stored}
 
-    def status(self, group_id: str) -> dict[str, Any]:
+    def status(self, placement_group_id: str) -> dict[str, Any]:
         with MemberJobStore(self.store_path) as store:
-            group = store.group(group_id)
+            placement = store.placement_for_group(placement_group_id)
         protection_trip_latched = False
-        if group is not None and self.observer is not None:
-            observation = self.observer(group)
+        if placement is not None and self.observer is not None:
+            observation = self.observer(placement)
             if (
                 not isinstance(observation, Mapping)
                 or observation.get("state")
                 not in {"staged", "running", "stopped", "failed", "removed"}
                 or not isinstance(observation.get("protection_trip_latched"), bool)
             ):
-                raise MemberJobError("member group observer returned an invalid state")
-            group = {**group, "state": observation["state"]}
+                raise MemberJobError("placement observer returned an invalid state")
+            placement = {**placement, "state": observation["state"]}
             protection_trip_latched = observation["protection_trip_latched"]
         return {
             "protocol": PROTOCOL,
-            "group": group,
+            "placement": placement,
             "protection_trip_latched": protection_trip_latched,
         }
 

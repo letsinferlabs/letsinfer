@@ -64,7 +64,7 @@ engine, lifecycle, API, safety, telemetry, and updates.
 
 `letsinfer status` is a continuously refreshed view of the whole request path,
 not a container snapshot. It combines the main and child nodes, hardware,
-links, every logical model and replica group, gateway, Engine adapters, and
+links, every logical model and placement group, gateway, Engine adapters, and
 Watchdog into one state plane.
 
 Depending on what the Engine adapter and hardware expose, it shows:
@@ -83,7 +83,7 @@ the UI consume the same normalized meanings, regardless of the engine.
 `letsinfer topology` provides the companion live graph for multi-node systems.
 It renders the main-and-child membership tree using each child's authenticated
 control-network transport as one continuous trunk whose pulse visits every
-child before repeating, then shows model groups without exposing a manual
+child before repeating, then shows model placement groups without exposing a manual
 link-probe control. Membership changes appear on the next frame, online/offline
 state follows signed fact freshness, interface changes publish each second,
 and direct-link evidence refreshes every two seconds.
@@ -92,9 +92,9 @@ Platform network setup is provider-owned rather than embedded in topology or
 orchestration. The DGX Spark provider prepares NVIDIA-compatible ConnectX
 link-local profiles, while future hardware adds independent providers behind
 the same generic boundary. If a verified physical link disappears, Core pauses
-only engine groups whose immutable plans require that link; unrelated local
+only placement groups whose immutable plans require that link; unrelated local
 models, replicas, children, and gateway routes continue serving. Link evidence
-must be restored before an operator can resume the affected group, so reconnect
+must be restored before an operator can resume the affected placement group, so reconnect
 never causes a silent model restart.
 
 ## Protection that understands unified memory
@@ -130,7 +130,7 @@ explicit recovery.
 
 ## Core and runtimes update independently
 
-- `letsinfer update check` checks core and all distinct installed engine-group
+- `letsinfer update check` checks core and all distinct installed placement-group
   releases.
 - `letsinfer update core` changes Core without silently moving your runtime or
   model.
@@ -166,9 +166,9 @@ installation, prompt set, and contract. They are evidence, not a prose claim.
 - **Mixed-hardware replication.** Install the same logical model on every
   compatible node. Each node resolves its own qualified runtime while clients
   continue using one endpoint.
-- **Capacity-aware routing.** The gateway selects healthy groups, queues when
-  every replica is full, and retries another group only before streaming.
-- **Rolling runtime changes.** Upgrade and rollback proceed group by group and
+- **Capacity-aware routing.** The gateway selects healthy placement groups,
+  queues when every replica is full, and retries another placement group only before streaming.
+- **Rolling runtime changes.** Upgrade and rollback proceed placement group by placement group and
   restore the exact prior signed release if a replacement fails.
 - **Secure controller pairing.** Private controller operations use a
   comparison-code flow, pinned node CA, mTLS identity, and role enforcement.

@@ -19,36 +19,38 @@ from tests.orchestration.helpers import release_identity
 
 class _Store:
     def __init__(self) -> None:
-        self.group_id = "1" * 32
+        self.placement_group_id = "1" * 32
         self.placement_id = "2" * 32
         self.placement = {
             "placement_id": self.placement_id,
+            "placement_group_id": self.placement_group_id,
+            "node_id": "5" * 32,
+            "task_id": "task-0",
+            "state": "running",
+        }
+        self.group = {
+            "placement_group_id": self.placement_group_id,
             "service_id": "3" * 32,
             "model": "example-model",
             "runtime": "example/runtime@1.0.0@sha256:" + "3" * 64,
             "target": "two-node",
-            "strategy": "parallel",
-            "state": "running",
-            "topology_sha256": "4" * 64,
-            "members": ["5" * 32, "6" * 32],
-            "endpoints": [
-                {"member_id": "5" * 32, "url": "https://a:18000", "healthy": True}
-            ],
-            "capacity": {},
-            "updated_at_unix": 1,
-        }
-        self.group = {
-            "group_id": self.group_id,
-            "placement_id": self.placement_id,
             "runtime_digest": "6" * 64,
             "state": "running",
             "desired_state": "running",
-            "members": [],
+            "placements": [self.placement],
+            "endpoint": {
+                "placement_id": self.placement_id,
+                "node_id": "5" * 32,
+                "url": "https://a:18000",
+                "healthy": True,
+            },
+            "capacity": {},
+            "plan": {"placements": [self.placement], "connections": []},
         }
         self.allocations = [
             {
-                "group_id": self.group_id,
-                "member_id": "5" * 32,
+                "placement_id": self.placement_id,
+                "node_id": "5" * 32,
                 "device_uuid": "GPU-fixture",
                 "state": "active",
             }
@@ -63,7 +65,7 @@ class _Store:
     def placements(self):
         return [dict(self.placement)]
 
-    def engine_groups(self):
+    def placement_groups(self):
         return [dict(self.group)]
 
     def device_allocations(self):
@@ -74,10 +76,10 @@ class _Store:
         return dict(value)
 
 
-class EngineGroupLifecycleTests(unittest.TestCase):
-    def test_live_snapshot_keeps_metrics_when_engine_group_exists(self) -> None:
+class PlacementGroupLifecycleTests(unittest.TestCase):
+    def test_live_snapshot_keeps_metrics_when_placement_group_exists(self) -> None:
         group = {
-            "group_id": "1" * 32,
+            "placement_group_id": "1" * 32,
             "model": "example-model",
             "runtime": "runtime-a",
             "target": "target-a",
@@ -102,7 +104,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             with (
                 mock.patch.object(cli, "site_identity_path") as identity_path,
                 mock.patch.object(cli, "read_site_identity", return_value=identity),
-                mock.patch.object(cli, "_engine_group_status", return_value=[group]),
+                mock.patch.object(cli, "_placement_group_status", return_value=[group]),
                 mock.patch.object(
                     cli, "active_service_config_path", return_value=root / "missing.json"
                 ),
@@ -147,20 +149,20 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["services"]["node_active"], "active")
         self.assertEqual(payload["telemetry"], telemetry)
-        self.assertEqual(payload["engine_groups"], [group])
+        self.assertEqual(payload["placement_groups"], [group])
 
     def test_plain_status_renders_all_models_without_retired_role(self) -> None:
         group = {
-            "group_id": "1" * 32,
+            "placement_group_id": "1" * 32,
             "model": "example-model",
             "runtime": "runtime-a",
             "target": "target-a",
-            "strategy": "single",
             "state": "failed",
             "desired_state": "stopped",
-            "members": [
+            "placements": [
                 {
-                    "member_id": "5" * 32,
+                    "placement_id": "2" * 32,
+                    "node_id": "5" * 32,
                     "task_id": "task-0",
                     "state": "failed",
                 }
@@ -180,7 +182,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             with (
                 mock.patch.object(cli, "site_identity_path") as identity_path,
                 mock.patch.object(cli, "read_site_identity", return_value=identity),
-                mock.patch.object(cli, "_engine_group_status", return_value=[group]),
+                mock.patch.object(cli, "_placement_group_status", return_value=[group]),
                 mock.patch.object(
                     cli, "active_service_config_path", return_value=root / "missing.json"
                 ),
@@ -214,7 +216,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                 mock.patch("sys.stdout", output),
             ):
                 identity_path.return_value.exists.return_value = True
-                self.assertEqual(cli.status(arguments), 0)
+                self.assertEqual(cli.status(arguments), 1)
 
         self.assertIn("model=example-model state=failed replicas=1", output.getvalue())
         self.assertNotIn("MEMBER", output.getvalue())
@@ -229,40 +231,54 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         topology_sha256 = "8" * 64
         source = "registry.example/runtime@sha256:" + "9" * 64
         document = {
-            "group_id": "1" * 32,
+            "placement_group_id": "1" * 32,
             "runtime_digest": runtime_digest,
             "manifest_sha256": manifest_sha256,
             "topology_sha256": topology_sha256,
             "release": {"source": source, "qualification": "qualified"},
-            "resources": [{
+            "placements": [{
+                "placement_id": "2" * 32,
                 "node_id": member_id,
                 "address": "https://node.local:9770",
                 "device_uuids": ["GPU-0"],
                 "port_base": 18000,
                 "port_count": 1,
             }],
-            "strategy": "single",
+            "endpoint_placement_id": "2" * 32,
+            "startup_order": [["2" * 32]],
+            "connections": [],
+            "runtime_execution_contract_sha256": "7" * 64,
             "service_id": "3" * 32,
         }
-        assignment = types.SimpleNamespace(member_id=member_id)
+        placement = types.SimpleNamespace(
+            placement_id="2" * 32,
+            node_id=member_id,
+        )
         plan = types.SimpleNamespace(
-            assignments=(assignment,), document=lambda: document
+            placements=(placement,), document=lambda: document
         )
         restored = types.SimpleNamespace(
             engine_credential_sha256="a" * 64,
-            states={member_id: {}},
+            states={placement.placement_id: {}},
             persisted_state=None,
         )
         row = {
-            "group_id": document["group_id"],
+            "placement_group_id": document["placement_group_id"],
             "runtime_digest": runtime_digest,
             "manifest_sha256": manifest_sha256,
             "topology_sha256": topology_sha256,
             "plan_sha256": hashlib.sha256(cli.canonical_bytes(document)).hexdigest(),
             "source": source,
-            "placement_id": "2" * 32,
+            "model": "example-model",
             "engine_credential_sha256": "a" * 64,
-            "members": [{"member_id": member_id, "state": "failed"}],
+            "placements": [{
+                "placement_id": placement.placement_id,
+                "node_id": member_id,
+                "task_id": "task-0",
+                "state": "failed",
+                "operation_id": None,
+                "error": None,
+            }],
             "state": "failed",
             "plan": document,
         }
@@ -284,7 +300,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         execution_manifest = mock.Mock(return_value=regenerated_manifest)
         install_bundle = mock.Mock(return_value=(control_root, manifest_path))
         with (
-            mock.patch.object(cli, "validate_group_document", return_value=document),
+            mock.patch.object(cli, "validate_placement_group_document", return_value=document),
             mock.patch.object(cli, "default_runtime_home", return_value=pathlib.Path("/runtime")),
             mock.patch.object(cli, "verify_descriptor", return_value=runtime),
             mock.patch.object(cli, "runtime_execution_manifest", execution_manifest),
@@ -292,16 +308,16 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             mock.patch.object(cli, "validate_control_bundle", validate_bundle),
             mock.patch.object(cli, "validate_target_binding", return_value=None),
             mock.patch.object(cli, "target_contract", return_value={"placement": {}}),
-            mock.patch.object(cli, "build_single_group_plan", return_value=plan),
+            mock.patch.object(cli, "build_single_placement_group_plan", return_value=plan),
             mock.patch.object(
                 cli,
-                "_engine_group_member_controls",
+                "_placement_group_node_controls",
                 return_value={member_id: {}},
             ),
-            mock.patch.object(cli, "_engine_group_transport", return_value=(None, None, None)),
-            mock.patch.object(cli, "EngineGroupOrchestrator", return_value=restored),
+            mock.patch.object(cli, "_placement_group_transport", return_value=(None, None, None)),
+            mock.patch.object(cli, "PlacementGroupOrchestrator", return_value=restored),
         ):
-            result, manifest = cli._restore_engine_group_orchestrator(store, row)
+            result, manifest = cli._restore_placement_group_orchestrator(store, row)
             self.assertEqual(
                 install_bundle.call_args,
                 mock.call(runtime.runtime_path, regenerated_manifest),
@@ -312,7 +328,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                 cli.LetsInferError,
                 "runtime no longer reproduces its execution manifest",
             ):
-                cli._restore_engine_group_orchestrator(store, row)
+                cli._restore_placement_group_orchestrator(store, row)
 
         self.assertIs(result, restored)
         self.assertEqual(manifest, regenerated_manifest)
@@ -328,52 +344,11 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             manifest_sha256,
         )
 
-    def test_intentional_stop_marks_placement_stopped_not_failed(self) -> None:
-        store = _Store()
-        group = {
-            "placement_id": store.placement_id,
-            "desired_state": "stopped",
-            "state": "stopped",
-            "member_states": [
-                {
-                    "member_id": "5" * 32,
-                    "state": "stopped",
-                }
-            ],
-        }
-        cli._sync_group_placement(store, group)
-        self.assertEqual(store.placement["state"], "stopped")
-        self.assertFalse(store.placement["endpoints"][0]["healthy"])
-        self.assertNotIn("updated_at_unix", store.placement)
-
-    def test_unqualified_running_group_publishes_its_healthy_endpoint(self) -> None:
-        for release_identity in (
-            {"release": {"qualification": "unqualified"}},
-            {"plan": {"release": {"qualification": "unqualified"}}},
-        ):
-            with self.subTest(release_identity=release_identity):
-                store = _Store()
-                group = {
-                    "placement_id": store.placement_id,
-                    "desired_state": "running",
-                    "state": "running",
-                    **release_identity,
-                    "member_states": [
-                        {
-                            "member_id": "5" * 32,
-                            "state": "running",
-                        }
-                    ],
-                }
-                cli._sync_group_placement(store, group)
-                self.assertEqual(store.placement["state"], "running")
-                self.assertTrue(store.placement["endpoints"][0]["healthy"])
-
     def test_start_of_cleanly_stopped_group_skips_recovery_stop(self) -> None:
         store = _Store()
         store.group.update({"state": "stopped", "desired_state": "stopped"})
         result = {
-            "group_id": store.group_id,
+            "placement_group_id": store.placement_group_id,
             "placement_id": store.placement_id,
             "desired_state": "running",
             "state": "running",
@@ -390,24 +365,22 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             mock.patch.object(cli, "_site_store", return_value=store),
             mock.patch.object(
                 cli,
-                "_restore_engine_group_orchestrator",
+                "_restore_placement_group_orchestrator",
                 return_value=(orchestrator, {}),
             ),
-            mock.patch.object(cli, "_sync_group_placement") as sync,
         ):
             self.assertEqual(
-                cli._engine_group_lifecycle("example-model", "start"), result
+                cli._placement_group_lifecycle("example-model", "start"), result
             )
         orchestrator.start.assert_called_once_with()
         orchestrator.recover.assert_not_called()
-        sync.assert_called_once_with(store, result)
 
     def test_resume_reports_each_member_that_downloaded_model_data_again(self) -> None:
         store = _Store()
         store.group.update({"state": "stopped", "desired_state": "stopped"})
         member_id = "5" * 32
         started = {
-            "group_id": store.group_id,
+            "placement_group_id": store.placement_group_id,
             "placement_id": store.placement_id,
             "desired_state": "running",
             "state": "running",
@@ -416,7 +389,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         orchestrator = mock.Mock()
         orchestrator.start.return_value = started
         orchestrator.results = {
-            member_id: {
+            store.placement_id: {
                 "model_artifacts_downloaded": ["owner/model@revision"]
             }
         }
@@ -429,17 +402,17 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             mock.patch.object(cli, "_site_store", return_value=store),
             mock.patch.object(
                 cli,
-                "_restore_engine_group_orchestrator",
+                "_restore_placement_group_orchestrator",
                 return_value=(orchestrator, {}),
             ),
-            mock.patch.object(cli, "_sync_group_placement"),
         ):
-            result = cli._engine_group_lifecycle("example-model", "start")
+            result = cli._placement_group_lifecycle("example-model", "start")
         self.assertEqual(
             result["model_artifact_downloads"],
             [
                 {
-                    "member_id": member_id,
+                    "placement_id": store.placement_id,
+                    "node_id": member_id,
                     "name": member_id,
                     "artifacts": ["owner/model@revision"],
                 }
@@ -448,7 +421,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
 
     def test_resume_does_not_restart_an_already_running_sibling(self) -> None:
         store = _Store()
-        store.group["plan"] = {"group_id": store.group_id}
+        store.group["plan"] = {"placement_group_id": store.placement_group_id}
         with (
             mock.patch.object(
                 cli,
@@ -457,10 +430,10 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             ),
             mock.patch.object(cli, "_site_store", return_value=store),
             mock.patch.object(
-                cli, "_restore_engine_group_orchestrator"
+                cli, "_restore_placement_group_orchestrator"
             ) as restore,
         ):
-            result = cli._engine_group_lifecycle("example-model", "start")
+            result = cli._placement_group_lifecycle("example-model", "start")
         assert result is not None
         self.assertEqual(result["state"], "running")
         self.assertEqual(result["desired_state"], "running")
@@ -469,7 +442,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
     def test_restart_stops_then_starts_without_acknowledging_trips(self) -> None:
         store = _Store()
         result = {
-            "group_id": store.group_id,
+            "placement_group_id": store.placement_group_id,
             "placement_id": store.placement_id,
             "desired_state": "running",
             "state": "running",
@@ -497,22 +470,20 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             mock.patch.object(cli, "_site_store", return_value=store),
             mock.patch.object(
                 cli,
-                "_restore_engine_group_orchestrator",
+                "_restore_placement_group_orchestrator",
                 return_value=(orchestrator, {}),
             ),
-            mock.patch.object(cli, "_sync_group_placement") as sync,
         ):
             self.assertEqual(
-                cli._engine_group_lifecycle("example-model", "restart"), result
+                cli._placement_group_lifecycle("example-model", "restart"), result
             )
         orchestrator.stop.assert_called_once_with()
         orchestrator.recover.assert_called_once_with(acknowledge_trips=False)
-        self.assertEqual(sync.call_args_list, [mock.call(store, stopped), mock.call(store, result)])
 
     def test_recovery_is_the_only_lifecycle_action_that_acknowledges_trips(self) -> None:
         store = _Store()
         result = {
-            "group_id": store.group_id,
+            "placement_group_id": store.placement_group_id,
             "placement_id": store.placement_id,
             "desired_state": "running",
             "state": "running",
@@ -529,36 +500,34 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             mock.patch.object(cli, "_site_store", return_value=store),
             mock.patch.object(
                 cli,
-                "_restore_engine_group_orchestrator",
+                "_restore_placement_group_orchestrator",
                 return_value=(orchestrator, {}),
             ),
-            mock.patch.object(cli, "_sync_group_placement") as sync,
         ):
             self.assertEqual(
-                cli._engine_group_lifecycle("example-model", "recover"), result
+                cli._placement_group_lifecycle("example-model", "recover"), result
             )
         orchestrator.recover.assert_called_once_with(acknowledge_trips=True)
-        sync.assert_called_once_with(store, result)
 
     def test_model_selector_fails_closed_when_multiple_groups_match(self) -> None:
         store = _Store()
         second = dict(store.group)
-        second["group_id"] = "7" * 32
-        store.engine_groups = lambda: [dict(store.group), second]
-        with self.assertRaisesRegex(cli.LetsInferError, "multiple engine groups"):
-            cli._select_engine_group(store, "example-model")
+        second["placement_group_id"] = "7" * 32
+        store.placement_groups = lambda: [dict(store.group), second]
+        with self.assertRaisesRegex(cli.LetsInferError, "multiple placement groups"):
+            cli._select_placement_group(store, "example-model")
 
     def test_remove_stops_running_group_before_member_cleanup(self) -> None:
         store = _Store()
         stopped = {
-            "group_id": store.group_id,
+            "placement_group_id": store.placement_group_id,
             "placement_id": store.placement_id,
             "desired_state": "stopped",
             "state": "stopped",
             "member_states": [],
         }
         removed = {
-            "group_id": store.group_id,
+            "placement_group_id": store.placement_group_id,
             "placement_id": store.placement_id,
             "desired_state": "removed",
             "state": "removed",
@@ -576,17 +545,15 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             mock.patch.object(cli, "_site_store", return_value=store),
             mock.patch.object(
                 cli,
-                "_restore_engine_group_orchestrator",
+                "_restore_placement_group_orchestrator",
                 return_value=(orchestrator, {}),
             ),
-            mock.patch.object(cli, "_sync_group_placement") as sync,
         ):
             self.assertEqual(
-                cli._engine_group_lifecycle("example-model", "remove"), removed
+                cli._placement_group_lifecycle("example-model", "remove"), removed
             )
         orchestrator.stop.assert_called_once_with()
         orchestrator.remove.assert_called_once_with()
-        self.assertEqual(sync.call_args_list, [mock.call(store, stopped), mock.call(store, removed)])
 
     def test_remove_retries_incomplete_group_without_stopping_again(self) -> None:
         for incomplete_state in ("failed", "removing"):
@@ -595,7 +562,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                 store.group["desired_state"] = "removed"
                 store.group["state"] = incomplete_state
                 removed = {
-                    "group_id": store.group_id,
+                    "placement_group_id": store.placement_group_id,
                     "placement_id": store.placement_id,
                     "desired_state": "removed",
                     "state": "removed",
@@ -612,18 +579,16 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                     mock.patch.object(cli, "_site_store", return_value=store),
                     mock.patch.object(
                         cli,
-                        "_restore_engine_group_orchestrator",
+                        "_restore_placement_group_orchestrator",
                         return_value=(orchestrator, {}),
                     ),
-                    mock.patch.object(cli, "_sync_group_placement") as sync,
                 ):
                     self.assertEqual(
-                        cli._engine_group_lifecycle("example-model", "remove"),
+                        cli._placement_group_lifecycle("example-model", "remove"),
                         removed,
                     )
                 orchestrator.stop.assert_not_called()
                 orchestrator.remove.assert_called_once_with()
-                sync.assert_called_once_with(store, removed)
 
     def test_replacement_removes_failed_group_with_released_allocation(self) -> None:
         store = _Store()
@@ -631,7 +596,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         store.group["state"] = "failed"
         store.allocations[0]["state"] = "released"
         removed = {
-            "group_id": store.group_id,
+            "placement_group_id": store.placement_group_id,
             "placement_id": store.placement_id,
             "desired_state": "removed",
             "state": "removed",
@@ -653,23 +618,21 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     cli,
-                    "_restore_engine_group_orchestrator",
+                    "_restore_placement_group_orchestrator",
                     return_value=(orchestrator, {}),
                 ),
-                mock.patch.object(cli, "_sync_group_placement") as sync,
             ):
-                cli._remove_engine_groups_by_id([store.group_id])
+                cli._remove_placement_groups_by_id([store.placement_group_id])
 
         orchestrator.stop.assert_not_called()
         orchestrator.remove.assert_called_once_with()
-        sync.assert_called_once_with(store, removed)
 
     def test_replacement_retries_incomplete_group_removal(self) -> None:
         store = _Store()
         store.group["desired_state"] = "removed"
         store.group["state"] = "failed"
         removed = {
-            "group_id": store.group_id,
+            "placement_group_id": store.placement_group_id,
             "placement_id": store.placement_id,
             "desired_state": "removed",
             "state": "removed",
@@ -691,20 +654,18 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     cli,
-                    "_restore_engine_group_orchestrator",
+                    "_restore_placement_group_orchestrator",
                     return_value=(orchestrator, {}),
                 ),
-                mock.patch.object(cli, "_sync_group_placement") as sync,
             ):
-                cli._remove_engine_groups_by_id([store.group_id])
+                cli._remove_placement_groups_by_id([store.placement_group_id])
 
         orchestrator.stop.assert_not_called()
         orchestrator.remove.assert_called_once_with()
-        sync.assert_called_once_with(store, removed)
 
     def test_replacement_forgets_failed_group_after_runtime_object_was_pruned(self) -> None:
         member_id = "5" * 32
-        plan = cli.build_single_group_plan(
+        plan = cli.build_single_placement_group_plan(
             member_id=member_id,
             member_address="member.local",
             device_uuids=["GPU-fixture"],
@@ -717,8 +678,8 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         )
         document = plan.document()
         row = {
-            "group_id": plan.group_id,
-            "placement_id": plan.group_id,
+            "placement_group_id": plan.placement_group_id,
+            "placement_id": plan.placement_group_id,
             "source": document["release"]["source"],
             "runtime_digest": document["runtime_digest"],
             "manifest_sha256": document["manifest_sha256"],
@@ -728,103 +689,91 @@ class EngineGroupLifecycleTests(unittest.TestCase):
             "plan_sha256": hashlib.sha256(cli.canonical_bytes(document)).hexdigest(),
             "desired_state": "stopped",
             "state": "failed",
-            "members": [{
-                "member_id": member_id,
+            "model": "fixture-model",
+            "placements": [{
+                "placement_id": plan.placements[0].placement_id,
+                "placement_group_id": plan.placement_group_id,
+                "node_id": member_id,
                 "task_id": "task-0",
                 "state": "failed",
                 "operation_id": "e" * 32,
-                "error": "GroupOrchestrationError",
+                "error": "PlacementGroupOrchestrationError",
             }],
-        }
-        placement = {
-            "placement_id": plan.group_id,
-            "service_id": document["service_id"],
-            "model": "fixture-model",
-            "runtime": "fixture-runtime",
-            "target": "fixture-target",
-            "strategy": "single",
-            "state": "failed",
-            "topology_sha256": document["topology_sha256"],
-            "members": [member_id],
-            "endpoints": [],
-            "capacity": {},
+            "endpoint": None,
         }
         allocation = {
-            "group_id": plan.group_id,
-            "member_id": member_id,
+            "placement_id": plan.placements[0].placement_id,
+            "node_id": member_id,
             "device_uuid": "GPU-fixture",
             "state": "released",
         }
         store = mock.MagicMock()
         store.__enter__.return_value = store
-        store.engine_groups.return_value = [row]
+        store.placement_groups.return_value = [row]
         store.device_allocations.return_value = [allocation]
-        store.placements.return_value = [placement]
 
         def persist(group, **changes):
             return {
                 **group,
-                "placement_id": changes["placement_id"],
                 "desired_state": changes["desired_state"],
                 "state": changes["state"],
-                "member_states": changes["members"],
+                "placements": changes["placements"],
             }
 
-        store.set_engine_group.side_effect = persist
+        store.set_placement_group.side_effect = persist
         with tempfile.TemporaryDirectory() as directory, (
             mock.patch.object(cli, "_site_store", return_value=store)
         ), mock.patch.object(
             cli, "default_runtime_home", return_value=pathlib.Path(directory)
-        ), mock.patch.object(cli, "_restore_engine_group_orchestrator") as restore:
-            cli._remove_engine_groups_by_id([plan.group_id])
+        ), mock.patch.object(cli, "_restore_placement_group_orchestrator") as restore:
+            cli._remove_placement_groups_by_id([plan.placement_group_id])
 
         restore.assert_not_called()
         self.assertEqual(
-            store.set_engine_group.call_args.kwargs["desired_state"], "removed"
+            store.set_placement_group.call_args.kwargs["desired_state"], "removed"
         )
-        self.assertEqual(store.set_engine_group.call_args.kwargs["state"], "removed")
-        store.set_group_allocation_state.assert_called_once_with(
-            plan.group_id, "released"
+        self.assertEqual(store.set_placement_group.call_args.kwargs["state"], "removed")
+        store.set_placement_group_allocation_state.assert_called_once_with(
+            plan.placement_group_id, "released"
         )
-        self.assertEqual(store.set_placement.call_args.args[0]["state"], "stopped")
 
-    def test_missing_runtime_object_never_forgets_potentially_active_group(self) -> None:
+    def test_missing_runtime_object_never_forgets_potentially_active_placement_group(self) -> None:
         member_id = "5" * 32
         document = {
-            "group_id": "1" * 32,
-            "resources": [{"node_id": member_id, "task_id": "task-0"}],
+            "placement_group_id": "1" * 32,
+            "placements": [{
+                "placement_id": "2" * 32,
+                "node_id": member_id,
+                "task_id": "task-0",
+            }],
         }
         row = {
-            "placement_id": "2" * 32,
             "source": "registry.example/runtime@sha256:" + "7" * 64,
             "engine_credential_sha256": "d" * 64,
             "desired_state": "running",
             "state": "running",
-            "members": [{
-                "member_id": member_id,
+            "placements": [{
+                "placement_id": "2" * 32,
+                "node_id": member_id,
                 "task_id": "task-0",
                 "state": "running",
                 "operation_id": None,
                 "error": None,
             }],
+            "endpoint": {"healthy": True},
         }
         store = mock.MagicMock()
-        store.placements.return_value = [{
-            "placement_id": row["placement_id"],
-            "state": "running",
-            "endpoints": [{"healthy": True}],
-        }]
         with mock.patch.object(
-            cli, "_validated_engine_group_document", return_value=document
+            cli, "_validated_placement_group_document", return_value=document
         ):
             with self.assertRaisesRegex(cli.LetsInferError, "may still be active"):
-                cli._remove_terminal_engine_group_without_runtime(
+                cli._remove_terminal_placement_group_without_runtime(
                     store,
                     row,
                     [{"state": "active"}],
                 )
 
-        store.set_engine_group.assert_not_called()
+        store.set_placement_group.assert_not_called()
 
 
 if __name__ == "__main__":

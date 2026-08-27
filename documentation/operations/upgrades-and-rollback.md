@@ -10,8 +10,8 @@ letsinfer update check
 
 Core availability comes from the signed GitHub release channel. Runtime
 availability comes from the signed catalog and immutable OCI digest for every
-distinct installed engine-group release. Exact replicas are deduplicated;
-mixed target-specific or temporarily mixed-version groups remain separate.
+distinct installed placement-group release. Exact replicas are deduplicated;
+mixed target-specific or temporarily mixed-version placement groups remain separate.
 The node agent refreshes this state periodically, and
 interactive commands read the local snapshot without delaying administration
 on a network request.

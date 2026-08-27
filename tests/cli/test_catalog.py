@@ -142,7 +142,7 @@ class CatalogTests(unittest.TestCase):
         pack = runtime_packs.RuntimePack(
             pathlib.Path("/runtime"), {}, runtime, "5" * 64
         )
-        identity = cli._group_release_identity(
+        identity = cli._placement_group_release_identity(
             catalog_release_value=release,
             candidate_id=CANDIDATE,
             version="0.1.0-rc.12",
@@ -163,7 +163,7 @@ class CatalogTests(unittest.TestCase):
             cli.LetsInferError,
             "signed catalog release does not match the installed runtime bytes",
         ):
-            cli._group_release_identity(
+            cli._placement_group_release_identity(
                 catalog_release_value=release,
                 candidate_id=CANDIDATE,
                 version="0.1.0-rc.12",
@@ -198,7 +198,7 @@ class CatalogTests(unittest.TestCase):
             ],
             "benchmark": {"contract": {"schema_version": 7}},
         }
-        identity = cli._group_release_identity(
+        identity = cli._placement_group_release_identity(
             catalog_release_value=release,
             candidate_id=CANDIDATE,
             version="0.1.0-rc.12",

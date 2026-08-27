@@ -195,17 +195,19 @@ class ProductCommandScenarioTests(unittest.TestCase):
     def test_real_status_json_keeps_complete_mock_state_when_models_exist(self) -> None:
         groups = [
             {
-                "group_id": "group-1",
+                "placement_group_id": "group-1",
                 "model": "ling-3-flash",
                 "runtime": "runtime-a",
                 "target": "dgx-spark",
+                "desired_state": "running",
                 "state": "running",
             },
             {
-                "group_id": "group-2",
+                "placement_group_id": "group-2",
                 "model": "ling-3-flash",
                 "runtime": "runtime-a",
                 "target": "dgx-spark",
+                "desired_state": "running",
                 "state": "running",
             },
         ]
@@ -229,7 +231,7 @@ class ProductCommandScenarioTests(unittest.TestCase):
                 mock.patch.object(cli, "site_identity_path", return_value=identity_path),
                 mock.patch.object(cli, "read_site_identity", return_value=identity),
                 mock.patch.object(cli, "identity_json", return_value={"role": "main"}),
-                mock.patch.object(cli, "_engine_group_status", return_value=groups),
+                mock.patch.object(cli, "_placement_group_status", return_value=groups),
                 mock.patch.object(
                     cli,
                     "active_service_config_path",
@@ -275,9 +277,11 @@ class ProductCommandScenarioTests(unittest.TestCase):
                 )
         payload = json.loads(output.getvalue())
         self.assertEqual(result, 0)
-        self.assertEqual(payload["engine_groups"], groups)
+        self.assertEqual(payload["placement_groups"], groups)
+        self.assertTrue(payload["service"]["runtime_installed"])
+        self.assertEqual(payload["lifecycle"]["state"], "ready")
         self.assertEqual(payload["models"], [{
-            "group_ids": ["group-1", "group-2"],
+            "placement_group_ids": ["group-1", "group-2"],
             "model": "ling-3-flash",
             "replicas": 2,
             "runtimes": ["runtime-a"],
@@ -287,10 +291,10 @@ class ProductCommandScenarioTests(unittest.TestCase):
         for key, value in node_details.items():
             self.assertEqual(payload[key], value)
 
-    def test_main_engine_group_status_reports_the_observed_gateway_route(self) -> None:
-        group_id = "a" * 32
+    def test_main_placement_group_status_reports_the_observed_gateway_route(self) -> None:
+        placement_group_id = "a" * 32
         groups = [{
-            "group_id": group_id,
+            "placement_group_id": placement_group_id,
             "model": "qwen3.8-flash-next",
             "runtime": (
                 "qwen3.8-flash-next/sglang/dgx-spark-connectx-2@0.1.0-rc.6"
@@ -316,7 +320,7 @@ class ProductCommandScenarioTests(unittest.TestCase):
                 mock.patch.object(cli, "site_identity_path", return_value=identity_path),
                 mock.patch.object(cli, "read_site_identity", return_value=identity),
                 mock.patch.object(cli, "identity_json", return_value={"role": "main"}),
-                mock.patch.object(cli, "_engine_group_status", return_value=groups),
+                mock.patch.object(cli, "_placement_group_status", return_value=groups),
                 mock.patch.object(
                     cli,
                     "active_service_config_path",
@@ -395,9 +399,9 @@ class ProductCommandScenarioTests(unittest.TestCase):
 
     def test_child_status_json_shows_its_running_parallel_group_task(self) -> None:
         member_id = "a" * 32
-        group_id = "b" * 32
+        placement_group_id = "b" * 32
         groups = [{
-            "group_id": group_id,
+            "placement_group_id": placement_group_id,
             "model": "qwen3.8-flash-next",
             "runtime": (
                 "qwen3.8-flash-next/sglang/dgx-spark-connectx-2@0.1.0-rc.2"
@@ -441,7 +445,7 @@ class ProductCommandScenarioTests(unittest.TestCase):
                 mock.patch.object(cli, "read_site_identity", return_value=identity),
                 mock.patch.object(cli, "identity_json", return_value={"role": "child"}),
                 mock.patch.object(
-                    cli, "_local_engine_group_status", return_value=groups
+                    cli, "_local_placement_group_status", return_value=groups
                 ),
                 mock.patch.object(
                     cli,
@@ -533,10 +537,10 @@ class ProductCommandScenarioTests(unittest.TestCase):
             contextlib.redirect_stdout(output),
             mock.patch.object(
                 cli,
-                "_engine_group_lifecycle",
+                "_placement_group_lifecycle",
                 return_value={
-                    "group_id": "group-1",
-                    "member_states": [{"member_id": "main-1"}],
+                    "placement_group_id": "group-1",
+                    "placements": [{"placement_id": "placement-1"}],
                 },
             ),
             mock.patch.object(cli, "qualification_service_config_path") as path,
@@ -547,7 +551,10 @@ class ProductCommandScenarioTests(unittest.TestCase):
                 argparse.Namespace(model="ling-3-flash", action_id="model.pause")
             )
         self.assertEqual(result, 0)
-        self.assertEqual(output.getvalue(), "PAUSED group=group-1 members=1\n")
+        self.assertEqual(
+            output.getvalue(),
+            "PAUSED placement_group=group-1 placements=1\n",
+        )
 
 
 if __name__ == "__main__":

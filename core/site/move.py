@@ -95,8 +95,11 @@ def plan_local_move(store: SiteStore) -> MovePlan:
     placements = [
         dict(row)
         for row in store.connection.execute(
-            "SELECT placement_id,model,runtime,target,strategy,state FROM placements "
-            "WHERE state IN ('starting','running','draining') ORDER BY placement_id"
+            "SELECT p.placement_id,p.placement_group_id,p.node_id,p.state,"
+            "g.model,g.runtime,g.target FROM placements AS p "
+            "JOIN placement_groups AS g USING(placement_group_id) "
+            "WHERE g.state!='removed' AND g.desired_state!='removed' "
+            "ORDER BY p.placement_id"
         )
     ]
     blockers: list[str] = []

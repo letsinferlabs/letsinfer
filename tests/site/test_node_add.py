@@ -902,7 +902,7 @@ class NodeAddContractTests(unittest.TestCase):
         ready = types.SimpleNamespace(active_placements=(), blocking_reasons=())
         activity = mock.MagicMock()
         activity.enabled = False
-        group_ids = ("7" * 32,)
+        placement_group_ids = ("7" * 32,)
         with (
             mock.patch.object(cli, "_human_presenter", return_value=presenter),
             mock.patch.object(cli, "_site_store", return_value=mock.MagicMock()),
@@ -910,12 +910,12 @@ class NodeAddContractTests(unittest.TestCase):
             mock.patch.object(
                 cli,
                 "_node_move_stop_targets",
-                return_value=(group_ids, None),
+                return_value=(placement_group_ids, None),
             ) as resolve,
             mock.patch.object(
                 cli,
                 "_stop_node_move_models",
-                return_value=(group_ids, None),
+                return_value=(placement_group_ids, None),
             ) as stop,
             mock.patch.object(cli, "_command_activity", return_value=activity),
             mock.patch.object(cli, "site_move_command", return_value=0) as move,
@@ -945,7 +945,7 @@ class NodeAddContractTests(unittest.TestCase):
             "Main node authority will move",
         )
         resolve.assert_called_once_with((active,))
-        stop.assert_called_once_with(group_ids, None)
+        stop.assert_called_once_with(placement_group_ids, None)
         move.assert_called_once()
         clear.assert_called_once_with(request["request_id"])
 
@@ -969,7 +969,7 @@ class NodeAddContractTests(unittest.TestCase):
         ready = types.SimpleNamespace(active_placements=(), blocking_reasons=())
         activity = mock.MagicMock()
         activity.enabled = False
-        group_ids = ("7" * 32,)
+        placement_group_ids = ("7" * 32,)
         with (
             mock.patch.object(cli, "_human_presenter", return_value=presenter),
             mock.patch.object(cli, "_site_store", return_value=mock.MagicMock()),
@@ -977,12 +977,12 @@ class NodeAddContractTests(unittest.TestCase):
             mock.patch.object(
                 cli,
                 "_node_move_stop_targets",
-                return_value=(group_ids, None),
+                return_value=(placement_group_ids, None),
             ),
             mock.patch.object(
                 cli,
                 "_stop_node_move_models",
-                return_value=(group_ids, None),
+                return_value=(placement_group_ids, None),
             ),
             mock.patch.object(cli, "_command_activity", return_value=activity),
             mock.patch.object(
@@ -994,7 +994,7 @@ class NodeAddContractTests(unittest.TestCase):
             self.assertRaisesRegex(cli.LetsInferError, "expired"),
         ):
             cli._accept_node_add_request(arguments, identity, request, confirmed=True)
-        restore.assert_called_once_with(group_ids, None)
+        restore.assert_called_once_with(placement_group_ids, None)
         clear.assert_not_called()
 
     def test_candidate_declining_model_stop_is_a_normal_cancellation(self) -> None:
@@ -1040,7 +1040,7 @@ class NodeAddContractTests(unittest.TestCase):
             "model": placement["model"],
         }
         store = mock.MagicMock()
-        store.__enter__.return_value.engine_groups.return_value = []
+        store.__enter__.return_value.placement_groups.return_value = []
         path = mock.Mock()
         path.is_file.return_value = True
         with (
@@ -1126,7 +1126,7 @@ class NodeAddContractTests(unittest.TestCase):
     def test_node_move_rejects_an_unowned_running_placement(self) -> None:
         placement_id = "6" * 32
         store = mock.MagicMock()
-        store.__enter__.return_value.engine_groups.return_value = []
+        store.__enter__.return_value.placement_groups.return_value = []
         path = mock.Mock()
         path.is_file.return_value = False
         with (
@@ -1147,29 +1147,29 @@ class NodeAddContractTests(unittest.TestCase):
 
     def test_node_move_resolves_only_stable_running_groups(self) -> None:
         placement_id = "6" * 32
-        group_id = "7" * 32
+        placement_group_id = "7" * 32
         store = mock.MagicMock()
-        store.__enter__.return_value.engine_groups.return_value = [
+        store.__enter__.return_value.placement_groups.return_value = [
             {
-                "placement_id": placement_id,
-                "group_id": group_id,
+                "placement_group_id": placement_group_id,
                 "state": "running",
                 "desired_state": "running",
+                "placements": [{"placement_id": placement_id}],
             }
         ]
         with mock.patch.object(cli, "_site_store", return_value=store):
             self.assertEqual(
-                cli._node_move_running_group_ids(
+                cli._node_move_running_placement_group_ids(
                     ({"placement_id": placement_id},)
                 ),
-                (group_id,),
+                (placement_group_id,),
             )
-        store.__enter__.return_value.engine_groups.return_value[0]["state"] = "stopping"
+        store.__enter__.return_value.placement_groups.return_value[0]["state"] = "stopping"
         with (
             mock.patch.object(cli, "_site_store", return_value=store),
             self.assertRaisesRegex(cli.LetsInferError, "current lifecycle"),
         ):
-            cli._node_move_running_group_ids(({"placement_id": placement_id},))
+            cli._node_move_running_placement_group_ids(({"placement_id": placement_id},))
 
     def test_partial_model_stop_restores_already_stopped_groups(self) -> None:
         first = "6" * 32
@@ -1177,7 +1177,7 @@ class NodeAddContractTests(unittest.TestCase):
         with (
             mock.patch.object(
                 cli,
-                "_stop_engine_group_by_id",
+                "_stop_placement_group_by_id",
                 side_effect=(None, cli.LetsInferError("stop failed")),
             ),
             mock.patch.object(cli, "_restore_node_move_groups") as restore,

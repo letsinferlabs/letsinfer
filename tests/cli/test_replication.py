@@ -33,7 +33,7 @@ class _Store:
     def placements(self):
         return [dict(value) for value in self._placements]
 
-    def engine_groups(self):
+    def placement_groups(self):
         return [dict(value) for value in self._groups]
 
 
@@ -102,11 +102,15 @@ class ReplicaSelectionTests(unittest.TestCase):
         ]
         groups = [
             {
-                "group_id": "2" * 32,
-                "placement_id": placement_id,
+                "placement_group_id": "2" * 32,
+                "model": "example-model",
                 "state": "running",
                 "desired_state": "running",
-                "plan": {"resources": [{"node_id": member_id}]},
+                "plan": {
+                    "placements": [
+                        {"placement_id": placement_id, "node_id": member_id}
+                    ]
+                },
             }
         ]
         arguments = argparse.Namespace(
@@ -175,15 +179,15 @@ class ReplicaSelectionTests(unittest.TestCase):
         ]
         groups = [
             {
-                "group_id": "3" * 32,
-                "placement_id": "1" * 32,
+                "placement_group_id": "3" * 32,
+                "model": "example-model",
                 "state": "running",
                 "desired_state": "running",
                 "updated_at_unix": 1,
             },
             {
-                "group_id": "4" * 32,
-                "placement_id": "2" * 32,
+                "placement_group_id": "4" * 32,
+                "model": "example-model",
                 "state": "stopped",
                 "desired_state": "stopped",
                 "updated_at_unix": 2,
@@ -200,7 +204,7 @@ class ReplicaSelectionTests(unittest.TestCase):
                 return_value=types.SimpleNamespace(document={"schema_version": 6}),
             ),
             mock.patch.object(cli, "_site_store", return_value=_Store(placements, groups)),
-            mock.patch.object(cli, "_remove_engine_groups_by_id") as remove,
+            mock.patch.object(cli, "_remove_placement_groups_by_id") as remove,
         ):
             self.assertEqual(cli.scale_command(arguments), 0)
         remove.assert_called_once_with(["4" * 32])

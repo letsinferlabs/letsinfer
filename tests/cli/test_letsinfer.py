@@ -202,20 +202,22 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             "NVIDIA GB10",
         )
 
-    def test_child_status_projects_its_validated_local_group_task(self) -> None:
+    def test_child_status_projects_its_validated_local_placement(self) -> None:
         member_id = "a" * 32
-        group_id = "b" * 32
+        placement_group_id = "b" * 32
+        placement_id = "9" * 32
         identity = types.SimpleNamespace(member_id=member_id)
-        task = {"task_id": "task-1"}
+        placement = {"task_id": "task-1"}
         row = {
-            "group_id": group_id,
-            "member_id": member_id,
+            "placement_group_id": placement_group_id,
+            "placement_id": placement_id,
+            "node_id": member_id,
             "plan_sha256": "c" * 64,
             "runtime_digest": "d" * 64,
             "manifest_sha256": "e" * 64,
             "topology_sha256": "f" * 64,
             "engine_credential_sha256": "1" * 64,
-            "task": task,
+            "placement": placement,
             "state": "running",
             "updated_at_unix": 1_800_000_000,
         }
@@ -223,7 +225,8 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             **{
                 key: row[key]
                 for key in (
-                    "member_id",
+                    "placement_id",
+                    "node_id",
                     "plan_sha256",
                     "runtime_digest",
                     "manifest_sha256",
@@ -232,7 +235,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             },
             "_credential_sha256": row["engine_credential_sha256"],
             "runtime_version": "0.1.0-rc.2",
-            "task": task,
+            "placement": placement,
             "_manifest": {
                 "model": {"alias": "qwen3.8-flash-next"},
                 "serving": {
@@ -241,13 +244,13 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                     "max_context_tokens": 65536,
                 },
             },
-            "_group": {"strategy": "parallel"},
+            "_placement_group": {"release": {}},
         }
         store = mock.Mock()
-        store.groups.return_value = [
+        store.placements.return_value = [
             {
                 **row,
-                "group_id": "2" * 32,
+                "placement_group_id": "2" * 32,
                 "runtime_digest": "3" * 64,
                 "state": "stopped",
             },
@@ -263,7 +266,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 mock.patch.object(cli, "site_data_root", return_value=root),
                 mock.patch.object(cli, "MemberJobStore", return_value=store_context),
                 mock.patch.object(
-                    cli, "_read_engine_group_config", read_config
+                    cli, "_read_placement_group_config", read_config
                 ),
                 mock.patch.object(
                     cli,
@@ -276,20 +279,20 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                     return_value={"id": "dgx-spark-connectx-2"},
                 ),
             ):
-                groups = cli._local_engine_group_status(identity)
+                groups = cli._local_placement_group_status(identity)
 
         self.assertEqual(len(groups), 1)
-        self.assertEqual(groups[0]["group_id"], group_id)
+        self.assertEqual(groups[0]["placement_group_id"], placement_group_id)
         self.assertEqual(groups[0]["model"], "qwen3.8-flash-next")
         self.assertEqual(groups[0]["state"], "running")
-        self.assertTrue(groups[0]["local_task"])
-        self.assertEqual(groups[0]["members"][0]["task_id"], "task-1")
-        read_config.assert_called_once_with(group_id, repair_tls=False)
+        self.assertTrue(groups[0]["local_placement"])
+        self.assertEqual(groups[0]["placements"][0]["task_id"], "task-1")
+        read_config.assert_called_once_with(placement_group_id, repair_tls=False)
 
-    def test_running_engine_group_projects_into_the_runtime_dashboard(self) -> None:
-        group_id = "a" * 32
+    def test_running_placement_group_projects_into_the_runtime_dashboard(self) -> None:
+        placement_group_id = "a" * 32
         group = {
-            "group_id": group_id,
+            "placement_group_id": placement_group_id,
             "model": "qwen3.8-flash-next",
             "runtime": (
                 "qwen3.8-flash-next/sglang/dgx-spark-connectx-2@0.1.0-rc.2"
@@ -303,6 +306,13 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             },
             "desired_state": "running",
             "state": "running",
+            "placements": [
+                {
+                    "placement_id": placement_group_id,
+                    "node_id": "1" * 32,
+                    "state": "running",
+                }
+            ],
         }
         inspection = {
             "Id": "c" * 64,
@@ -319,8 +329,13 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                     "trip_latched": False,
                 },
             ),
+            mock.patch.object(
+                cli,
+                "read_site_identity",
+                return_value=types.SimpleNamespace(member_id="1" * 32),
+            ),
         ):
-            projection = cli._engine_group_dashboard_projection([group])
+            projection = cli._placement_group_dashboard_projection([group])
 
         self.assertIsNotNone(projection)
         assert projection is not None
@@ -333,7 +348,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         self.assertTrue(projection["container"]["healthy"])
         self.assertEqual(projection["container"]["docker_health"], "none")
         self.assertEqual(
-            cli._engine_group_dashboard_lifecycle(
+            cli._placement_group_dashboard_lifecycle(
                 {
                     "state": "ready",
                     "reason": "runtime-not-installed",
@@ -349,14 +364,14 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 "ready_services": 3,
                 "total_services": 3,
                 "state": "ready",
-                "reason": "engine-group-ready",
+                "reason": "placement-group-ready",
             },
         )
 
-    def test_native_engine_group_dashboard_uses_its_launch_agent(self) -> None:
-        group_id = "a" * 32
+    def test_native_placement_group_dashboard_uses_its_launch_agent(self) -> None:
+        placement_group_id = "a" * 32
         group = {
-            "group_id": group_id,
+            "placement_group_id": placement_group_id,
             "model": "qwen3.8-flash-next",
             "runtime": (
                 "qwen3.8-flash-next/llama.cpp/apple-silicon@0.1.0"
@@ -365,7 +380,13 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             "target": "apple-silicon",
             "desired_state": "running",
             "state": "running",
-            "local_task": True,
+            "placements": [
+                {
+                    "placement_id": placement_group_id,
+                    "node_id": "1" * 32,
+                    "state": "running",
+                }
+            ],
             "engine_distribution": {
                 "kind": "native-archive",
                 "payload_id": "sha256:" + "c" * 64,
@@ -378,28 +399,33 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 return_value=("enabled", "active", None),
             ) as service_state,
             mock.patch.object(cli, "container_inspect") as inspect,
+            mock.patch.object(
+                cli,
+                "read_site_identity",
+                return_value=types.SimpleNamespace(member_id="1" * 32),
+            ),
         ):
-            projection = cli._engine_group_dashboard_projection([group])
+            projection = cli._placement_group_dashboard_projection([group])
 
         self.assertIsNotNone(projection)
         assert projection is not None
         self.assertEqual(
-            projection["container"]["name"], f"ai.letsinfer.engine.{group_id}"
+            projection["container"]["name"], f"ai.letsinfer.engine.{placement_group_id}"
         )
         self.assertEqual(
             projection["container"]["kind"], "native-launch-agent"
         )
         self.assertTrue(projection["container"]["healthy"])
         self.assertTrue(projection["protection"]["armed"])
-        service_state.assert_called_once_with(f"ai.letsinfer.engine.{group_id}")
+        service_state.assert_called_once_with(f"ai.letsinfer.engine.{placement_group_id}")
         inspect.assert_not_called()
 
     def test_dashboard_projection_requires_one_exact_runtime_identity(self) -> None:
-        self.assertIsNone(cli._engine_group_dashboard_projection([]))
+        self.assertIsNone(cli._placement_group_dashboard_projection([]))
         self.assertIsNone(
-            cli._engine_group_dashboard_projection([
+            cli._placement_group_dashboard_projection([
                 {
-                    "group_id": "a" * 32,
+                    "placement_group_id": "a" * 32,
                     "model": "qwen3.8-flash-next",
                     "runtime": "runtime-a",
                     "target": "dgx-spark-connectx-2",
@@ -413,7 +439,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         child_id = "b" * 32
         row = {
             "plan": {
-                "resources": [{"node_id": main_id}, {"node_id": child_id}],
+                "placements": [{"node_id": main_id}, {"node_id": child_id}],
                 "connections": [
                     {
                         "nodes": [main_id, child_id],
@@ -438,7 +464,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         graph = mock.Mock(links={})
         with mock.patch.object(cli, "TopologyGraph", return_value=graph):
             self.assertEqual(
-                cli._engine_group_required_link_failure(
+                cli._placement_group_required_link_failure(
                     row,
                     store,
                     now_unix=now,
@@ -454,7 +480,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 }
             }
             self.assertIsNone(
-                cli._engine_group_required_link_failure(
+                cli._placement_group_required_link_failure(
                     row,
                     store,
                     now_unix=now,
@@ -462,46 +488,46 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             )
         store.reset_mock()
         self.assertIsNone(
-            cli._engine_group_required_link_failure(
-                {"plan": {"connections": [], "resources": []}},
+            cli._placement_group_required_link_failure(
+                {"plan": {"connections": [], "placements": []}},
                 store,
                 now_unix=now,
             )
         )
         store.members.assert_not_called()
 
-    def test_link_loss_pauses_only_the_affected_engine_group(self) -> None:
+    def test_link_loss_pauses_only_the_affected_placement_group(self) -> None:
         affected = {
-            "group_id": "a" * 32,
+            "placement_group_id": "a" * 32,
             "desired_state": "running",
             "state": "running",
             "updated_at_unix": 1,
         }
         independent = {
-            "group_id": "b" * 32,
+            "placement_group_id": "b" * 32,
             "desired_state": "running",
             "state": "running",
             "updated_at_unix": 1,
         }
         store = mock.MagicMock()
         store.__enter__.return_value = store
-        store.engine_groups.return_value = [affected, independent]
+        store.placement_groups.return_value = [affected, independent]
         affected_orchestrator = mock.Mock()
         independent_orchestrator = mock.Mock(protection_trips={})
         independent_orchestrator.reconcile.return_value = {
             "state": "running",
-            "member_states": [],
+            "placements": [],
         }
         with (
             mock.patch.object(
                 cli,
-                "_engine_group_lifecycle_lock",
+                "_placement_group_lifecycle_lock",
                 return_value=contextlib.nullcontext(),
             ),
             mock.patch.object(cli, "_site_store", return_value=store),
             mock.patch.object(
                 cli,
-                "_restore_engine_group_orchestrator",
+                "_restore_placement_group_orchestrator",
                 side_effect=(
                     (affected_orchestrator, {}),
                     (independent_orchestrator, {}),
@@ -509,16 +535,15 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             ),
             mock.patch.object(
                 cli,
-                "_engine_group_required_link_failure",
+                "_placement_group_required_link_failure",
                 side_effect=("required_link_unavailable", None),
             ),
             mock.patch.object(
-                cli, "_pause_engine_group_for_link_loss"
+                cli, "_pause_placement_group_for_link_loss"
             ) as pause,
-            mock.patch.object(cli, "_sync_group_placement"),
             mock.patch.object(cli.time, "time", return_value=1000),
         ):
-            summary = cli.reconcile_engine_groups_once()
+            summary = cli.reconcile_placement_groups_once()
         pause.assert_called_once_with(
             store,
             affected,
@@ -527,46 +552,53 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         )
         affected_orchestrator.reconcile.assert_not_called()
         independent_orchestrator.reconcile.assert_called_once_with()
-        self.assertEqual(summary["paused"], [affected["group_id"]])
-        self.assertEqual(summary["healthy"], [independent["group_id"]])
+        self.assertEqual(summary["paused"], [affected["placement_group_id"]])
+        self.assertEqual(summary["healthy"], [independent["placement_group_id"]])
 
     def test_link_pause_persists_reason_without_touching_siblings(self) -> None:
         row = {
-            "group_id": "a" * 32,
-            "placement_id": "b" * 32,
+            "placement_group_id": "a" * 32,
             "source": "registry.example/runtime@sha256:" + "c" * 64,
             "engine_credential_sha256": "d" * 64,
-            "plan": {"group_id": "a" * 32},
-            "members": [{"member_id": "e" * 32}],
+            "plan": {"placement_group_id": "a" * 32},
         }
-        stopped = {"member_states": [{"member_id": "e" * 32, "state": "stopped"}]}
-        paused = {"state": "stopped", "member_states": stopped["member_states"]}
+        stopped = {
+            "placements": [
+                {
+                    "placement_id": "b" * 32,
+                    "node_id": "e" * 32,
+                    "task_id": "task-0",
+                    "state": "stopped",
+                    "operation_id": None,
+                    "error": None,
+                }
+            ]
+        }
+        paused = {"state": "stopped", "placements": stopped["placements"]}
         orchestrator = mock.Mock()
         orchestrator.stop.return_value = stopped
         store = mock.Mock()
-        store.set_engine_group.return_value = paused
-        with mock.patch.object(cli, "_sync_group_placement") as sync:
-            result = cli._pause_engine_group_for_link_loss(
-                store,
-                row,
-                orchestrator,
-                "required_link_unavailable",
-            )
+        store.set_placement_group.return_value = paused
+        result = cli._pause_placement_group_for_link_loss(
+            store,
+            row,
+            orchestrator,
+            "required_link_unavailable",
+        )
         self.assertIs(result, paused)
         orchestrator.stop.assert_called_once_with()
         self.assertEqual(
-            store.set_engine_group.call_args.kwargs["action"],
-            "group.link-pause",
+            store.set_placement_group.call_args.kwargs["action"],
+            "placement_group.stop",
         )
         self.assertEqual(
-            store.set_engine_group.call_args.kwargs["desired_state"],
+            store.set_placement_group.call_args.kwargs["desired_state"],
             "stopped",
         )
         self.assertEqual(
-            store.set_engine_group.call_args.kwargs["error"],
+            store.set_placement_group.call_args.kwargs["error"],
             "required_link_unavailable",
         )
-        self.assertEqual(sync.call_count, 2)
 
     def test_link_monitor_discovers_connectx_from_live_signed_facts(self) -> None:
         now = 1_800_000_000
@@ -880,23 +912,25 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         for key, path in paths.items():
             self.assertEqual(config[key], str(path))
 
-    def test_logs_resolve_the_only_local_engine_group_without_legacy_service(
+    def test_logs_resolve_the_only_local_placement_group_without_legacy_service(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            group_id = "a" * 32
+            placement_group_id = "a" * 32
             member_id = "b" * 32
             task_id = "task-0"
-            name = f"letsinfer-group-{group_id}"
-            group_root = root / group_id
+            placement_id = "c" * 32
+            name = f"letsinfer-placement-{placement_id}"
+            group_root = root / placement_group_id
             group_root.mkdir()
             group_root.chmod(0o700)
             config = {
-                "schema_version": 1,
-                "group_id": group_id,
-                "member_id": member_id,
-                "task": {"task_id": task_id},
+                "schema_version": 2,
+                "placement_group_id": placement_group_id,
+                "placement_id": placement_id,
+                "node_id": member_id,
+                "placement": {"task_id": task_id},
                 "container_name": name,
             }
             config_path = group_root / "config.json"
@@ -906,20 +940,21 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 "Config": {
                     "Labels": {
                         cli.MANAGED_LABEL: "true",
-                        cli.GROUP_ID_LABEL: group_id,
-                        cli.GROUP_NODE_LABEL: member_id,
-                        cli.GROUP_TASK_LABEL: task_id,
+                        cli.PLACEMENT_GROUP_ID_LABEL: placement_group_id,
+                        cli.PLACEMENT_ID_LABEL: placement_id,
+                        cli.PLACEMENT_NODE_LABEL: member_id,
+                        cli.PLACEMENT_TASK_LABEL: task_id,
                     }
                 }
             }
             arguments = types.SimpleNamespace(
                 config=None,
-                group=None,
+                placement_group=None,
                 tail=7,
                 follow=False,
             )
             with (
-                mock.patch.object(cli, "default_engine_group_root", return_value=root),
+                mock.patch.object(cli, "default_placement_group_root", return_value=root),
                 mock.patch.object(
                     cli,
                     "qualification_service_config_path",
@@ -971,7 +1006,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
     def test_logs_require_an_exact_group_when_multiple_are_local(self) -> None:
         arguments = types.SimpleNamespace(
             config=None,
-            group=None,
+            placement_group=None,
             tail=200,
             follow=False,
         )
@@ -983,32 +1018,34 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             ),
             mock.patch.object(
                 cli,
-                "_local_engine_group_log_targets",
+                "_local_placement_group_log_targets",
                 return_value=[("a" * 32, "first"), ("b" * 32, "second")],
             ),
-            self.assertRaisesRegex(cli.LetsInferError, "specify --group"),
+            self.assertRaisesRegex(
+                cli.LetsInferError, "specify --placement-group"
+            ),
         ):
             cli.logs(arguments)
 
-    def test_engine_group_lifecycle_lock_serializes_threads(self) -> None:
+    def test_placement_group_lifecycle_lock_serializes_threads(self) -> None:
         first_acquired = threading.Event()
         release_first = threading.Event()
         second_attempted = threading.Event()
         second_acquired = threading.Event()
 
         def first() -> None:
-            with cli._engine_group_lifecycle_lock():
+            with cli._placement_group_lifecycle_lock():
                 first_acquired.set()
                 release_first.wait(2)
 
         def second() -> None:
             second_attempted.set()
-            with cli._engine_group_lifecycle_lock():
+            with cli._placement_group_lifecycle_lock():
                 second_acquired.set()
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             cli,
-            "default_engine_group_root",
+            "default_placement_group_root",
             return_value=pathlib.Path(directory) / "groups",
         ):
             first_thread = threading.Thread(target=first)
@@ -1028,7 +1065,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
 
     def test_benchmark_placement_borrows_only_overlapping_group_devices(self) -> None:
         member_id = "a" * 32
-        group_id = "b" * 32
+        placement_group_id = "b" * 32
         identity = types.SimpleNamespace(
             site_id="c" * 32,
             coordinator_id=member_id,
@@ -1037,8 +1074,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         graph.members = {member_id: {"member_id": member_id}}
         graph.resolve.side_effect = cli.TopologyError("device is allocated")
         placement = types.SimpleNamespace(
-            strategy="single",
-            member_ids=(member_id,),
+            node_ids=(member_id,),
             device_uuids={member_id: ("GPU-0",)},
             topology_sha256="d" * 64,
         )
@@ -1047,19 +1083,29 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         store = mock.Mock()
         store.device_allocations.return_value = [
             {
-                "group_id": group_id,
-                "member_id": member_id,
+                "placement_id": "1" * 32,
+                "node_id": member_id,
                 "device_uuid": "GPU-0",
             },
             {
-                "group_id": "e" * 32,
-                "member_id": member_id,
+                "placement_id": "2" * 32,
+                "node_id": member_id,
                 "device_uuid": "GPU-1",
             },
         ]
-        store.engine_groups.return_value = [
+        store.placements.return_value = [
             {
-                "group_id": group_id,
+                "placement_id": "1" * 32,
+                "placement_group_id": placement_group_id,
+            },
+            {
+                "placement_id": "2" * 32,
+                "placement_group_id": "e" * 32,
+            },
+        ]
+        store.placement_groups.return_value = [
+            {
+                "placement_group_id": placement_group_id,
                 "state": "running",
                 "desired_state": "running",
             }
@@ -1070,6 +1116,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             runtime_candidate(), qualified=False
         )
         with (
+            mock.patch.object(cli, "read_site_identity", return_value=identity),
             mock.patch.object(
                 cli, "_fresh_site_topology", return_value=(identity, graph)
             ),
@@ -1080,9 +1127,9 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 manifest, "f" * 64
             )
 
-        self.assertEqual(groups, (group_id,))
+        self.assertEqual(groups, (placement_group_id,))
         graph.resolve.assert_called_once()
-        self.assertEqual(resolved["placement_members"], [member_id])
+        self.assertEqual(resolved["placement_node_ids"], [member_id])
         self.assertEqual(
             topology.call_args.kwargs["allocated_devices"], {member_id: ()}
         )
@@ -1094,8 +1141,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             coordinator_id=member_id,
         )
         placement = types.SimpleNamespace(
-            strategy="single",
-            member_ids=(member_id,),
+            node_ids=(member_id,),
             device_uuids={member_id: ("GPU-1",)},
             topology_sha256="c" * 64,
         )
@@ -1105,12 +1151,18 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         store = mock.Mock()
         store.device_allocations.return_value = [
             {
-                "group_id": "d" * 32,
-                "member_id": member_id,
+                "placement_id": "1" * 32,
+                "node_id": member_id,
                 "device_uuid": "GPU-0",
             }
         ]
-        store.engine_groups.return_value = []
+        store.placements.return_value = [
+            {
+                "placement_id": "1" * 32,
+                "placement_group_id": "d" * 32,
+            }
+        ]
+        store.placement_groups.return_value = []
         store_context = mock.MagicMock()
         store_context.__enter__.return_value = store
         manifest = cli.runtime_execution_manifest(
@@ -1132,7 +1184,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
 
     def test_parallel_benchmark_binds_one_exact_installed_group(self) -> None:
         member_ids = ("a" * 32, "b" * 32)
-        group_id = "c" * 32
+        placement_group_id = "c" * 32
         manifest_sha256 = "d" * 64
         identity = types.SimpleNamespace(
             site_id="e" * 32,
@@ -1143,77 +1195,97 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             member_id: {"member_id": member_id} for member_id in member_ids
         }
         graph.resolve.side_effect = cli.TopologyError("devices are allocated")
-        placement = types.SimpleNamespace(
-            strategy="parallel",
-            member_ids=member_ids,
-            device_uuids={
-                member_ids[0]: ("GPU-0",),
-                member_ids[1]: ("GPU-1",),
-            },
-            topology_sha256="f" * 64,
-        )
-        unallocated = mock.Mock()
-        unallocated.resolve.return_value = placement
         store = mock.Mock()
-        store.device_allocations.return_value = [
+        store.placement_groups.return_value = [
             {
-                "group_id": group_id,
-                "member_id": member_id,
-                "device_uuid": device_uuid,
-            }
-            for member_id, device_uuid in zip(member_ids, ("GPU-0", "GPU-1"))
-        ]
-        store.engine_groups.return_value = [
-            {
-                "group_id": group_id,
+                "placement_group_id": placement_group_id,
                 "manifest_sha256": manifest_sha256,
+                "topology_sha256": "f" * 64,
                 "state": "running",
                 "desired_state": "running",
                 "plan": {
-                    "resources": [
+                    "schema_version": 1,
+                    "placement_group_id": placement_group_id,
+                    "endpoint_placement_id": "1" * 32,
+                    "release": {"target_id": "fixture-target"},
+                    "placements": [
                         {
+                            "placement_id": f"{index + 1:032x}",
                             "node_id": member_id,
                             "device_uuids": [device_uuid],
                         }
-                        for member_id, device_uuid in zip(
-                            member_ids, ("GPU-0", "GPU-1")
+                        for index, (member_id, device_uuid) in enumerate(
+                            zip(member_ids, ("GPU-0", "GPU-1"))
                         )
                     ]
                 },
             }
+        ]
+        store.members.return_value = [
+            {
+                "member_id": member_id,
+                "state": "active",
+                "facts": {"observed_at_unix": 100},
+            }
+            for member_id in member_ids
         ]
         store_context = mock.MagicMock()
         store_context.__enter__.return_value = store
         manifest = cli.runtime_execution_manifest(
             runtime_candidate(), qualified=False
         )
+        manifest["target"]["placement"] = {
+            "strategy": "parallel",
+            "node_count": 2,
+            "interconnect": {
+                "kind": "connectx",
+                "rdma_required": True,
+                "minimum_speed_mbps": 100_000,
+                "minimum_mtu": 1500,
+            },
+        }
+        store.placement_groups.return_value[0]["plan"]["release"][
+            "target_id"
+        ] = manifest["target"]["id"]
         with (
             mock.patch.object(
                 cli, "_fresh_site_topology", return_value=(identity, graph)
             ),
-            mock.patch.object(cli, "TopologyGraph", return_value=unallocated),
             mock.patch.object(cli, "_site_store", return_value=store_context),
+            mock.patch.object(cli, "read_site_identity", return_value=identity),
+            mock.patch.object(
+                cli,
+                "validate_placement_group_document",
+                side_effect=lambda value: value,
+            ),
+            mock.patch.object(
+                cli, "validate_placement_group_target_interconnect"
+            ),
+            mock.patch.object(
+                cli, "_placement_group_required_link_failure", return_value=None
+            ),
+            mock.patch.object(cli.time, "time", return_value=100),
         ):
             resolved, groups = cli.resolve_benchmark_service_placement(
                 manifest, manifest_sha256
             )
 
-        self.assertEqual(groups, (group_id,))
-        self.assertEqual(resolved["placement_strategy"], "parallel")
+        self.assertEqual(groups, (placement_group_id,))
+        self.assertEqual(resolved["placement_group_id"], placement_group_id)
 
-    def test_qualification_reuses_only_a_stopped_resident_group_slot(self) -> None:
-        group_id = "a" * 32
+    def test_qualification_reuses_only_a_stopped_resident_placement_group_slot(self) -> None:
+        placement_group_id = "a" * 32
         placement = {"placement_id": "b" * 32}
         with (
             mock.patch.object(
                 cli,
                 "resolve_benchmark_service_placement",
-                return_value=(placement, (group_id,)),
+                return_value=(placement, (placement_group_id,)),
             ),
             mock.patch.object(
                 cli,
-                "_benchmark_engine_group_intents",
-                return_value={group_id: False},
+                "_benchmark_placement_group_intents",
+                return_value={placement_group_id: False},
             ),
         ):
             self.assertIs(
@@ -1225,16 +1297,16 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             mock.patch.object(
                 cli,
                 "resolve_benchmark_service_placement",
-                return_value=(placement, (group_id,)),
+                return_value=(placement, (placement_group_id,)),
             ),
             mock.patch.object(
                 cli,
-                "_benchmark_engine_group_intents",
-                return_value={group_id: True},
+                "_benchmark_placement_group_intents",
+                return_value={placement_group_id: True},
             ),
             self.assertRaisesRegex(
                 cli.LetsInferError,
-                "requires conflicting resident engine groups to be stopped",
+                "requires conflicting resident placement groups to be stopped",
             ),
         ):
             cli._resolve_qualification_service_placement({}, "c" * 64)
@@ -1242,7 +1314,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
     def test_benchmark_isolation_restores_running_group_on_success_and_failure(
         self,
     ) -> None:
-        group_id = "a" * 32
+        placement_group_id = "a" * 32
         for failure in (False, True):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 events: list[str] = []
@@ -1266,18 +1338,18 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                     ),
                     mock.patch.object(
                         cli,
-                        "_benchmark_engine_group_intents",
-                        return_value={group_id: True},
+                        "_benchmark_placement_group_intents",
+                        return_value={placement_group_id: True},
                     ),
                     mock.patch.object(
                         cli,
-                        "_stop_engine_group_by_id",
-                        side_effect=lambda _group_id: events.append("stop"),
+                        "_stop_placement_group_by_id",
+                        side_effect=lambda _placement_group_id: events.append("stop"),
                     ),
                     mock.patch.object(
                         cli,
-                        "_start_engine_group_by_id",
-                        side_effect=lambda _group_id: events.append("start"),
+                        "_start_placement_group_by_id",
+                        side_effect=lambda _placement_group_id: events.append("start"),
                     ),
                     mock.patch.object(
                         cli,
@@ -1291,16 +1363,16 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                             cli.LetsInferError, "fixture benchmark failed"
                         ):
                             cli._run_benchmark_with_service_isolation(
-                                ["matrix"], resident_group_ids=(group_id,)
+                                ["matrix"], resident_placement_group_ids=(placement_group_id,)
                             )
                     else:
                         cli._run_benchmark_with_service_isolation(
-                            ["matrix"], resident_group_ids=(group_id,)
+                            ["matrix"], resident_placement_group_ids=(placement_group_id,)
                         )
                 self.assertEqual(events, ["idle", "stop", "benchmark", "start"])
 
     def test_parallel_benchmark_restarts_and_keeps_running_exact_group(self) -> None:
-        group_id = "a" * 32
+        placement_group_id = "a" * 32
         events: list[str] = []
         with tempfile.TemporaryDirectory() as directory:
             with (
@@ -1319,8 +1391,8 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     cli,
-                    "_benchmark_engine_group_intents",
-                    return_value={group_id: True},
+                    "_benchmark_placement_group_intents",
+                    return_value={placement_group_id: True},
                 ),
                 mock.patch.object(
                     cli,
@@ -1329,13 +1401,13 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     cli,
-                    "_stop_engine_group_by_id",
-                    side_effect=lambda _group_id: events.append("stop"),
+                    "_stop_placement_group_by_id",
+                    side_effect=lambda _placement_group_id: events.append("stop"),
                 ),
                 mock.patch.object(
                     cli,
-                    "_start_engine_group_by_id",
-                    side_effect=lambda _group_id: events.append("start"),
+                    "_start_placement_group_by_id",
+                    side_effect=lambda _placement_group_id: events.append("start"),
                 ),
                 mock.patch.object(
                     cli,
@@ -1345,77 +1417,75 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             ):
                 cli._run_benchmark_with_service_isolation(
                     ["matrix"],
-                    resident_group_ids=(group_id,),
-                    benchmark_group_id=group_id,
+                    resident_placement_group_ids=(placement_group_id,),
+                    benchmark_placement_group_id=placement_group_id,
                 )
 
         self.assertEqual(events, ["idle", "stop", "start", "benchmark"])
 
-    def test_stopped_engine_group_restoration_uses_start(self) -> None:
-        group_id = "a" * 32
+    def test_stopped_placement_group_restoration_uses_start(self) -> None:
+        placement_group_id = "a" * 32
         row = {
-            "group_id": group_id,
+            "placement_group_id": placement_group_id,
             "state": "stopped",
             "desired_state": "stopped",
         }
         store = mock.Mock()
-        store.engine_groups.return_value = [row]
+        store.placement_groups.return_value = [row]
         store_context = mock.MagicMock()
         store_context.__enter__.return_value = store
         orchestrator = mock.Mock()
-        started = {"group_id": group_id, "state": "running"}
+        started = {"placement_group_id": placement_group_id, "state": "running"}
         orchestrator.start.return_value = started
         with (
             mock.patch.object(
                 cli,
-                "_engine_group_lifecycle_lock",
+                "_placement_group_lifecycle_lock",
                 return_value=contextlib.nullcontext(),
             ),
             mock.patch.object(cli, "_site_store", return_value=store_context),
             mock.patch.object(
                 cli,
-                "_restore_engine_group_orchestrator",
+                "_restore_placement_group_orchestrator",
                 return_value=(orchestrator, {}),
             ),
-            mock.patch.object(cli, "_sync_group_placement") as sync,
         ):
-            cli._start_engine_group_by_id(group_id)
+            cli._start_placement_group_by_id(placement_group_id)
 
         orchestrator.start.assert_called_once_with()
         orchestrator.recover.assert_not_called()
-        sync.assert_called_once_with(store, started)
 
     def test_stopped_group_cannot_resume_before_link_reverification(self) -> None:
-        group_id = "a" * 32
+        placement_group_id = "a" * 32
         row = {
-            "group_id": group_id,
+            "placement_group_id": placement_group_id,
             "state": "stopped",
             "desired_state": "stopped",
         }
         store = mock.Mock()
-        store.engine_groups.return_value = [row]
+        store.placement_groups.return_value = [row]
         store_context = mock.MagicMock()
         store_context.__enter__.return_value = store
         with (
             mock.patch.object(
                 cli,
-                "_engine_group_lifecycle_lock",
+                "_placement_group_lifecycle_lock",
                 return_value=contextlib.nullcontext(),
             ),
             mock.patch.object(cli, "_site_store", return_value=store_context),
             mock.patch.object(
                 cli,
-                "_engine_group_required_link_failure",
+                "_placement_group_required_link_failure",
                 return_value="required_link_unavailable",
             ),
-            mock.patch.object(cli, "_restore_engine_group_orchestrator") as restore,
+            mock.patch.object(cli, "_restore_placement_group_orchestrator") as restore,
             self.assertRaisesRegex(cli.LetsInferError, "required node link"),
         ):
-            cli._start_engine_group_by_id(group_id)
+            cli._start_placement_group_by_id(placement_group_id)
         restore.assert_not_called()
 
     def test_benchmark_failure_retains_original_error_when_restore_fails(self) -> None:
-        group_id = "a" * 32
+        placement_group_id = "a" * 32
         with tempfile.TemporaryDirectory() as directory:
             with (
                 mock.patch.object(
@@ -1431,14 +1501,14 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     cli,
-                    "_benchmark_engine_group_intents",
-                    return_value={group_id: True},
+                    "_benchmark_placement_group_intents",
+                    return_value={placement_group_id: True},
                 ),
                 mock.patch.object(cli, "_gateway_is_idle"),
-                mock.patch.object(cli, "_stop_engine_group_by_id"),
+                mock.patch.object(cli, "_stop_placement_group_by_id"),
                 mock.patch.object(
                     cli,
-                    "_start_engine_group_by_id",
+                    "_start_placement_group_by_id",
                     side_effect=cli.LetsInferError("fixture restore failed"),
                 ),
                 mock.patch.object(
@@ -1450,17 +1520,17 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     cli.LetsInferError,
                     "benchmark failed: fixture benchmark failed; service restoration "
-                    "was incomplete: restore engine group .*: fixture restore failed",
+                    "was incomplete: restore placement group .*: fixture restore failed",
                 ):
                     cli._run_benchmark_with_service_isolation(
-                        ["matrix"], resident_group_ids=(group_id,)
+                        ["matrix"], resident_placement_group_ids=(placement_group_id,)
                     )
 
     def test_benchmark_isolation_restores_group_when_stop_fails(self) -> None:
-        group_id = "a" * 32
+        placement_group_id = "a" * 32
         events: list[str] = []
         with tempfile.TemporaryDirectory() as directory:
-            def fail_stop(_group_id: str) -> None:
+            def fail_stop(_placement_group_id: str) -> None:
                 events.append("stop")
                 raise cli.LetsInferError("fixture stop failed")
 
@@ -1478,8 +1548,8 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     cli,
-                    "_benchmark_engine_group_intents",
-                    return_value={group_id: True},
+                    "_benchmark_placement_group_intents",
+                    return_value={placement_group_id: True},
                 ),
                 mock.patch.object(
                     cli,
@@ -1488,32 +1558,32 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     cli,
-                    "_stop_engine_group_by_id",
+                    "_stop_placement_group_by_id",
                     side_effect=fail_stop,
                 ),
                 mock.patch.object(
                     cli,
-                    "_start_engine_group_by_id",
-                    side_effect=lambda _group_id: events.append("start"),
+                    "_start_placement_group_by_id",
+                    side_effect=lambda _placement_group_id: events.append("start"),
                 ),
             ):
                 with self.assertRaisesRegex(cli.LetsInferError, "fixture stop failed"):
                     cli._run_benchmark_with_service_isolation(
-                        ["matrix"], resident_group_ids=(group_id,)
+                        ["matrix"], resident_placement_group_ids=(placement_group_id,)
                     )
         self.assertEqual(events, ["idle", "stop", "start"])
 
-    def test_benchmark_stop_allows_resident_group_restoration(self) -> None:
+    def test_benchmark_stop_allows_resident_placement_group_restoration(self) -> None:
         with mock.patch.object(
             cli.benchmark_jobs,
             "read_state",
             return_value={
-                "metadata": {"resident_group_ids": ["a" * 32]},
+                "metadata": {"resident_placement_group_ids": ["a" * 32]},
             },
         ):
             self.assertEqual(cli._benchmark_stop_timeout_seconds(), 3_600)
 
-    def test_detached_benchmark_binds_resident_groups_into_worker_command(self) -> None:
+    def test_detached_benchmark_binds_resident_placement_groups_into_worker_command(self) -> None:
         parsed = cli.parser().parse_args(["benchmark", "run", "model", "--c1"])
         arguments = cli._benchmark_namespace(parsed, runtime=parsed.model)
         command = cli._benchmark_self_command(
@@ -1522,7 +1592,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             pathlib.Path("/evidence"),
             ("a" * 32,),
         )
-        self.assertEqual(command[-2:], ["--resident-group", "a" * 32])
+        self.assertEqual(command[-2:], ["--resident-placement-group", "a" * 32])
 
     def test_control_bundle_install_accepts_concurrent_exact_publisher(self) -> None:
         manifest = {"release": "fixture-release"}
@@ -1771,7 +1841,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
 
             self.assertEqual(events, ["selection", "restore"])
 
-    def test_service_placement_uses_gateway_runtime_contract(self) -> None:
+    def test_qualification_placement_is_validated_without_gateway_registration(self) -> None:
         identity = types.SimpleNamespace(
             site_id="0" * 32,
             member_id="1" * 32,
@@ -1783,8 +1853,8 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         )
         config = {
             "placement_id": "2" * 32,
-            "placement_strategy": "single",
-            "placement_members": [identity.member_id],
+            "placement_node_ids": [identity.member_id],
+            "model": "example-model",
             "topology_sha256": "3" * 64,
             "runtime_version": "1.2.3",
             "runtime_digest": "4" * 64,
@@ -1804,17 +1874,10 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         }
         with (
             mock.patch.object(cli, "read_site_identity", return_value=identity),
-            mock.patch.object(cli, "adapter_for", return_value=adapter),
-            mock.patch.object(
-                cli, "target_contract", return_value={"id": "fixture-target"}
-            ),
         ):
-            placement = cli.service_placement_document(config, manifest, "running")
-
-        self.assertEqual(
-            placement["runtime"],
-            "example-model/example-engine/fixture-target@1.2.3@sha256:" + "4" * 64,
-        )
+            self.assertIsNone(
+                cli.update_service_placement(config, manifest, "running")
+            )
 
     def test_core_prune_retains_installed_runtime_and_rollback_controls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1837,7 +1900,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                     return_value=root / "qualification.json",
                 ),
                 mock.patch.object(
-                    cli, "default_engine_group_root", return_value=root / "groups"
+                    cli, "default_placement_group_root", return_value=root / "groups"
                 ),
                 mock.patch.object(cli, "selections", return_value=[receipt]),
                 mock.patch.object(
@@ -2086,13 +2149,13 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             ),
             mock.patch.object(
                 cli,
-                "_direct_group_release_identity",
+                "_direct_placement_group_release_identity",
                 return_value=mock.sentinel.release,
             ) as release_identity,
             mock.patch.object(
                 cli, "_resolve_direct_install_placement", return_value=placement
             ),
-            mock.patch.object(cli, "install_engine_group", return_value=0) as group,
+            mock.patch.object(cli, "install_placement_group", return_value=0) as group,
         ):
             self.assertEqual(cli.install(arguments), 0)
 

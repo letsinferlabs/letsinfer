@@ -2,7 +2,7 @@
 
 The native menu-bar app is a provisioned controller for one or more Let's
 Infer nodes. A node can contain a main machine, child machines, independent
-replicas, or a runtime-qualified parallel engine group.
+replicas, or a runtime-qualified parallel placement group.
 
 ## Features
 
@@ -11,9 +11,9 @@ replicas, or a runtime-qualified parallel engine group.
 - **Secure pairing without SSH** — verify a short comparison code while the
   app keeps its non-exportable controller identity in Keychain.
 - **Topology-first control** — see the main node, children, model services,
-  replica groups, targets, links, and health as one system.
-- **One model, many groups** — each model appears once and expands to its
-  independently routed replica or parallel groups.
+  placement groups, targets, links, and health as one system.
+- **One model, many placement groups** — each model appears once and expands
+  to its independently routed placement groups.
 - **Live inference visibility** — inspect active and queued requests,
   throughput, context, cache state, utilization, temperatures, power, network,
   and recent history from the same normalized state plane as the CLI.
@@ -34,7 +34,7 @@ replicas, or a runtime-qualified parallel engine group.
   issued controller certificate in Keychain.
 - Use the pinned private CA, exact server leaf, and controller certificate for
   Watchdog telemetry and the main node's private controller API.
-- Read signed node inventory, topology, services, groups, controller role, and
+- Read signed node inventory, topology, services, placement groups, controller role, and
   bounded aggregate telemetry from the main node. Read one-second machine
   telemetry from Watchdog. The app keeps at most 1,801 presentation points per
   node in memory and never writes telemetry or history to disk.
@@ -53,7 +53,7 @@ replicas, or a runtime-qualified parallel engine group.
   configure exposure, and manage inference keys.
 
 The menu presents the logical node first, then model services, expandable
-engine groups, aggregate requests, topology, and main-machine detail.
+placement groups, aggregate requests, topology, and main-node detail.
 Unavailable measurements stay explicit.
 
 ## Source layout

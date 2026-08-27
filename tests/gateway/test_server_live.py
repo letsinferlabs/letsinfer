@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import hashlib
 import http.server
 import json
 import os
@@ -15,8 +16,10 @@ import urllib.request
 from unittest import mock
 
 from core.gateway import server
+from core.orchestration import build_single_placement_group_plan
 from core.site import state
 from tests.gateway.helpers import insert_member, routing_facts, set_member_facts
+from tests.orchestration.helpers import release_identity
 
 
 MODEL = "fixture-model"
@@ -160,8 +163,7 @@ class LiveGatewayTests(unittest.TestCase):
             for index, _backend in enumerate(self.backends):
                 insert_member(store, f"{index + 1:032x}")
             self.service_id = store.ensure_model_service(MODEL)["service_id"]
-            for placement in self._placements(self.backends):
-                store.set_placement(placement)
+            self._register_placement_groups(store, self.backends)
 
         self.gateway = server.GatewayServer(
             ("127.0.0.1", 0),
@@ -233,22 +235,77 @@ class LiveGatewayTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(self.gateway.metrics.snapshot()["connected_clients"], 0)
 
-    def _placements(self, backends: list[_Backend]) -> list[dict]:
-        members = [f"{index + 1:032x}" for index in range(len(backends))]
-        placements = []
+    def _register_placement_groups(
+        self,
+        store: state.SiteStore,
+        backends: list[_Backend],
+        *,
+        engine: str = "fixture",
+    ) -> None:
+        node_ids = [f"{index + 1:032x}" for index in range(len(backends))]
         for index, backend in enumerate(backends):
-            placements.append({
-                "placement_id": f"{index + 1:032x}",
-                "service_id": self.service_id,
-                "model": MODEL,
-                "runtime": f"{MODEL}/fixture/target@1.0.0",
-                "target": "fixture-target",
-                "strategy": "single",
-                "state": "running",
-                "topology_sha256": f"{index + 1:064x}",
-                "members": [members[index]],
-                "endpoints": [{
-                    "member_id": members[index],
+            node_id = node_ids[index]
+            manifest_sha256 = "2" * 64
+            runtime_digest = hashlib.sha256(
+                f"{engine}:{node_id}".encode()
+            ).hexdigest()
+            release = release_identity(
+                manifest_sha256=manifest_sha256,
+                runtime_digest=runtime_digest,
+            )
+            plan = build_single_placement_group_plan(
+                member_id=node_id,
+                member_address=f"{node_id}.local:9770",
+                device_uuids=[f"GPU-{node_id[:8]}"],
+                topology_sha256=f"{index + 1:064x}",
+                manifest_sha256=manifest_sha256,
+                runtime_digest=runtime_digest,
+                service_id=self.service_id,
+                release=release,
+                port_base=backend.server_port,
+            )
+            store.register_placement_group(
+                plan.document(),
+                source=str(release["source"]),
+                model=MODEL,
+                runtime=f"{MODEL}/{engine}/target@1.0.0",
+                target="fixture-target",
+                capacity={
+                    "max_connections": 16,
+                    "max_active_requests": 1,
+                    "max_context_tokens": 256,
+                    "interconnect": {
+                        "kind": "any",
+                        "rdma_required": False,
+                        "minimum_speed_mbps": 0,
+                        "minimum_mtu": 0,
+                    },
+                },
+                engine_credential_sha256="6" * 64,
+            )
+            store.set_placement_group(
+                plan.document(),
+                source=str(release["source"]),
+                engine_credential_sha256="6" * 64,
+                desired_state="running",
+                state="running",
+                placements=[
+                    {
+                        "placement_id": plan.placements[0].placement_id,
+                        "node_id": node_id,
+                        "task_id": plan.placements[0].task_id,
+                        "state": "running",
+                        "operation_id": "operation-fixture",
+                        "error": None,
+                    }
+                ],
+                action="placement_group.start",
+            )
+            store.set_placement_group_endpoint(
+                plan.placement_group_id,
+                {
+                    "placement_id": plan.placements[0].placement_id,
+                    "node_id": node_id,
                     "url": f"http://127.0.0.1:{backend.server_port}",
                     "credential_file": str(self.backend_token),
                     "ca_file": None,
@@ -260,13 +317,9 @@ class LiveGatewayTests(unittest.TestCase):
                     "memory_pressure": False,
                     "temperature_c": 40.0 + index,
                     "prefix_keys": ["shared"] if index else [],
-                }],
-                "capacity": {
-                    "max_active_requests": 1,
-                    "max_context_tokens": 256,
                 },
-            })
-        return placements
+                state="running",
+            )
 
     def _request(
         self,
@@ -576,9 +629,10 @@ class LiveGatewayTests(unittest.TestCase):
         backend = self.backends[0]
         backend.mode = "stream"
         with state.SiteStore(identity=self.identity) as store:
-            for placement in self._placements(self.backends):
-                placement["runtime"] = f"{MODEL}/example-engine/target@1"
-                store.set_placement(placement)
+            store.connection.execute(
+                "UPDATE placement_groups SET runtime=?",
+                (f"{MODEL}/example-engine/target@1",),
+            )
         self.gateway.policy.reload(force=True)
 
         result: list[tuple[int, bytes]] = []

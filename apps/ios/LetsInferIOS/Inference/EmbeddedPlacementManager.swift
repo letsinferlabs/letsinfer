@@ -2,28 +2,29 @@ import CryptoKit
 import Foundation
 
 @MainActor
-final class EmbeddedGroupManager {
-    static let protocolName = "letsinfer-engine-group-job-v2"
+final class EmbeddedPlacementManager {
+    static let protocolName = "letsinfer-placement-job-v1"
 
     struct Record: Codable {
-        let groupID: String
+        let placementGroupID: String
+        let placementID: String
         let planSHA256: String
         let runtimeDigest: String
         let manifestSHA256: String
         let topologySHA256: String
         let engineCredentialSHA256: String
-        let memberID: String
+        let nodeID: String
         let candidateID: String
         let payloadID: String
         let source: String
-        let task: Data
+        let placement: Data
         var state: String
         var lastOperationID: String
         var updatedAtUnix: Int
     }
 
     private let defaults = UserDefaults.standard
-    private let recordKey = "letsinfer.embedded-engine-group.v1"
+    private let recordKey = "letsinfer.embedded-placement.v2"
     private let inference: InferenceService
     private let identityStore: NodeIdentityStore
     private let accessKeys = EngineAccessKeyStore()
@@ -55,7 +56,7 @@ final class EmbeddedGroupManager {
                 replayed: true,
                 result: try safeResult(
                     record: current,
-                    task: job.task,
+                    placement: job.placement,
                     address: job.address,
                     identity: identity
                 )
@@ -65,9 +66,11 @@ final class EmbeddedGroupManager {
         if job.action == "stage" {
             guard record == nil
                     || record?.state == "removed"
-                    || record?.groupID == job.groupID
+                    || record?.placementGroupID == job.placementGroupID
             else {
-                throw NodeError.inference("A different iOS Engine group is already staged")
+                throw NodeError.inference(
+                    "A different iOS placement group is already staged"
+                )
             }
             let llamaReady = job.candidateID == EmbeddedEngineIdentities.llamaCandidate
                 && job.payloadID == EmbeddedEngineIdentities.llamaPayload
@@ -89,20 +92,21 @@ final class EmbeddedGroupManager {
                     "The exact embedded Engine and model must be loaded before stage"
                 )
             }
-            try accessKeys.setGroupKey(engineCredential)
+            try accessKeys.setPlacementGroupKey(engineCredential)
             record = Record(
-                groupID: job.groupID,
+                placementGroupID: job.placementGroupID,
+                placementID: job.placementID,
                 planSHA256: job.planSHA256,
                 runtimeDigest: job.runtimeDigest,
                 manifestSHA256: job.manifestSHA256,
                 topologySHA256: job.topologySHA256,
                 engineCredentialSHA256: job.engineCredentialSHA256,
-                memberID: identity.memberID,
+                nodeID: identity.memberID,
                 candidateID: job.candidateID,
                 payloadID: job.payloadID,
                 source: job.source!,
-                task: try JSONSerialization.data(
-                    withJSONObject: job.task,
+                placement: try JSONSerialization.data(
+                    withJSONObject: job.placement,
                     options: [.sortedKeys]
                 ),
                 state: "staged",
@@ -112,14 +116,16 @@ final class EmbeddedGroupManager {
             inference.setPlacementEnabled(false)
         } else {
             guard var existing = record,
-                  existing.groupID == job.groupID,
+                  existing.placementGroupID == job.placementGroupID,
                   existing.planSHA256 == job.planSHA256,
                   existing.runtimeDigest == job.runtimeDigest,
                   existing.manifestSHA256 == job.manifestSHA256,
                   existing.topologySHA256 == job.topologySHA256,
                   existing.engineCredentialSHA256 == job.engineCredentialSHA256
             else {
-                throw NodeError.inference("iOS Engine job differs from staged immutable state")
+                throw NodeError.inference(
+                    "iOS placement job differs from staged immutable state"
+                )
             }
             switch job.action {
             case "start", "recover":
@@ -140,7 +146,7 @@ final class EmbeddedGroupManager {
             case "remove":
                 existing.state = "removed"
                 inference.setPlacementEnabled(false)
-                try accessKeys.setGroupKey(nil)
+                try accessKeys.setPlacementGroupKey(nil)
             default:
                 throw NodeError.invalidData("Unsupported iOS Engine action")
             }
@@ -149,7 +155,7 @@ final class EmbeddedGroupManager {
             record = existing
         }
         guard let record else {
-            throw NodeError.inference("iOS Engine group state is unavailable")
+            throw NodeError.inference("iOS placement-group state is unavailable")
         }
         save(record)
         return response(
@@ -157,31 +163,32 @@ final class EmbeddedGroupManager {
             replayed: false,
             result: try safeResult(
                 record: record,
-                task: job.task,
+                placement: job.placement,
                 address: job.address,
                 identity: identity
             )
         )
     }
 
-    func status(groupID: String) -> [String: Any] {
-        guard let record = record(), record.groupID == groupID else {
+    func status(placementGroupID: String) -> [String: Any] {
+        guard let record = record(), record.placementGroupID == placementGroupID else {
             return [
                 "protocol": Self.protocolName,
-                "group": NSNull(),
+                "placement": NSNull(),
                 "protection_trip_latched": false,
             ]
         }
         return [
             "protocol": Self.protocolName,
-            "group": groupObject(record),
+            "placement": placementObject(record),
             "protection_trip_latched": ProcessInfo.processInfo.thermalState == .critical,
         ]
     }
 
     private struct Job {
         let operationID: String
-        let groupID: String
+        let placementGroupID: String
+        let placementID: String
         let action: String
         let planSHA256: String
         let runtimeDigest: String
@@ -189,7 +196,7 @@ final class EmbeddedGroupManager {
         let topologySHA256: String
         let engineCredentialSHA256: String
         let source: String?
-        let task: [String: Any]
+        let placement: [String: Any]
         let address: String
         let candidateID: String
         let payloadID: String
@@ -200,38 +207,42 @@ final class EmbeddedGroupManager {
         identity: ProvisionalNodeIdentity
     ) throws -> Job {
         let fields: Set<String> = [
-            "protocol", "operation_id", "group_id", "action", "member_id",
+            "protocol", "operation_id", "placement_group_id", "placement_id",
+            "action", "node_id",
             "plan_sha256", "runtime_digest", "manifest_sha256", "topology_sha256",
-            "engine_credential_sha256", "expires_at_unix", "source", "task", "group",
+            "engine_credential_sha256", "expires_at_unix", "source", "placement",
+            "placement_group",
         ]
         guard Set(value.keys) == fields,
               value["protocol"] as? String == Self.protocolName,
               let operationID = value["operation_id"] as? String,
-              let groupID = value["group_id"] as? String,
+              let placementGroupID = value["placement_group_id"] as? String,
+              let placementID = value["placement_id"] as? String,
               let action = value["action"] as? String,
-              value["member_id"] as? String == identity.memberID,
+              value["node_id"] as? String == identity.memberID,
               let planSHA = value["plan_sha256"] as? String,
               let runtimeDigest = value["runtime_digest"] as? String,
               let manifestSHA = value["manifest_sha256"] as? String,
               let topologySHA = value["topology_sha256"] as? String,
               let credentialSHA = value["engine_credential_sha256"] as? String,
               let expires = value["expires_at_unix"] as? Int,
-              let task = value["task"] as? [String: Any],
-              let group = value["group"] as? [String: Any],
-              let release = group["release"] as? [String: Any],
+              let placement = value["placement"] as? [String: Any],
+              let placementGroup = value["placement_group"] as? [String: Any],
+              let release = placementGroup["release"] as? [String: Any],
               let distribution = release["engine_distribution"] as? [String: Any],
               let nativeExecution = release["native_execution"] as? [String: Any],
               operationID.isLowercaseHex(count: 32),
-              groupID.isLowercaseHex(count: 32),
+              placementGroupID.isLowercaseHex(count: 32),
+              placementID.isLowercaseHex(count: 32),
               ["stage", "start", "recover", "stop", "remove"].contains(action),
               [planSHA, runtimeDigest, manifestSHA, topologySHA, credentialSHA]
                 .allSatisfy({ $0.isLowercaseHex(count: 64) }),
               expires >= Int(Date().timeIntervalSince1970) - 30,
               expires <= Int(Date().timeIntervalSince1970) + 300,
-              group["group_id"] as? String == groupID,
-              group["runtime_digest"] as? String == runtimeDigest,
-              group["manifest_sha256"] as? String == manifestSHA,
-              group["topology_sha256"] as? String == topologySHA,
+              placementGroup["placement_group_id"] as? String == placementGroupID,
+              placementGroup["runtime_digest"] as? String == runtimeDigest,
+              placementGroup["manifest_sha256"] as? String == manifestSHA,
+              placementGroup["topology_sha256"] as? String == topologySHA,
               distribution["kind"] as? String == "embedded-application",
               distribution["platform"] as? String == "ios/arm64",
               distribution["bundle_id"] as? String == "ai.letsinfer.ios",
@@ -243,28 +254,48 @@ final class EmbeddedGroupManager {
               [EmbeddedEngineIdentities.llamaCandidate, EmbeddedEngineIdentities.mlcCandidate]
                 .contains(candidateID),
               nativeExecution["engine"] is [String: Any],
-              task["endpoint_owner"] as? Bool == true,
-              task["port_base"] as? Int == Int(NodeProtocol.enginePort),
-              task["port_count"] as? Int == 1,
-              let resources = group["resources"] as? [[String: Any]],
-              let resource = resources.first(where: {
-                  $0["node_id"] as? String == identity.memberID
+              placement["placement_id"] as? String == placementID,
+              placement["node_id"] as? String == identity.memberID,
+              placement["endpoint_owner"] as? Bool == true,
+              placement["port_base"] as? Int == Int(NodeProtocol.enginePort),
+              placement["port_count"] as? Int == 1,
+              placement["launcher"] as? String == "manifest",
+              placement["command"] is [String],
+              placement["environment"] is [String: String],
+              placement["readiness"] is [String: Any],
+              placement["device_uuids"] is [String],
+              let plannedPlacements = placementGroup["placements"] as? [[String: Any]],
+              let plannedPlacement = plannedPlacements.first(where: {
+                  $0["placement_id"] as? String == placementID
+                    && $0["node_id"] as? String == identity.memberID
               }),
-              let address = resource["address"] as? String,
+              plannedPlacement["task_id"] as? String
+                == placement["task_id"] as? String,
+              plannedPlacement["port_base"] as? Int
+                == placement["port_base"] as? Int,
+              plannedPlacement["port_count"] as? Int
+                == placement["port_count"] as? Int,
+              plannedPlacement["device_uuids"] as? [String]
+                == placement["device_uuids"] as? [String],
+              placementGroup["endpoint_placement_id"] as? String == placementID,
+              let address = plannedPlacement["address"] as? String,
               !address.isEmpty,
-              SHA256.hash(data: try CanonicalJSON.data(group)).hexString == planSHA
+              SHA256.hash(data: try CanonicalJSON.data(placementGroup)).hexString
+                == planSHA
         else {
-            throw NodeError.invalidData("iOS Engine group job is invalid")
+            throw NodeError.invalidData("iOS placement job is invalid")
         }
         let source = value["source"] as? String
         guard (action == "stage" && source?.contains("@sha256:") == true)
-                || (action != "stage" && value["source"] is NSNull)
+                || (action != "stage" && value["source"] is NSNull),
+              action != "stage" || release["source"] as? String == source
         else {
-            throw NodeError.invalidData("iOS Engine group source is invalid")
+            throw NodeError.invalidData("iOS placement-group source is invalid")
         }
         return Job(
             operationID: operationID,
-            groupID: groupID,
+            placementGroupID: placementGroupID,
+            placementID: placementID,
             action: action,
             planSHA256: planSHA,
             runtimeDigest: runtimeDigest,
@@ -272,7 +303,7 @@ final class EmbeddedGroupManager {
             topologySHA256: topologySHA,
             engineCredentialSHA256: credentialSHA,
             source: source,
-            task: task,
+            placement: placement,
             address: address,
             candidateID: candidateID,
             payloadID: payloadID
@@ -281,7 +312,7 @@ final class EmbeddedGroupManager {
 
     private func safeResult(
         record: Record,
-        task: [String: Any],
+        placement: [String: Any],
         address: String,
         identity: ProvisionalNodeIdentity
     ) throws -> [String: Any] {
@@ -289,9 +320,10 @@ final class EmbeddedGroupManager {
         let host = address.contains(":") ? "[\(address)]" : address
         return [
             "state": record.state,
-            "group_id": record.groupID,
-            "member_id": record.memberID,
-            "task_id": task["task_id"] as? String ?? "task-0",
+            "placement_group_id": record.placementGroupID,
+            "placement_id": record.placementID,
+            "node_id": record.nodeID,
+            "task_id": placement["task_id"] as? String ?? "task-0",
             "runtime_digest": record.runtimeDigest,
             "manifest_sha256": record.manifestSHA256,
             "tls_certificate_sha256": SHA256.hash(data: certificate).hexString,
@@ -314,16 +346,19 @@ final class EmbeddedGroupManager {
         ]
     }
 
-    private func groupObject(_ record: Record) -> [String: Any] {
+    private func placementObject(_ record: Record) -> [String: Any] {
         [
-            "group_id": record.groupID,
+            "placement_group_id": record.placementGroupID,
+            "placement_id": record.placementID,
             "plan_sha256": record.planSHA256,
             "runtime_digest": record.runtimeDigest,
             "manifest_sha256": record.manifestSHA256,
             "topology_sha256": record.topologySHA256,
             "engine_credential_sha256": record.engineCredentialSHA256,
-            "member_id": record.memberID,
-            "task": (try? JSONSerialization.jsonObject(with: record.task)) ?? [:],
+            "node_id": record.nodeID,
+            "placement": (
+                try? JSONSerialization.jsonObject(with: record.placement)
+            ) ?? [:],
             "source": record.source,
             "state": record.state,
             "last_operation_id": record.lastOperationID,

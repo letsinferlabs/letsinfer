@@ -13,7 +13,7 @@ one responsibility and a two-sentence explanation directly beneath it.
 
 ### `letsinfer status`
 
-Shows the complete node, service, hardware, model, engine-group, protection,
+Shows the complete node, service, hardware, model, placement-group, protection,
 and telemetry state. Physically shared memory is shown as unified memory, while
 discrete hosts report GPU VRAM and installed system RAM separately; use
 `--json` when another program needs the result.
@@ -24,7 +24,7 @@ Shows the authenticated main-and-child graph with verified links, node health,
 model placements, and current host network traffic. Its live terminal view
 animates one continuous main-to-child trunk independently of one-second state
 polling, flows through every child before repeating, reports standalone and
-engine-group placements, and pauses only groups that depend on a lost verified
+placement-group placements, and pauses only placement groups that depend on a lost verified
 link, while `--json` returns one exact snapshot.
 
 ### `letsinfer doctor`
@@ -137,7 +137,7 @@ pass. Resume does not clear a protection trip or replace recovery.
 
 ### `letsinfer model restart MODEL`
 
-Restarts the selected model's engine groups while preserving its chosen
+Restarts the selected model's placement groups while preserving its chosen
 runtime and safety history. Use it for ordinary lifecycle recovery, not as an
 acknowledgement of a Watchdog protection event.
 
@@ -150,13 +150,14 @@ clear that protected state.
 ### `letsinfer model rollback MODEL`
 
 Plans or applies a rollback to the retained prior immutable runtime for the
-selected model. Use `--dry-run` to review the exact groups and version change
+selected model. Use `--dry-run` to review the exact placement groups and version change
 before mutation.
 
 ### `letsinfer model logs MODEL`
 
-Streams or tails logs for the selected model's local engine group. Specify a
-group only when more than one local group makes the model selection ambiguous.
+Streams or tails logs for the selected model's local placement group. Specify a
+placement group with `--placement-group PLACEMENT_GROUP_ID` only when multiple
+local placement groups make selection ambiguous.
 
 ```text
 letsinfer benchmark
@@ -358,7 +359,7 @@ runtimes.
 
 Plans or applies a qualified runtime update for one installed model, or opens
 the installed-model selector when `MODEL` is omitted. Use `--dry-run` to
-inspect every affected engine group before activation.
+inspect every affected placement group before activation.
 
 ### `letsinfer uninstall`
 
