@@ -2014,6 +2014,33 @@ def host_device_fingerprint() -> dict[str, Any]:
     }
 
 
+def _collect_local_member_facts(
+    member_id: str,
+    *,
+    links: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    if platform.system() == "Darwin":
+        from core.apple_hardware import AppleHardwareError, member_facts
+
+        try:
+            return member_facts(
+                member_id,
+                data_path=site_data_root(),
+                product_version=PRODUCT_VERSION,
+            )
+        except AppleHardwareError as error:
+            raise InventoryError(str(error)) from error
+    return collect_local_facts(
+        member_id,
+        host_device_fingerprint(),
+        data_path=site_data_root(),
+        protection_trip_path=(default_watchdog_data_root() / PROTECTION_ROOT_NAME),
+        memory_pressure_available_bytes=active_memory_pressure_available_bytes(),
+        product_version=PRODUCT_VERSION,
+        links=links,
+    )
+
+
 def refresh_local_member_facts() -> dict[str, Any]:
     """Publish a freshly signed local inventory into the coordinator store."""
     identity = read_site_identity()
@@ -2023,30 +2050,8 @@ def refresh_local_member_facts() -> dict[str, Any]:
             "child-control channel"
         )
     try:
-        if platform.system() == "Darwin":
-            from core.apple_hardware import AppleHardwareError, member_facts
-
-            try:
-                facts = member_facts(
-                    identity.member_id,
-                    data_path=site_data_root(),
-                    product_version=PRODUCT_VERSION,
-                )
-            except AppleHardwareError as error:
-                raise LetsInferError(str(error)) from error
-        else:
-            link_store = LinkStore(identity)
-            facts = collect_local_facts(
-                identity.member_id,
-                host_device_fingerprint(),
-                data_path=site_data_root(),
-                protection_trip_path=(
-                    default_watchdog_data_root() / PROTECTION_ROOT_NAME
-                ),
-                memory_pressure_available_bytes=active_memory_pressure_available_bytes(),
-                product_version=PRODUCT_VERSION,
-                links=link_store.facts(),
-            )
+        links = () if platform.system() == "Darwin" else LinkStore(identity).facts()
+        facts = _collect_local_member_facts(identity.member_id, links=links)
         signature = member_proof(facts)
         with SiteStore(identity=identity) as store:
             return store.update_member_facts(
@@ -7087,6 +7092,30 @@ def verify_active_core_gateway() -> pathlib.Path:
     return unit
 
 
+def _macos_core_service_environment() -> dict[str, str]:
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        raise LetsInferError("OpenSSL is required for macOS core services")
+    openssl_directory = str(pathlib.Path(os.path.abspath(openssl)).parent)
+    search_path = os.pathsep.join(
+        dict.fromkeys(
+            (
+                openssl_directory,
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            )
+        )
+    )
+    return {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "LETSINFER_HOME": str(letsinfer_home_root()),
+        "LETSINFER_PYTHON": sys.executable,
+        "PATH": search_path,
+    }
+
+
 def install_core_gateway_service(
     *,
     executable_root: pathlib.Path | None = None,
@@ -7117,10 +7146,7 @@ def install_core_gateway_service(
                 "--max-connections",
                 str(config["gateway_max_connections"]),
             ),
-            environment={
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "LETSINFER_PYTHON": sys.executable,
-            },
+            environment=_macos_core_service_environment(),
         )
         try:
             atomic_json(config_path, config)
@@ -7278,10 +7304,7 @@ def install_node_service_only(
                         "--port",
                         str(SITE_CONTROL_PORT),
                     ),
-                    environment={
-                        "PYTHONDONTWRITEBYTECODE": "1",
-                        "LETSINFER_PYTHON": sys.executable,
-                    },
+                    environment=_macos_core_service_environment(),
                 ),
                 no_start=no_start,
             )
@@ -18846,14 +18869,8 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
 
     def local_facts() -> dict[str, Any]:
         try:
-            return collect_local_facts(
-                identity.member_id,
-                host_device_fingerprint(),
-                data_path=site_data_root(),
-                protection_trip_path=default_watchdog_data_root() / PROTECTION_ROOT_NAME,
-                memory_pressure_available_bytes=active_memory_pressure_available_bytes(),
-                product_version=PRODUCT_VERSION,
-                links=link_store.facts(),
+            return _collect_local_member_facts(
+                identity.member_id, links=link_store.facts()
             )
         except (InventoryError, LinkError, SiteError) as error:
             raise ControlError(str(error)) from error
