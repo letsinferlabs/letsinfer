@@ -22,12 +22,12 @@ from typing import Any
 from .contracts import OrchestrationError, validate_group_document
 from .credentials import GroupCredentialError, credential_sha256
 from ..paths import data_root
+from ..runtime_sources import is_immutable_runtime_source
 
 
 PROTOCOL = "letsinfer-engine-group-job-v2"
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-OCI_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 MAX_JOB_BYTES = 16 * 1024
 MAX_RESULT_BYTES = 16 * 1024
 MAX_CLOCK_SKEW_SECONDS = 30
@@ -162,8 +162,8 @@ def validate_group_job(
         raise MemberJobError("engine-group job action is invalid")
     source = value.get("source")
     if action == "stage":
-        if not isinstance(source, str) or not OCI_RE.fullmatch(source):
-            raise MemberJobError("stage jobs require a digest-pinned OCI runtime source")
+        if not is_immutable_runtime_source(source):
+            raise MemberJobError("stage jobs require an immutable runtime source")
     elif source is not None:
         raise MemberJobError("only stage jobs may carry a runtime source")
     current = int(time.time()) if now is None else now

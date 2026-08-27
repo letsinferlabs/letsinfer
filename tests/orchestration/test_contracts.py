@@ -43,6 +43,20 @@ class OrchestrationContractTests(unittest.TestCase):
             validate_release_identity(release)["source"], release["source"]
         )
 
+    def test_unqualified_release_accepts_an_exact_local_runtime_object(self) -> None:
+        release = release_identity()
+        release["qualification"] = "unqualified"
+        release["source"] = "letsinfer-object:sha256:" + release["runtime_digest"]
+        release["benchmark"] = None
+        release["authors"] = []
+        release["license"] = None
+
+        self.assertIs(validate_release_identity(release), release)
+
+        release["qualification"] = "qualified"
+        with self.assertRaisesRegex(OrchestrationError, "published OCI"):
+            validate_release_identity(release)
+
     def test_replication_is_core_owned_and_single_targets_have_no_contract(self) -> None:
         self.assertIsNone(validate_target_binding(None, {"strategy": "single"}))
         with self.assertRaisesRegex(OrchestrationError, "cannot declare"):

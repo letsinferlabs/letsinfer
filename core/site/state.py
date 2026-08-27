@@ -33,13 +33,13 @@ from core.paths import data_root as canonical_data_root
 from core.paths import secrets_root as canonical_secrets_root
 from core.orchestration import OrchestrationError, validate_group_document
 from core.exact_tokens import TOKEN_COUNT_PROTOCOLS
+from core.runtime_sources import is_immutable_runtime_source
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 KEY_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
-OCI_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 SCHEMA_VERSION = 3
 CHECKPOINT_INTERVAL = 100
 MAX_REASON_BYTES = 512
@@ -2666,8 +2666,8 @@ class SiteStore:
             != {item["node_id"] for item in document["resources"]}
         ):
             raise SiteError("engine-group plan does not match its placement")
-        if not isinstance(source, str) or not OCI_RE.fullmatch(source):
-            raise SiteError("engine-group source must be digest-pinned OCI")
+        if not is_immutable_runtime_source(source):
+            raise SiteError("engine-group source must be immutable")
         if source != document["release"]["source"]:
             raise SiteError("engine-group source differs from its signed release")
         if not isinstance(engine_credential_sha256, str) or not SHA256_RE.fullmatch(engine_credential_sha256):

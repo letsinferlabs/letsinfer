@@ -665,7 +665,7 @@ class GatewayPolicyTests(unittest.TestCase):
         policy = server.PolicySnapshot(self.identity)
         policy.reload(force=True)
         only = policy.backends[0]
-        with self.assertRaisesRegex(server.GatewayError, "all qualified placements failed"):
+        with self.assertRaisesRegex(server.GatewayError, "all available placements failed"):
             policy.acquire_backend(
                 "fixture-model", prefix_key=None, timeout=0.1, excluded={only.key}
             )
