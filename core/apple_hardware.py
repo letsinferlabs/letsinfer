@@ -4,14 +4,17 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
+import math
 import os
 import pathlib
 import plistlib
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import time
 from collections.abc import Iterator
@@ -28,6 +31,289 @@ from .site.topology import validate_member_facts
 
 class AppleHardwareError(RuntimeError):
     """Apple hardware identity or live capacity is unavailable."""
+
+
+class _SMCVersion(ctypes.Structure):
+    _fields_ = [
+        ("major", ctypes.c_uint8),
+        ("minor", ctypes.c_uint8),
+        ("build", ctypes.c_uint8),
+        ("reserved", ctypes.c_uint8),
+        ("release", ctypes.c_uint16),
+    ]
+
+
+class _SMCLimits(ctypes.Structure):
+    _fields_ = [
+        ("version", ctypes.c_uint16),
+        ("length", ctypes.c_uint16),
+        ("cpu", ctypes.c_uint32),
+        ("gpu", ctypes.c_uint32),
+        ("memory", ctypes.c_uint32),
+    ]
+
+
+class _SMCKeyInfo(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_uint32),
+        ("type", ctypes.c_uint32),
+        ("attributes", ctypes.c_uint8),
+    ]
+
+
+class _SMCKeyData(ctypes.Structure):
+    _fields_ = [
+        ("key", ctypes.c_uint32),
+        ("version", _SMCVersion),
+        ("limits", _SMCLimits),
+        ("info", _SMCKeyInfo),
+        ("result", ctypes.c_uint8),
+        ("status", ctypes.c_uint8),
+        ("data8", ctypes.c_uint8),
+        ("data32", ctypes.c_uint32),
+        ("bytes", ctypes.c_uint8 * 32),
+    ]
+
+
+def _fourcc(value: str) -> int:
+    encoded = value.encode("ascii")
+    if len(encoded) != 4:
+        raise AppleHardwareError("Apple SMC key is invalid")
+    return int.from_bytes(encoded, "big")
+
+
+def _smc_temperature(raw: bytes, data_type: int) -> float | None:
+    """Decode the temperature formats used by Apple Silicon SMC keys."""
+
+    try:
+        if data_type == _fourcc("flt ") and len(raw) == 4:
+            value = float(struct.unpack("<f", raw)[0])
+        elif data_type == _fourcc("sp78") and len(raw) == 2:
+            value = int.from_bytes(raw, "big", signed=True) / 256
+        elif data_type == _fourcc("fpe2") and len(raw) == 2:
+            value = int.from_bytes(raw, "big") / 4
+        else:
+            return None
+    except (OverflowError, struct.error):
+        return None
+    return value if math.isfinite(value) and 0 < value <= 150 else None
+
+
+def _temperature_group(key: str) -> str | None:
+    # Apple does not publish the individual SMC key map. These stable families
+    # are used by established Apple Silicon monitoring tools.
+    if key.startswith(("Tp", "Te", "Ts")):
+        return "cpu"
+    if key.startswith("Tg"):
+        return "gpu"
+    return None
+
+
+class _AppleSMCTemperatureReader:
+    """Read Apple Silicon CPU/GPU sensors without root or subprocesses."""
+
+    _SELECTOR = 2
+    _READ_BYTES = 5
+    _READ_INDEX = 8
+    _READ_INFO = 9
+
+    def __init__(self) -> None:
+        if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
+            raise AppleHardwareError(
+                "Apple SMC temperatures require Apple Silicon macOS"
+            )
+        if ctypes.sizeof(_SMCKeyData) != 80:
+            raise AppleHardwareError("Apple SMC data layout is unsupported")
+        try:
+            self._iokit = ctypes.CDLL(
+                "/System/Library/Frameworks/IOKit.framework/IOKit"
+            )
+            self._system = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+            self._configure_functions()
+            self._connection = self._open_connection()
+            self._keys = self._discover_temperature_keys()
+        except (AttributeError, OSError) as error:
+            raise AppleHardwareError(
+                "Apple SMC temperatures are unavailable"
+            ) from error
+        if not any(group == "cpu" for group, _, _ in self._keys):
+            self.close()
+            raise AppleHardwareError(
+                "Apple SMC CPU temperature keys are unavailable"
+            )
+
+    def _configure_functions(self) -> None:
+        self._iokit.IOServiceMatching.argtypes = (ctypes.c_char_p,)
+        self._iokit.IOServiceMatching.restype = ctypes.c_void_p
+        self._iokit.IOServiceGetMatchingServices.argtypes = (
+            ctypes.c_uint,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint),
+        )
+        self._iokit.IOServiceGetMatchingServices.restype = ctypes.c_int
+        self._iokit.IOIteratorNext.argtypes = (ctypes.c_uint,)
+        self._iokit.IOIteratorNext.restype = ctypes.c_uint
+        self._iokit.IORegistryEntryGetName.argtypes = (
+            ctypes.c_uint,
+            ctypes.c_void_p,
+        )
+        self._iokit.IORegistryEntryGetName.restype = ctypes.c_int
+        self._iokit.IOObjectRelease.argtypes = (ctypes.c_uint,)
+        self._iokit.IOObjectRelease.restype = ctypes.c_int
+        self._iokit.IOServiceOpen.argtypes = (
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint),
+        )
+        self._iokit.IOServiceOpen.restype = ctypes.c_int
+        self._iokit.IOServiceClose.argtypes = (ctypes.c_uint,)
+        self._iokit.IOServiceClose.restype = ctypes.c_int
+        self._iokit.IOConnectCallStructMethod.argtypes = (
+            ctypes.c_uint,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t),
+        )
+        self._iokit.IOConnectCallStructMethod.restype = ctypes.c_int
+        self._system.mach_task_self.argtypes = ()
+        self._system.mach_task_self.restype = ctypes.c_uint
+
+    def _open_connection(self) -> int:
+        matching = self._iokit.IOServiceMatching(b"AppleSMC")
+        if not matching:
+            raise AppleHardwareError("Apple SMC service is unavailable")
+        iterator = ctypes.c_uint()
+        if self._iokit.IOServiceGetMatchingServices(
+            0, matching, ctypes.byref(iterator)
+        ) != 0:
+            raise AppleHardwareError("Apple SMC service lookup failed")
+        connection = ctypes.c_uint()
+        try:
+            while True:
+                service = int(self._iokit.IOIteratorNext(iterator.value))
+                if service == 0:
+                    break
+                try:
+                    name = ctypes.create_string_buffer(128)
+                    if (
+                        self._iokit.IORegistryEntryGetName(service, name) == 0
+                        and name.value == b"AppleSMCKeysEndpoint"
+                        and self._iokit.IOServiceOpen(
+                            service,
+                            self._system.mach_task_self(),
+                            0,
+                            ctypes.byref(connection),
+                        )
+                        == 0
+                    ):
+                        break
+                finally:
+                    self._iokit.IOObjectRelease(service)
+        finally:
+            self._iokit.IOObjectRelease(iterator.value)
+        if connection.value == 0:
+            raise AppleHardwareError("Apple SMC connection failed")
+        return int(connection.value)
+
+    def _call(self, input_data: _SMCKeyData) -> _SMCKeyData | None:
+        output = _SMCKeyData()
+        output_size = ctypes.c_size_t(ctypes.sizeof(output))
+        status = self._iokit.IOConnectCallStructMethod(
+            self._connection,
+            self._SELECTOR,
+            ctypes.byref(input_data),
+            ctypes.sizeof(input_data),
+            ctypes.byref(output),
+            ctypes.byref(output_size),
+        )
+        if (
+            status != 0
+            or output.result != 0
+            or output_size.value != ctypes.sizeof(output)
+        ):
+            return None
+        return output
+
+    def _key_info(self, key: int) -> _SMCKeyInfo | None:
+        request = _SMCKeyData()
+        request.key = key
+        request.data8 = self._READ_INFO
+        response = self._call(request)
+        return None if response is None else response.info
+
+    def _key_value(self, key: int, info: _SMCKeyInfo) -> float | None:
+        if info.size > 32:
+            return None
+        request = _SMCKeyData()
+        request.key = key
+        request.info = info
+        request.data8 = self._READ_BYTES
+        response = self._call(request)
+        if response is None:
+            return None
+        return _smc_temperature(bytes(response.bytes[: info.size]), info.type)
+
+    def _discover_temperature_keys(self) -> list[tuple[str, int, _SMCKeyInfo]]:
+        count_info = self._key_info(_fourcc("#KEY"))
+        if count_info is None:
+            raise AppleHardwareError("Apple SMC key count is unavailable")
+        request = _SMCKeyData()
+        request.key = _fourcc("#KEY")
+        request.info = count_info
+        request.data8 = self._READ_BYTES
+        response = self._call(request)
+        if response is None or count_info.size != 4:
+            raise AppleHardwareError("Apple SMC key count is invalid")
+        count = int.from_bytes(bytes(response.bytes[:4]), "big")
+        if not 0 < count <= 65_536:
+            raise AppleHardwareError("Apple SMC key count is out of range")
+
+        keys: list[tuple[str, int, _SMCKeyInfo]] = []
+        for index in range(count):
+            request = _SMCKeyData()
+            request.data8 = self._READ_INDEX
+            request.data32 = index
+            indexed = self._call(request)
+            if indexed is None:
+                continue
+            try:
+                name = indexed.key.to_bytes(4, "big").decode("ascii")
+            except UnicodeDecodeError:
+                continue
+            group = _temperature_group(name)
+            info = self._key_info(indexed.key) if group is not None else None
+            if info is not None and info.size <= 32:
+                keys.append((group, indexed.key, info))
+        return keys
+
+    def read(self) -> tuple[int, int]:
+        values: dict[str, list[float]] = {"cpu": [], "gpu": []}
+        for group, key, info in self._keys:
+            value = self._key_value(key, info)
+            if value is not None:
+                values[group].append(value)
+        return tuple(
+            round(max(values[group]) * 10) if values[group] else -1
+            for group in ("cpu", "gpu")
+        )  # type: ignore[return-value]
+
+    def close(self) -> None:
+        connection = getattr(self, "_connection", 0)
+        if connection:
+            self._iokit.IOServiceClose(connection)
+            self._connection = 0
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except (AttributeError, OSError):
+            pass
+
+
+_AUTOMATIC_TEMPERATURE_READER = object()
 
 
 def _run(command: list[str]) -> str:
@@ -264,6 +550,7 @@ class AppleTelemetrySampler:
         *,
         data_path: pathlib.Path,
         gateway_telemetry_path: pathlib.Path,
+        temperature_reader: Any = _AUTOMATIC_TEMPERATURE_READER,
     ) -> None:
         self.member_id = member_id
         self.data_path = data_path
@@ -273,6 +560,13 @@ class AppleTelemetrySampler:
         self.previous_network: tuple[int, int] | None = None
         self.previous_monotonic: float | None = None
         self.sequence = 0
+        if temperature_reader is _AUTOMATIC_TEMPERATURE_READER:
+            try:
+                self.temperature_reader = _AppleSMCTemperatureReader()
+            except AppleHardwareError:
+                self.temperature_reader = None
+        else:
+            self.temperature_reader = temperature_reader
 
     def _cpu_percent(self, current: tuple[int, int, int, int]) -> int:
         previous = self.previous_cpu
@@ -335,6 +629,12 @@ class AppleTelemetrySampler:
                 "gpu_memory_percent": -1,
                 "gpu_engine_percent": [],
             }
+        cpu_temperature, gpu_temperature = -1, -1
+        if self.temperature_reader is not None:
+            try:
+                cpu_temperature, gpu_temperature = self.temperature_reader.read()
+            except (AppleHardwareError, OSError):
+                pass
         try:
             inference = _gateway_inference(
                 self.gateway_telemetry_path,
@@ -365,8 +665,8 @@ class AppleTelemetrySampler:
                 **gpu,
                 "memory_percent": round(memory_used * 100 / self.total_memory_bytes),
                 "disk_percent": round(disk.used * 100 / disk.total),
-                "system_temp_deci_c": -1,
-                "gpu_temp_deci_c": -1,
+                "system_temp_deci_c": cpu_temperature,
+                "gpu_temp_deci_c": gpu_temperature,
                 "nvme_temp_deci_c": -1,
                 "power_deci_w": -1,
                 "load1_centi": max(0, min(65_535, round(os.getloadavg()[0] * 100))),
