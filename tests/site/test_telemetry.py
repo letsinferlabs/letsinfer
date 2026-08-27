@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import plistlib
 import json
 import struct
 import tempfile
@@ -10,10 +11,13 @@ import threading
 import time
 import unittest
 import zlib
+from collections import namedtuple
 from types import SimpleNamespace
 from unittest import mock
 
 from core import cli as letsinfer
+from core import apple_hardware
+from core.apple_hardware import AppleTelemetrySampler
 from core.site.telemetry import (
     COUNTER_FIELDS,
     RAW_RING_CAPACITY,
@@ -84,6 +88,163 @@ def protocol_payload(
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_apple_sampler_produces_generic_live_metrics_and_gateway_counters(self) -> None:
+        vm_stat = """Mach Virtual Memory Statistics: (page size of 4096 bytes)
+Pages free: 262144.
+Pages inactive: 262144.
+Pages speculative: 0.
+Pages purgeable: 0.
+"""
+        route = "interface: en0\n"
+        first_network = "en0 1500 <Link#4> aa:bb 10 0 1048576 10 0 2097152 0\n"
+        second_network = "en0 1500 <Link#4> aa:bb 20 0 1572864 20 0 3145728 0\n"
+        gpu = plistlib.dumps([{
+            "PerformanceStatistics": {
+                "Device Utilization %": 42,
+                "Renderer Utilization %": 38,
+                "Tiler Utilization %": 11,
+                "Alloc system memory": 2 * 1024**3,
+            }
+        }])
+        usage = namedtuple("usage", "total used free")(
+            100 * 1024**3,
+            25 * 1024**3,
+            75 * 1024**3,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            gateway = root / "telemetry.state"
+            gateway.write_text(
+                "version=2\n"
+                + "".join(
+                    f"{field}={7 if field == 'requests_received' else 0}\n"
+                    for field in sorted({
+                        "active_requests",
+                        "connected_clients",
+                        "queued_requests",
+                        *COUNTER_FIELDS,
+                    })
+                ),
+                encoding="ascii",
+            )
+            gateway.chmod(0o600)
+            commands = [vm_stat, route, first_network, vm_stat, route, second_network]
+            with (
+                mock.patch.object(apple_hardware, "total_memory_gib", return_value=8),
+                mock.patch.object(apple_hardware, "_run", side_effect=commands),
+                mock.patch.object(apple_hardware, "_run_bytes", return_value=gpu),
+                mock.patch.object(
+                    apple_hardware,
+                    "_cpu_ticks",
+                    side_effect=[(100, 100, 800, 0), (120, 110, 870, 0)],
+                ),
+                mock.patch.object(apple_hardware.shutil, "disk_usage", return_value=usage),
+                mock.patch.object(
+                    apple_hardware.time,
+                    "time",
+                    side_effect=[gateway.stat().st_mtime, gateway.stat().st_mtime + 1],
+                ),
+                mock.patch.object(
+                    apple_hardware.time,
+                    "monotonic",
+                    side_effect=[10.0, 11.0],
+                ),
+            ):
+                sampler = AppleTelemetrySampler(
+                    MEMBER,
+                    data_path=root,
+                    gateway_telemetry_path=gateway,
+                )
+                first = sampler.sample()
+                second = sampler.sample()
+
+        self.assertEqual(first["system"]["cpu_percent"], -1)
+        self.assertEqual(second["system"]["cpu_percent"], 30)
+        self.assertEqual(second["system"]["gpu_percent"], 42)
+        self.assertEqual(second["system"]["memory_percent"], 75)
+        self.assertEqual(second["system"]["disk_percent"], 25)
+        self.assertEqual(second["system"]["network_rx_kib_s"], 512)
+        self.assertEqual(second["system"]["network_tx_kib_s"], 1024)
+        self.assertEqual(second["system"]["power_deci_w"], -1)
+        self.assertTrue(second["inference"]["gateway_available"])
+        self.assertEqual(second["inference"]["requests_received"], 7)
+
+    def test_publisher_uses_injected_native_sample_source(self) -> None:
+        sample = decode_watchdog_protocol_sample(
+            protocol_payload(sequence=9), member_id=MEMBER
+        )
+        accepted: list[dict[str, object]] = []
+        stopped: list[threading.Event] = []
+
+        def native(stop_event: threading.Event):
+            stopped.append(stop_event)
+            yield sample
+
+        with mock.patch(
+            "core.site.telemetry.watchdog_live_samples"
+        ) as watchdog:
+            publisher = TelemetryPublisher(
+                SimpleNamespace(member_id=MEMBER),
+                watchdog_port=9768,
+                watchdog_ca_file=pathlib.Path("ca"),
+                watchdog_controller_cert_file=pathlib.Path("cert"),
+                watchdog_controller_key_file=pathlib.Path("key"),
+                local_accept=lambda document, _: accepted.append(dict(document)),
+                sample_source=native,
+            )
+            publisher.start()
+            deadline = time.monotonic() + 1
+            while not accepted and time.monotonic() < deadline:
+                time.sleep(0.01)
+            publisher.close()
+
+        watchdog.assert_not_called()
+        self.assertEqual(accepted, [sample])
+        self.assertTrue(stopped[0].is_set())
+
+    def test_apple_sampler_keeps_system_metrics_when_network_is_offline(self) -> None:
+        vm_stat = """Mach Virtual Memory Statistics: (page size of 4096 bytes)
+Pages free: 262144.
+Pages inactive: 0.
+Pages speculative: 0.
+Pages purgeable: 0.
+"""
+        gpu = plistlib.dumps([{
+            "PerformanceStatistics": {"Device Utilization %": 5}
+        }])
+        usage = namedtuple("usage", "total used free")(
+            100 * 1024**3,
+            20 * 1024**3,
+            80 * 1024**3,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with (
+                mock.patch.object(apple_hardware, "total_memory_gib", return_value=8),
+                mock.patch.object(
+                    apple_hardware,
+                    "_run",
+                    side_effect=[vm_stat, "route to: default\n"],
+                ),
+                mock.patch.object(apple_hardware, "_run_bytes", return_value=gpu),
+                mock.patch.object(
+                    apple_hardware, "_cpu_ticks", return_value=(1, 1, 8, 0)
+                ),
+                mock.patch.object(
+                    apple_hardware.shutil, "disk_usage", return_value=usage
+                ),
+            ):
+                sample = AppleTelemetrySampler(
+                    MEMBER,
+                    data_path=root,
+                    gateway_telemetry_path=root / "missing",
+                ).sample()
+
+        self.assertEqual(sample["system"]["gpu_percent"], 5)
+        self.assertEqual(sample["system"]["network_rx_kib_s"], -1)
+        self.assertEqual(sample["system"]["network_tx_kib_s"], -1)
+        self.assertFalse(sample["inference"]["gateway_available"])
+
     def test_cli_reads_active_request_and_live_rate_from_site_aggregate(self) -> None:
         samples = [
             decode_watchdog_protocol_sample(
@@ -178,11 +339,14 @@ class TelemetryTests(unittest.TestCase):
         )
         local["system"]["gpu_percent"] = 67
         identity = type("Identity", (), {"member_id": MEMBER})()
-        with mock.patch.object(
-            letsinfer,
-            "watchdog_live_samples",
-            return_value=iter((local,)),
-        ) as read:
+        with (
+            mock.patch.object(letsinfer.platform, "system", return_value="Linux"),
+            mock.patch.object(
+                letsinfer,
+                "watchdog_live_samples",
+                return_value=iter((local,)),
+            ) as read,
+        ):
             telemetry = letsinfer._local_watchdog_telemetry(identity)
         read.assert_called_once_with(
             member_id=MEMBER,
