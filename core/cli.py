@@ -11873,6 +11873,7 @@ def status(arguments: argparse.Namespace) -> int:
         gateway_health = False
         gateway_auth_required = False
         gateway_authenticated = False
+        gateway_models: set[str] = set()
         endpoint = None
         if is_main:
             gateway_config_path = site_config_root() / "gateway.json"
@@ -11886,15 +11887,24 @@ def status(arguments: argparse.Namespace) -> int:
             gateway_auth_required = (
                 api_status(gateway_port, "/v1/models", None) == 401
             )
-            gateway_authenticated = (
-                api_status(
-                    gateway_port,
-                    "/v1/models",
-                    None,
-                    default_api_key_path(),
-                )
-                == 200
+            gateway_models_status, gateway_models_payload = api_json(
+                gateway_port,
+                "/v1/models",
+                None,
+                default_api_key_path(),
             )
+            gateway_authenticated = gateway_models_status == 200
+            gateway_model_rows = (
+                gateway_models_payload.get("data")
+                if isinstance(gateway_models_payload, dict)
+                else None
+            )
+            if isinstance(gateway_model_rows, list):
+                gateway_models = {
+                    row["id"]
+                    for row in gateway_model_rows
+                    if isinstance(row, dict) and isinstance(row.get("id"), str)
+                }
             endpoint = local_inference_endpoint(gateway_port)
         service = {
             "active": watchdog_active,
@@ -11955,6 +11965,10 @@ def status(arguments: argparse.Namespace) -> int:
                 "runtime_mode": "engine-group",
                 "engine_group_id": projection["group"]["group_id"],
             })
+            if is_main:
+                service["gateway_model_identity"] = (
+                    projection["container"]["model"] in gateway_models
+                )
             payload["container"] = projection["container"]
             payload["protection"] = projection["protection"]
             payload["lifecycle"] = _engine_group_dashboard_lifecycle(
