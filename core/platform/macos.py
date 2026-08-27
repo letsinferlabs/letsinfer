@@ -48,6 +48,15 @@ class LaunchAgent:
                 raise MacOSServiceError("launchd values must be non-empty single lines")
 
 
+@dataclasses.dataclass(frozen=True)
+class LaunchAgentSnapshot:
+    """Exact user-owned plist bytes plus the observed launchd load state."""
+
+    label: str
+    file: tuple[bytes, int] | None
+    loaded: bool
+
+
 def launch_agents_root(home: pathlib.Path | None = None) -> pathlib.Path:
     return (home or pathlib.Path.home()) / "Library" / "LaunchAgents"
 
@@ -178,6 +187,129 @@ def service_state(
     completed = runner(("launchctl", "print", domain_target(label)))
     active = "active" if completed.returncode == 0 else "inactive"
     return enabled, active, None
+
+
+def snapshot_launch_agent(
+    label: str,
+    *,
+    home: pathlib.Path | None = None,
+    runner: Runner = _default_runner,
+) -> LaunchAgentSnapshot:
+    path = launch_agent_path(label, home)
+    return LaunchAgentSnapshot(
+        label=label,
+        file=_snapshot(path),
+        loaded=runner(("launchctl", "print", domain_target(label))).returncode == 0,
+    )
+
+
+def restore_launch_agent(
+    snapshot: LaunchAgentSnapshot,
+    *,
+    home: pathlib.Path | None = None,
+    runner: Runner = _default_runner,
+    sleeper: Sleeper = time.sleep,
+) -> None:
+    """Restore an exact plist and loaded state after a larger transaction fails."""
+
+    path = launch_agent_path(snapshot.label, home)
+    target = domain_target(snapshot.label)
+    if runner(("launchctl", "print", target)).returncode == 0:
+        _run(
+            runner,
+            ("launchctl", "bootout", target),
+            expected=frozenset({0, 3}),
+        )
+    if snapshot.file is None:
+        path.unlink(missing_ok=True)
+        return
+    _atomic_bytes(path, snapshot.file[0], snapshot.file[1])
+    if snapshot.loaded:
+        _bootstrap_launch_agent(
+            runner,
+            f"gui/{os.getuid()}",
+            path,
+            sleeper=sleeper,
+        )
+        _run(runner, ("launchctl", "enable", target))
+        _run(runner, ("launchctl", "kickstart", "-k", target))
+        _run(runner, ("launchctl", "print", target))
+
+
+def restart_launch_agent(
+    label: str,
+    *,
+    runner: Runner = _default_runner,
+) -> None:
+    """Replace one already-loaded service after its current response is complete."""
+
+    _run(runner, ("launchctl", "kickstart", "-k", domain_target(label)))
+
+
+class LaunchAgentTransaction:
+    """Restore a bounded set of launch agents unless the caller commits."""
+
+    def __init__(
+        self,
+        labels: Sequence[str],
+        *,
+        home: pathlib.Path | None = None,
+        runner: Runner = _default_runner,
+        sleeper: Sleeper = time.sleep,
+    ) -> None:
+        if not labels or len(set(labels)) != len(labels):
+            raise MacOSServiceError("launchd transaction labels are invalid")
+        for label in labels:
+            if not LABEL_RE.fullmatch(label):
+                raise MacOSServiceError("launchd label is invalid")
+        self.labels = tuple(labels)
+        self.home = home
+        self.runner = runner
+        self.sleeper = sleeper
+        self.snapshots: dict[str, LaunchAgentSnapshot] = {}
+        self.started = False
+        self.committed = False
+
+    def __enter__(self) -> "LaunchAgentTransaction":
+        self.snapshots = {
+            label: snapshot_launch_agent(
+                label,
+                home=self.home,
+                runner=self.runner,
+            )
+            for label in self.labels
+        }
+        self.started = True
+        return self
+
+    def remove(self, label: str) -> None:
+        if not self.started or label not in self.snapshots:
+            raise MacOSServiceError("launchd transaction is not active for this label")
+        remove_launch_agent(label, home=self.home, runner=self.runner)
+
+    def commit(self) -> None:
+        if not self.started:
+            raise MacOSServiceError("launchd transaction has not started")
+        self.committed = True
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if self.committed:
+            return
+        errors: list[str] = []
+        for label in reversed(self.labels):
+            try:
+                restore_launch_agent(
+                    self.snapshots[label],
+                    home=self.home,
+                    runner=self.runner,
+                    sleeper=self.sleeper,
+                )
+            except (MacOSServiceError, OSError) as error:
+                errors.append(f"{label}: {error}")
+        if errors:
+            raise MacOSServiceError(
+                "launchd transaction rollback was incomplete: " + "; ".join(errors)
+            ) from exc
 
 
 def user_domain_available(*, runner: Runner = _default_runner) -> bool:

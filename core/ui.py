@@ -920,6 +920,7 @@ def live_runtime_status(snapshot: Callable[[], Mapping[str, Any]]) -> int:
     terminal = Terminal(sys.stdout)
     history: dict[str, list[float]] = {
         "gpu": [],
+        "vram": [],
         "memory": [],
         "cpu": [],
         "nvme": [],

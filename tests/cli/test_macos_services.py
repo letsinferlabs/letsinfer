@@ -14,6 +14,7 @@ from core.platform.macos import (
     GATEWAY_LABEL,
     LAUNCHD_BOOTSTRAP_RETRY_DELAY_SECONDS,
     NODE_LABEL,
+    LaunchAgentTransaction,
     LaunchAgent,
     MacOSServiceError,
     install_launch_agent,
@@ -58,6 +59,25 @@ class ScriptedBootstrapRunner(FakeRunner):
         return super().__call__(value)
 
 
+class MultiServiceRunner:
+    def __init__(self) -> None:
+        self.commands: list[tuple[str, ...]] = []
+        self.loaded: set[str] = set()
+
+    def __call__(self, command: object) -> subprocess.CompletedProcess[str]:
+        value = tuple(str(item) for item in command)  # type: ignore[arg-type]
+        self.commands.append(value)
+        if value[:2] == ("launchctl", "bootstrap"):
+            self.loaded.add(pathlib.Path(value[-1]).stem)
+        elif value[:2] == ("launchctl", "bootout"):
+            self.loaded.discard(value[-1].rsplit("/", 1)[-1])
+        if value[:2] == ("launchctl", "print"):
+            returncode = 0 if value[-1].rsplit("/", 1)[-1] in self.loaded else 1
+        else:
+            returncode = 0
+        return subprocess.CompletedProcess(value, returncode, "", "")
+
+
 class MacOSServiceTests(unittest.TestCase):
     def test_render_is_direct_deterministic_and_private(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -79,7 +99,7 @@ class MacOSServiceTests(unittest.TestCase):
     def test_install_uses_bootstrap_enable_and_kickstart(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = pathlib.Path(temporary)
-            runner = FakeRunner()
+            runner = MultiServiceRunner()
             agent = LaunchAgent(
                 label=GATEWAY_LABEL,
                 arguments=("/opt/letsinfer/bin/letsinfer", "gateway", "--port", "8000"),
@@ -184,7 +204,7 @@ class MacOSServiceTests(unittest.TestCase):
     def test_remove_boots_out_and_deletes_only_the_named_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = pathlib.Path(temporary)
-            runner = FakeRunner()
+            runner = MultiServiceRunner()
             agent = LaunchAgent(
                 label=GATEWAY_LABEL,
                 arguments=("/opt/letsinfer/bin/letsinfer", "gateway", "--port", "8000"),
@@ -199,4 +219,84 @@ class MacOSServiceTests(unittest.TestCase):
             self.assertIn(
                 ("launchctl", "bootout", f"gui/{os.getuid()}/{GATEWAY_LABEL}"),
                 runner.commands,
+            )
+
+    def test_transaction_commit_keeps_replacement_node_and_removed_gateway(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            runner = MultiServiceRunner()
+            gateway = LaunchAgent(
+                label=GATEWAY_LABEL,
+                arguments=("/opt/letsinfer/old", "gateway"),
+            )
+            old_node = LaunchAgent(
+                label=NODE_LABEL,
+                arguments=("/opt/letsinfer/old", "node-agent"),
+            )
+            new_node = LaunchAgent(
+                label=NODE_LABEL,
+                arguments=("/opt/letsinfer/new", "node-agent"),
+            )
+            install_launch_agent(gateway, home=home, runner=runner)
+            install_launch_agent(old_node, home=home, runner=runner)
+
+            with LaunchAgentTransaction(
+                (GATEWAY_LABEL, NODE_LABEL), home=home, runner=runner
+            ) as transaction:
+                transaction.remove(GATEWAY_LABEL)
+                transaction.remove(NODE_LABEL)
+                install_launch_agent(new_node, home=home, runner=runner)
+                transaction.commit()
+
+            gateway_path = home / f"Library/LaunchAgents/{GATEWAY_LABEL}.plist"
+            node_path = home / f"Library/LaunchAgents/{NODE_LABEL}.plist"
+            self.assertFalse(gateway_path.exists())
+            self.assertEqual(
+                plistlib.loads(node_path.read_bytes())["ProgramArguments"],
+                list(new_node.arguments),
+            )
+
+    def test_transaction_failure_restores_exact_agents_and_loaded_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            runner = MultiServiceRunner()
+            gateway = LaunchAgent(
+                label=GATEWAY_LABEL,
+                arguments=("/opt/letsinfer/old", "gateway"),
+            )
+            node = LaunchAgent(
+                label=NODE_LABEL,
+                arguments=("/opt/letsinfer/old", "node-agent"),
+            )
+            install_launch_agent(gateway, home=home, runner=runner)
+            gateway_path = home / f"Library/LaunchAgents/{GATEWAY_LABEL}.plist"
+            gateway_bytes = gateway_path.read_bytes()
+            remove_launch_agent(GATEWAY_LABEL, home=home, runner=runner)
+            gateway_path.write_bytes(gateway_bytes)
+            gateway_path.chmod(0o600)
+            install_launch_agent(node, home=home, runner=runner)
+
+            with self.assertRaisesRegex(RuntimeError, "fixture"):
+                with LaunchAgentTransaction(
+                    (GATEWAY_LABEL, NODE_LABEL), home=home, runner=runner
+                ) as transaction:
+                    transaction.remove(GATEWAY_LABEL)
+                    transaction.remove(NODE_LABEL)
+                    raise RuntimeError("fixture")
+
+            node_path = home / f"Library/LaunchAgents/{NODE_LABEL}.plist"
+            self.assertEqual(gateway_path.read_bytes(), gateway_bytes)
+            self.assertEqual(
+                plistlib.loads(node_path.read_bytes())["ProgramArguments"],
+                list(node.arguments),
+            )
+            node_target = f"gui/{os.getuid()}/{NODE_LABEL}"
+            gateway_target = f"gui/{os.getuid()}/{GATEWAY_LABEL}"
+            self.assertEqual(
+                runner(("launchctl", "print", node_target)).returncode,
+                0,
+            )
+            self.assertNotEqual(
+                runner(("launchctl", "print", gateway_target)).returncode,
+                0,
             )
