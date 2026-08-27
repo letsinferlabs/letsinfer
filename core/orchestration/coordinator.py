@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping
 from typing import Any, Optional
 
 from core.site.state import SiteError, SiteStore
+from core.runtime_sources import is_immutable_runtime_source
 
 from .contracts import (
     GroupPlan,
@@ -28,7 +29,6 @@ from .credentials import (
 from .member import PROTOCOL, canonical_bytes
 
 
-OCI_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 JOB_LIFETIME_SECONDS = 120
 GROUP_PORT_MIN = 18000
@@ -107,8 +107,8 @@ def group_job(
     if action not in {"stage", "start", "recover", "stop", "remove"}:
         raise GroupOrchestrationError("engine-group action is invalid")
     if action == "stage":
-        if not isinstance(source, str) or not OCI_RE.fullmatch(source):
-            raise GroupOrchestrationError("stage requires a digest-pinned OCI runtime source")
+        if not is_immutable_runtime_source(source):
+            raise GroupOrchestrationError("stage requires an immutable runtime source")
     elif source is not None:
         raise GroupOrchestrationError("only stage may carry a runtime source")
     identifier = operation_id or uuid.uuid4().hex
@@ -166,8 +166,8 @@ class EngineGroupOrchestrator:
         validate_group_document(plan.document())
         if not ID_RE.fullmatch(placement_id):
             raise GroupOrchestrationError("engine-group placement identity is invalid")
-        if not OCI_RE.fullmatch(source):
-            raise GroupOrchestrationError("engine-group source must be digest-pinned OCI")
+        if not is_immutable_runtime_source(source):
+            raise GroupOrchestrationError("engine-group source must be immutable")
         if set(members) != {item.member_id for item in plan.assignments}:
             raise GroupOrchestrationError("engine-group member controls are incomplete")
         for member_id, member in members.items():

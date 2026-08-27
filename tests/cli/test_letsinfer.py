@@ -353,6 +353,47 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             },
         )
 
+    def test_native_engine_group_dashboard_uses_its_launch_agent(self) -> None:
+        group_id = "a" * 32
+        group = {
+            "group_id": group_id,
+            "model": "qwen3.8-flash-next",
+            "runtime": (
+                "qwen3.8-flash-next/llama.cpp/apple-silicon@0.1.0"
+                "@sha256:" + "b" * 64
+            ),
+            "target": "apple-silicon",
+            "desired_state": "running",
+            "state": "running",
+            "local_task": True,
+            "engine_distribution": {
+                "kind": "native-archive",
+                "payload_id": "sha256:" + "c" * 64,
+            },
+        }
+        with (
+            mock.patch.object(
+                cli.macos_services,
+                "service_state",
+                return_value=("enabled", "active", None),
+            ) as service_state,
+            mock.patch.object(cli, "container_inspect") as inspect,
+        ):
+            projection = cli._engine_group_dashboard_projection([group])
+
+        self.assertIsNotNone(projection)
+        assert projection is not None
+        self.assertEqual(
+            projection["container"]["name"], f"ai.letsinfer.engine.{group_id}"
+        )
+        self.assertEqual(
+            projection["container"]["kind"], "native-launch-agent"
+        )
+        self.assertTrue(projection["container"]["healthy"])
+        self.assertTrue(projection["protection"]["armed"])
+        service_state.assert_called_once_with(f"ai.letsinfer.engine.{group_id}")
+        inspect.assert_not_called()
+
     def test_dashboard_projection_requires_one_exact_runtime_identity(self) -> None:
         self.assertIsNone(cli._engine_group_dashboard_projection([]))
         self.assertIsNone(
@@ -2010,6 +2051,55 @@ class RuntimeCandidateCliTests(unittest.TestCase):
             "example-engine--example--model--test-target",
         )
         self.assertFalse(hasattr(arguments, "engine"))
+
+    def test_direct_install_enters_managed_group_placement(self) -> None:
+        arguments = types.SimpleNamespace(
+            model="/tmp/runtime",
+            runtime=None,
+            runtime_policy=None,
+            catalog=None,
+        )
+        manifest_path = pathlib.Path("/runtime/runtime-execution.json")
+        control_root = pathlib.Path("/runtime/control")
+        manifest = {"model": {"alias": "example-model"}}
+        receipt = {"object_root": "/runtime/object"}
+        runtime = mock.Mock(digest="a" * 64)
+        placement = (mock.sentinel.identity, mock.sentinel.graph, mock.sentinel.placement)
+        with (
+            mock.patch.object(cli, "_install_catalog_nodes", return_value=None),
+            mock.patch.object(
+                cli,
+                "_runtime_source_for_install",
+                return_value=("/tmp/runtime", "local", None, None, None, False),
+            ),
+            mock.patch.object(
+                cli,
+                "prepare_runtime_install",
+                return_value=(manifest_path, manifest, control_root, receipt),
+            ),
+            mock.patch.object(cli, "verify_runtime_sources"),
+            mock.patch.object(cli, "verify_descriptor", return_value=runtime),
+            mock.patch.object(cli, "sha256_file", return_value="b" * 64),
+            mock.patch.object(cli, "target_contract", return_value={"id": "target"}),
+            mock.patch.object(
+                cli, "target_contract_sha256", return_value="c" * 64
+            ),
+            mock.patch.object(
+                cli,
+                "_direct_group_release_identity",
+                return_value=mock.sentinel.release,
+            ) as release_identity,
+            mock.patch.object(
+                cli, "_resolve_direct_install_placement", return_value=placement
+            ),
+            mock.patch.object(cli, "install_engine_group", return_value=0) as group,
+        ):
+            self.assertEqual(cli.install(arguments), 0)
+
+        immutable_source = "letsinfer-object:sha256:" + "a" * 64
+        self.assertEqual(release_identity.call_args.kwargs["source"], immutable_source)
+        self.assertEqual(group.call_args.kwargs["source"], immutable_source)
+        self.assertEqual(group.call_args.kwargs["resolved_topology"], placement)
 
     def test_engine_identity_is_opaque_to_core(self) -> None:
         runtime = runtime_candidate()

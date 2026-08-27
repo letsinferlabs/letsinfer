@@ -631,7 +631,7 @@ class PolicySnapshot:
                 if available_for_model and all(
                     backend.key in excluded_keys for backend in available_for_model
                 ):
-                    raise GatewayError("all qualified placements failed before output began")
+                    raise GatewayError("all available placements failed before output began")
                 candidates = [
                     backend
                     for backend in self.backends

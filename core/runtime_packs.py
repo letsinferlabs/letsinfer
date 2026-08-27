@@ -36,6 +36,7 @@ from core.engine_distribution import (
 )
 from core.orchestration import OrchestrationError, validate_target_binding
 from core.paths import config_root, data_root, runtime_root
+from core.runtime_sources import local_runtime_digest
 
 
 RUNTIME_CONFIG = "runtime.json"
@@ -82,7 +83,8 @@ TTFT_CACHE_BENCHMARK_GENERATOR_VERSION = 7
 EXECUTION_PAYLOAD_BENCHMARK_GENERATOR_VERSION = 8
 BENCHMARK_TOKENIZER_CAPABILITY = "engine-rendered-chat-count-v1"
 BENCHMARK_RENDER_CONTRACT = "openai-chat-user-v1"
-SELECTION_SCHEMA_VERSION = 3
+SELECTION_SCHEMA_VERSION = 4
+LEGACY_SELECTION_SCHEMA_VERSION = 3
 SELECTION_FIELDS = {
     "schema_version",
     "candidate_id",
@@ -100,10 +102,14 @@ SELECTION_FIELDS = {
     "hardware_fingerprint_sha256",
     "installation_id",
     "policy",
-    "authorization",
+    "source_authority",
+    "qualification",
     "source",
     "history",
 }
+LEGACY_SELECTION_FIELDS = (
+    SELECTION_FIELDS - {"source_authority", "qualification"}
+) | {"authorization"}
 
 
 class RuntimePackError(ValueError):
@@ -1810,7 +1816,21 @@ def materialize(source: str | os.PathLike[str]) -> Iterator[RuntimePack]:
                 root = unpacked
             yield verify_descriptor(root)
             return
-    raise RuntimePackError(f"runtime source does not exist or is not digest-pinned OCI: {raw}")
+    object_digest = local_runtime_digest(raw)
+    if object_digest is not None:
+        root = default_runtime_home() / ".objects" / object_digest
+        if root.is_symlink() or not root.is_dir():
+            raise RuntimePackError(
+                f"local runtime object is unavailable on this node: {object_digest}"
+            )
+        pack = verify_descriptor(root)
+        if pack.digest != object_digest:
+            raise RuntimePackError("local runtime object digest changed")
+        yield pack
+        return
+    raise RuntimePackError(
+        f"runtime source does not exist or is not an immutable runtime source: {raw}"
+    )
 
 
 def default_runtime_home() -> pathlib.Path:
@@ -1890,6 +1910,33 @@ def installation_identity(
     return hashlib.sha256(canonical_bytes(material)).hexdigest()
 
 
+def _normalize_selection(value: dict[str, Any], label: str) -> dict[str, Any]:
+    if (
+        value.get("schema_version") == LEGACY_SELECTION_SCHEMA_VERSION
+        and set(value) == LEGACY_SELECTION_FIELDS
+    ):
+        authorization = value.get("authorization")
+        if (
+            not isinstance(authorization, dict)
+            or set(authorization) != {"qualified", "authority"}
+            or not isinstance(authorization.get("qualified"), bool)
+            or authorization.get("authority") not in {"signed-catalog", "direct"}
+        ):
+            raise RuntimePackError(
+                f"invalid runtime selection authorization: {label}"
+            )
+        value = {
+            key: item for key, item in value.items() if key != "authorization"
+        }
+        value["schema_version"] = SELECTION_SCHEMA_VERSION
+        value["source_authority"] = authorization["authority"]
+        value["qualification"] = (
+            "qualified" if authorization["qualified"] else "unqualified"
+        )
+    _validate_selection(value, label)
+    return value
+
+
 def _validate_selection(value: dict[str, Any], label: str) -> None:
     if (
         type(value.get("schema_version")) is not int
@@ -1924,16 +1971,10 @@ def _validate_selection(value: dict[str, Any], label: str) -> None:
     for key in ("candidate_id", "logical_model", "engine"):
         if not isinstance(value.get(key), str) or not SAFE_NAME_RE.fullmatch(value[key]):
             raise RuntimePackError(f"invalid runtime selection {key}: {label}")
-    authorization = value.get("authorization")
-    if (
-        not isinstance(authorization, dict)
-        or set(authorization) != {"qualified", "authority"}
-        or not isinstance(authorization.get("qualified"), bool)
-        or authorization.get("authority") not in {"signed-catalog", "direct"}
-        or (authorization["authority"] == "signed-catalog")
-        != authorization["qualified"]
-    ):
-        raise RuntimePackError(f"invalid runtime selection authorization: {label}")
+    if value.get("source_authority") not in {"signed-catalog", "direct"}:
+        raise RuntimePackError(f"invalid runtime selection source authority: {label}")
+    if value.get("qualification") not in {"qualified", "unqualified"}:
+        raise RuntimePackError(f"invalid runtime selection qualification: {label}")
 
 
 def selections(home: pathlib.Path | None = None) -> list[dict[str, Any]]:
@@ -1948,8 +1989,9 @@ def selections(home: pathlib.Path | None = None) -> list[dict[str, Any]]:
         raise RuntimePackError(f"runtime selections must be a regular directory: {root}")
     values: list[dict[str, Any]] = []
     for path in sorted(root.glob("*.json")):
-        value = _read_object(path, "runtime selection")
-        _validate_selection(value, str(path))
+        value = _normalize_selection(
+            _read_object(path, "runtime selection"), str(path)
+        )
         expected_name = f"{selection_key(value['logical_model'])}.json"
         if path.name != expected_name:
             raise RuntimePackError(f"runtime selection filename mismatch: {path}")
@@ -2026,8 +2068,9 @@ def write_selection(
     path = root / f"{selection_key(receipt['logical_model'])}.json"
     previous: dict[str, Any] | None = None
     if path.is_file():
-        previous = _read_object(path, "runtime selection")
-        _validate_selection(previous, str(path))
+        previous = _normalize_selection(
+            _read_object(path, "runtime selection"), str(path)
+        )
     supplied_history = receipt.get("history")
     if supplied_history:
         history = list(supplied_history)
@@ -2053,13 +2096,14 @@ def write_selection(
                     "hardware_fingerprint_sha256",
                     "installation_id",
                     "policy",
-                    "authorization",
+                    "source_authority",
+                    "qualification",
                     "source",
                 )
                 if key in previous
             }
         )
-    value = dict(receipt)
+    value = _normalize_selection(dict(receipt), "new receipt")
     value["schema_version"] = SELECTION_SCHEMA_VERSION
     value["history"] = history[-1:]
     _validate_selection(value, "new receipt")
@@ -2100,9 +2144,11 @@ def restore_selection(
 ) -> None:
     """Restore the exact prior receipt after a failed service activation."""
 
-    _validate_selection(replacement, "replacement receipt")
+    replacement = _normalize_selection(
+        dict(replacement), "replacement receipt"
+    )
     if previous is not None:
-        _validate_selection(previous, "previous receipt")
+        previous = _normalize_selection(dict(previous), "previous receipt")
         if previous["logical_model"] != replacement["logical_model"]:
             raise RuntimePackError("runtime selection rollback model mismatch")
     runtime_home = (home or default_runtime_home()).expanduser()
@@ -2112,8 +2158,9 @@ def restore_selection(
         if previous is None and not path.exists():
             return
         raise RuntimePackError("runtime selection rollback receipt is unavailable")
-    current = _read_object(path, "runtime selection")
-    _validate_selection(current, str(path))
+    current = _normalize_selection(
+        _read_object(path, "runtime selection"), str(path)
+    )
     if previous is not None and current["digest"] == previous["digest"]:
         return
     if current["digest"] != replacement["digest"]:
@@ -2174,10 +2221,8 @@ def new_receipt(
         "hardware_fingerprint_sha256": hardware_fingerprint_sha256,
         "installation_id": installation_id,
         "policy": policy,
-        "authorization": {
-            "qualified": qualified,
-            "authority": "signed-catalog" if qualified else "direct",
-        },
+        "source_authority": "signed-catalog" if qualified else "direct",
+        "qualification": "qualified" if qualified else "unqualified",
         "source": source,
         "history": [],
     }

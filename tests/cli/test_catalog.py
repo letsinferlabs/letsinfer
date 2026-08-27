@@ -542,6 +542,41 @@ class CatalogTests(unittest.TestCase):
             ],
         )
 
+    def test_list_includes_installed_direct_runtime_outside_catalog(self) -> None:
+        snapshot = CatalogSnapshot(catalog(), "catalog.json", "5" * 64, 100, False)
+        receipt = {
+            "logical_model": "local-model",
+            "target": "apple-silicon",
+            "candidate_id": "llamacpp--example--local-model--apple-silicon",
+            "version": "0.1.0",
+            "engine": "llamacpp",
+            "source_authority": "direct",
+            "qualification": "unqualified",
+        }
+        arguments = argparse.Namespace(
+            catalog="catalog.json",
+            refresh=False,
+            all_targets=True,
+            model="local-model",
+            versions=False,
+            installed=True,
+            json=True,
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(cli.CatalogManager, "load", return_value=snapshot),
+            mock.patch.object(cli, "selections", return_value=[receipt]),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(cli.list_available_runtimes(arguments), 0)
+
+        rows = json.loads(output.getvalue())["models"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["model"], "local-model")
+        self.assertTrue(rows[0]["installed"])
+        self.assertEqual(rows[0]["source_authority"], "direct")
+        self.assertEqual(rows[0]["qualification"], "unqualified")
+
     def test_list_uses_compact_records_on_an_eighty_column_terminal(self) -> None:
         snapshot = CatalogSnapshot(catalog(), "catalog.json", "5" * 64, 100, False)
         arguments = argparse.Namespace(

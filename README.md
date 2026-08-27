@@ -98,6 +98,10 @@ independent runtime candidates—without adding model-specific code to core.
 Unqualified Apple candidates provide native llama.cpp and MLX-LM lanes on
 Apple Silicon macOS plus embedded llama.cpp and MLC Metal lanes on iOS; they
 are not catalog recommendations until physical-device qualification passes.
+Qualification controls catalog recommendation and release claims, not the
+managed lifecycle: an operator who explicitly installs an exact local or
+digest-pinned candidate still gets a registered placement, resource
+allocation, service, status, and gateway route.
 
 ## Common commands
 

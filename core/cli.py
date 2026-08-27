@@ -137,6 +137,7 @@ from .runtime_packs import (
     verify_descriptor,
     write_selection,
 )
+from .runtime_sources import is_immutable_runtime_source, local_runtime_source
 from .storage_usage import (
     RECLAIMABLE_CATEGORIES,
     RuntimeStorageReference,
@@ -5642,17 +5643,10 @@ def authorize_serving_launch(
     qualification_mode: bool,
     evidence_dir: str | None,
 ) -> None:
-    """Keep ordinary serving fail-closed while permitting explicit qualification."""
-    if serving["qualified"]:
-        return
-    if not qualification_mode:
+    """Require isolated evidence storage only for an explicit qualification run."""
+    if qualification_mode and not evidence_dir:
         raise LetsInferError(
-            f"serving configuration is not qualified: {serving['blocked_by']}"
-        )
-    if not evidence_dir:
-        raise LetsInferError(
-            "--qualification-mode requires an explicit --evidence-dir for an "
-            "unqualified serving configuration"
+            "--qualification-mode requires an explicit --evidence-dir"
         )
 
 
@@ -8699,6 +8693,61 @@ def _group_release_identity(
     }
 
 
+def _direct_group_release_identity(
+    *,
+    source: str,
+    runtime: RuntimePack,
+    manifest_sha256: str,
+    target_sha256: str,
+) -> dict[str, Any]:
+    """Bind an explicitly installed runtime to its immutable local bytes."""
+    distribution = runtime.runtime["engine"]["distribution"]
+    native_execution = (
+        None
+        if distribution["kind"] == "oci-container"
+        else {
+            "engine": {
+                "id": runtime.runtime["engine"]["id"],
+                "protocol": dict(runtime.runtime["engine"]["protocol"]),
+                "model_format": runtime.runtime["engine"]["model_format"],
+                "cache_provider": runtime.runtime["engine"]["cache_provider"],
+                "arguments": list(runtime.runtime["engine"]["arguments"]),
+                "environment": dict(runtime.runtime["engine"]["environment"]),
+            },
+            "model": dict(runtime.runtime["model"]),
+            "artifacts": [dict(item) for item in runtime.runtime["artifacts"]],
+            "cache": dict(runtime.runtime["cache"]),
+            "serving": dict(runtime.runtime["serving"]),
+        }
+    )
+    return {
+        "logical_model": runtime.runtime["logical_model"],
+        "candidate_id": runtime.runtime["id"],
+        "version": runtime.runtime["version"],
+        "source": source,
+        "runtime_digest": runtime.digest,
+        "manifest_sha256": manifest_sha256,
+        "engine_distribution": dict(distribution),
+        "model_uri": runtime.runtime["model"]["uri"],
+        "artifacts": [
+            {
+                "name": artifact["name"],
+                "uri": artifact["uri"],
+                "revision": artifact["revision"],
+                "sha256": artifact.get("sha256"),
+            }
+            for artifact in runtime.runtime["artifacts"]
+        ],
+        "target_id": runtime.runtime["target"]["id"],
+        "target_contract_sha256": target_sha256,
+        "qualification": "unqualified",
+        "benchmark": None,
+        "authors": [],
+        "license": None,
+        "native_execution": native_execution,
+    }
+
+
 def install_engine_group(
     arguments: argparse.Namespace,
     *,
@@ -8711,10 +8760,8 @@ def install_engine_group(
     resolved_topology: tuple[Any, TopologyGraph, Any] | None = None,
 ) -> int:
     """Install one exact engine group under a logical model service."""
-    if not REGISTRY_DIGEST_RE.fullmatch(source):
-        raise LetsInferError(
-            "engine-group installation requires a digest-pinned OCI runtime"
-        )
+    if not is_immutable_runtime_source(source):
+        raise LetsInferError("engine-group installation requires an immutable runtime")
     if any(
         bool(getattr(arguments, name, False))
         for name in ("no_service", "no_start", "no_build_image")
@@ -8736,7 +8783,7 @@ def install_engine_group(
             or release_identity.get("target_id") != target_contract(manifest)["id"]
         ):
             raise OrchestrationError(
-                "signed release identity does not match the requested model, target, and source"
+                "release identity does not match the requested model, target, and source"
             )
         contract = validate_target_binding(
             runtime.runtime.get("orchestration"),
@@ -8748,7 +8795,6 @@ def install_engine_group(
         raise LetsInferError("parallel runtime has no engine-group contract")
     if placement.strategy == "single" and contract is not None:
         raise LetsInferError("single runtime cannot carry a parallel group contract")
-    qualification_mode = release_identity.get("qualification") == "unqualified"
     manifest_sha256 = sha256_file(manifest_path)
     service_id = logical_service_id(identity.site_id, manifest["model"]["alias"])
     group_member_ids = (
@@ -8950,7 +8996,7 @@ def install_engine_group(
                         "ca_file": str(certificate_file),
                         "max_active_requests": manifest["serving"]["max_active_requests"],
                         "max_context_tokens": manifest["serving"]["max_context_tokens"],
-                        "healthy": not qualification_mode,
+                        "healthy": True,
                         "memory_pressure": False,
                         "temperature_c": -1,
                         "prefix_keys": [],
@@ -8969,12 +9015,8 @@ def install_engine_group(
                     raise LetsInferError(
                         f"engine-group runtime receipt failed: {error}"
                     ) from error
-                placement_document["state"] = (
-                    "starting" if qualification_mode else "running"
-                )
-                placement_document["endpoints"] = (
-                    [] if qualification_mode else endpoints
-                )
+                placement_document["state"] = "running"
+                placement_document["endpoints"] = endpoints
                 store.set_placement(placement_document)
             except Exception as error:
                 rollback_error: BaseException | None = None
@@ -9041,7 +9083,7 @@ def _validated_engine_group_document(row: Mapping[str, Any]) -> dict[str, Any]:
         or row.get("topology_sha256") != document["topology_sha256"]
         or row.get("plan_sha256")
         != hashlib.sha256(canonical_bytes(document)).hexdigest()
-        or not REGISTRY_DIGEST_RE.fullmatch(str(row.get("source", "")))
+        or not is_immutable_runtime_source(row.get("source"))
         or row.get("source") != document["release"]["source"]
     ):
         raise LetsInferError("durable engine-group identity is inconsistent")
@@ -9202,20 +9244,7 @@ def _sync_group_placement(
             "capacity",
         )
     }
-    group_release = group.get("release")
-    if not isinstance(group_release, Mapping):
-        group_plan = group.get("plan")
-        group_release = (
-            group_plan.get("release") if isinstance(group_plan, Mapping) else None
-        )
-    qualification_mode = (
-        isinstance(group_release, Mapping)
-        and group_release.get("qualification") == "unqualified"
-    )
-    if qualification_mode and group_running:
-        updated["state"] = "starting"
-        updated["endpoints"] = []
-    elif group_running:
+    if group_running:
         updated["state"] = "running"
     elif group["desired_state"] in {"stopped", "removed"} and group["state"] in {
         "stopped", "removed",
@@ -9227,15 +9256,14 @@ def _sync_group_placement(
         updated["state"] = "starting"
     else:
         updated["state"] = "failed"
-    if not qualification_mode:
-        updated["endpoints"] = [
-            {
-                **endpoint,
-                "healthy": group_running
-                and member_states.get(endpoint["member_id"]) == "running",
-            }
-            for endpoint in placement["endpoints"]
-        ]
+    updated["endpoints"] = [
+        {
+            **endpoint,
+            "healthy": group_running
+            and member_states.get(endpoint["member_id"]) == "running",
+        }
+        for endpoint in placement["endpoints"]
+    ]
     if (
         updated["state"] != placement["state"]
         or updated["endpoints"] != placement["endpoints"]
@@ -9861,6 +9889,7 @@ def _controller_site_action(
 
 
 def _engine_group_status(model: str | None) -> list[dict[str, Any]]:
+    local_member_id = read_site_identity().member_id
     with _site_store() as store:
         placements = {row["placement_id"]: row for row in store.placements()}
         values: list[dict[str, Any]] = []
@@ -9872,6 +9901,7 @@ def _engine_group_status(model: str | None) -> list[dict[str, Any]]:
                 raise LetsInferError("engine-group placement record disappeared")
             if model is not None and placement["model"] != model:
                 continue
+            release = row.get("plan", {}).get("release", {})
             values.append({
                 "group_id": row["group_id"],
                 "placement_id": row["placement_id"],
@@ -9887,6 +9917,11 @@ def _engine_group_status(model: str | None) -> list[dict[str, Any]]:
                 "endpoints": placement["endpoints"],
                 "last_error": row["last_error"],
                 "updated_at_unix": row["updated_at_unix"],
+                "local_task": any(
+                    member.get("member_id") == local_member_id
+                    for member in row["members"]
+                ),
+                "engine_distribution": release.get("engine_distribution"),
             })
     if model is not None and not values:
         raise LetsInferError(f"no installed engine group serves model {model!r}")
@@ -10627,6 +10662,42 @@ def scale_command(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_direct_install_placement(
+    arguments: argparse.Namespace,
+    manifest: Mapping[str, Any],
+) -> tuple[Any, TopologyGraph, Any]:
+    """Resolve an explicit runtime only across the explicitly selected nodes."""
+    identity, graph = _fresh_site_topology()
+    with _site_store() as store:
+        members = store.members()
+    selected = _selected_install_node_ids(arguments, identity, members)
+    required = int(target_contract(manifest)["placement"]["node_count"])
+    if len(selected) != required:
+        raise LetsInferError(
+            f"runtime target requires exactly {required} selected node(s); "
+            f"received {len(selected)}"
+        )
+    node_graph = TopologyGraph(
+        [graph.members[member_id] for member_id in selected],
+        allocated_devices={
+            member_id: tuple(graph.allocated_devices.get(member_id, ()))
+            for member_id in selected
+        },
+    )
+    try:
+        placement = node_graph.resolve(
+            target_contract(manifest),
+            coordinator_id=(
+                identity.member_id
+                if identity.member_id in selected
+                else selected[0]
+            ),
+        )
+    except TopologyError as error:
+        raise LetsInferError(f"cannot resolve runtime placement: {error}") from error
+    return identity, node_graph, placement
+
+
 def install(arguments: argparse.Namespace) -> int:
     catalog_install = _install_catalog_nodes(arguments)
     if catalog_install is not None:
@@ -10669,96 +10740,33 @@ def install(arguments: argparse.Namespace) -> int:
             or getattr(arguments, "expected_target_contract_sha256", None)
         ),
     )
-    selected_receipt = prepared_receipt
     verify_runtime_sources(manifest, release_root)
-    serving = manifest["serving"]
-    if not serving["qualified"]:
-        model_cache = requested_model_cache(getattr(arguments, "model_cache", None))
-        runtime_artifact_root = pathlib.Path(
-            prepared_receipt["object_root"]
-        ).expanduser()
-        download_dependencies = bool(
-            getattr(
-                arguments,
-                "download_dependencies",
-                getattr(arguments, "download", True),
-            )
-        )
-        ensure_install_dependencies(
-            manifest,
-            model_cache=model_cache,
-            runtime_artifact_root=runtime_artifact_root,
-            download=download_dependencies,
-            build_image=not getattr(arguments, "no_build_image", False),
-        )
-        verify_installed_runtime(manifest, model_cache=model_cache)
-        store_root_value = getattr(arguments, "store_root", None)
-        store_root = (
-            expanded_path(store_root_value)
-            if store_root_value
-            else default_store_root(manifest)
-        )
-        runtime_cache_value = getattr(arguments, "runtime_cache_root", None)
-        runtime_cache_root = (
-            expanded_path(runtime_cache_value)
-            if runtime_cache_value
-            else default_runtime_cache_root(manifest)
-        )
-        api_key_value = getattr(arguments, "api_key_file", None)
-        tls_cert_value = getattr(arguments, "tls_cert_file", None)
-        tls_key_value = getattr(arguments, "tls_key_file", None)
-        api_key_file = expanded_path(api_key_value or default_engine_api_key_path())
-        tls_cert_file = expanded_path(tls_cert_value or default_tls_cert_path())
-        tls_key_file = expanded_path(tls_key_value or default_tls_key_path())
-        ensure_private_directory(store_root)
-        ensure_runtime_home(runtime_cache_root)
-        ensure_api_key(api_key_file)
-        ensure_tls_material(tls_cert_file, tls_key_file)
-        try:
-            receipt_path = write_selection(prepared_receipt)
-        except RuntimePackError as error:
-            raise LetsInferError(str(error)) from error
-        presenter = _human_presenter()
-        if presenter is not None:
-            presenter.records(
-                (
-                    command_ui.RecordRow(
-                        "Runtime",
-                        prepared_receipt["candidate_id"],
-                        prepared_receipt["version"],
-                        command_ui.Semantic.WARNING,
-                    ),
-                    command_ui.RecordRow(
-                        "Activation", "Blocked", serving["blocked_by"]
-                    ),
-                )
-            )
-            presenter.verbatim(
-                f"sha256:{prepared_receipt['digest']}",
-                label="Digest",
-                copyable=True,
-            )
-            presenter.verbatim(receipt_path, label="Receipt", copyable=True)
-        else:
-            print(
-                f"INSTALLED RUNTIME {prepared_receipt['candidate_id']} "
-                f"version={prepared_receipt['version']} digest=sha256:{prepared_receipt['digest']} "
-                f"activation=blocked receipt={receipt_path}"
-            )
-            print(f"  blocked_by: {serving['blocked_by']}")
-        return 0
-    if not arguments.no_service and not user_lingering_enabled():
-        raise LetsInferError(
-            "boot-persistent user service requires lingering; run "
-            f"sudo loginctl enable-linger {getpass.getuser()} and retry"
-        )
-    raise LetsInferError(
-        "qualified runtime activation requires its signed catalog release; "
-        "install by logical model name instead of a local or bare OCI source"
+    runtime = verify_descriptor(pathlib.Path(prepared_receipt["object_root"]))
+    immutable_source = (
+        source
+        if REGISTRY_DIGEST_RE.fullmatch(source)
+        else local_runtime_source(runtime.digest)
     )
-    # Unqualified development runs retain the isolated candidate path above.
-    # Every qualified runtime below this boundary is represented by a durable
-    # engine group, including an ordinary one-device runtime.
+    manifest_sha256 = sha256_file(manifest_path)
+    release_identity = _direct_group_release_identity(
+        source=immutable_source,
+        runtime=runtime,
+        manifest_sha256=manifest_sha256,
+        target_sha256=target_contract_sha256(target_contract(manifest)),
+    )
+    return install_engine_group(
+        arguments,
+        source=immutable_source,
+        manifest_path=manifest_path,
+        manifest=manifest,
+        control_root=release_root,
+        receipt=prepared_receipt,
+        release_identity=release_identity,
+        resolved_topology=_resolve_direct_install_placement(arguments, manifest),
+    )
+    # Legacy direct-service activation remains below for receipt compatibility;
+    # new installations return through the engine-group path above.
+    selected_receipt = prepared_receipt
     manifest_sha = sha256_file(manifest_path)
     placement = resolve_service_placement(manifest, manifest_sha)
     control_root, installed_manifest_path = install_control_bundle(
@@ -11570,6 +11578,9 @@ def _local_engine_group_status(identity: Any) -> list[dict[str, Any]]:
             "last_error": None,
             "updated_at_unix": row["updated_at_unix"],
             "local_task": True,
+            "engine_distribution": group.get("release", {}).get(
+                "engine_distribution"
+            ),
         })
     return values
 
@@ -11613,17 +11624,64 @@ def _engine_group_dashboard_projection(
     ):
         return None
 
-    inspection = container_inspect(f"letsinfer-group-{group_id}")
-    state = inspection.get("State") if isinstance(inspection, Mapping) else None
-    state = state if isinstance(state, Mapping) else {}
-    container_state = str(state.get("Status") or "absent")
-    health = state.get("Health")
-    health = health if isinstance(health, Mapping) else {}
-    group_running = (
+    lifecycle_running = (
         group.get("state") == "running"
         and group.get("desired_state") == "running"
-        and container_state == "running"
     )
+    distribution = group.get("engine_distribution")
+    distribution_kind = (
+        distribution.get("kind") if isinstance(distribution, Mapping) else None
+    )
+    local_task = group.get("local_task") is True
+    native = distribution_kind not in {None, "oci-container"}
+    inspection: dict[str, Any] | None = None
+    health: Mapping[str, Any] = {}
+    process_name = f"letsinfer-group-{group_id}"
+    process_kind = "oci-container"
+    if native:
+        process_name = f"ai.letsinfer.engine.{group_id}"
+        process_kind = "native-launch-agent"
+        if local_task:
+            try:
+                _enabled, active, _detail = macos_services.service_state(process_name)
+            except macos_services.MacOSServiceError:
+                active = "unavailable"
+            process_state = active
+            process_running = active == "active"
+        else:
+            process_state = str(group.get("state") or "unknown")
+            process_running = lifecycle_running
+        protection = {
+            "phase": "armed" if lifecycle_running and process_running else "inactive",
+            "armed": lifecycle_running and process_running,
+            "trip_latched": False,
+        }
+    elif local_task or distribution_kind is None:
+        inspected = container_inspect(process_name)
+        inspection = dict(inspected) if isinstance(inspected, Mapping) else None
+        state = inspection.get("State") if inspection is not None else None
+        state = state if isinstance(state, Mapping) else {}
+        process_state = str(state.get("Status") or "absent")
+        health_value = state.get("Health")
+        health = health_value if isinstance(health_value, Mapping) else {}
+        process_running = process_state == "running"
+        protection = protection_status(
+            {
+                "protection_root": str(
+                    default_watchdog_data_root() / PROTECTION_ROOT_NAME / group_id
+                )
+            },
+            inspection,
+        )
+    else:
+        process_state = str(group.get("state") or "unknown")
+        process_running = lifecycle_running
+        protection = {
+            "phase": "armed" if lifecycle_running else "inactive",
+            "armed": lifecycle_running,
+            "trip_latched": False,
+        }
+    group_running = lifecycle_running and process_running
     capacity_value = group.get("capacity")
     capacity = (
         {
@@ -11638,21 +11696,18 @@ def _engine_group_dashboard_projection(
         if isinstance(capacity_value, Mapping)
         else None
     )
-    protection = protection_status(
-        {
-            "protection_root": str(
-                default_watchdog_data_root() / PROTECTION_ROOT_NAME / group_id
-            )
-        },
-        dict(inspection) if isinstance(inspection, dict) else None,
-    )
     return {
         "group": dict(group),
         "container": {
-            "name": f"letsinfer-group-{group_id}",
-            "state": container_state,
+            "name": process_name,
+            "kind": process_kind,
+            "state": process_state,
             "healthy": group_running,
-            "docker_health": str(health.get("Status") or "none"),
+            "docker_health": (
+                "not-applicable"
+                if native
+                else str(health.get("Status") or "none")
+            ),
             "model_identity": group_running,
             "managed": True,
             "engine": engine,
@@ -13582,7 +13637,12 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
     }
     rows: list[dict[str, Any]] = []
     model_filter = arguments.model
-    if model_filter is not None and model_filter not in catalog["models"]:
+    installed_models = {receipt["logical_model"] for receipt in receipts}
+    if (
+        model_filter is not None
+        and model_filter not in catalog["models"]
+        and model_filter not in installed_models
+    ):
         raise LetsInferError(f"model is not present in runtime catalog: {model_filter}")
 
     for model, model_record in sorted(catalog["models"].items()):
@@ -13634,8 +13694,46 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
                             "recommended": recommended,
                             "installed": (model, target, candidate, version)
                             in installed,
+                            "source_authority": "signed-catalog",
+                            "qualification": "qualified",
                         }
                     )
+
+    listed = {
+        (row["model"], row["target"], row["runtime"], row["version"])
+        for row in rows
+    }
+    for receipt in receipts:
+        key = (
+            receipt["logical_model"],
+            receipt["target"],
+            receipt["candidate_id"],
+            receipt["version"],
+        )
+        if key in listed or (
+            model_filter is not None and receipt["logical_model"] != model_filter
+        ):
+            continue
+        rows.append(
+            {
+                "model": receipt["logical_model"],
+                "runtime": receipt["candidate_id"],
+                "version": receipt["version"],
+                "authors": [],
+                "license": None,
+                "engine": receipt["engine"],
+                "target": receipt["target"],
+                "model_uri": None,
+                "benchmark_id": None,
+                "benchmark_score": None,
+                "verification": None,
+                "provenance": None,
+                "recommended": False,
+                "installed": True,
+                "source_authority": receipt["source_authority"],
+                "qualification": receipt["qualification"],
+            }
+        )
 
     if getattr(arguments, "installed", False):
         rows = [row for row in rows if row["installed"]]
@@ -13685,12 +13783,15 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
     rendered = [
         (
             row["model"],
-            ", ".join(author["github_login"] for author in row["authors"]),
+            ", ".join(author["github_login"] for author in row["authors"])
+            or "direct",
             row["version"],
             row["engine"],
             row["target"],
             (
-                str(len(row["verification"]["verifiers"]))
+                "direct"
+                if row["verification"] is None
+                else str(len(row["verification"]["verifiers"]))
                 if "consensus_path" in row["verification"]
                 else "legacy"
             ),
@@ -13700,10 +13801,11 @@ def list_available_runtimes(arguments: argparse.Namespace) -> int:
                     (row["recommended"], "recommended"),
                     (row["installed"], "installed"),
                     (row["benchmark_score"] is None, "unscored"),
+                    (row["qualification"] == "unqualified", "unqualified"),
                 )
                 if enabled
             )
-            or "qualified",
+            or row["qualification"],
         )
         for row in rows
     ]
@@ -18528,22 +18630,13 @@ def _require_matching_rdma_container(
         raise LetsInferError("engine-group container RDMA memlock changed")
 
 
-def _engine_group_qualification_launch(
+def _engine_group_launch_mode(
     config: Mapping[str, Any],
 ) -> tuple[bool, str | None]:
     qualification = config["_group"]["release"]["qualification"]
-    if qualification == "qualified":
-        return False, None
-    if qualification != "unqualified":
+    if qualification not in {"qualified", "unqualified"}:
         raise LetsInferError("engine-group release qualification is invalid")
-    evidence = (
-        evidence_root()
-        / "engine-groups"
-        / str(config["group_id"])
-        / "qualification"
-    )
-    ensure_private_directory(evidence)
-    return True, str(evidence)
+    return False, None
 
 
 def _collect_engine_group_launch_failure(
@@ -18984,7 +19077,7 @@ class LocalEngineGroupExecutor:
             return self._start_native_config(config)
         verify_active_core_watchdog()
         task = config["task"]
-        qualification_mode, evidence_dir = _engine_group_qualification_launch(config)
+        qualification_mode, evidence_dir = _engine_group_launch_mode(config)
         authorize_serving_launch(
             manifest["serving"],
             qualification_mode=qualification_mode,
@@ -19150,7 +19243,7 @@ class LocalEngineGroupExecutor:
             raise LetsInferError("native Apple Engines require macOS")
         manifest = config["_manifest"]
         task = config["task"]
-        qualification_mode, evidence_dir = _engine_group_qualification_launch(config)
+        qualification_mode, evidence_dir = _engine_group_launch_mode(config)
         authorize_serving_launch(
             manifest["serving"],
             qualification_mode=qualification_mode,
