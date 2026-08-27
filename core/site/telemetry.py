@@ -865,6 +865,9 @@ class TelemetryPublisher:
         watchdog_controller_key_file: pathlib.Path,
         local_accept: Callable[[Mapping[str, Any], str], None] | None = None,
         endpoint: str | None = None,
+        sample_source: Callable[
+            [threading.Event], Iterator[dict[str, Any]]
+        ] | None = None,
     ) -> None:
         if (local_accept is None) == (endpoint is None):
             raise TelemetryError("telemetry publisher requires exactly one destination")
@@ -875,6 +878,7 @@ class TelemetryPublisher:
         self.watchdog_controller_key_file = watchdog_controller_key_file
         self.local_accept = local_accept
         self.endpoint = endpoint
+        self.sample_source = sample_source
         self.stop_event = threading.Event()
         self.last_sequence: int | None = None
         self.last_error: str | None = None
@@ -893,14 +897,19 @@ class TelemetryPublisher:
     def _run(self) -> None:
         while not self.stop_event.is_set():
             try:
-                for sample in watchdog_live_samples(
-                    member_id=self.identity.member_id,
-                    port=self.watchdog_port,
-                    ca_file=self.watchdog_ca_file,
-                    controller_cert_file=self.watchdog_controller_cert_file,
-                    controller_key_file=self.watchdog_controller_key_file,
-                    stop_event=self.stop_event,
-                ):
+                samples = (
+                    self.sample_source(self.stop_event)
+                    if self.sample_source is not None
+                    else watchdog_live_samples(
+                        member_id=self.identity.member_id,
+                        port=self.watchdog_port,
+                        ca_file=self.watchdog_ca_file,
+                        controller_cert_file=self.watchdog_controller_cert_file,
+                        controller_key_file=self.watchdog_controller_key_file,
+                        stop_event=self.stop_event,
+                    )
+                )
+                for sample in samples:
                     if sample["sequence"] == self.last_sequence:
                         continue
                     if self.local_accept is not None:

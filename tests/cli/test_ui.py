@@ -957,10 +957,19 @@ class TerminalTests(unittest.TestCase):
                 "runtime_version": "1.0.0",
             },
             "protection": {"armed": True, "trip_latched": False},
+            "hardware": {
+                "accelerator": {"minimum_memory_gib": 32},
+                "memory": {"topology": "discrete", "total_gib": 96},
+            },
             "lifecycle": {
                 "state": "ready",
                 "ready_services": 5,
                 "total_services": 5,
+            },
+            "telemetry": {
+                "fresh": True,
+                "sample_sequence": 1,
+                "system": {"gpu_memory_percent": 42},
             },
         }
         with (
@@ -975,6 +984,7 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("\033[?1049l", rendered)
         self.assertNotIn("\033[H\033[J", rendered)
         self.assertIn("fixture-model", rendered)
+        self.assertIn("42%", rendered)
 
     def test_live_topology_animates_traffic_until_control_c(self) -> None:
         stream = FakeStream(tty=True)

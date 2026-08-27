@@ -9321,8 +9321,29 @@ def _remove_all_engine_groups() -> list[str]:
 
 def _apply_controller_site_move(prepared: PreparedMove) -> Any:
     """Commit an approved move and restart the node agent after its HTTP reply."""
+    if platform.system() == "Darwin":
+        if not macos_services.user_domain_available():
+            raise SiteError(
+                "the macOS launchd user domain is unavailable; log into the target user session"
+            )
+        if macos_services.service_state(macos_services.NODE_LABEL)[1] != "active":
+            raise SiteError("node move requires the private node service to be active")
+        try:
+            with macos_services.LaunchAgentTransaction(
+                (macos_services.GATEWAY_LABEL,)
+            ) as services:
+                replacement = apply_prepared_move(
+                    prepared,
+                    before_transaction=lambda: services.remove(
+                        macos_services.GATEWAY_LABEL
+                    ),
+                )
+                services.commit()
+                return replacement
+        except macos_services.MacOSServiceError as error:
+            raise SiteError(str(error)) from error
     if platform.system().lower() != "linux":
-        raise SiteError("persistent node moves require Linux user systemd")
+        raise SiteError("persistent node moves require Linux user systemd or macOS launchd")
     if not user_lingering_enabled():
         raise SiteError("user-systemd lingering is required before a node move")
     systemctl = shutil.which("systemctl")
@@ -9436,6 +9457,9 @@ def _controller_administration_completed(
     move = result.get("move")
     move_id = move.get("move_id") if isinstance(move, Mapping) else None
     if not isinstance(move_id, str) or not re.fullmatch(r"[0-9a-f]{32}", move_id):
+        return
+    if platform.system() == "Darwin":
+        macos_services.restart_launch_agent(macos_services.NODE_LABEL)
         return
     systemctl = shutil.which("systemctl")
     if systemctl is None:
@@ -11126,6 +11150,30 @@ def _telemetry_summary(
 def _local_watchdog_telemetry(identity: Any) -> dict[str, Any] | None:
     """Read this node's authenticated live Watchdog sample without main authority."""
 
+    if platform.system() == "Darwin":
+        try:
+            from core.apple_hardware import AppleHardwareError, AppleTelemetrySampler
+
+            sampler = AppleTelemetrySampler(
+                identity.member_id,
+                data_path=site_data_root(),
+                gateway_telemetry_path=default_gateway_telemetry_path(),
+            )
+            sampler.sample()
+            time.sleep(0.05)
+            sample = sampler.sample()
+        except (AppleHardwareError, OSError, TelemetryError):
+            return None
+        try:
+            aggregator = TelemetryAggregator()
+            telemetry = aggregator.update(sample)
+        except (OSError, TelemetryError):
+            return None
+        return _telemetry_summary(
+            telemetry,
+            preferred_member_id=identity.member_id,
+        )
+
     stop_event = threading.Event()
     samples: Any = None
     try:
@@ -11159,6 +11207,20 @@ def _local_watchdog_telemetry(identity: Any) -> dict[str, Any] | None:
         return None
     return _telemetry_summary(
         telemetry,
+        preferred_member_id=identity.member_id,
+    )
+
+
+def _local_status_telemetry(
+    identity: Any,
+    config: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Select the platform's authenticated or native local telemetry source."""
+
+    if platform.system() == "Darwin" or identity.role == "child":
+        return _local_watchdog_telemetry(identity)
+    return _local_controller_telemetry(
+        config,
         preferred_member_id=identity.member_id,
     )
 
@@ -11401,11 +11463,7 @@ def status(arguments: argparse.Namespace) -> int:
             "protection": None,
             "runtime": None,
             "telemetry": (
-                _local_controller_telemetry(
-                    preferred_member_id=identity.member_id,
-                )
-                if identity.role == "main" and node_active == "active"
-                else _local_watchdog_telemetry(identity)
+                _local_status_telemetry(identity)
                 if node_active == "active"
                 else None
             ),
@@ -11630,8 +11688,8 @@ def status(arguments: argparse.Namespace) -> int:
     payload["models"] = _model_status_from_groups(live_groups)
     payload["lifecycle"] = runtime_lifecycle(payload)
     payload["telemetry"] = (
-        _local_watchdog_telemetry(local_identity)
-        if local_identity is not None and local_identity.role == "child"
+        _local_status_telemetry(local_identity, config)
+        if local_identity is not None
         else _local_controller_telemetry(
             config,
             preferred_member_id=local_member_id,
@@ -17026,32 +17084,46 @@ def site_move_command(arguments: argparse.Namespace) -> int:
 
     prior_units: dict[str, tuple[str, str]] = {}
     prior_unit_files: dict[str, tuple[str, int] | None] = {}
+    service_platform = platform.system()
     if not arguments.no_service:
-        if platform.system().lower() != "linux":
-            raise LetsInferError("persistent node moves require Linux user systemd")
-        if not user_lingering_enabled():
-            raise LetsInferError("user-systemd lingering is required before a node move")
-        for unit in (
-            SERVICE_NAME,
-            NODE_SERVICE_NAME,
-            ENGINE_SERVICE_NAME,
-            GATEWAY_SERVICE_NAME,
-            RECOVERY_TIMER_NAME,
-        ):
-            prior_units[unit] = _unit_enabled_active(unit)
-            prior_unit_files[unit] = _snapshot_user_file(
-                pathlib.Path.home() / ".config/systemd/user" / unit
-            )
-        active_work = [
-            unit
-            for unit in (ENGINE_SERVICE_NAME,)
-            if prior_units[unit][1] == "active"
-        ]
-        if active_work:
+        if service_platform not in {"Darwin", "Linux"}:
             raise LetsInferError(
-                "node move requires active inference services to be stopped first: "
-                + ",".join(active_work)
+                "persistent node moves require Linux user systemd or macOS launchd"
             )
+        if not user_lingering_enabled():
+            if service_platform == "Darwin":
+                raise LetsInferError(
+                    "the macOS launchd user domain is unavailable; "
+                    "log into the target user session"
+                )
+            raise LetsInferError("user-systemd lingering is required before a node move")
+        if service_platform == "Darwin":
+            if _unit_enabled_active(NODE_SERVICE_NAME)[1] != "active":
+                raise LetsInferError(
+                    "node move requires the private node service to be active"
+                )
+        else:
+            for unit in (
+                SERVICE_NAME,
+                NODE_SERVICE_NAME,
+                ENGINE_SERVICE_NAME,
+                GATEWAY_SERVICE_NAME,
+                RECOVERY_TIMER_NAME,
+            ):
+                prior_units[unit] = _unit_enabled_active(unit)
+                prior_unit_files[unit] = _snapshot_user_file(
+                    pathlib.Path.home() / ".config/systemd/user" / unit
+                )
+            active_work = [
+                unit
+                for unit in (ENGINE_SERVICE_NAME,)
+                if prior_units[unit][1] == "active"
+            ]
+            if active_work:
+                raise LetsInferError(
+                    "node move requires active inference services to be stopped first: "
+                    + ",".join(active_work)
+                )
 
     with _site_store() as store:
         store.record_action(
@@ -17062,46 +17134,72 @@ def site_move_command(arguments: argparse.Namespace) -> int:
         )
     arguments._mandatory_audit_satisfied = _MANDATORY_AUDIT_SATISFIED
     try:
-        if not arguments.no_service:
-            for unit in (
-                RECOVERY_TIMER_NAME,
-                GATEWAY_SERVICE_NAME,
-                NODE_SERVICE_NAME,
-                SERVICE_NAME,
-            ):
-                if prior_units[unit][1] == "active":
-                    run_passthrough(["systemctl", "--user", "stop", unit])
-        moving = _command_activity(arguments, "Joining the destination node")
-        with moving, ui.protect_stdout(moving):
-            with LocalMoveTransaction(identity) as transaction:
-                enrollment = join_site(
-                    str(arguments.endpoint),
-                    invite_id=str(arguments.invite),
-                    code=code,
-                    coordinator_certificate_sha256=str(
-                        arguments.coordinator_certificate_sha256
-                    ),
-                    member_name=arguments.name or socket.gethostname(),
-                    member_address=(
-                        arguments.address
-                        or socket.getfqdn()
-                        or socket.gethostname()
-                    ),
-                )
-                if not arguments.no_service:
-                    ensure_core_watchdog_tls()
-                    install_node_service_only()
-                    install_core_watchdog_service(enrollment.identity)
-                replacement = transaction.commit()
-        if not arguments.no_service:
-            for unit in (
-                ENGINE_SERVICE_NAME,
-                GATEWAY_SERVICE_NAME,
-                RECOVERY_TIMER_NAME,
-            ):
-                run(["systemctl", "--user", "disable", unit], check=False)
+        with contextlib.ExitStack() as service_stack:
+            macos_transaction = None
+            if not arguments.no_service:
+                if service_platform == "Darwin":
+                    macos_transaction = service_stack.enter_context(
+                        macos_services.LaunchAgentTransaction(
+                            (
+                                macos_services.GATEWAY_LABEL,
+                                macos_services.NODE_LABEL,
+                            )
+                        )
+                    )
+                    macos_transaction.remove(macos_services.GATEWAY_LABEL)
+                    macos_transaction.remove(macos_services.NODE_LABEL)
+                else:
+                    for unit in (
+                        RECOVERY_TIMER_NAME,
+                        GATEWAY_SERVICE_NAME,
+                        NODE_SERVICE_NAME,
+                        SERVICE_NAME,
+                    ):
+                        if prior_units[unit][1] == "active":
+                            run_passthrough(["systemctl", "--user", "stop", unit])
+            moving = _command_activity(arguments, "Joining the destination node")
+            with moving, ui.protect_stdout(moving):
+                with LocalMoveTransaction(identity) as transaction:
+                    enrollment = join_site(
+                        str(arguments.endpoint),
+                        invite_id=str(arguments.invite),
+                        code=code,
+                        coordinator_certificate_sha256=str(
+                            arguments.coordinator_certificate_sha256
+                        ),
+                        member_name=arguments.name or socket.gethostname(),
+                        member_address=(
+                            arguments.address
+                            or socket.getfqdn()
+                            or socket.gethostname()
+                        ),
+                    )
+                    if not arguments.no_service:
+                        if service_platform == "Darwin":
+                            install_node_service_only()
+                        else:
+                            ensure_core_watchdog_tls()
+                            install_node_service_only()
+                            install_core_watchdog_service(enrollment.identity)
+                    replacement = transaction.commit()
+            if not arguments.no_service:
+                if macos_transaction is not None:
+                    macos_transaction.commit()
+                else:
+                    for unit in (
+                        ENGINE_SERVICE_NAME,
+                        GATEWAY_SERVICE_NAME,
+                        RECOVERY_TIMER_NAME,
+                    ):
+                        run(["systemctl", "--user", "disable", unit], check=False)
     except BaseException as failure:
-        if not arguments.no_service:
+        if (
+            not arguments.no_service
+            and service_platform == "Darwin"
+            and isinstance(failure, macos_services.MacOSServiceError)
+        ):
+            raise LetsInferError(str(failure)) from failure
+        if not arguments.no_service and service_platform != "Darwin":
             rollback_errors: list[str] = []
             unit_root = pathlib.Path.home() / ".config/systemd/user"
             for unit in prior_units:
@@ -19237,6 +19335,18 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
             controller_server.server_close()
         raise LetsInferError(str(error)) from error
     try:
+        sample_source = None
+        if platform.system() == "Darwin":
+            from core.apple_hardware import AppleHardwareError, AppleTelemetrySampler
+
+            try:
+                sample_source = AppleTelemetrySampler(
+                    identity.member_id,
+                    data_path=site_data_root(),
+                    gateway_telemetry_path=default_gateway_telemetry_path(),
+                ).samples
+            except AppleHardwareError as error:
+                raise TelemetryError(str(error)) from error
         telemetry_publisher = TelemetryPublisher(
             identity,
             watchdog_port=WATCHDOG_TELEMETRY_PORT,
@@ -19255,6 +19365,7 @@ def node_agent_command(arguments: argparse.Namespace) -> int:
                 if identity.role == "main"
                 else _site_control_endpoint(identity.coordinator_address)
             ),
+            sample_source=sample_source,
         )
         telemetry_publisher.start()
     except TelemetryError as error:

@@ -252,7 +252,7 @@ class ProductCommandScenarioTests(unittest.TestCase):
                     "_complete_local_node_status",
                     return_value=node_details,
                 ),
-                mock.patch.object(cli, "_local_controller_telemetry", return_value={}),
+                mock.patch.object(cli, "_local_status_telemetry", return_value={}),
                 mock.patch.object(
                     cli,
                     "runtime_lifecycle",

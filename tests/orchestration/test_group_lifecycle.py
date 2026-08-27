@@ -131,7 +131,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                     },
                 ),
                 mock.patch.object(
-                    cli, "_local_controller_telemetry", return_value=telemetry
+                    cli, "_local_status_telemetry", return_value=telemetry
                 ),
                 mock.patch.object(
                     cli, "runtime_lifecycle", return_value={"state": "absent"}
@@ -201,7 +201,7 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                         "links": [],
                     },
                 ),
-                mock.patch.object(cli, "_local_controller_telemetry", return_value={}),
+                mock.patch.object(cli, "_local_status_telemetry", return_value={}),
                 mock.patch.object(
                     cli, "runtime_lifecycle", return_value={"state": "ready"}
                 ),
