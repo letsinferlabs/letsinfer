@@ -154,6 +154,9 @@ Pages purgeable: 0.
                     MEMBER,
                     data_path=root,
                     gateway_telemetry_path=gateway,
+                    temperature_reader=SimpleNamespace(
+                        read=mock.Mock(return_value=(781, 542))
+                    ),
                 )
                 first = sampler.sample()
                 second = sampler.sample()
@@ -165,9 +168,36 @@ Pages purgeable: 0.
         self.assertEqual(second["system"]["disk_percent"], 25)
         self.assertEqual(second["system"]["network_rx_kib_s"], 512)
         self.assertEqual(second["system"]["network_tx_kib_s"], 1024)
+        self.assertEqual(second["system"]["system_temp_deci_c"], 781)
+        self.assertEqual(second["system"]["gpu_temp_deci_c"], 542)
         self.assertEqual(second["system"]["power_deci_w"], -1)
         self.assertTrue(second["inference"]["gateway_available"])
         self.assertEqual(second["inference"]["requests_received"], 7)
+
+    def test_apple_smc_temperature_formats_and_groups_are_bounded(self) -> None:
+        self.assertEqual(
+            apple_hardware._smc_temperature(
+                struct.pack("<f", 51.25), apple_hardware._fourcc("flt ")
+            ),
+            51.25,
+        )
+        self.assertEqual(
+            apple_hardware._smc_temperature(
+                (12_800).to_bytes(2, "big", signed=True),
+                apple_hardware._fourcc("sp78"),
+            ),
+            50.0,
+        )
+        self.assertIsNone(
+            apple_hardware._smc_temperature(
+                struct.pack("<f", 151.0), apple_hardware._fourcc("flt ")
+            )
+        )
+        self.assertEqual(apple_hardware._temperature_group("Tp09"), "cpu")
+        self.assertEqual(apple_hardware._temperature_group("Te05"), "cpu")
+        self.assertEqual(apple_hardware._temperature_group("Ts0P"), "cpu")
+        self.assertEqual(apple_hardware._temperature_group("Tg1A"), "gpu")
+        self.assertIsNone(apple_hardware._temperature_group("TH0x"))
 
     def test_publisher_uses_injected_native_sample_source(self) -> None:
         sample = decode_watchdog_protocol_sample(
