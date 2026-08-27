@@ -241,7 +241,12 @@ class ProductCommandScenarioTests(unittest.TestCase):
                     "_service_state",
                     return_value=("enabled", "active", 1024),
                 ),
-                mock.patch.object(cli, "api_status", return_value=200),
+                mock.patch.object(cli, "api_status", side_effect=(200, 401)),
+                mock.patch.object(
+                    cli,
+                    "api_json",
+                    return_value=(200, {"data": [{"id": "ling-3-flash"}]}),
+                ),
                 mock.patch.object(
                     cli,
                     "local_inference_endpoint",
@@ -281,6 +286,112 @@ class ProductCommandScenarioTests(unittest.TestCase):
         }])
         for key, value in node_details.items():
             self.assertEqual(payload[key], value)
+
+    def test_main_engine_group_status_reports_the_observed_gateway_route(self) -> None:
+        group_id = "a" * 32
+        groups = [{
+            "group_id": group_id,
+            "model": "qwen3.8-flash-next",
+            "runtime": (
+                "qwen3.8-flash-next/sglang/dgx-spark-connectx-2@0.1.0-rc.6"
+                "@sha256:" + "b" * 64
+            ),
+            "target": "dgx-spark-connectx-2",
+            "capacity": {
+                "max_connections": 32,
+                "max_active_requests": 4,
+                "max_context_tokens": 65536,
+            },
+            "desired_state": "running",
+            "state": "running",
+        }]
+        identity = types.SimpleNamespace(role="main", member_id="main-1")
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = pathlib.Path(temporary)
+            identity_path = mock.Mock()
+            identity_path.exists.return_value = True
+            with (
+                contextlib.redirect_stdout(output),
+                mock.patch.object(cli, "site_identity_path", return_value=identity_path),
+                mock.patch.object(cli, "read_site_identity", return_value=identity),
+                mock.patch.object(cli, "identity_json", return_value={"role": "main"}),
+                mock.patch.object(cli, "_engine_group_status", return_value=groups),
+                mock.patch.object(
+                    cli,
+                    "active_service_config_path",
+                    return_value=temporary_path / "absent-service.json",
+                ),
+                mock.patch.object(cli, "site_config_root", return_value=temporary_path),
+                mock.patch.object(
+                    cli,
+                    "_service_state",
+                    return_value=("enabled", "active", 1024),
+                ),
+                mock.patch.object(cli, "api_status", side_effect=(200, 401)),
+                mock.patch.object(
+                    cli,
+                    "api_json",
+                    return_value=(
+                        200,
+                        {"data": [{"id": "qwen3.8-flash-next"}]},
+                    ),
+                ) as api_json,
+                mock.patch.object(
+                    cli,
+                    "local_inference_endpoint",
+                    return_value="http://main.local:8000/v1",
+                ),
+                mock.patch.object(
+                    cli,
+                    "_complete_local_node_status",
+                    return_value={"node": {}, "nodes": [], "links": []},
+                ),
+                mock.patch.object(cli, "_local_status_telemetry", return_value={}),
+                mock.patch.object(
+                    cli,
+                    "runtime_lifecycle",
+                    return_value={
+                        "state": "ready",
+                        "reason": "runtime-not-installed",
+                        "ready_services": 3,
+                        "total_services": 3,
+                    },
+                ),
+                mock.patch.object(
+                    cli,
+                    "container_inspect",
+                    return_value={"State": {"Status": "running"}},
+                ),
+                mock.patch.object(
+                    cli,
+                    "protection_status",
+                    return_value={
+                        "phase": "armed",
+                        "armed": True,
+                        "trip_latched": False,
+                    },
+                ),
+            ):
+                result = cli.status(
+                    argparse.Namespace(
+                        json=True,
+                        name=None,
+                        config=None,
+                        model=None,
+                        _single_snapshot=True,
+                    )
+                )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(result, 0)
+        self.assertTrue(payload["service"]["gateway_model_identity"])
+        api_json.assert_called_once()
+        self.assertEqual(api_json.call_args.args[:3], (
+            8000,
+            "/v1/models",
+            None,
+        ))
 
     def test_child_status_json_shows_its_running_parallel_group_task(self) -> None:
         member_id = "a" * 32

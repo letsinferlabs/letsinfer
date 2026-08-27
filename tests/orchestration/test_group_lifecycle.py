@@ -110,7 +110,10 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                 mock.patch.object(
                     cli, "_service_state", return_value=("enabled", "active", 1024)
                 ),
-                mock.patch.object(cli, "api_status", side_effect=[200, 401, 200]),
+                mock.patch.object(cli, "api_status", side_effect=[200, 401]),
+                mock.patch.object(
+                    cli, "api_json", return_value=(200, {"data": []})
+                ),
                 mock.patch.object(
                     cli,
                     "identity_json",
@@ -185,7 +188,10 @@ class EngineGroupLifecycleTests(unittest.TestCase):
                 mock.patch.object(
                     cli, "_service_state", return_value=("enabled", "active", 1024)
                 ),
-                mock.patch.object(cli, "api_status", side_effect=[200, 401, 200]),
+                mock.patch.object(cli, "api_status", side_effect=[200, 401]),
+                mock.patch.object(
+                    cli, "api_json", return_value=(200, {"data": []})
+                ),
                 mock.patch.object(
                     cli,
                     "identity_json",
