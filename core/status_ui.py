@@ -300,6 +300,9 @@ def dashboard_lines(
     telemetry = _mapping(payload.get("telemetry"))
     rates = _mapping(telemetry.get("rates"))
     system = _mapping(telemetry.get("system"))
+    hardware = _mapping(payload.get("hardware"))
+    hardware_accelerator = _mapping(hardware.get("accelerator"))
+    hardware_memory = _mapping(hardware.get("memory"))
     site = _mapping(payload.get("node"))
     history = session_history or {}
     width = max(42, min(terminal.width, 76) - 6)
@@ -676,7 +679,22 @@ def dashboard_lines(
     memory_value = _percent(system.get("memory_percent"))
     memory_detail = ""
     if min(memory_used, memory_total) >= 0:
-        memory_detail = f"{_mib_size(memory_used)} / {_mib_size(memory_total)}"
+        installed_memory = _number(hardware_memory.get("total_gib"))
+        memory_detail = (
+            f"{_mib_size(memory_used)} / {_compact(installed_memory, decimals=0)} G"
+            if hardware_memory.get("topology") == "discrete"
+            and installed_memory > 0
+            else f"{_mib_size(memory_used)} / {_mib_size(memory_total)}"
+        )
+    gpu_memory_percent = _number(system.get("gpu_memory_percent"))
+    gpu_memory_value = _percent(system.get("gpu_memory_percent"))
+    gpu_memory_total = _number(hardware_accelerator.get("minimum_memory_gib"))
+    gpu_memory_detail = (
+        f"{_compact(gpu_memory_total * gpu_memory_percent / 100, decimals=1)} G / "
+        f"{_compact(gpu_memory_total, decimals=0)} G"
+        if min(gpu_memory_percent, gpu_memory_total) >= 0 and gpu_memory_total > 0
+        else ""
+    )
     gpu_value = _percent(system.get("gpu_percent"))
     gpu_clock = _number(system.get("gpu_clock_mhz"))
     gpu_detail = _clock(gpu_clock) if gpu_clock >= 0 else ""
@@ -712,17 +730,28 @@ def dashboard_lines(
         else f"↓{_binary_rate_kib(rx)} ↑{_binary_rate_kib(tx)}"
     )
 
-    system_rows = (
-        ("GPU", "gpu", gpu_value, gpu_detail, 100.0, True),
-        ("Unified mem", "memory", memory_value, memory_detail, 100.0, True),
-        ("CPU", "cpu", cpu_value, cpu_detail, 100.0, True),
-        ("NVMe", "nvme", nvme_value, nvme_detail, 100.0, True),
-        ("Power", "power", power_value, "", None, True),
-        ("Network", "network", network_value, network_detail, None, False),
-    )
+    if hardware_memory.get("topology") == "discrete":
+        system_rows = (
+            ("GPU", "gpu", gpu_value, gpu_detail, 100.0, True, ui.HISTORY_CHART_COLORS[0]),
+            ("VRAM", "vram", gpu_memory_value, gpu_memory_detail, 100.0, True, ui.HISTORY_CHART_COLORS[1]),
+            ("System RAM", "memory", memory_value, memory_detail, 100.0, True, ui.HISTORY_CHART_COLORS[1]),
+            ("CPU", "cpu", cpu_value, cpu_detail, 100.0, True, ui.HISTORY_CHART_COLORS[2]),
+            ("NVMe", "nvme", nvme_value, nvme_detail, 100.0, True, ui.HISTORY_CHART_COLORS[3]),
+            ("Power", "power", power_value, "", None, True, ui.HISTORY_CHART_COLORS[4]),
+            ("Network", "network", network_value, network_detail, None, False, ui.HISTORY_CHART_COLORS[5]),
+        )
+    else:
+        system_rows = (
+            ("GPU", "gpu", gpu_value, gpu_detail, 100.0, True, ui.HISTORY_CHART_COLORS[0]),
+            ("Unified mem", "memory", memory_value, memory_detail, 100.0, True, ui.HISTORY_CHART_COLORS[1]),
+            ("CPU", "cpu", cpu_value, cpu_detail, 100.0, True, ui.HISTORY_CHART_COLORS[2]),
+            ("NVMe", "nvme", nvme_value, nvme_detail, 100.0, True, ui.HISTORY_CHART_COLORS[3]),
+            ("Power", "power", power_value, "", None, True, ui.HISTORY_CHART_COLORS[4]),
+            ("Network", "network", network_value, network_detail, None, False, ui.HISTORY_CHART_COLORS[5]),
+        )
     lines.extend(("", _history_heading(terminal, "System", width)))
     fresh_sample = telemetry_display_state == "live"
-    for index, (label, key, value, detail, scale_maximum, show_trend) in enumerate(system_rows):
+    for label, key, value, detail, scale_maximum, show_trend, color in system_rows:
         values = history.get(key, [])
         lines.append(
             _metric_row(
@@ -734,7 +763,7 @@ def dashboard_lines(
                     terminal,
                     values,
                     width=chart_width,
-                    color=ui.HISTORY_CHART_COLORS[index],
+                    color=color,
                     scale_maximum=scale_maximum,
                 ),
                 _trend(terminal, values, fresh=fresh_sample) if show_trend else "  ",

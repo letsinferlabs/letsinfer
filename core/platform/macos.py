@@ -12,6 +12,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Mapping, Sequence
 
 from ..paths import logs_root as canonical_logs_root
@@ -21,6 +22,9 @@ NODE_LABEL = f"{LABEL_PREFIX}node"
 GATEWAY_LABEL = f"{LABEL_PREFIX}gateway"
 LABEL_RE = re.compile(r"^ai\.letsinfer\.[a-z][a-z0-9.-]{0,63}$")
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+Sleeper = Callable[[float], None]
+LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS = 30
+LAUNCHD_BOOTSTRAP_RETRY_DELAY_SECONDS = 0.25
 
 
 class MacOSServiceError(RuntimeError):
@@ -105,6 +109,27 @@ def _run(
     return completed
 
 
+def _bootstrap_launch_agent(
+    runner: Runner,
+    domain: str,
+    path: pathlib.Path,
+    *,
+    sleeper: Sleeper,
+) -> None:
+    command = ("launchctl", "bootstrap", domain, str(path))
+    for attempt in range(LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS):
+        completed = runner(command)
+        if completed.returncode == 0:
+            return
+        detail = (completed.stderr or completed.stdout).strip() or "launchctl failed"
+        retryable = (
+            "Bootstrap failed: 5:" in detail and "Input/output error" in detail
+        )
+        if not retryable or attempt + 1 == LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS:
+            raise MacOSServiceError(f"{' '.join(command)}: {detail}")
+        sleeper(LAUNCHD_BOOTSTRAP_RETRY_DELAY_SECONDS)
+
+
 def _atomic_bytes(path: pathlib.Path, value: bytes, mode: int) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor, temporary_text = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -166,6 +191,7 @@ def install_launch_agent(
     no_start: bool = False,
     home: pathlib.Path | None = None,
     runner: Runner = _default_runner,
+    sleeper: Sleeper = time.sleep,
 ) -> None:
     agent.validate()
     root = launch_agents_root(home)
@@ -187,7 +213,7 @@ def install_launch_agent(
         _atomic_bytes(path, expected, 0o600)
         if no_start:
             return
-        _run(runner, ("launchctl", "bootstrap", domain, str(path)))
+        _bootstrap_launch_agent(runner, domain, path, sleeper=sleeper)
         loaded = True
         _run(runner, ("launchctl", "enable", target))
         _run(runner, ("launchctl", "kickstart", "-k", target))
@@ -209,7 +235,7 @@ def install_launch_agent(
             else:
                 _atomic_bytes(path, snapshot[0], snapshot[1])
             if was_loaded and snapshot is not None:
-                _run(runner, ("launchctl", "bootstrap", domain, str(path)))
+                _bootstrap_launch_agent(runner, domain, path, sleeper=sleeper)
                 _run(runner, ("launchctl", "kickstart", "-k", target))
         except (MacOSServiceError, OSError) as error:
             errors.append(str(error))

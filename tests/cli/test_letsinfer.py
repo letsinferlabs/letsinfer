@@ -25,6 +25,135 @@ from tests.orchestration.helpers import parallel_contract
 from tests.runtime_fixture import runtime_candidate
 
 
+class LinuxHardwareInventoryTests(unittest.TestCase):
+    def test_kernel_memory_blocks_report_installed_ram(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "block_size_bytes").write_text("80000000\n", encoding="ascii")
+            (root / "online").write_text("0,2-48\n", encoding="ascii")
+
+            self.assertEqual(cli.parse_linux_installed_memory_gib(root), 96)
+
+            (root / "online").write_text("0-2,2-4\n", encoding="ascii")
+            with self.assertRaisesRegex(cli.LetsInferError, "ranges"):
+                cli.parse_linux_installed_memory_gib(root)
+
+    def test_nvidia_memory_capacity_distinguishes_discrete_and_unified(self) -> None:
+        self.assertEqual(cli.parse_nvidia_memory_capacity_gib(["32607"]), 32)
+        self.assertIsNone(cli.parse_nvidia_memory_capacity_gib(["N/A"]))
+        with self.assertRaisesRegex(cli.LetsInferError, "inconsistent"):
+            cli.parse_nvidia_memory_capacity_gib(["32607", "N/A"])
+
+    def test_host_fingerprint_separates_discrete_vram_and_installed_ram(self) -> None:
+        values = {
+            "compute_cap": ["12.0"],
+            "addressing_mode": ["HMM"],
+            "memory.total": ["32607"],
+            "name": ["NVIDIA GeForce RTX 5090"],
+            "uuid": ["GPU-fixture"],
+        }
+        with (
+            mock.patch.object(cli.platform, "system", return_value="Linux"),
+            mock.patch.object(cli, "gpu_count", return_value=1),
+            mock.patch.object(cli, "gpu_partitioning_mode", return_value="full-device"),
+            mock.patch.object(
+                cli,
+                "nvidia_query",
+                side_effect=lambda field, _count: values[field],
+            ),
+            mock.patch.object(cli.pathlib.Path, "read_text", return_value="MemTotal: 98570660 kB\n"),
+            mock.patch.object(cli, "parse_linux_installed_memory_gib", return_value=96),
+        ):
+            fingerprint = cli.host_device_fingerprint()
+
+        self.assertEqual(fingerprint["memory"]["topology"], "discrete")
+        self.assertEqual(fingerprint["memory"]["total_gib"], 96)
+        self.assertEqual(fingerprint["accelerator"]["minimum_memory_gib"], 32)
+
+    def test_discrete_inventory_does_not_depend_on_an_active_addressing_mode(self) -> None:
+        values = {
+            "compute_cap": ["12.0"],
+            "addressing_mode": ["None"],
+            "memory.total": ["32607"],
+            "name": ["NVIDIA GeForce RTX 5090"],
+            "uuid": ["GPU-fixture"],
+        }
+        with (
+            mock.patch.object(cli.platform, "system", return_value="Linux"),
+            mock.patch.object(cli, "gpu_count", return_value=1),
+            mock.patch.object(
+                cli, "gpu_partitioning_mode", return_value="full-device"
+            ),
+            mock.patch.object(
+                cli,
+                "nvidia_query",
+                side_effect=lambda field, _count: values[field],
+            ),
+            mock.patch.object(
+                cli.pathlib.Path,
+                "read_text",
+                return_value="MemTotal: 98570660 kB\n",
+            ),
+            mock.patch.object(
+                cli, "parse_linux_installed_memory_gib", return_value=96
+            ),
+        ):
+            fingerprint = cli.host_device_fingerprint()
+
+        self.assertEqual(fingerprint["memory"]["topology"], "discrete")
+
+    def test_host_fingerprint_requires_ats_for_unified_nvidia_memory(self) -> None:
+        values = {
+            "compute_cap": ["12.1"],
+            "addressing_mode": ["HMM"],
+            "memory.total": ["N/A"],
+            "name": ["NVIDIA unified fixture"],
+            "uuid": ["GPU-fixture"],
+        }
+        with (
+            mock.patch.object(cli.platform, "system", return_value="Linux"),
+            mock.patch.object(cli, "gpu_count", return_value=1),
+            mock.patch.object(cli, "gpu_partitioning_mode", return_value="full-device"),
+            mock.patch.object(
+                cli,
+                "nvidia_query",
+                side_effect=lambda field, _count: values[field],
+            ),
+            mock.patch.object(cli.pathlib.Path, "read_text", return_value="MemTotal: 125372456 kB\n"),
+            self.assertRaisesRegex(cli.LetsInferError, "requires ATS"),
+        ):
+            cli.host_device_fingerprint()
+
+    def test_host_fingerprint_keeps_true_nvidia_unified_memory_shared(self) -> None:
+        values = {
+            "compute_cap": ["12.1"],
+            "addressing_mode": ["ATS"],
+            "memory.total": ["N/A"],
+            "name": ["NVIDIA GB10"],
+            "uuid": ["GPU-fixture"],
+        }
+        with (
+            mock.patch.object(cli.platform, "system", return_value="Linux"),
+            mock.patch.object(cli, "gpu_count", return_value=1),
+            mock.patch.object(cli, "gpu_partitioning_mode", return_value="full-device"),
+            mock.patch.object(
+                cli,
+                "nvidia_query",
+                side_effect=lambda field, _count: values[field],
+            ),
+            mock.patch.object(cli.pathlib.Path, "read_text", return_value="MemTotal: 125372456 kB\n"),
+            mock.patch.object(
+                cli, "parse_linux_installed_memory_gib"
+            ) as installed_memory,
+        ):
+            fingerprint = cli.host_device_fingerprint()
+
+        self.assertEqual(fingerprint["memory"]["topology"], "unified")
+        self.assertEqual(fingerprint["memory"]["total_gib"], 119)
+        self.assertNotIn("minimum_memory_gib", fingerprint["accelerator"])
+        installed_memory.assert_not_called()
+
+
 class RuntimeCandidateCliTests(unittest.TestCase):
     def test_group_link_health_applies_only_to_sealed_connections(self) -> None:
         now = 1_800_000_000

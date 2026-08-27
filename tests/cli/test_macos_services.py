@@ -12,6 +12,7 @@ import unittest
 
 from core.platform.macos import (
     GATEWAY_LABEL,
+    LAUNCHD_BOOTSTRAP_RETRY_DELAY_SECONDS,
     NODE_LABEL,
     LaunchAgent,
     MacOSServiceError,
@@ -39,6 +40,22 @@ class FakeRunner:
             "",
             "",
         )
+
+
+class ScriptedBootstrapRunner(FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.bootstrap_results: list[tuple[int, str]] = []
+
+    def __call__(self, command: object) -> subprocess.CompletedProcess[str]:
+        value = tuple(str(item) for item in command)  # type: ignore[arg-type]
+        if value[:2] == ("launchctl", "bootstrap") and self.bootstrap_results:
+            self.commands.append(value)
+            returncode, detail = self.bootstrap_results.pop(0)
+            if returncode == 0:
+                self.loaded = True
+            return subprocess.CompletedProcess(value, returncode, "", detail)
+        return super().__call__(value)
 
 
 class MacOSServiceTests(unittest.TestCase):
@@ -76,6 +93,87 @@ class MacOSServiceTests(unittest.TestCase):
             self.assertIn("enable", actions)
             self.assertIn("kickstart", actions)
             self.assertNotIn("load", actions)
+
+    def test_replacement_retries_transient_launchd_bootstrap_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            runner = ScriptedBootstrapRunner()
+            original = LaunchAgent(
+                label=GATEWAY_LABEL,
+                arguments=("/opt/letsinfer/old", "gateway", "--port", "8000"),
+            )
+            replacement = LaunchAgent(
+                label=GATEWAY_LABEL,
+                arguments=("/opt/letsinfer/new", "gateway", "--port", "8000"),
+            )
+            install_launch_agent(original, home=home, runner=runner)
+            runner.bootstrap_results = [
+                (5, "Bootstrap failed: 5: Input/output error"),
+                (5, "Bootstrap failed: 5: Input/output error"),
+                (0, ""),
+            ]
+            delays: list[float] = []
+
+            install_launch_agent(
+                replacement,
+                home=home,
+                runner=runner,
+                sleeper=delays.append,
+            )
+
+            self.assertEqual(
+                delays,
+                [
+                    LAUNCHD_BOOTSTRAP_RETRY_DELAY_SECONDS,
+                    LAUNCHD_BOOTSTRAP_RETRY_DELAY_SECONDS,
+                ],
+            )
+            path = home / "Library/LaunchAgents/ai.letsinfer.gateway.plist"
+            self.assertEqual(
+                plistlib.loads(path.read_bytes())["ProgramArguments"],
+                list(replacement.arguments),
+            )
+            self.assertTrue(runner.loaded)
+
+    def test_rollback_retries_transient_launchd_bootstrap_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            runner = ScriptedBootstrapRunner()
+            original = LaunchAgent(
+                label=GATEWAY_LABEL,
+                arguments=("/opt/letsinfer/old", "gateway", "--port", "8000"),
+            )
+            replacement = LaunchAgent(
+                label=GATEWAY_LABEL,
+                arguments=("/opt/letsinfer/new", "gateway", "--port", "8000"),
+            )
+            install_launch_agent(original, home=home, runner=runner)
+            runner.bootstrap_results = [
+                (64, "Bootstrap failed: invalid service"),
+                (5, "Bootstrap failed: 5: Input/output error"),
+                (0, ""),
+            ]
+            delays: list[float] = []
+
+            with self.assertRaisesRegex(
+                MacOSServiceError, "previous service restored"
+            ):
+                install_launch_agent(
+                    replacement,
+                    home=home,
+                    runner=runner,
+                    sleeper=delays.append,
+                )
+
+            self.assertEqual(
+                delays, [LAUNCHD_BOOTSTRAP_RETRY_DELAY_SECONDS]
+            )
+            path = home / "Library/LaunchAgents/ai.letsinfer.gateway.plist"
+            self.assertEqual(
+                plistlib.loads(path.read_bytes())["ProgramArguments"],
+                list(original.arguments),
+            )
+            self.assertTrue(runner.loaded)
 
     def test_shell_and_relative_executables_are_rejected(self) -> None:
         with self.assertRaises(MacOSServiceError):

@@ -507,6 +507,38 @@ class TerminalTests(unittest.TestCase):
         self.assertIn(ui.BOLD + ui.DIM + " 900 MHz" + ui.RESET, rendered)
         self.assertIn(ui.BOLD + ui.DIM + " 2.46 GHz" + ui.RESET, rendered)
 
+    def test_status_separates_discrete_vram_from_installed_system_ram(self) -> None:
+        stream = FakeStream(tty=True)
+        terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
+        rendered = "\n".join(
+            status_ui.dashboard_lines(
+                {
+                    "hardware": {
+                        "accelerator": {"minimum_memory_gib": 32},
+                        "memory": {"topology": "discrete", "total_gib": 96},
+                    },
+                    "telemetry": {
+                        "system": {
+                            "gpu_memory_percent": 3,
+                            "memory_percent": 5,
+                            "memory_used_mib": 4608,
+                            "memory_total_mib": 94 * 1024,
+                        }
+                    },
+                },
+                terminal,
+                session_history={"vram": [2, 3], "memory": [4, 5]},
+            )
+        )
+        plain = ui.ANSI.sub("", rendered)
+        system = plain.partition("System")[2].partition("Temperature")[0]
+        self.assertIn("VRAM", system)
+        self.assertIn("3%", system)
+        self.assertIn("32 G", system)
+        self.assertIn("System RAM", system)
+        self.assertIn("4.5 G / 96 G", system)
+        self.assertNotIn("Unified mem", system)
+
     def test_status_system_trends_compare_consecutive_fresh_samples(self) -> None:
         stream = FakeStream(tty=True)
         terminal = ui.Terminal(stream, environ={"TERM": "xterm-256color"})
@@ -1159,6 +1191,78 @@ class TerminalTests(unittest.TestCase):
         )
         self.assertIn("1 node", removed)
         self.assertNotIn("node-2", removed)
+
+    def test_topology_uses_one_continuous_sequential_child_trunk(self) -> None:
+        main = {
+            "member_id": "1" * 32,
+            "name": "homeai",
+            "role": "main",
+            "online": True,
+            "models": [],
+        }
+        children = [
+            {
+                "member_id": member * 32,
+                "name": name,
+                "role": "child",
+                "online": True,
+                "connection": connection,
+                "models": [],
+            }
+            for member, name, connection in (
+                ("2", "homeai-node-2", "ConnectX"),
+                ("3", "t.inference.server", "Ethernet"),
+            )
+        ]
+        calls: list[tuple[int, int]] = []
+
+        def pulse(
+            _terminal: ui.Terminal,
+            value: str,
+            *,
+            frame: int,
+            segment: int,
+            segments: int = 4,
+        ) -> str:
+            del frame
+            calls.append((segment, segments))
+            return value
+
+        with mock.patch.object(topology_ui, "_tree_pulse", side_effect=pulse):
+            rendered = topology_ui.topology_text(
+                {"nodes": [main, *children], "links": []},
+                stream=FakeStream(tty=True),
+                environ={"TERM": "xterm", "NO_COLOR": "1", "COLUMNS": "80"},
+            )
+
+        self.assertIn("│ [ConnectX]", rendered)
+        self.assertIn("│ [Ethernet]", rendered)
+        self.assertIn("│   accelerator unknown", rendered)
+        self.assertTrue(all(segments == 8 for _segment, segments in calls))
+        self.assertEqual({segment for segment, _segments in calls}, set(range(8)))
+
+    def test_topology_discrete_node_shows_vram_and_system_ram(self) -> None:
+        rendered = topology_ui.topology_text(
+            {
+                "nodes": [
+                    {
+                        "member_id": "1" * 32,
+                        "name": "t.inference.server",
+                        "role": "main",
+                        "online": True,
+                        "accelerator": "NVIDIA GeForce RTX 5090",
+                        "memory_topology": "discrete",
+                        "accelerator_memory_gib": 32,
+                        "system_memory_gib": 96,
+                        "models": [],
+                    }
+                ],
+                "links": [],
+            },
+            stream=FakeStream(tty=True),
+            environ={"TERM": "xterm", "NO_COLOR": "1", "COLUMNS": "80"},
+        )
+        self.assertIn("NVIDIA GeForce RTX 5090 · 32 G VRAM · 96 G RAM", rendered)
 
     def test_live_runtime_status_refreshes_request_performance_and_allocation(self) -> None:
         stream = FakeStream(tty=True)

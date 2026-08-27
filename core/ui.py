@@ -1009,6 +1009,7 @@ def live_runtime_status(snapshot: Callable[[], Mapping[str, Any]]) -> int:
             if record_history:
                 for name, fields, divisor in (
                     ("gpu", ("gpu_percent",), 1.0),
+                    ("vram", ("gpu_memory_percent",), 1.0),
                     ("memory", ("memory_percent",), 1.0),
                     ("cpu", ("cpu_percent",), 1.0),
                     ("nvme", ("disk_percent",), 1.0),
