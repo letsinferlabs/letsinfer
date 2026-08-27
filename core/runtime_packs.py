@@ -44,6 +44,7 @@ RUNTIME_SCHEMA_VERSION = 6
 ENGINE_PROTOCOL_VERSION = 2
 ARTIFACT_SCHEMA_VERSION = 6
 CATALOG_SCHEMA_VERSION = 7
+LEGACY_CATALOG_SCHEMA_VERSION = 6
 DEFAULT_CATALOG_URL = (
     "https://github.com/letsinferlabs/runtimes/releases/latest/download/catalog.json"
 )
@@ -2258,6 +2259,55 @@ def _verify_catalog_signature(
             raise RuntimePackError("runtime catalog signature verification failed") from error
 
 
+def _normalize_legacy_catalog(value: Any) -> None:
+    """Normalize the exact signed schema-6 OCI projection after verification."""
+
+    if not isinstance(value, dict) or value.get("schema_version") != (
+        LEGACY_CATALOG_SCHEMA_VERSION
+    ):
+        return
+    if set(value) != {"schema_version", "recommendation_policy", "targets", "models"}:
+        return
+    models = value.get("models")
+    if not isinstance(models, dict):
+        return
+    releases: list[dict[str, Any]] = []
+    legacy_fields = {
+        "authors",
+        "license",
+        "source",
+        "engine",
+        "engine_oci",
+        "model_uri",
+        "benchmark",
+        "provenance",
+        "verification",
+    }
+    try:
+        for model_record in models.values():
+            for target_record in model_record["targets"].values():
+                for candidate_record in target_record["candidates"].values():
+                    for release in candidate_record["releases"].values():
+                        if (
+                            not isinstance(release, dict)
+                            or set(release) != legacy_fields
+                            or not REGISTRY_DIGEST_RE.fullmatch(
+                                str(release.get("engine_oci", ""))
+                            )
+                        ):
+                            return
+                        releases.append(release)
+    except (KeyError, TypeError, AttributeError):
+        return
+    for release in releases:
+        reference = release.pop("engine_oci")
+        release["engine_distribution"] = {
+            "kind": OCI_KIND,
+            "reference": reference,
+        }
+    value["schema_version"] = CATALOG_SCHEMA_VERSION
+
+
 def load_catalog(
     location: str, *, public_key: str | None = None
 ) -> dict[str, Any]:
@@ -2307,6 +2357,7 @@ def load_catalog(
         value = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RuntimePackError(f"runtime catalog is invalid JSON: {error}") from error
+    _normalize_legacy_catalog(value)
     if (
         not isinstance(value, dict)
         or type(value.get("schema_version")) is not int
