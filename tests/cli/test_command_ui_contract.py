@@ -628,7 +628,10 @@ class ImmutableStatusContractTests(unittest.TestCase):
         ]
         white = ui.BOLD + ui.LIGHT
         self.assertIn(white + "│" + ui.RESET, frames[0])
-        self.assertIn(white + "[ConnectX]" + ui.RESET, frames[1])
+        self.assertIn(
+            white + "│" + ui.RESET + " " + ui.LIGHT + "[ConnectX]" + ui.RESET,
+            frames[1],
+        )
         self.assertIn(white + "│" + ui.RESET, frames[2])
         self.assertIn(white + "└── " + ui.RESET, frames[3])
         self.assertEqual(len(set(frames)), 4)

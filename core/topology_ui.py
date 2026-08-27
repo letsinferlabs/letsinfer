@@ -144,13 +144,24 @@ def _node_header(
 
 def _node_detail(terminal: ui.Terminal, node: Mapping[str, Any], width: int) -> str:
     accelerator = str(node.get("accelerator") or "accelerator unknown")
-    memory = node.get("memory_total_gib")
-    memory_text = (
-        f"{memory} G"
-        if isinstance(memory, int) and not isinstance(memory, bool)
-        else "memory —"
-    )
-    return terminal.paint(terminal.clip(f"{accelerator} · {memory_text}", width), ui.DIM)
+    memory = node.get("system_memory_gib", node.get("memory_total_gib"))
+    accelerator_memory = node.get("accelerator_memory_gib")
+    if (
+        node.get("memory_topology") == "discrete"
+        and isinstance(accelerator_memory, int)
+        and not isinstance(accelerator_memory, bool)
+        and isinstance(memory, int)
+        and not isinstance(memory, bool)
+    ):
+        detail = f"{accelerator} · {accelerator_memory} G VRAM · {memory} G RAM"
+    else:
+        memory_text = (
+            f"{memory} G"
+            if isinstance(memory, int) and not isinstance(memory, bool)
+            else "memory —"
+        )
+        detail = f"{accelerator} · {memory_text}"
+    return terminal.paint(terminal.clip(detail, width), ui.DIM)
 
 
 def _node_models(terminal: ui.Terminal, node: Mapping[str, Any], width: int) -> str:
@@ -179,9 +190,14 @@ def _tree_node_lines(
     width: int,
     branch: str = "",
     rendered_branch: str | None = None,
+    rendered_continuation: str | None = None,
 ) -> list[str]:
     spinner = SPINNER[frame % len(SPINNER)] if terminal.unicode else "*"
-    continuation = " " * len(branch)
+    continuation = (
+        rendered_continuation
+        if rendered_continuation is not None
+        else " " * len(branch)
+    )
     return [
         (rendered_branch if rendered_branch is not None else branch)
         + _node_header(terminal, node, spinner, max(8, width - len(branch))),
@@ -295,6 +311,8 @@ def topology_lines(
             terminal, root, frame=frame, width=width
         )))
     for index, child in enumerate(children):
+        pulse_segments = max(4, len(children) * 4)
+        pulse_base = index * 4
         verified = _edge_link(roots[0] if roots else None, child, links)
         connection = (
             "ConnectX"
@@ -305,33 +323,61 @@ def topology_lines(
         )
         connection_line = _tree_pulse(
             terminal,
-            f"[{connection}]",
+            "│",
             frame=pulse,
-            segment=1,
-        )
+            segment=pulse_base + 1,
+            segments=pulse_segments,
+        ) + " " + terminal.paint(f"[{connection}]", ui.LIGHT)
         if verified is not None:
             connection_line += "  " + terminal.paint(
                 _edge_capability(verified),
                 ui.DIM,
             )
         branch = "└── " if index == len(children) - 1 else "├── "
+        rendered_branch = _tree_pulse(
+            terminal,
+            branch,
+            frame=pulse,
+            segment=pulse_base + 3,
+            segments=pulse_segments,
+        )
+        rendered_continuation = (
+            _tree_pulse(
+                terminal,
+                "│",
+                frame=pulse,
+                segment=pulse_base + 3,
+                segments=pulse_segments,
+            )
+            + "   "
+            if index < len(children) - 1
+            else " " * len(branch)
+        )
         lines.extend(
             (
-                _tree_pulse(terminal, "│", frame=pulse, segment=0),
+                _tree_pulse(
+                    terminal,
+                    "│",
+                    frame=pulse,
+                    segment=pulse_base,
+                    segments=pulse_segments,
+                ),
                 connection_line,
-                _tree_pulse(terminal, "│", frame=pulse, segment=2),
+                _tree_pulse(
+                    terminal,
+                    "│",
+                    frame=pulse,
+                    segment=pulse_base + 2,
+                    segments=pulse_segments,
+                ),
                 *_tree_node_lines(
                     terminal,
                     child,
                     frame=frame,
                     width=width,
                     branch=branch,
-                    rendered_branch=_tree_pulse(
-                        terminal,
-                        branch,
-                        frame=pulse,
-                        segment=3,
-                    ),
+                    rendered_branch=rendered_branch,
+                    rendered_continuation=rendered_continuation,
                 ),
             )
         )

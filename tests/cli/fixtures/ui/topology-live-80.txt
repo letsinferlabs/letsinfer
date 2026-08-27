@@ -12,7 +12,7 @@
 │  NVIDIA GB10 · 119 G                                                     │
 │  nemotron-3.5-lightning                                                  │
 │  │                                                                       │
-│  [ConnectX]  200 Gbit/s · RDMA · MTU 9000                                │
+│  │ [ConnectX]  200 Gbit/s · RDMA · MTU 9000                              │
 │  │                                                                       │
 │  └── ⠹ homeai-node-2 · ONLINE                                            │
 │      NVIDIA GB10 · 121 G                                                 │

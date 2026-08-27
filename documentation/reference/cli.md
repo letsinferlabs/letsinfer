@@ -14,13 +14,16 @@ one responsibility and a two-sentence explanation directly beneath it.
 ### `letsinfer status`
 
 Shows the complete node, service, hardware, model, engine-group, protection,
-and telemetry state. Use `--json` when another program needs the result.
+and telemetry state. Physically shared memory is shown as unified memory, while
+discrete hosts report GPU VRAM and installed system RAM separately; use
+`--json` when another program needs the result.
 
 ### `letsinfer topology`
 
 Shows the authenticated main-and-child graph with verified links, node health,
 model placements, and current host network traffic. Its live terminal view
-animates independently of one-second state polling, reports standalone and
+animates one continuous main-to-child trunk independently of one-second state
+polling, flows through every child before repeating, reports standalone and
 engine-group placements, and pauses only groups that depend on a lost verified
 link, while `--json` returns one exact snapshot.
 
