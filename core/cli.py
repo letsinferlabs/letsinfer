@@ -6258,8 +6258,100 @@ def resolve_benchmark_service_placement(
     manifest: dict[str, Any], manifest_sha256: str
 ) -> tuple[dict[str, Any], tuple[str, ...]]:
     """Resolve a qualification slot and the resident groups that own its GPUs."""
-    identity, graph = _fresh_site_topology()
     contract = target_contract(manifest)
+    if contract["placement"]["strategy"] == "parallel":
+        identity = read_site_identity()
+        now = int(time.time())
+        with _site_store() as store:
+            matches = [
+                row
+                for row in store.engine_groups()
+                if row["strategy"] == "parallel"
+                and row["manifest_sha256"] == manifest_sha256
+                and row["state"] != "removed"
+                and row["desired_state"] != "removed"
+            ]
+            if len(matches) != 1:
+                raise LetsInferError(
+                    "parallel benchmark requires one exact installed engine group"
+                )
+            row = matches[0]
+            if (row["state"], row["desired_state"]) not in {
+                ("running", "running"),
+                ("stopped", "stopped"),
+            }:
+                raise LetsInferError(
+                    f"benchmark cannot isolate engine group {row['group_id']} "
+                    "in its current state"
+                )
+            try:
+                document = validate_group_document(dict(row["plan"]))
+                validate_group_target_interconnect(
+                    document, contract["placement"]
+                )
+            except (OrchestrationError, KeyError) as error:
+                raise LetsInferError(
+                    f"parallel benchmark engine-group plan is invalid: {error}"
+                ) from error
+            resources = document["resources"]
+            member_ids = tuple(resource["node_id"] for resource in resources)
+            device_uuids = {
+                resource["node_id"]: tuple(resource["device_uuids"])
+                for resource in resources
+            }
+            members = {
+                member["member_id"]: member
+                for member in store.members()
+                if member["member_id"] in member_ids
+                and member["state"] == "active"
+            }
+            if set(members) != set(member_ids) or any(
+                not isinstance(member.get("facts"), Mapping)
+                or not isinstance(member["facts"].get("observed_at_unix"), int)
+                or not 0
+                <= now - int(member["facts"]["observed_at_unix"])
+                <= TOPOLOGY_ONLINE_SECONDS
+                for member in members.values()
+            ):
+                raise LetsInferError(
+                    "parallel benchmark requires fresh authenticated facts from "
+                    "every engine-group node"
+                )
+            link_failure = _engine_group_required_link_failure(
+                row, store, now_unix=now
+            )
+            if link_failure is not None:
+                raise LetsInferError(
+                    "parallel benchmark requires its sealed node link: "
+                    f"{link_failure}"
+                )
+        if (
+            document["release"].get("target_id") != contract["id"]
+            or len(resources) != contract["placement"]["node_count"]
+            or any(
+                len(resource["device_uuids"])
+                != contract["accelerator"]["count"]
+                for resource in resources
+            )
+        ):
+            raise LetsInferError(
+                "parallel benchmark engine group differs from the runtime target"
+            )
+        return (
+            {
+                "placement_id": row["placement_id"],
+                "placement_strategy": "parallel",
+                "placement_members": list(member_ids),
+                "topology_sha256": row["topology_sha256"],
+                "device_uuids": {
+                    member_id: list(device_uuids[member_id])
+                    for member_id in member_ids
+                },
+                "site_id": identity.site_id,
+            },
+            (row["group_id"],),
+        )
+    identity, graph = _fresh_site_topology()
     try:
         placement = graph.resolve(
             contract, coordinator_id=identity.coordinator_id
@@ -6277,9 +6369,9 @@ def resolve_benchmark_service_placement(
             raise LetsInferError(
                 f"cannot resolve runtime placement: {unallocated_error}"
             ) from unallocated_error
-    if placement.strategy != "single" or len(placement.member_ids) != 1:
+    if placement.strategy not in {"single", "parallel"}:
         raise LetsInferError(
-            "this target requires the engine-group installation path"
+            "benchmark placement strategy is invalid"
         )
     selected_devices = {
         (member_id, device_uuid)
@@ -6307,6 +6399,29 @@ def resolve_benchmark_service_placement(
         ):
             raise LetsInferError(
                 f"benchmark cannot isolate engine group {group_id} in its current state"
+            )
+    if placement.strategy == "parallel":
+        if len(resident_group_ids) != 1:
+            raise LetsInferError(
+                "parallel benchmark requires one exact installed engine group"
+            )
+        group = groups[resident_group_ids[0]]
+        resources = group.get("plan", {}).get("resources")
+        if not isinstance(resources, list) or any(
+            not isinstance(resource, Mapping) for resource in resources
+        ):
+            raise LetsInferError("parallel benchmark engine-group plan is incomplete")
+        group_devices = {
+            (str(resource.get("node_id")), str(device_uuid))
+            for resource in resources
+            for device_uuid in resource.get("device_uuids", [])
+        }
+        if (
+            group.get("manifest_sha256") != manifest_sha256
+            or group_devices != selected_devices
+        ):
+            raise LetsInferError(
+                "parallel benchmark engine group differs from the installed runtime placement"
             )
     return (
         service_placement_identity(identity, placement, manifest_sha256),
@@ -8633,6 +8748,7 @@ def install_engine_group(
         raise LetsInferError("parallel runtime has no engine-group contract")
     if placement.strategy == "single" and contract is not None:
         raise LetsInferError("single runtime cannot carry a parallel group contract")
+    qualification_mode = release_identity.get("qualification") == "unqualified"
     manifest_sha256 = sha256_file(manifest_path)
     service_id = logical_service_id(identity.site_id, manifest["model"]["alias"])
     group_member_ids = (
@@ -8834,7 +8950,7 @@ def install_engine_group(
                         "ca_file": str(certificate_file),
                         "max_active_requests": manifest["serving"]["max_active_requests"],
                         "max_context_tokens": manifest["serving"]["max_context_tokens"],
-                        "healthy": True,
+                        "healthy": not qualification_mode,
                         "memory_pressure": False,
                         "temperature_c": -1,
                         "prefix_keys": [],
@@ -8853,8 +8969,12 @@ def install_engine_group(
                     raise LetsInferError(
                         f"engine-group runtime receipt failed: {error}"
                     ) from error
-                placement_document["state"] = "running"
-                placement_document["endpoints"] = endpoints
+                placement_document["state"] = (
+                    "starting" if qualification_mode else "running"
+                )
+                placement_document["endpoints"] = (
+                    [] if qualification_mode else endpoints
+                )
                 store.set_placement(placement_document)
             except Exception as error:
                 rollback_error: BaseException | None = None
@@ -9082,7 +9202,20 @@ def _sync_group_placement(
             "capacity",
         )
     }
-    if group_running:
+    group_release = group.get("release")
+    if not isinstance(group_release, Mapping):
+        group_plan = group.get("plan")
+        group_release = (
+            group_plan.get("release") if isinstance(group_plan, Mapping) else None
+        )
+    qualification_mode = (
+        isinstance(group_release, Mapping)
+        and group_release.get("qualification") == "unqualified"
+    )
+    if qualification_mode and group_running:
+        updated["state"] = "starting"
+        updated["endpoints"] = []
+    elif group_running:
         updated["state"] = "running"
     elif group["desired_state"] in {"stopped", "removed"} and group["state"] in {
         "stopped", "removed",
@@ -9094,14 +9227,15 @@ def _sync_group_placement(
         updated["state"] = "starting"
     else:
         updated["state"] = "failed"
-    updated["endpoints"] = [
-        {
-            **endpoint,
-            "healthy": group_running
-            and member_states.get(endpoint["member_id"]) == "running",
-        }
-        for endpoint in placement["endpoints"]
-    ]
+    if not qualification_mode:
+        updated["endpoints"] = [
+            {
+                **endpoint,
+                "healthy": group_running
+                and member_states.get(endpoint["member_id"]) == "running",
+            }
+            for endpoint in placement["endpoints"]
+        ]
     if (
         updated["state"] != placement["state"]
         or updated["endpoints"] != placement["endpoints"]
@@ -9744,6 +9878,7 @@ def _engine_group_status(model: str | None) -> list[dict[str, Any]]:
                 "model": placement["model"],
                 "runtime": placement["runtime"],
                 "target": placement["target"],
+                "capacity": placement["capacity"],
                 "strategy": row["strategy"],
                 "desired_state": row["desired_state"],
                 "state": row["state"],
@@ -10139,7 +10274,7 @@ def _remove_engine_groups_by_id(group_ids: Sequence[str]) -> None:
             )
         for group_id in wanted:
             row = rows[group_id]
-            if row["state"] == "removed" or row["desired_state"] == "removed":
+            if row["state"] == "removed":
                 continue
             allocations = allocations_by_group.get(group_id, [])
             runtime_root = default_runtime_home() / ".objects" / str(
@@ -10161,7 +10296,8 @@ def _remove_engine_groups_by_id(group_ids: Sequence[str]) -> None:
                 allocation["state"] == "released" for allocation in allocations
             )
             if (
-                row["state"] not in {"staged", "stopped"}
+                row["desired_state"] != "removed"
+                and row["state"] not in {"staged", "stopped"}
                 and not allocations_released
             ):
                 stopped = orchestrator.stop()
@@ -11225,13 +11361,49 @@ def _local_status_telemetry(
     )
 
 
-def _local_status_node(identity: Any) -> dict[str, Any]:
+def _hardware_display_name(
+    hardware: Mapping[str, Any] | None,
+    inventory: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Prefer the actual accelerator/SoC identity over a chassis product name."""
+
+    accelerator = hardware.get("accelerator") if hardware is not None else None
+    names = accelerator.get("names") if isinstance(accelerator, Mapping) else None
+    if isinstance(names, list):
+        name = next(
+            (value for value in names if isinstance(value, str) and value),
+            None,
+        )
+        if name is not None:
+            return name
+    if inventory is None:
+        return None
+    for key in (
+        "gpu_name",
+        "cpu_model",
+        "dgx_name",
+        "product_name",
+        "board_name",
+    ):
+        value = inventory.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _local_status_node(
+    identity: Any,
+    hardware: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return the cached local identity and inventory used by live status."""
 
     summary: dict[str, Any] = {
         **identity_json(identity),
         "hostname": socket.gethostname(),
     }
+    hardware_name = _hardware_display_name(hardware)
+    if hardware_name is not None:
+        summary["hardware_name"] = hardware_name
     if identity.role != "main":
         return summary
     try:
@@ -11249,11 +11421,9 @@ def _local_status_node(identity: Any) -> dict[str, Any]:
     facts = member.get("facts") if isinstance(member, dict) else None
     inventory = facts.get("inventory") if isinstance(facts, dict) else None
     if isinstance(inventory, dict):
-        summary["hardware_name"] = (
-            inventory.get("dgx_name")
-            or inventory.get("product_name")
-            or inventory.get("board_name")
-        )
+        inventory_name = _hardware_display_name(None, inventory)
+        if inventory_name is not None and hardware_name is None:
+            summary["hardware_name"] = inventory_name
         summary["uptime_seconds"] = inventory.get("uptime_seconds")
     return summary
 
@@ -11282,7 +11452,8 @@ def _complete_local_node_status(identity: Any) -> dict[str, Any]:
             "address": identity.coordinator_address,
             "state": "active",
         }]
-    node = _local_status_node(identity)
+    hardware = host_device_fingerprint()
+    node = _local_status_node(identity, hardware)
     local = next(
         (row for row in nodes if row.get("member_id") == identity.member_id),
         None,
@@ -11296,7 +11467,7 @@ def _complete_local_node_status(identity: Any) -> dict[str, Any]:
     return {
         "node": node,
         "nodes": nodes,
-        "hardware": host_device_fingerprint(),
+        "hardware": hardware,
         "links": links,
     }
 
@@ -11318,6 +11489,252 @@ def _model_status_from_groups(groups: Sequence[Mapping[str, Any]]) -> list[dict[
             "targets": sorted({str(group["target"]) for group in model_groups}),
         })
     return result
+
+
+def _local_engine_group_status(identity: Any) -> list[dict[str, Any]]:
+    """Read this node's exact staged group tasks without coordinator authority."""
+
+    job_store = site_data_root() / "member-jobs.sqlite3"
+    if not job_store.exists():
+        return []
+    if job_store.is_symlink() or not job_store.is_file():
+        raise LetsInferError("local engine-group journal is unsafe")
+    try:
+        with MemberJobStore(job_store) as store:
+            rows = store.groups()
+    except MemberJobError as error:
+        raise LetsInferError(f"cannot read local engine-group journal: {error}") from error
+
+    # A child journal can retain stopped history after the main has removed an
+    # older group.  When a task is running, it is the node's current runtime;
+    # do not let an obsolete, incompatible staged artifact hide that live task.
+    running_rows = [row for row in rows if row.get("state") == "running"]
+    rows = running_rows or [
+        row for row in rows if row.get("state") in {"staged", "stopped"}
+    ]
+
+    values: list[dict[str, Any]] = []
+    for row in rows:
+        group_id = str(row.get("group_id") or "")
+        config = _read_engine_group_config(group_id, repair_tls=False)
+        expected = {
+            "member_id": config["member_id"],
+            "plan_sha256": config["plan_sha256"],
+            "runtime_digest": config["runtime_digest"],
+            "manifest_sha256": config["manifest_sha256"],
+            "topology_sha256": config["topology_sha256"],
+            "engine_credential_sha256": config["_credential_sha256"],
+        }
+        if (
+            config["member_id"] != identity.member_id
+            or any(row.get(key) != value for key, value in expected.items())
+            or row.get("task") != config["task"]
+        ):
+            raise LetsInferError(
+                "local engine-group journal differs from its staged runtime"
+            )
+        manifest = config["_manifest"]
+        group = config["_group"]
+        model = manifest["model"]["alias"]
+        engine = adapter_for(manifest).name
+        target = target_contract(manifest)["id"]
+        runtime = (
+            f"{model}/{engine}/{target}@{config['runtime_version']}"
+            f"@sha256:{config['runtime_digest']}"
+        )
+        state = str(row["state"])
+        values.append({
+            "group_id": group_id,
+            "placement_id": group_id,
+            "model": model,
+            "runtime": runtime,
+            "target": target,
+            "capacity": {
+                key: manifest["serving"][key]
+                for key in (
+                    "max_connections",
+                    "max_active_requests",
+                    "max_context_tokens",
+                )
+            },
+            "strategy": group["strategy"],
+            "desired_state": "running" if state == "running" else "stopped",
+            "state": state,
+            "topology_sha256": config["topology_sha256"],
+            "members": [{
+                "member_id": identity.member_id,
+                "task_id": config["task"]["task_id"],
+                "state": state,
+            }],
+            "endpoints": [],
+            "last_error": None,
+            "updated_at_unix": row["updated_at_unix"],
+            "local_task": True,
+        })
+    return values
+
+
+def _engine_group_dashboard_projection(
+    groups: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Project one complete engine group onto the detailed runtime dashboard."""
+
+    if len(groups) != 1:
+        return None
+    group = groups[0]
+    model = group.get("model")
+    target = group.get("target")
+    runtime = group.get("runtime")
+    group_id = group.get("group_id")
+    if not all(isinstance(value, str) and value for value in (
+        model, target, runtime, group_id
+    )) or re.fullmatch(r"[0-9a-f]{32}", str(group_id)) is None:
+        return None
+    assert isinstance(model, str)
+    assert isinstance(target, str)
+    assert isinstance(runtime, str)
+    assert isinstance(group_id, str)
+    identity, digest_marker, digest = runtime.rpartition("@sha256:")
+    model_prefix = f"{model}/"
+    if (
+        not digest_marker
+        or not SHA256_RE.fullmatch(digest)
+        or not identity.startswith(model_prefix)
+    ):
+        return None
+    engine, engine_separator, target_version = identity[len(model_prefix):].partition("/")
+    runtime_target, version_separator, version = target_version.rpartition("@")
+    if (
+        not engine_separator
+        or not version_separator
+        or not engine
+        or runtime_target != target
+        or not version
+    ):
+        return None
+
+    inspection = container_inspect(f"letsinfer-group-{group_id}")
+    state = inspection.get("State") if isinstance(inspection, Mapping) else None
+    state = state if isinstance(state, Mapping) else {}
+    container_state = str(state.get("Status") or "absent")
+    health = state.get("Health")
+    health = health if isinstance(health, Mapping) else {}
+    group_running = (
+        group.get("state") == "running"
+        and group.get("desired_state") == "running"
+        and container_state == "running"
+    )
+    capacity_value = group.get("capacity")
+    capacity = (
+        {
+            key: capacity_value[key]
+            for key in (
+                "max_connections",
+                "max_active_requests",
+                "max_context_tokens",
+            )
+            if key in capacity_value
+        }
+        if isinstance(capacity_value, Mapping)
+        else None
+    )
+    protection = protection_status(
+        {
+            "protection_root": str(
+                default_watchdog_data_root() / PROTECTION_ROOT_NAME / group_id
+            )
+        },
+        dict(inspection) if isinstance(inspection, dict) else None,
+    )
+    return {
+        "group": dict(group),
+        "container": {
+            "name": f"letsinfer-group-{group_id}",
+            "state": container_state,
+            "healthy": group_running,
+            "docker_health": str(health.get("Status") or "none"),
+            "model_identity": group_running,
+            "managed": True,
+            "engine": engine,
+            "model": model,
+            "target": target,
+            "runtime_version": version,
+            "capacity": capacity,
+        },
+        "protection": protection,
+    }
+
+
+def _engine_group_dashboard_lifecycle(
+    control: Mapping[str, Any],
+    projection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Combine control-plane health with one opaque engine-group lifecycle."""
+
+    group = projection["group"]
+    container = projection["container"]
+    protection = projection["protection"]
+    runtime_ready = container.get("healthy") is True
+    details = {
+        "ready": False,
+        "transitional": False,
+        "runtime_ready": runtime_ready,
+        "ready_services": control.get("ready_services", 0),
+        "total_services": control.get("total_services", 0),
+    }
+    if protection.get("trip_latched") is True:
+        return {**details, "state": "blocked", "reason": "protection-trip"}
+    group_state = str(group.get("state") or "unknown")
+    if group_state in {"staging", "staged", "starting", "recovering"}:
+        return {
+            **details,
+            "state": "starting",
+            "reason": "engine-group-startup",
+            "transitional": True,
+        }
+    if group_state in {"stopping", "removing"}:
+        return {
+            **details,
+            "state": "stopping",
+            "reason": "engine-group-shutdown",
+            "transitional": True,
+        }
+    if group_state in {"stopped", "removed"}:
+        return {**details, "state": "stopped", "reason": "engine-group-stopped"}
+    if group_state == "failed":
+        return {**details, "state": "failed", "reason": "engine-group-failure"}
+    if group_state != "running" or not runtime_ready:
+        return {
+            **details,
+            "state": "degraded",
+            "reason": "engine-group-not-ready",
+        }
+    if protection.get("armed") is not True:
+        if protection.get("phase") == "starting":
+            return {
+                **details,
+                "state": "starting",
+                "reason": "engine-group-protection-startup",
+                "transitional": True,
+            }
+        return {
+            **details,
+            "state": "degraded",
+            "reason": "engine-group-protection-not-ready",
+        }
+    if control.get("state") != "ready":
+        return {
+            **details,
+            "state": str(control.get("state") or "degraded"),
+            "reason": str(control.get("reason") or "node-not-ready"),
+            "transitional": control.get("transitional") is True,
+        }
+    return {
+        **details,
+        "state": "ready",
+        "reason": "engine-group-ready",
+        "ready": True,
+    }
 
 
 def status(arguments: argparse.Namespace) -> int:
@@ -11367,6 +11784,8 @@ def status(arguments: argparse.Namespace) -> int:
             raise LetsInferError(
                 "node-wide engine-group status is available from the main node"
             )
+        else:
+            live_groups = _local_engine_group_status(identity)
     config_path = absolute_user_path(
         arguments.config or active_service_config_path()
     )
@@ -11472,7 +11891,22 @@ def status(arguments: argparse.Namespace) -> int:
         if live_groups:
             payload["engine_groups"] = live_groups
         payload["models"] = _model_status_from_groups(live_groups)
-        payload["lifecycle"] = runtime_lifecycle(payload)
+        control_lifecycle = runtime_lifecycle(payload)
+        projection = _engine_group_dashboard_projection(live_groups)
+        if projection is not None:
+            service.update({
+                "runtime_installed": True,
+                "runtime_metadata_ready": True,
+                "runtime_mode": "engine-group",
+                "engine_group_id": projection["group"]["group_id"],
+            })
+            payload["container"] = projection["container"]
+            payload["protection"] = projection["protection"]
+            payload["lifecycle"] = _engine_group_dashboard_lifecycle(
+                control_lifecycle, projection
+            )
+        else:
+            payload["lifecycle"] = control_lifecycle
         if arguments.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         elif ui.Terminal(sys.stdout).interactive:
@@ -13791,6 +14225,53 @@ def _benchmark_engine_group_intents(
     return intents
 
 
+def _parallel_benchmark_group_config(
+    group_id: str,
+    manifest: Mapping[str, Any],
+    manifest_sha256: str,
+) -> dict[str, Any]:
+    """Bind a private benchmark endpoint to one exact local group task."""
+    with _site_store() as store:
+        row = next(
+            (item for item in store.engine_groups() if item["group_id"] == group_id),
+            None,
+        )
+    if row is None or row.get("manifest_sha256") != manifest_sha256:
+        raise LetsInferError(
+            "parallel benchmark engine group differs from the installed runtime"
+        )
+    config = _read_engine_group_config(group_id)
+    identity = read_site_identity()
+    task = config.get("task")
+    if (
+        config.get("member_id") != identity.member_id
+        or not isinstance(task, Mapping)
+        or task.get("endpoint_owner") is not True
+        or not isinstance(task.get("port_base"), int)
+        or isinstance(task.get("port_base"), bool)
+        or not 1 <= task["port_base"] <= 65_535
+        or config.get("manifest_sha256") != manifest_sha256
+        or config.get("_manifest") != manifest
+    ):
+        raise LetsInferError(
+            "parallel benchmark endpoint owner does not match this runtime"
+        )
+    core = _qualification_core_plane_config()
+    core.update(
+        {
+            "benchmark_group_id": group_id,
+            "placement_strategy": "parallel",
+            "engine_port": task["port_base"],
+            "engine_api_key_file": config["credential_file"],
+            "tls_cert_file": config["tls_certificate_file"],
+            "tls_key_file": config["tls_key_file"],
+            "protection_root": config["protection_root"],
+            "name": config["container_name"],
+        }
+    )
+    return core
+
+
 def _active_group_id_for_release(
     source: str,
     member_ids: Sequence[str],
@@ -16026,6 +16507,7 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         if getattr(arguments, f"context_{context}"):
             command.append(f"--{context}")
     benchmark_resident_group_ids: tuple[str, ...] = ()
+    benchmark_group_id: str | None = None
     if arguments.list:
         command.append("--list")
     else:
@@ -16037,8 +16519,8 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                     "benchmark worker received resident groups for a legacy service"
                 )
         else:
-            config = _qualification_core_plane_config()
             if nested_verification:
+                config = _qualification_core_plane_config()
                 placement = resolve_service_placement(
                     manifest, sha256_file(manifest_path)
                 )
@@ -16054,16 +16536,30 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                     raise LetsInferError(
                         "benchmark resident engine groups changed before worker start"
                     )
-            config.update(
-                {
-                    "engine_port": 18000,
-                    "protection_root": str(
-                        default_watchdog_data_root()
-                        / PROTECTION_ROOT_NAME
-                        / placement["placement_id"]
-                    ),
-                }
-            )
+                if placement["placement_strategy"] == "parallel":
+                    if len(benchmark_resident_group_ids) != 1:
+                        raise LetsInferError(
+                            "parallel benchmark requires one exact installed engine group"
+                        )
+                    benchmark_group_id = benchmark_resident_group_ids[0]
+                    config = _parallel_benchmark_group_config(
+                        benchmark_group_id,
+                        manifest,
+                        sha256_file(manifest_path),
+                    )
+                else:
+                    config = _qualification_core_plane_config()
+            if benchmark_group_id is None:
+                config.update(
+                    {
+                        "engine_port": 18000,
+                        "protection_root": str(
+                            default_watchdog_data_root()
+                            / PROTECTION_ROOT_NAME
+                            / placement["placement_id"]
+                        ),
+                    }
+                )
         _, watchdog_state = _unit_enabled_active(SERVICE_NAME)
         if watchdog_state != "active":
             raise LetsInferError(
@@ -16074,12 +16570,32 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
             installation_id
         ):
             raise LetsInferError("installed runtime has no valid installation identity")
+        if benchmark_group_id is not None:
+            command.append("--active-group")
+            if arguments.container is None:
+                command.extend(["--container", config["name"]])
         if arguments.base_url is None:
             command.extend(
-                ["--base-url", f"http://127.0.0.1:{config['gateway_port']}"]
+                [
+                    "--base-url",
+                    (
+                        f"https://127.0.0.1:{config['engine_port']}"
+                        if benchmark_group_id is not None
+                        else f"http://127.0.0.1:{config['gateway_port']}"
+                    ),
+                ]
             )
         if arguments.api_key_file is None:
-            command.extend(["--api-key-file", config["gateway_api_key_file"]])
+            command.extend(
+                [
+                    "--api-key-file",
+                    (
+                        config["engine_api_key_file"]
+                        if benchmark_group_id is not None
+                        else config["gateway_api_key_file"]
+                    ),
+                ]
+            )
         if arguments.ca_cert_file is None:
             command.extend(["--ca-cert-file", config["tls_cert_file"]])
         if arguments.watchdog_trip_file is None:
@@ -16148,12 +16664,17 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
                     command,
                     protection_config=config,
                     resident_group_ids=benchmark_resident_group_ids,
-                    cleanup_command=[
-                        str(letsinfer_bin),
-                        "stop",
-                        "--name",
-                        arguments.container or "letsinfer-benchmark",
-                    ],
+                    benchmark_group_id=benchmark_group_id,
+                    cleanup_command=(
+                        None
+                        if benchmark_group_id is not None
+                        else [
+                            str(letsinfer_bin),
+                            "stop",
+                            "--name",
+                            arguments.container or "letsinfer-benchmark",
+                        ]
+                    ),
                     progress_job_id=arguments.job_id,
                 )
         except _BenchmarkCancelled:
@@ -16228,6 +16749,7 @@ def _run_benchmark_with_service_isolation(
     *,
     protection_config: dict[str, Any] | None = None,
     resident_group_ids: Sequence[str] = (),
+    benchmark_group_id: str | None = None,
     cleanup_command: Sequence[str] | None = None,
     progress_job_id: str | None = None,
 ) -> None:
@@ -16273,6 +16795,10 @@ def _run_benchmark_with_service_isolation(
     resident_group_intents = _benchmark_engine_group_intents(
         resident_group_ids
     )
+    if benchmark_group_id is not None and benchmark_group_id not in resident_group_intents:
+        raise LetsInferError(
+            "parallel benchmark group is not part of the exact resident placement"
+        )
     if any(resident_group_intents.values()):
         # Recheck immediately in the worker.  The parent check avoids starting
         # a doomed job, while this check closes most of the detach/start race
@@ -16285,6 +16811,8 @@ def _run_benchmark_with_service_isolation(
     recovery_stopped = False
     engine_stopped = False
     stopped_groups: list[str] = []
+    benchmark_group_started = False
+    benchmark_group_stopped_for_restart = False
     try:
         if progress_job_id is not None:
             benchmark_jobs.merge_progress(
@@ -16314,7 +16842,13 @@ def _run_benchmark_with_service_isolation(
             )
             engine_stopped = True
         for group_id, was_running in resident_group_intents.items():
-            if was_running:
+            if group_id == benchmark_group_id:
+                if was_running:
+                    benchmark_group_stopped_for_restart = True
+                    _stop_engine_group_by_id(group_id)
+                _start_engine_group_by_id(group_id)
+                benchmark_group_started = True
+            elif was_running:
                 stopped_groups.append(group_id)
                 _stop_engine_group_by_id(group_id)
         run_passthrough(command, failure_label="benchmark runner")
@@ -16370,6 +16904,28 @@ def _run_benchmark_with_service_isolation(
                     restore_errors.append(
                         f"retire temporary qualification candidate: {error}"
                     )
+        if benchmark_group_started and (
+            benchmark_trip_latched
+            or not resident_group_intents.get(benchmark_group_id, False)
+        ):
+            try:
+                _stop_engine_group_by_id(str(benchmark_group_id))
+            except BaseException as error:
+                restore_errors.append(
+                    f"restore engine group {benchmark_group_id}: {error}"
+                )
+        elif (
+            not benchmark_group_started
+            and benchmark_group_stopped_for_restart
+            and not benchmark_trip_latched
+            and resident_group_intents.get(benchmark_group_id, False)
+        ):
+            try:
+                _start_engine_group_by_id(str(benchmark_group_id))
+            except BaseException as error:
+                restore_errors.append(
+                    f"restore engine group {benchmark_group_id}: {error}"
+                )
         if not benchmark_trip_latched:
             for group_id in reversed(stopped_groups):
                 try:
@@ -17972,6 +18528,50 @@ def _require_matching_rdma_container(
         raise LetsInferError("engine-group container RDMA memlock changed")
 
 
+def _engine_group_qualification_launch(
+    config: Mapping[str, Any],
+) -> tuple[bool, str | None]:
+    qualification = config["_group"]["release"]["qualification"]
+    if qualification == "qualified":
+        return False, None
+    if qualification != "unqualified":
+        raise LetsInferError("engine-group release qualification is invalid")
+    evidence = (
+        evidence_root()
+        / "engine-groups"
+        / str(config["group_id"])
+        / "qualification"
+    )
+    ensure_private_directory(evidence)
+    return True, str(evidence)
+
+
+def _collect_engine_group_launch_failure(
+    config: Mapping[str, Any],
+    evidence_dir: str | None,
+) -> pathlib.Path | None:
+    root = (
+        pathlib.Path(evidence_dir)
+        if evidence_dir is not None
+        else evidence_root()
+        / "engine-groups"
+        / str(config["group_id"])
+        / "launches"
+    )
+    evidence = root / f"failure-{time.time_ns()}"
+    try:
+        ensure_private_directory(evidence)
+        credential = read_api_key(pathlib.Path(config["credential_file"]))
+        collect_container_evidence(
+            str(config["container_name"]),
+            evidence,
+            secrets_to_redact=(credential,),
+        )
+    except BaseException:
+        return None
+    return evidence
+
+
 def _ensure_engine_group_tls(
     certificate: pathlib.Path,
     private_key: pathlib.Path,
@@ -17980,7 +18580,6 @@ def _ensure_engine_group_tls(
     if certificate.exists() or private_key.exists():
         if not certificate.exists() or not private_key.exists():
             raise LetsInferError("engine-group TLS material is incomplete")
-        validate_tls_material(certificate, private_key)
     else:
         ensure_private_directory(certificate.parent)
         staging = pathlib.Path(
@@ -18017,11 +18616,26 @@ def _ensure_engine_group_tls(
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
+    _validate_engine_group_tls(certificate, private_key, host)
+
+
+def _validate_engine_group_tls(
+    certificate: pathlib.Path,
+    private_key: pathlib.Path,
+    host: str,
+) -> None:
+    """Validate existing group TLS material without creating or replacing it."""
+
+    validate_tls_material(certificate, private_key)
     check_flag = "-checkip" if re.fullmatch(r"[0-9a-fA-F:.]+", host) else "-checkhost"
     run(["openssl", "x509", "-in", str(certificate), "-noout", check_flag, host])
 
 
-def _read_engine_group_config(group_id: str) -> dict[str, Any]:
+def _read_engine_group_config(
+    group_id: str,
+    *,
+    repair_tls: bool = True,
+) -> dict[str, Any]:
     root = _engine_group_path(group_id)
     path = root / "config.json"
     try:
@@ -18086,11 +18700,13 @@ def _read_engine_group_config(group_id: str) -> dict[str, Any]:
     ):
         raise LetsInferError("engine-group configuration does not match its plan")
     credential = read_api_key(pathlib.Path(config["credential_file"]))
-    _ensure_engine_group_tls(
-        pathlib.Path(config["tls_certificate_file"]),
-        pathlib.Path(config["tls_key_file"]),
-        _engine_group_member_host(group, config["member_id"]),
-    )
+    certificate = pathlib.Path(config["tls_certificate_file"])
+    private_key = pathlib.Path(config["tls_key_file"])
+    host = _engine_group_member_host(group, config["member_id"])
+    if repair_tls:
+        _ensure_engine_group_tls(certificate, private_key, host)
+    else:
+        _validate_engine_group_tls(certificate, private_key, host)
     config["_manifest"] = manifest
     config["_group"] = group
     config["_credential_sha256"] = group_credential_sha256(credential)
@@ -18205,7 +18821,9 @@ class LocalEngineGroupExecutor:
             manifest_path, manifest, control_root, receipt = prepare_runtime_install(
                 str(job["source"]),
                 policy="site-group",
-                qualified=True,
+                qualified=(
+                    job["group"]["release"]["qualification"] == "qualified"
+                ),
                 requested_runtime=None,
             )
             if (
@@ -18366,10 +18984,17 @@ class LocalEngineGroupExecutor:
             return self._start_native_config(config)
         verify_active_core_watchdog()
         task = config["task"]
+        qualification_mode, evidence_dir = _engine_group_qualification_launch(config)
         authorize_serving_launch(
-            manifest["serving"], qualification_mode=False, evidence_dir=None
+            manifest["serving"],
+            qualification_mode=qualification_mode,
+            evidence_dir=evidence_dir,
         )
         verify_host_target(manifest)
+        store_root = pathlib.Path(config["store_root"])
+        runtime_cache_root = pathlib.Path(config["runtime_cache_root"])
+        ensure_private_directory(store_root)
+        ensure_runtime_home(runtime_cache_root)
         runtime_root = pathlib.Path(config["object_root"])
         downloaded = ensure_install_dependencies(
             manifest,
@@ -18394,8 +19019,8 @@ class LocalEngineGroupExecutor:
             runtime_digest=config["runtime_digest"],
             port=task["port_base"],
             model_cache=pathlib.Path(config["model_cache"]),
-            store_root=pathlib.Path(config["store_root"]),
-            runtime_cache_root=pathlib.Path(config["runtime_cache_root"]),
+            store_root=store_root,
+            runtime_cache_root=runtime_cache_root,
             api_key_file=pathlib.Path(config["credential_file"]),
             tls_cert_file=pathlib.Path(config["tls_certificate_file"]),
             tls_key_file=pathlib.Path(config["tls_key_file"]),
@@ -18490,6 +19115,7 @@ class LocalEngineGroupExecutor:
                 disarm_before_planned_stop(protection)
             inspection = container_inspect(config["container_name"])
             if inspection is not None:
+                _collect_engine_group_launch_failure(config, evidence_dir)
                 run(["docker", "update", "--restart", "no", config["container_name"]], check=False)
                 run(["docker", "stop", "--time", "30", config["container_name"]], check=False)
                 run(["docker", "rm", config["container_name"]], check=False)
@@ -18524,8 +19150,11 @@ class LocalEngineGroupExecutor:
             raise LetsInferError("native Apple Engines require macOS")
         manifest = config["_manifest"]
         task = config["task"]
+        qualification_mode, evidence_dir = _engine_group_qualification_launch(config)
         authorize_serving_launch(
-            manifest["serving"], qualification_mode=False, evidence_dir=None
+            manifest["serving"],
+            qualification_mode=qualification_mode,
+            evidence_dir=evidence_dir,
         )
         verify_host_target(manifest)
         runtime_root = pathlib.Path(config["object_root"])

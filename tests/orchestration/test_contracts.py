@@ -36,6 +36,13 @@ class OrchestrationContractTests(unittest.TestCase):
             release["candidate_id"],
         )
 
+    def test_release_accepts_digest_pinned_registry_port(self) -> None:
+        release = release_identity()
+        release["source"] = "127.0.0.1:5000/runtime/dev@sha256:" + "7" * 64
+        self.assertEqual(
+            validate_release_identity(release)["source"], release["source"]
+        )
+
     def test_replication_is_core_owned_and_single_targets_have_no_contract(self) -> None:
         self.assertIsNone(validate_target_binding(None, {"strategy": "single"}))
         with self.assertRaisesRegex(OrchestrationError, "cannot declare"):

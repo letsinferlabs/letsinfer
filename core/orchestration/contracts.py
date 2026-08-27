@@ -33,7 +33,8 @@ CANDIDATE_ID_RE = re.compile(
 )
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
 OCI_DIGEST_RE = re.compile(
-    r"^[a-z0-9][a-z0-9._/-]*(?::[a-zA-Z0-9._-]+)?@sha256:[0-9a-f]{64}$"
+    r"^[a-z0-9][a-z0-9.-]*(?::[0-9]+)?/"
+    r"[a-z0-9][a-z0-9._/-]*(?::[a-zA-Z0-9._-]+)?@sha256:[0-9a-f]{64}$"
 )
 ENVIRONMENT_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 MAX_ARGUMENTS = 128

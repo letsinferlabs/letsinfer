@@ -13,6 +13,7 @@ import pathlib
 import plistlib
 import re
 import shutil
+import socket
 import stat
 import struct
 import subprocess
@@ -739,6 +740,65 @@ def member_facts(
     device = device_fingerprint()
     usage = shutil.disk_usage(data_path)
     available = available_memory_gib()
+    chip = str(device["accelerator"]["names"][0])
+    device_uuid = str(device["accelerator"]["uuids"][0])
+    try:
+        product_name = _sysctl("hw.model")
+    except AppleHardwareError:
+        product_name = None
+    if (
+        not isinstance(product_name, str)
+        or not product_name
+        or len(product_name.encode("utf-8")) > 128
+    ):
+        product_name = None
+    inventory = {
+        "hostname": socket.gethostname()[:255] or None,
+        "operating_system": "macOS",
+        "kernel_version": os.uname().release[:255] or None,
+        "product_vendor": "Apple Inc.",
+        "product_name": product_name,
+        "product_version": None,
+        "serial_number": None,
+        "serial_source": None,
+        "system_uuid": None,
+        "machine_id_sha256": device_uuid.removeprefix("APPLE-"),
+        "dmi_serial_requires_privilege": False,
+        "board_vendor": "Apple Inc.",
+        "board_name": product_name,
+        "board_version": None,
+        "board_serial": None,
+        "chassis_vendor": "Apple Inc.",
+        "chassis_type": None,
+        "chassis_serial": None,
+        "bios_vendor": "Apple Inc.",
+        "bios_version": None,
+        "bios_date": None,
+        "cpu_model": chip,
+        "cpu_core_count": os.cpu_count(),
+        "gpu_name": chip,
+        "gpu_uuid": device_uuid,
+        "nvidia_driver_version": None,
+        "dgx_name": None,
+        "dgx_software_version": None,
+        "dgx_base_build_version": None,
+        "dgx_build_date": None,
+        "dgx_commit_id": None,
+        "dgx_platform": None,
+        "dgx_update_date": None,
+        "nvme_model": None,
+        "nvme_serial": None,
+        "nvme_firmware": None,
+        "network_addresses": [],
+        "default_network_interface": None,
+        "uptime_seconds": int(time.monotonic()),
+        "process_count": None,
+        "active_users": [],
+        "login_session_count": None,
+        "last_login": None,
+        "firmware_update_count": None,
+        "containers": [],
+    }
     facts = {
         "schema_version": 1,
         "member_id": member_id,
@@ -774,6 +834,7 @@ def member_facts(
             "protection_trip": False,
             "max_temperature_c": -1,
         },
+        "inventory": inventory,
     }
     return validate_member_facts(facts)
 

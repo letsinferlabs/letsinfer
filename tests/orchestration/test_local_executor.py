@@ -39,7 +39,7 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             "schema_version": 3,
             "group_id": self.group_id,
             "service": "fixture-model",
-            "release": {},
+            "release": {"qualification": "qualified"},
             "strategy": "parallel",
             "failure_policy": "whole-group",
             "topology_sha256": "1" * 64,
@@ -140,6 +140,8 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             mock.patch.object(cli, "verify_active_core_watchdog"),
             mock.patch.object(cli, "authorize_serving_launch"),
             mock.patch.object(cli, "verify_host_target"),
+            mock.patch.object(cli, "ensure_private_directory") as prepare_store,
+            mock.patch.object(cli, "ensure_runtime_home") as prepare_runtime_cache,
             mock.patch.object(
                 cli,
                 "ensure_install_dependencies",
@@ -162,6 +164,10 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
             result["model_artifacts_downloaded"], ["owner/model@revision"]
         )
         self.assertTrue(dependencies.call_args.kwargs["download"])
+        prepare_store.assert_called_once_with(pathlib.Path(self.config["store_root"]))
+        prepare_runtime_cache.assert_called_once_with(
+            pathlib.Path(self.config["runtime_cache_root"])
+        )
         run.assert_called_once_with(["docker", "run"])
         ready.assert_called_once_with(self.config["container_name"], self.task["readiness"])
         self.assertEqual([call.args[2] for call in protect.call_args_list], ["pending", "starting", "armed"])
@@ -192,6 +198,63 @@ class LocalEngineGroupExecutorTests(unittest.TestCase):
         ):
             remote = executor._safe_result(config, "running")
         self.assertEqual(remote["endpoint"], "https://member.local:18000")
+
+    def test_unqualified_group_uses_private_qualification_evidence(self) -> None:
+        config = copy.deepcopy(self.config)
+        config["_group"]["release"]["qualification"] = "unqualified"
+        root = pathlib.Path(self.temporary.name) / "evidence"
+        with mock.patch.object(cli, "evidence_root", return_value=root):
+            qualification_mode, evidence = cli._engine_group_qualification_launch(config)
+
+        self.assertTrue(qualification_mode)
+        expected = root / "engine-groups" / self.group_id / "qualification"
+        self.assertEqual(evidence, str(expected))
+        self.assertTrue(expected.is_dir())
+
+    def test_group_launch_failure_captures_redacted_evidence(self) -> None:
+        evidence_root = pathlib.Path(self.temporary.name) / "evidence"
+        with (
+            mock.patch.object(cli, "read_api_key", return_value="secret") as read_key,
+            mock.patch.object(cli, "collect_container_evidence") as collect,
+        ):
+            evidence = cli._collect_engine_group_launch_failure(
+                self.config, str(evidence_root)
+            )
+
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertTrue(evidence.is_dir())
+        self.assertEqual(evidence.parent, evidence_root)
+        read_key.assert_called_once_with(pathlib.Path(self.config["credential_file"]))
+        collect.assert_called_once_with(
+            self.config["container_name"],
+            evidence,
+            secrets_to_redact=("secret",),
+        )
+
+    def test_stage_preserves_unqualified_group_manifest_identity(self) -> None:
+        executor = cli.LocalEngineGroupExecutor(self.member_id)
+        job = copy.deepcopy(self.job)
+        job["source"] = self.config["source"]
+        job["group"]["release"] = {"qualification": "unqualified"}
+        root = pathlib.Path(self.temporary.name) / "new-group"
+        with (
+            mock.patch.object(cli, "_engine_group_path", return_value=root),
+            mock.patch.object(
+                cli,
+                "default_engine_group_root",
+                return_value=pathlib.Path(self.temporary.name),
+            ),
+            mock.patch.object(
+                cli,
+                "prepare_runtime_install",
+                side_effect=RuntimeError("stop after qualification binding"),
+            ) as prepare,
+            self.assertRaisesRegex(RuntimeError, "qualification binding"),
+        ):
+            executor.stage(job, "fixture-credential")
+
+        self.assertFalse(prepare.call_args.kwargs["qualified"])
 
     def test_rdma_docker_options_are_exact_and_never_privileged(self) -> None:
         binding = {
