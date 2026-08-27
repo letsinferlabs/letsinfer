@@ -429,6 +429,14 @@ class NodeAddContractTests(unittest.TestCase):
             ],
         )
 
+    def test_avahi_discovery_decodes_escaped_hostname_punctuation(self) -> None:
+        self.assertEqual(
+            node_add._decode_avahi_text(r"t\.inference\.server"),
+            "t.inference.server",
+        )
+        with self.assertRaisesRegex(node_add.NodeAddError, "invalid Avahi escape"):
+            node_add._decode_avahi_text(r"broken\12")
+
     def test_avahi_discovery_rejects_conflicting_identity_for_one_node(self) -> None:
         node = "a" * 32
         machine = "b" * 32
@@ -446,6 +454,31 @@ class NodeAddContractTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(node_add.NodeAddError, "conflicting"):
             node_add._parse_avahi(output)
+
+    def test_avahi_discovery_allows_members_that_share_one_site_id(self) -> None:
+        site = "a" * 32
+        first_machine = "b" * 32
+        second_machine = "c" * 32
+        output = "\n".join(
+            (
+                "=;eth0;IPv4;Let\\039s\\032Infer\\032Main;_letsinfer._tcp;"
+                f"local;main.local;192.168.1.2;9770;\"node={site}\" "
+                f"\"machine={first_machine}\" \"tls={'d' * 64}\" "
+                '"control=letsinfer-node-control-v1" "role=main" "state=configured"',
+                "=;eth0;IPv4;Let\\039s\\032Infer\\032Child;_letsinfer._tcp;"
+                f"local;child.local;192.168.1.3;9770;\"node={site}\" "
+                f"\"machine={second_machine}\" \"tls={'e' * 64}\" "
+                '"control=letsinfer-node-control-v1" "role=child" "state=configured"',
+            )
+        )
+
+        records = node_add._parse_avahi(output)
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(
+            {record["machine_id"] for record in records},
+            {first_machine, second_machine},
+        )
 
     def test_request_sender_requires_exact_acknowledgement(self) -> None:
         client = mock.Mock()

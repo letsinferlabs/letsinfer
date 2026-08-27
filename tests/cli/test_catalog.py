@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import errno
 import io
@@ -243,6 +244,40 @@ class CatalogTests(unittest.TestCase):
             path = pathlib.Path(temporary) / "catalog.json"
             path.write_bytes(runtime_packs.canonical_bytes(document))
             self.assertEqual(runtime_packs.load_catalog(str(path)), document)
+
+    def test_signed_schema6_catalog_normalizes_exact_engine_oci_projection(self) -> None:
+        expected = catalog()
+        legacy = copy.deepcopy(expected)
+        legacy["schema_version"] = runtime_packs.LEGACY_CATALOG_SCHEMA_VERSION
+        release = legacy["models"]["qwen3.8-27b"]["targets"]["dgx-spark"][
+            "candidates"
+        ][CANDIDATE]["releases"]["0.1.0-rc.12"]
+        distribution = release.pop("engine_distribution")
+        release["engine_oci"] = distribution["reference"]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "catalog.json"
+            path.write_bytes(runtime_packs.canonical_bytes(legacy))
+
+            loaded = runtime_packs.load_catalog(str(path))
+
+        self.assertEqual(loaded, expected)
+
+    def test_malformed_schema6_catalog_is_not_normalized(self) -> None:
+        legacy = copy.deepcopy(catalog())
+        legacy["schema_version"] = runtime_packs.LEGACY_CATALOG_SCHEMA_VERSION
+        release = legacy["models"]["qwen3.8-27b"]["targets"]["dgx-spark"][
+            "candidates"
+        ][CANDIDATE]["releases"]["0.1.0-rc.12"]
+        release["engine_oci"] = "latest"
+        release.pop("engine_distribution")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "catalog.json"
+            path.write_bytes(runtime_packs.canonical_bytes(legacy))
+            with self.assertRaisesRegex(
+                runtime_packs.RuntimePackError,
+                "unsupported runtime catalog schema_version",
+            ):
+                runtime_packs.load_catalog(str(path))
 
     def test_maintainer_bypass_requires_marked_author_score_for_recommendation(
         self,
