@@ -1369,6 +1369,75 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("\033[?1049h", rendered)
         self.assertIn("\033[?1049l", rendered)
 
+    def test_live_node_status_keeps_the_detailed_runtime_dashboard(self) -> None:
+        stream = FakeStream(tty=True)
+        payload = {
+            "identity": {"display_name": "Home", "role": "main"},
+            "endpoint": "http://homeai.local:8000/v1",
+            "services": {
+                "node_active": "active",
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+            },
+            "service": {
+                "runtime_installed": True,
+                "gateway_expected": True,
+                "gateway_active": "active",
+                "gateway_health": True,
+                "gateway_auth_required": True,
+                "gateway_authenticated": True,
+                "gateway_model_identity": False,
+                "gateway_endpoint": "http://homeai.local:8000/v1",
+            },
+            "container": {
+                "state": "running",
+                "healthy": True,
+                "model_identity": True,
+                "model": "qwen3.8-flash-next",
+                "engine": "sglang",
+                "target": "dgx-spark-connectx-2",
+                "runtime_version": "0.1.0-rc.2",
+                "capacity": {
+                    "max_active_requests": 4,
+                    "max_context_tokens": 65536,
+                },
+            },
+            "protection": {"armed": True, "trip_latched": False},
+            "lifecycle": {"state": "ready", "runtime_ready": True},
+            "telemetry": {
+                "fresh": True,
+                "sample_sequence": 1,
+                "system": {
+                    "gpu_memory_percent": 80,
+                    "memory_percent": 80,
+                },
+            },
+            "models": [
+                {
+                    "model": "qwen3.8-flash-next",
+                    "state": "running",
+                    "replicas": 1,
+                }
+            ],
+        }
+        with (
+            mock.patch.object(ui.sys, "stdout", stream),
+            mock.patch.object(ui.time, "sleep", side_effect=KeyboardInterrupt),
+        ):
+            self.assertEqual(ui.live_runtime_status(lambda: payload), 0)
+
+        rendered = stream.getvalue()
+        self.assertIn("Model", rendered)
+        self.assertIn("qwen3.8-flash-next", rendered)
+        self.assertIn("sglang", rendered)
+        self.assertIn("dgx-spark-connectx-2", rendered)
+        self.assertIn("0.1.0-rc.2", rendered)
+        self.assertIn("Performance", rendered)
+        self.assertNotIn("TOPOLOGY", rendered)
+        self.assertNotIn("Not installed", rendered)
+
     def test_live_runtime_status_transitions_from_node_to_runtime(self) -> None:
         stream = FakeStream(tty=True)
         payloads = [

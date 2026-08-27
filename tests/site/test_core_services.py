@@ -13,7 +13,7 @@ import types
 import unittest
 from unittest import mock
 
-from core import cli
+from core import apple_hardware, cli
 from core.site.state import SiteIdentity
 
 
@@ -33,6 +33,55 @@ def member_identity() -> SiteIdentity:
 
 
 class CoreServiceTests(unittest.TestCase):
+    def test_macos_member_facts_publish_the_actual_chip_name(self) -> None:
+        device = {
+            "platform": "macos/arm64",
+            "accelerator": {
+                "vendor": "apple",
+                "architecture": "apple-silicon",
+                "count": 1,
+                "partitioning": "full-device",
+                "names": ["Apple M4 Max"],
+                "minimum_memory_gib": 128,
+                "uuids": ["APPLE-" + "a" * 64],
+            },
+            "memory": {
+                "topology": "unified",
+                "total_gib": 128,
+                "addressing_modes": ["UNIFIED"],
+            },
+        }
+        usage = types.SimpleNamespace(total=1 << 40, free=1 << 39)
+        uname = types.SimpleNamespace(release="24.6.0")
+        with (
+            mock.patch.object(
+                apple_hardware, "device_fingerprint", return_value=device
+            ),
+            mock.patch.object(
+                apple_hardware, "available_memory_gib", return_value=96
+            ),
+            mock.patch.object(apple_hardware.shutil, "disk_usage", return_value=usage),
+            mock.patch.object(
+                apple_hardware,
+                "_sysctl",
+                side_effect=lambda name: {"hw.model": "Mac16,5"}[name],
+            ),
+            mock.patch.object(apple_hardware.os, "uname", return_value=uname),
+            mock.patch.object(apple_hardware.os, "cpu_count", return_value=16),
+            mock.patch.object(apple_hardware.socket, "gethostname", return_value="mac"),
+            mock.patch.object(apple_hardware.time, "monotonic", return_value=1234),
+        ):
+            facts = apple_hardware.member_facts(
+                "1" * 32,
+                data_path=pathlib.Path("/state"),
+                product_version="0.11.0-rc.92",
+                now_unix=1_800_000_000,
+            )
+
+        self.assertEqual(facts["inventory"]["cpu_model"], "Apple M4 Max")
+        self.assertEqual(facts["inventory"]["gpu_name"], "Apple M4 Max")
+        self.assertEqual(facts["inventory"]["product_name"], "Mac16,5")
+
     def test_macos_node_facts_use_the_apple_collector(self) -> None:
         expected = {"schema_version": 1}
         data_root = pathlib.Path("/private/letsinfer/state")

@@ -340,6 +340,29 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         self.assertFalse(store.placement["endpoints"][0]["healthy"])
         self.assertNotIn("updated_at_unix", store.placement)
 
+    def test_unqualified_running_group_never_publishes_an_endpoint(self) -> None:
+        for release_identity in (
+            {"release": {"qualification": "unqualified"}},
+            {"plan": {"release": {"qualification": "unqualified"}}},
+        ):
+            with self.subTest(release_identity=release_identity):
+                store = _Store()
+                group = {
+                    "placement_id": store.placement_id,
+                    "desired_state": "running",
+                    "state": "running",
+                    **release_identity,
+                    "member_states": [
+                        {
+                            "member_id": "5" * 32,
+                            "state": "running",
+                        }
+                    ],
+                }
+                cli._sync_group_placement(store, group)
+                self.assertEqual(store.placement["state"], "starting")
+                self.assertEqual(store.placement["endpoints"], [])
+
     def test_start_of_cleanly_stopped_group_skips_recovery_stop(self) -> None:
         store = _Store()
         store.group.update({"state": "stopped", "desired_state": "stopped"})
@@ -601,6 +624,44 @@ class EngineGroupLifecycleTests(unittest.TestCase):
         store.group["desired_state"] = "stopped"
         store.group["state"] = "failed"
         store.allocations[0]["state"] = "released"
+        removed = {
+            "group_id": store.group_id,
+            "placement_id": store.placement_id,
+            "desired_state": "removed",
+            "state": "removed",
+            "member_states": [],
+        }
+        orchestrator = mock.Mock()
+        orchestrator.remove.return_value = removed
+        with tempfile.TemporaryDirectory() as directory:
+            runtime_home = pathlib.Path(directory)
+            (runtime_home / ".objects" / store.group["runtime_digest"]).mkdir(
+                parents=True
+            )
+            with (
+                mock.patch.object(cli, "_site_store", return_value=store),
+                mock.patch.object(
+                    cli,
+                    "default_runtime_home",
+                    return_value=runtime_home,
+                ),
+                mock.patch.object(
+                    cli,
+                    "_restore_engine_group_orchestrator",
+                    return_value=(orchestrator, {}),
+                ),
+                mock.patch.object(cli, "_sync_group_placement") as sync,
+            ):
+                cli._remove_engine_groups_by_id([store.group_id])
+
+        orchestrator.stop.assert_not_called()
+        orchestrator.remove.assert_called_once_with()
+        sync.assert_called_once_with(store, removed)
+
+    def test_replacement_retries_incomplete_group_removal(self) -> None:
+        store = _Store()
+        store.group["desired_state"] = "removed"
+        store.group["state"] = "failed"
         removed = {
             "group_id": store.group_id,
             "placement_id": store.placement_id,

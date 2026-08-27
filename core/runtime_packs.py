@@ -1422,6 +1422,11 @@ _OCI_MANIFEST_ACCEPT = ", ".join(
 
 def _oci_open(request: urllib.request.Request) -> Any:
     current = request
+    initial = urllib.parse.urlsplit(request.full_url)
+    loopback_http = initial.scheme == "http" and initial.hostname in {
+        "127.0.0.1",
+        "localhost",
+    }
     for _redirect in range(6):
         try:
             return _OCI_OPENER.open(current, timeout=30)
@@ -1438,12 +1443,14 @@ def _oci_open(request: urllib.request.Request) -> Any:
             old = urllib.parse.urlsplit(current.full_url)
             new = urllib.parse.urlsplit(next_url)
             if (
-                new.scheme != "https"
+                new.scheme != ("http" if loopback_http else "https")
                 or not new.hostname
+                or (loopback_http and new.hostname not in {"127.0.0.1", "localhost"})
                 or new.username is not None
                 or new.password is not None
             ):
-                raise RuntimePackError("OCI registry redirected away from HTTPS")
+                detail = "its safe transport" if loopback_http else "HTTPS"
+                raise RuntimePackError(f"OCI registry redirected away from {detail}")
             headers = {key: value for key, value in current.header_items()}
             if (old.scheme, old.hostname, old.port) != (
                 new.scheme,
@@ -1459,10 +1466,21 @@ def _oci_open(request: urllib.request.Request) -> Any:
     raise RuntimePackError("OCI registry exceeded the redirect limit")
 
 
-def _read_oci_response(response: Any, *, limit: int, label: str) -> bytes:
+def _read_oci_response(
+    response: Any,
+    *,
+    limit: int,
+    label: str,
+    allow_loopback_http: bool = False,
+) -> bytes:
     final_url = urllib.parse.urlsplit(response.geturl())
-    if final_url.scheme != "https":
-        raise RuntimePackError(f"OCI {label} redirected away from HTTPS")
+    if final_url.scheme != "https" and not (
+        allow_loopback_http
+        and final_url.scheme == "http"
+        and final_url.hostname in {"127.0.0.1", "localhost"}
+    ):
+        detail = "its safe transport" if allow_loopback_http else "HTTPS"
+        raise RuntimePackError(f"OCI {label} redirected away from {detail}")
     data = response.read(limit + 1)
     if len(data) > limit:
         raise RuntimePackError(f"OCI {label} exceeds {limit} bytes")
@@ -1595,6 +1613,12 @@ def _open_public_oci_request(
         raise RuntimePackError(f"cannot read OCI registry object: {error}") from error
 
 
+def _oci_registry_scheme(registry: str) -> str:
+    """Allow digest-verified development artifacts only from local loopback HTTP."""
+    host = urllib.parse.urlsplit(f"//{registry}").hostname
+    return "http" if host in {"127.0.0.1", "localhost"} else "https"
+
+
 def _native_pull_public_oci(reference: str, destination: pathlib.Path) -> None:
     name, expected_manifest = reference.rsplit("@", 1)
     registry, separator, repository = name.partition("/")
@@ -1608,9 +1632,10 @@ def _native_pull_public_oci(reference: str, destination: pathlib.Path) -> None:
         or any(part in {"", ".", ".."} for part in repository_parts)
     ):
         raise RuntimePackError("OCI runtime reference has an invalid registry path")
+    scheme = _oci_registry_scheme(registry)
     repository_path = urllib.parse.quote(repository, safe="/")
     manifest_url = (
-        f"https://{registry}/v2/{repository_path}/manifests/"
+        f"{scheme}://{registry}/v2/{repository_path}/manifests/"
         f"{expected_manifest}"
     )
     manifest_request = urllib.request.Request(
@@ -1623,7 +1648,10 @@ def _native_pull_public_oci(reference: str, destination: pathlib.Path) -> None:
     try:
         with _open_public_oci_request(manifest_request, repository) as response:
             manifest_data = _read_oci_response(
-                response, limit=MAX_OCI_MANIFEST_BYTES, label="manifest"
+                response,
+                limit=MAX_OCI_MANIFEST_BYTES,
+                label="manifest",
+                allow_loopback_http=scheme == "http",
             )
     except OSError as error:
         raise RuntimePackError(f"cannot read OCI registry manifest: {error}") from error
@@ -1676,7 +1704,7 @@ def _native_pull_public_oci(reference: str, destination: pathlib.Path) -> None:
         raise RuntimePackError("OCI runtime layer size is invalid")
     if media_type != PACK_MEDIA_TYPE and title != "runtime.letsinfer":
         raise RuntimePackError("OCI runtime layer media type is unsupported")
-    blob_url = f"https://{registry}/v2/{repository_path}/blobs/{layer_digest}"
+    blob_url = f"{scheme}://{registry}/v2/{repository_path}/blobs/{layer_digest}"
     blob_request = urllib.request.Request(
         blob_url,
         headers={"Accept": media_type, "User-Agent": "letsinfer/oci-pull"},
@@ -1688,8 +1716,11 @@ def _native_pull_public_oci(reference: str, destination: pathlib.Path) -> None:
     try:
         with _open_public_oci_request(blob_request, repository) as response:
             final_url = urllib.parse.urlsplit(response.geturl())
-            if final_url.scheme != "https":
-                raise RuntimePackError("OCI runtime layer redirected away from HTTPS")
+            if final_url.scheme != scheme or (
+                scheme == "http"
+                and final_url.hostname not in {"127.0.0.1", "localhost"}
+            ):
+                raise RuntimePackError("OCI runtime layer redirected away from its safe transport")
             length = response.headers.get("Content-Length")
             if length is not None:
                 try:
