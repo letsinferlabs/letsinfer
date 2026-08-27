@@ -100,6 +100,7 @@ from .orchestration import (
     OrchestrationError,
     credential_sha256 as group_credential_sha256,
     orchestration_contract_sha256,
+    validate_orchestration_contract,
     validate_group_document,
     validate_group_target_interconnect,
     validate_target_binding,
