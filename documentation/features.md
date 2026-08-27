@@ -72,7 +72,8 @@ Depending on what the Engine adapter and hardware expose, it shows:
 - node, lifecycle, runtime, engine, target, API, and guard state;
 - active and queued requests, admission capacity, and live context use;
 - aggregate, decode, and prefill throughput, TTFT, and prefix-cache state;
-- GPU, unified memory, CPU, NVMe, power, and network activity;
+- GPU, physically unified memory or separate VRAM and system RAM, CPU, NVMe,
+  power, and network activity;
 - clocks and GPU, CPU, and NVMe temperatures; and
 - bounded recent history without inventing unavailable values.
 
@@ -81,11 +82,11 @@ the UI consume the same normalized meanings, regardless of the engine.
 
 `letsinfer topology` provides the companion live graph for multi-node systems.
 It renders the main-and-child membership tree using each child's authenticated
-control-network transport, then animates directional host RX/TX measurements
-for separately verified direct links and shows model groups without exposing a
-manual link-probe control. Membership changes appear on the next frame,
-online/offline state follows signed fact freshness, interface changes publish
-each second, and direct-link evidence refreshes every two seconds.
+control-network transport as one continuous trunk whose pulse visits every
+child before repeating, then shows model groups without exposing a manual
+link-probe control. Membership changes appear on the next frame, online/offline
+state follows signed fact freshness, interface changes publish each second,
+and direct-link evidence refreshes every two seconds.
 
 Platform network setup is provider-owned rather than embedded in topology or
 orchestration. The DGX Spark provider prepares NVIDIA-compatible ConnectX
