@@ -96,7 +96,7 @@ def _smc_temperature(raw: bytes, data_type: int) -> float | None:
             return None
     except (OverflowError, struct.error):
         return None
-    return value if math.isfinite(value) and 0 < value <= 150 else None
+    return value if math.isfinite(value) and 10 <= value <= 150 else None
 
 
 def _temperature_group(key: str) -> str | None:
@@ -104,7 +104,9 @@ def _temperature_group(key: str) -> str | None:
     # are used by established Apple Silicon monitoring tools.
     if key.startswith(("Tp", "Te", "Ts")):
         return "cpu"
-    if key.startswith("Tg"):
+    # TRDX is the GPU die hotspot on current Apple Silicon. Some M4 Tg keys
+    # expose calibration offsets such as -4.0 and 1.8 rather than temperatures.
+    if key == "TRDX" or key.startswith("Tg"):
         return "gpu"
     return None
 

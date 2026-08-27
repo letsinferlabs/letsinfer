@@ -193,10 +193,16 @@ Pages purgeable: 0.
                 struct.pack("<f", 151.0), apple_hardware._fourcc("flt ")
             )
         )
+        self.assertIsNone(
+            apple_hardware._smc_temperature(
+                struct.pack("<f", 1.8), apple_hardware._fourcc("flt ")
+            )
+        )
         self.assertEqual(apple_hardware._temperature_group("Tp09"), "cpu")
         self.assertEqual(apple_hardware._temperature_group("Te05"), "cpu")
         self.assertEqual(apple_hardware._temperature_group("Ts0P"), "cpu")
         self.assertEqual(apple_hardware._temperature_group("Tg1A"), "gpu")
+        self.assertEqual(apple_hardware._temperature_group("TRDX"), "gpu")
         self.assertIsNone(apple_hardware._temperature_group("TH0x"))
 
     def test_publisher_uses_injected_native_sample_source(self) -> None:
