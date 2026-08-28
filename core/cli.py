@@ -10015,7 +10015,7 @@ def reconcile_placement_groups_once() -> dict[str, Any]:
                 if not recovery_in_cooldown:
                     states = {
                         item["placement_id"]: item["state"]
-                        for item in current["placements"]
+                        for item in current["placement_states"]
                     }
                     if (
                         current["state"] == "failed"

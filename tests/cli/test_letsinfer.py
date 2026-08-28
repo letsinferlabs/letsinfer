@@ -517,7 +517,7 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         independent_orchestrator = mock.Mock(protection_trips={})
         independent_orchestrator.reconcile.return_value = {
             "state": "running",
-            "placements": [],
+            "placement_states": [],
         }
         with (
             mock.patch.object(
@@ -555,6 +555,68 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         independent_orchestrator.reconcile.assert_called_once_with()
         self.assertEqual(summary["paused"], [affected["placement_group_id"]])
         self.assertEqual(summary["healthy"], [independent["placement_group_id"]])
+
+    def test_reconcile_reads_the_persisted_placement_state_projection(self) -> None:
+        """Consume the orchestrator result schema without failing the healthy group."""
+        placement_group_id = "a" * 32
+        placement_id = "b" * 32
+        row = {
+            "placement_group_id": placement_group_id,
+            "desired_state": "running",
+            "state": "running",
+            "updated_at_unix": 1,
+            "last_error": None,
+            "source": "registry.example/runtime@sha256:" + "c" * 64,
+            "engine_credential_sha256": "d" * 64,
+            "plan": {"placement_group_id": placement_group_id},
+            "placements": [
+                {
+                    "placement_id": placement_id,
+                    "node_id": "e" * 32,
+                    "task_id": "task-0",
+                    "state": "running",
+                    "operation_id": None,
+                    "error": None,
+                }
+            ],
+        }
+        current = {
+            "state": "running",
+            "placement_states": [
+                {"placement_id": placement_id, "state": "running"}
+            ],
+        }
+        store = mock.MagicMock()
+        store.__enter__.return_value = store
+        store.placement_groups.return_value = [row]
+        orchestrator = mock.Mock(protection_trips={})
+        orchestrator.reconcile.return_value = current
+
+        with (
+            mock.patch.object(
+                cli,
+                "_placement_group_lifecycle_lock",
+                return_value=contextlib.nullcontext(),
+            ),
+            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(
+                cli,
+                "_restore_placement_group_orchestrator",
+                return_value=(orchestrator, {}),
+            ),
+            mock.patch.object(
+                cli,
+                "_placement_group_required_link_failure",
+                return_value=None,
+            ),
+            mock.patch.object(cli.time, "time", return_value=1000),
+        ):
+            summary = cli.reconcile_placement_groups_once()
+
+        self.assertEqual(summary["healthy"], [placement_group_id])
+        self.assertEqual(summary["failed"], [])
+        orchestrator.recover.assert_not_called()
+        store.set_placement_group.assert_not_called()
 
     def test_link_pause_persists_reason_without_touching_siblings(self) -> None:
         row = {
