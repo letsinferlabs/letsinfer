@@ -19387,7 +19387,7 @@ class LocalPlacementExecutor:
         expected_protection_root = (
             default_watchdog_data_root()
             / PROTECTION_ROOT_NAME
-            / job["placement_group_id"]
+            / job["placement_id"]
         )
         if protection_root.exists():
             if (
