@@ -216,6 +216,30 @@ class MemberJobTests(unittest.TestCase):
                     ):
                         MemberJobStore(database)
 
+    def test_disappearing_sqlite_sidecar_is_a_benign_close_race(self) -> None:
+        """Tolerate SQLite unlinking a WAL sidecar while its mode is secured."""
+        with tempfile.TemporaryDirectory() as directory:
+            database = pathlib.Path(directory) / "jobs.sqlite3"
+            sidecar = database.with_name(database.name + "-shm")
+            store = MemberJobStore(database)
+            real_exists = pathlib.Path.exists
+            real_stat = pathlib.Path.stat
+
+            def exists(path: pathlib.Path) -> bool:
+                return True if path == sidecar else real_exists(path)
+
+            def file_stat(path: pathlib.Path, *arguments, **options):
+                if path == sidecar:
+                    raise FileNotFoundError(sidecar)
+                return real_stat(path, *arguments, **options)
+
+            with (
+                mock.patch.object(pathlib.Path, "exists", exists),
+                mock.patch.object(pathlib.Path, "stat", file_stat),
+            ):
+                store._secure_files()
+            store.close()
+
     def test_agent_is_idempotent_and_rejects_changed_replay(self) -> None:
         calls: list[str] = []
         with tempfile.TemporaryDirectory() as directory:

@@ -355,11 +355,38 @@ class MemberJobStore:
             raise
 
     def _secure_files(self) -> None:
-        for path in (self.path, self.path.with_name(self.path.name + "-wal"), self.path.with_name(self.path.name + "-shm")):
-            if path.exists():
-                if path.is_symlink() or path.stat().st_uid != os.getuid():
-                    raise MemberJobError(f"member job database file is unsafe: {path}")
-                path.chmod(0o600)
+        """Secure each extant SQLite file through one non-following descriptor."""
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        for path in (
+            self.path,
+            self.path.with_name(self.path.name + "-wal"),
+            self.path.with_name(self.path.name + "-shm"),
+        ):
+            try:
+                descriptor = os.open(path, flags)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise MemberJobError(
+                    f"member job database file is unsafe: {path}"
+                ) from error
+            try:
+                details = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(details.st_mode)
+                    or details.st_uid != os.getuid()
+                ):
+                    raise MemberJobError(
+                        f"member job database file is unsafe: {path}"
+                    )
+                os.fchmod(descriptor, 0o600)
+            finally:
+                os.close(descriptor)
 
     def close(self) -> None:
         self.connection.close()
