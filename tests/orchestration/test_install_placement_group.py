@@ -94,7 +94,7 @@ class PlacementGroupInstallTests(unittest.TestCase):
             self.assertEqual(cli.install(arguments), 17)
         install_nodes.assert_called_once_with(arguments)
 
-    def test_post_start_finalization_failure_stops_group_and_marks_failed(self) -> None:
+    def test_endpoint_contract_and_post_start_failure_rollback(self) -> None:
         member_ids = ("a" * 32,)
         records = [
             {
@@ -223,11 +223,10 @@ class PlacementGroupInstallTests(unittest.TestCase):
                 mock.patch.object(
                     cli,
                     "write_selection",
-                    side_effect=cli.RuntimePackError("synthetic receipt failure"),
-                ),
-                self.assertRaisesRegex(cli.LetsInferError, "runtime receipt failed"),
+                    return_value=pathlib.Path(directory) / "receipt.json",
+                ) as write_selection,
             ):
-                cli.install_placement_group(
+                self.assertEqual(cli.install_placement_group(
                     arguments,
                     source="registry.example/runtime@sha256:" + "9" * 64,
                     manifest_path=pathlib.Path("/control/release.json"),
@@ -235,9 +234,35 @@ class PlacementGroupInstallTests(unittest.TestCase):
                     control_root=pathlib.Path("/control"),
                     receipt={"object_root": "/objects/runtime"},
                     release_identity=sealed_release,
+                ), 0)
+                endpoint = store.groups[-1]["endpoint"]
+                adapter = cli.adapter_for(manifest)
+                self.assertEqual(
+                    endpoint["token_count_path"], adapter.token_count_path
+                )
+                self.assertEqual(
+                    endpoint["token_count_protocol"],
+                    adapter.token_count_protocol,
                 )
 
-        self.assertEqual(instances[0].stop_calls, 1)
+                write_selection.side_effect = cli.RuntimePackError(
+                    "synthetic receipt failure"
+                )
+                with self.assertRaisesRegex(
+                    cli.LetsInferError, "runtime receipt failed"
+                ):
+                    cli.install_placement_group(
+                        arguments,
+                        source="registry.example/runtime@sha256:" + "9" * 64,
+                        manifest_path=pathlib.Path("/control/release.json"),
+                        manifest=manifest,
+                        control_root=pathlib.Path("/control"),
+                        receipt={"object_root": "/objects/runtime"},
+                        release_identity=sealed_release,
+                    )
+
+        self.assertEqual(instances[0].stop_calls, 0)
+        self.assertEqual(instances[1].stop_calls, 1)
         self.assertEqual(store.groups[-1]["state"], "failed")
         self.assertIsNone(store.groups[-1]["endpoint"])
         self.assertEqual(store.allocation_states[-1][1], "released")

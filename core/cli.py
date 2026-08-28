@@ -8882,8 +8882,9 @@ def install_placement_group(
         raise LetsInferError(f"cannot build placement-group plan: {error}") from error
     submit, job_status, group_status = _placement_group_transport()
 
+    adapter = adapter_for(manifest)
     runtime_identity = (
-        f"{manifest['model']['alias']}/{adapter_for(manifest).name}/"
+        f"{manifest['model']['alias']}/{adapter.name}/"
         f"{target_contract(manifest)['id']}@{runtime.runtime['version']}"
         f"@sha256:{runtime.digest}"
     )
@@ -8969,6 +8970,8 @@ def install_placement_group(
                         "url": result["endpoint"],
                         "credential_file": str(credential_file),
                         "ca_file": str(certificate_file),
+                        "token_count_path": adapter.token_count_path,
+                        "token_count_protocol": adapter.token_count_protocol,
                         "max_active_requests": manifest["serving"]["max_active_requests"],
                         "max_context_tokens": manifest["serving"]["max_context_tokens"],
                         "healthy": True,
