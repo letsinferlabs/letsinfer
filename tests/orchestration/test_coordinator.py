@@ -325,6 +325,43 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         self.assertEqual(removed["state"], "removed")
         self.assertEqual(removed["desired_state"], "removed")
 
+    def test_stop_after_allocation_release_never_reacquires_devices(self) -> None:
+        """Stop exact placements while leaving prematurely released devices released."""
+        calls: list[tuple[str, str]] = []
+
+        def submit(_member, job, _credential):
+            calls.append((job["action"], job["placement"]["task_id"]))
+            return {
+                "protocol": PROTOCOL,
+                "operation_id": job["operation_id"],
+                "replayed": False,
+                "state": "succeeded",
+                "result": {"state": job["action"]},
+            }
+
+        orchestrator = self.orchestrator(submit)
+        orchestrator.stage()
+        orchestrator.start()
+        self.store.set_placement_group_allocation_state(
+            self.plan.placement_group_id, "draining"
+        )
+        self.store.set_placement_group_allocation_state(
+            self.plan.placement_group_id, "released"
+        )
+        calls.clear()
+
+        stopped = orchestrator.stop_after_allocation_release()
+
+        self.assertEqual(stopped["state"], "stopped")
+        self.assertEqual(
+            {row["state"] for row in self.store.device_allocations()},
+            {"released"},
+        )
+        self.assertEqual(
+            {task_id for action, task_id in calls if action == "stop"},
+            {"task-0", "task-1", "task-2"},
+        )
+
     def test_failed_removal_retry_skips_already_removed_tasks(self) -> None:
         calls: list[tuple[str, str]] = []
         fail_task_two = True
