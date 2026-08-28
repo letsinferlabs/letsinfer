@@ -81,6 +81,7 @@ SHORT_WORKLOAD_BENCHMARK_GENERATOR_VERSION = 5
 SHORT_CONCURRENCY_BENCHMARK_GENERATOR_VERSION = 6
 TTFT_CACHE_BENCHMARK_GENERATOR_VERSION = 7
 EXECUTION_PAYLOAD_BENCHMARK_GENERATOR_VERSION = 8
+CONTEXT_ISOLATED_BENCHMARK_ISOLATION = "fresh-context"
 BENCHMARK_TOKENIZER_CAPABILITY = "engine-rendered-chat-count-v1"
 BENCHMARK_RENDER_CONTRACT = "openai-chat-user-v1"
 SELECTION_SCHEMA_VERSION = 4
@@ -565,9 +566,13 @@ def validate_benchmark_contract(value: Any) -> dict[str, Any]:
                 f"{where}.execution must contain exactly "
                 + ", ".join(sorted(execution_fields))
             )
-        if execution.get("isolation") != "fresh-matrix":
+        allowed_isolations = {"fresh-matrix"}
+        if value["schema_version"] == EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION:
+            allowed_isolations.add(CONTEXT_ISOLATED_BENCHMARK_ISOLATION)
+        if execution.get("isolation") not in allowed_isolations:
+            expected = " or ".join(sorted(allowed_isolations))
             raise RuntimePackError(
-                f"{where}.execution.isolation must be fresh-matrix"
+                f"{where}.execution.isolation must be {expected}"
             )
         if execution.get("prefix_state") != "shared":
             raise RuntimePackError(

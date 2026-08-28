@@ -48,7 +48,10 @@ Materialization rules:
    the schema-4-style declared context matrix. Generator v6/schema 6 runs each
    fixed short domain at C1, C2, and C4 before that long matrix. Generator
    v7/schema 7 then runs one unique 64K code prompt cold and immediately
-   reloads its exact bytes with a one-token response budget.
+   reloads its exact bytes with a one-token response budget. Generator
+   v8/schema 8 may use `fresh-context`: short, each long-context tier, and the
+   cold/warm pair receive separate fresh processes while cells inside one tier
+   retain the same shared-prefix ordering.
 
 Generated prompt files are ignored evidence. They are never committed to core
 or packaged in a runtime.

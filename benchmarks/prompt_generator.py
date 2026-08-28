@@ -26,6 +26,7 @@ from core.runtime_packs import (  # noqa: E402
     BENCHMARK_RENDER_CONTRACT,
     BENCHMARK_SUITE,
     BENCHMARK_TOKENIZER_CAPABILITY,
+    EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
     SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
     SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
@@ -134,6 +135,7 @@ def _uses_shared_stream_prefix(contract: dict[str, Any]) -> bool:
             SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
             SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
             TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+            EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
         }
         and isinstance(execution, dict)
         and execution.get("stream_prefix") == "shared-body"
@@ -150,6 +152,7 @@ def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
         SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
         TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     }:
         short = contract["short"]
         for concurrency in short.get("concurrencies", [1]):
@@ -164,7 +167,10 @@ def contract_cells(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
                     "concurrency": concurrency,
                     "max_tokens": short["request"]["output_tokens"],
                 }
-    if contract["schema_version"] == TTFT_CACHE_BENCHMARK_SCHEMA_VERSION:
+    if contract["schema_version"] in {
+        TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
+    }:
         ttft_cache = contract["ttft_cache"]
         for phase in ("ttftcold", "ttftwarm"):
             name = f"{phase}-code-c1"
@@ -232,6 +238,7 @@ def materialize(
             SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
             SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
             TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+            EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
         }
         else 2
     )
@@ -240,6 +247,7 @@ def materialize(
         SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
         TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     }:
         short = contract["short"]
         materialization_cases.append(
@@ -267,7 +275,10 @@ def materialize(
         }
         for case in contract["cases"]
     )
-    if contract["schema_version"] == TTFT_CACHE_BENCHMARK_SCHEMA_VERSION:
+    if contract["schema_version"] in {
+        TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
+    }:
         ttft_cache = contract["ttft_cache"]
         materialization_cases.extend(
             {
@@ -291,6 +302,7 @@ def materialize(
         SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,
         SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
         TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     }:
         template_hashes = {
             **{

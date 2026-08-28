@@ -832,6 +832,26 @@ class RuntimePackTests(unittest.TestCase):
         value["tokenizer"]["engine_payload_sha256"] = "8" * 64  # type: ignore[index]
         self.assertIs(runtime_packs.validate_benchmark_contract(value), value)
 
+        context_isolated = json.loads(json.dumps(value))
+        context_isolated["execution"]["isolation"] = "fresh-context"
+        self.assertIs(
+            runtime_packs.validate_benchmark_contract(context_isolated),
+            context_isolated,
+        )
+
+        legacy = json.loads(json.dumps(context_isolated))
+        legacy["schema_version"] = runtime_packs.TTFT_CACHE_BENCHMARK_SCHEMA_VERSION
+        legacy["generator"]["version"] = (
+            runtime_packs.TTFT_CACHE_BENCHMARK_GENERATOR_VERSION
+        )
+        legacy["tokenizer"]["engine_image_sha256"] = legacy["tokenizer"].pop(
+            "engine_payload_sha256"
+        )
+        with self.assertRaisesRegex(
+            runtime_packs.RuntimePackError, "isolation must be fresh-matrix"
+        ):
+            runtime_packs.validate_benchmark_contract(legacy)
+
         with tempfile.TemporaryDirectory() as directory:
             source = self._source(pathlib.Path(directory))
             runtime = json.loads(

@@ -31,6 +31,42 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
+    def test_context_boundaries_keep_ttft_pair_together(self) -> None:
+        cells = [
+            {"name": name}
+            for name in (
+                "short-code-c1",
+                "short-prose-c1",
+                "32k-code-c1",
+                "32k-code-c2",
+                "64k-code-c1",
+                "ttftcold-code-c1",
+                "ttftwarm-code-c1",
+            )
+        ]
+        self.assertEqual(
+            runtime_matrix.benchmark_context_boundaries(cells),
+            [
+                ("short", True, False),
+                ("short", False, True),
+                ("32k", True, False),
+                ("32k", False, True),
+                ("64k", True, True),
+                ("ttft", True, False),
+                ("ttft", False, True),
+            ],
+        )
+
+    def test_active_context_restart_uses_exact_group_lifecycle(self) -> None:
+        with (
+            mock.patch("core.cli._stop_placement_group_by_id") as stop,
+            mock.patch("core.cli._start_placement_group_by_id") as start,
+        ):
+            runtime_matrix.restart_active_placement_group("a" * 32)
+
+        stop.assert_called_once_with("a" * 32)
+        start.assert_called_once_with("a" * 32)
+
     def test_active_placement_group_is_an_internal_outer_matrix_mode(self) -> None:
         with mock.patch.object(
             runtime_matrix.sys,
