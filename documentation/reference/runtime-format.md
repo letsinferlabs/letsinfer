@@ -283,6 +283,9 @@ matrix. Prompts and runners stay in core, so every model receives the same
 benchmark bytes and measurement rules. Native payloads produce schema-8 records
 that bind their distribution kind and payload SHA-256. The trusted bot aggregates accepted records into
 `benchmark.consensus.json`, which is excluded from executable pack bytes.
+Schema-8 contracts may use `execution.isolation: fresh-context`: short, each
+long-context tier, and the cold/warm TTFT pair receive independent fresh
+processes while C1/C2/C4 inside one tier retain shared prefix state.
 
 ## Deterministic runtime artifact
 
