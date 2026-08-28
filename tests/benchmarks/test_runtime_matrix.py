@@ -293,6 +293,37 @@ class RuntimeMatrixTests(unittest.TestCase):
         ):
             runtime_matrix.ttft_cache_benchmark_result(rows, cells)
 
+    def test_ttft_cache_finalization_accepts_only_schema_seven_or_eight(self) -> None:
+        """Accept TTFT cache evidence for both supported payload-bound contracts."""
+        ttft_cache = {"cold_ttft_seconds": 60.0, "warm_ttft_seconds": 2.0}
+        for schema_version in (
+            runtime_matrix.TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+            runtime_matrix.EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
+        ):
+            with self.subTest(schema_version=schema_version):
+                runtime_matrix.validate_ttft_cache_contract(
+                    ttft_cache,
+                    shared_matrix=True,
+                    benchmark_contract={
+                        "schema_version": schema_version,
+                        "execution": {"isolation": "fresh-context"},
+                    },
+                )
+
+        for schema_version in (6, 9):
+            with (
+                self.subTest(schema_version=schema_version),
+                self.assertRaisesRegex(
+                    runtime_matrix.RuntimeMatrixError,
+                    "schema 7 or 8",
+                ),
+            ):
+                runtime_matrix.validate_ttft_cache_contract(
+                    ttft_cache,
+                    shared_matrix=True,
+                    benchmark_contract={"schema_version": schema_version},
+                )
+
     def test_runtime_config_uses_the_nested_benchmark_contract(self) -> None:
         contract = {
             "tokenizer": {
