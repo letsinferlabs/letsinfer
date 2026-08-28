@@ -5518,11 +5518,11 @@ def wait_for_ready(
                 details.append(_safe_diagnostic(runtime_error))
             suffix = f" ({'; '.join(details)})" if details else ""
             raise LetsInferError(f"Engine container exited during startup{suffix}")
-        require_memory_reserve(manifest, phase="runtime")
         docker_health = (
             (inspection.get("State", {}).get("Health") or {}).get("Status")
         )
         if docker_health == "healthy" and health_ready(port, cert_path):
+            require_memory_reserve(manifest, phase="runtime")
             return
         _cancellable_sleep(2, cancelled)
     raise LetsInferError(
