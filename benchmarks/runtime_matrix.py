@@ -44,6 +44,7 @@ from core.exact_tokens import (  # pylint: disable=wrong-import-position
     prepare_token_count_request,
 )
 from core.runtime_packs import (  # pylint: disable=wrong-import-position
+    CONTEXT_ISOLATED_BENCHMARK_ISOLATION,
     EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     RuntimePackError,
     TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
@@ -364,6 +365,7 @@ def parse_arguments() -> argparse.Namespace:
         "--active-container", action="store_true", help=argparse.SUPPRESS
     )
     parser.add_argument("--active-placement-group", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--active-placement-group-id", help=argparse.SUPPRESS)
     parser.add_argument(
         "--active-placement-container", action="store_true", help=argparse.SUPPRESS
     )
@@ -1564,6 +1566,46 @@ def _serve_command(
     ]
 
 
+def benchmark_context(cell_name: str) -> str:
+    """Return the process-isolation group for one ordered benchmark cell."""
+    context = cell_name.split("-", 1)[0]
+    return "ttft" if context in TTFT_CONTEXTS else context
+
+
+def benchmark_context_boundaries(
+    cells: list[dict[str, Any]],
+) -> list[tuple[str, bool, bool]]:
+    """Mark the first and last cell owned by every ordered context process."""
+    contexts = [benchmark_context(cell["name"]) for cell in cells]
+    return [
+        (
+            context,
+            index == 0 or contexts[index - 1] != context,
+            index == len(contexts) - 1 or contexts[index + 1] != context,
+        )
+        for index, context in enumerate(contexts)
+    ]
+
+
+def restart_active_placement_group(placement_group_id: str) -> None:
+    """Restart one exact active group through Core's generic lifecycle."""
+    if re.fullmatch(r"[0-9a-f]{32}", placement_group_id) is None:
+        raise RuntimeMatrixError("active placement-group identity is invalid")
+    try:
+        from core.cli import (  # pylint: disable=import-outside-toplevel
+            LetsInferError,
+            _start_placement_group_by_id,
+            _stop_placement_group_by_id,
+        )
+
+        _stop_placement_group_by_id(placement_group_id)
+        _start_placement_group_by_id(placement_group_id)
+    except LetsInferError as error:
+        raise RuntimeMatrixError(
+            f"cannot restart active benchmark placement group: {error}"
+        ) from error
+
+
 def _collect_cell_evidence(
     arguments: argparse.Namespace,
     cell: dict[str, Any],
@@ -1699,9 +1741,11 @@ def run_isolated_matrix(
         if isinstance(benchmark_contract, dict)
         else None
     )
+    isolation = execution.get("isolation") if isinstance(execution, dict) else None
+    context_isolated = isolation == CONTEXT_ISOLATED_BENCHMARK_ISOLATION
     shared_matrix = bool(
         isinstance(execution, dict)
-        and execution.get("isolation") == "fresh-matrix"
+        and isolation in {"fresh-matrix", CONTEXT_ISOLATED_BENCHMARK_ISOLATION}
         and execution.get("prefix_state") == "shared"
         and execution.get("samples_per_cell") == 1
     )
@@ -1711,7 +1755,16 @@ def run_isolated_matrix(
     active_placement_group = bool(getattr(arguments, "active_placement_group", False))
     if active_placement_group and not shared_matrix:
         raise RuntimeMatrixError(
-            "active placement-group benchmarking requires a fresh-matrix shared contract"
+            "active placement-group benchmarking requires a shared contract"
+        )
+    active_placement_group_id = getattr(arguments, "active_placement_group_id", None)
+    if context_isolated and active_placement_group and active_placement_group_id is None:
+        raise RuntimeMatrixError(
+            "context-isolated active benchmarking requires its exact placement-group identity"
+        )
+    if not active_placement_group and active_placement_group_id is not None:
+        raise RuntimeMatrixError(
+            "active placement-group identity requires active benchmarking"
         )
     expected_low, expected_high = expected_duration_range(
         selected,
@@ -1750,10 +1803,10 @@ def run_isolated_matrix(
                 "isolated benchmark requires the private engine token-count endpoint"
             )
         materialization_store = stores_root / (
-            "matrix" if shared_matrix else "materialization"
+            "matrix" if shared_matrix and not context_isolated else "materialization"
         )
         materialization_launch = launches_root / (
-            "matrix" if shared_matrix else "materialization"
+            "matrix" if shared_matrix and not context_isolated else "materialization"
         )
         materialization_started = False
         materialization_error: BaseException | None = None
@@ -1814,7 +1867,7 @@ def run_isolated_matrix(
             materialization_error = error
         stop_error: BaseException | None = None
         if materialization_started and (
-            materialization_error is not None or not shared_matrix
+            materialization_error is not None or not shared_matrix or context_isolated
         ):
             try:
                 stop_output = _command_output(
@@ -1846,7 +1899,7 @@ def run_isolated_matrix(
             selected = [materialized_cells[name] for name in requested_names]
             validate_capacity(manifest, selected)
         except BaseException:
-            if shared_matrix:
+            if shared_matrix and not context_isolated:
                 _command_output(
                     [
                         str(arguments.letsinfer_bin),
@@ -1864,18 +1917,25 @@ def run_isolated_matrix(
 
     rows: list[dict[str, Any]] = []
     container_ids: set[str] = set()
+    context_process_running = False
+    context_boundaries = benchmark_context_boundaries(selected)
     for cell_index, cell in enumerate(selected, start=1):
         name = cell["name"]
+        context_name, first_in_context, last_in_context = context_boundaries[
+            cell_index - 1
+        ]
         _CURRENT_CELL = name
         cell_output = results_root / name
-        cell_store = stores_root / ("matrix" if shared_matrix else name)
-        cell_launch = launches_root / ("matrix" if shared_matrix else name)
-        launch_attempted = shared_matrix and not active_placement_group
+        lifecycle_name = context_name if context_isolated else "matrix"
+        cell_store = stores_root / (lifecycle_name if shared_matrix else name)
+        cell_launch = launches_root / (lifecycle_name if shared_matrix else name)
         cell_error: BaseException | None = None
         row: dict[str, Any] | None = None
         try:
             paths = [(cell_output, "result")]
-            if not shared_matrix:
+            if not shared_matrix or (
+                context_isolated and first_in_context and not active_placement_group
+            ):
                 paths.extend(
                     [
                         (cell_store, "store"),
@@ -1893,8 +1953,19 @@ def run_isolated_matrix(
                 f"{len(selected) - cell_index} remaining",
                 phase=f"workload:{name}:starting",
             )
-            if not shared_matrix:
-                launch_attempted = True
+            if context_isolated and active_placement_group and first_in_context:
+                assert isinstance(active_placement_group_id, str)
+                with benchmark_activity(
+                    f"Resetting runtime state for {context_name}",
+                    done=f"Fresh runtime ready for {context_name}",
+                    phase=f"workload:{name}:loading-model",
+                ):
+                    restart_active_placement_group(active_placement_group_id)
+            if not active_placement_group and (
+                not shared_matrix or (context_isolated and first_in_context)
+            ):
+                if context_isolated:
+                    context_process_running = True
                 with benchmark_activity(
                     f"Loading runtime for {name}",
                     done=f"Runtime ready for {name}",
@@ -1940,11 +2011,23 @@ def run_isolated_matrix(
             cell_error = error
 
         stop_error: BaseException | None = None
-        if launch_attempted and (
-            not shared_matrix
-            or cell_error is not None
-            or cell_index == len(selected)
-        ):
+        should_stop = bool(
+            not active_placement_group
+            and (
+                (not shared_matrix)
+                or (
+                    context_isolated
+                    and context_process_running
+                    and (cell_error is not None or last_in_context)
+                )
+                or (
+                    shared_matrix
+                    and not context_isolated
+                    and (cell_error is not None or cell_index == len(selected))
+                )
+            )
+        )
+        if should_stop:
             try:
                 stop_output = _command_output(
                     [
@@ -1958,6 +2041,8 @@ def run_isolated_matrix(
                 )
                 if stop_output.strip():
                     print(stop_output.strip(), flush=True)
+                if context_isolated:
+                    context_process_running = False
             except BaseException as error:
                 stop_error = error
         if cell_error is not None:
@@ -2135,7 +2220,9 @@ def run_isolated_matrix(
     index = {
         "schema_version": 1,
         "contract": (
-            "letsinfer-shared-runtime-matrix"
+            "letsinfer-context-shared-runtime-matrix"
+            if context_isolated
+            else "letsinfer-shared-runtime-matrix"
             if shared_matrix
             else "letsinfer-isolated-runtime-matrix"
         ),
@@ -2162,9 +2249,17 @@ def run_isolated_matrix(
         "selected_cells": [cell["name"] for cell in selected],
         "fresh_process_per_cell": not shared_matrix,
         "fresh_store_per_cell": not shared_matrix,
-        "fresh_process_per_matrix": shared_matrix,
-        "fresh_store_per_matrix": shared_matrix,
-        "prefix_state": "shared" if shared_matrix else "per-cell",
+        "fresh_process_per_matrix": shared_matrix and not context_isolated,
+        "fresh_store_per_matrix": shared_matrix and not context_isolated,
+        "fresh_process_per_context": context_isolated,
+        "fresh_store_per_context": context_isolated,
+        "prefix_state": (
+            "shared-within-context"
+            if context_isolated
+            else "shared"
+            if shared_matrix
+            else "per-cell"
+        ),
         "stream_prefix": "shared-body" if shared_stream_prefix else "distinct",
         "samples_per_cell": 1,
         "ttft_cache": ttft_cache_result,
@@ -2178,7 +2273,7 @@ def run_isolated_matrix(
         output / "matrix-index.sha256", f"{index_sha}  matrix-index.json\n"
     )
     print(
-        f"{'SHARED' if shared_matrix else 'ISOLATED'} MATRIX PASS "
+        f"{'CONTEXT-SHARED' if context_isolated else 'SHARED' if shared_matrix else 'ISOLATED'} MATRIX PASS "
         f"cells={len(rows)} index_sha256={index_sha} "
         f"evidence={output}",
         flush=True,
