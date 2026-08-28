@@ -119,7 +119,7 @@ class RuntimeMatrixTests(unittest.TestCase):
         ):
             runtime_matrix._command_output(["letsinfer", "serve"], "launch")
 
-    def test_concurrent_public_decode_uses_the_stream_p50(self) -> None:
+    def test_concurrent_public_decode_rejects_buffered_stream_outliers(self) -> None:
         cell = {
             "target_prompt_tokens": 260_000,
             "max_tokens": 128,
@@ -131,8 +131,45 @@ class RuntimeMatrixTests(unittest.TestCase):
             "prompt_tokens": [254_400] * 4,
             "concurrency": 4,
             "decode_tokens_per_second": {
+                "count": 4,
+                "min": 44.71,
                 "mean": 87_201.337,
                 "p50": 54.918,
+                "max": 110_304.34,
+            },
+            "ttft_ms": {"p50": 6_991.0, "p95": 7_700.0},
+            "cached_prompt_tokens": {"max": 254_400.0},
+            "aggregate_completion_tokens_per_second": 38.199,
+            "measurement_started_unix_ms": 10_000,
+        }
+
+        with mock.patch.object(
+            runtime_matrix.benchmark_record,
+            "watchdog_summary",
+            return_value={},
+        ):
+            result = runtime_matrix.public_benchmark_result(cell, summary, [])
+
+        self.assertIsNone(result["decode_tps"])
+        self.assertEqual(result["ttft_statistic"], "p50")
+
+    def test_concurrent_public_decode_uses_coherent_stream_p50(self) -> None:
+        cell = {
+            "target_prompt_tokens": 260_000,
+            "max_tokens": 128,
+            "prompt_domain": "code",
+            "prompt_suite": "letsinfer-code-prose-v1",
+            "prompt_set_sha256": "a" * 64,
+        }
+        summary = {
+            "prompt_tokens": [254_400] * 4,
+            "concurrency": 4,
+            "decode_tokens_per_second": {
+                "count": 4,
+                "min": 44.71,
+                "mean": 61.37,
+                "p50": 54.918,
+                "max": 91.0,
             },
             "ttft_ms": {"p50": 6_991.0, "p95": 7_700.0},
             "cached_prompt_tokens": {"max": 254_400.0},
@@ -292,6 +329,37 @@ class RuntimeMatrixTests(unittest.TestCase):
             runtime_matrix.RuntimeMatrixError, "larger exact cache hit"
         ):
             runtime_matrix.ttft_cache_benchmark_result(rows, cells)
+
+    def test_ttft_cache_finalization_accepts_only_schema_seven_or_eight(self) -> None:
+        """Accept TTFT cache evidence for both supported payload-bound contracts."""
+        ttft_cache = {"cold_ttft_seconds": 60.0, "warm_ttft_seconds": 2.0}
+        for schema_version in (
+            runtime_matrix.TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+            runtime_matrix.EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
+        ):
+            with self.subTest(schema_version=schema_version):
+                runtime_matrix.validate_ttft_cache_contract(
+                    ttft_cache,
+                    shared_matrix=True,
+                    benchmark_contract={
+                        "schema_version": schema_version,
+                        "execution": {"isolation": "fresh-context"},
+                    },
+                )
+
+        for schema_version in (6, 9):
+            with (
+                self.subTest(schema_version=schema_version),
+                self.assertRaisesRegex(
+                    runtime_matrix.RuntimeMatrixError,
+                    "schema 7 or 8",
+                ),
+            ):
+                runtime_matrix.validate_ttft_cache_contract(
+                    ttft_cache,
+                    shared_matrix=True,
+                    benchmark_contract={"schema_version": schema_version},
+                )
 
     def test_runtime_config_uses_the_nested_benchmark_contract(self) -> None:
         contract = {

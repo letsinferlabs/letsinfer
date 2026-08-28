@@ -57,6 +57,7 @@ CONTEXTS = ("32k", "64k", "128k", "256k")
 PLAN_CONTEXTS = ("short",) + CONTEXTS
 TTFT_CONTEXTS = ("ttftcold", "ttftwarm")
 ALL_PLAN_CONTEXTS = PLAN_CONTEXTS + TTFT_CONTEXTS
+MAX_PUBLIC_DECODE_SPREAD_RATIO = 100.0
 SAFE_CELL = re.compile(
     r"(?:(?:short|32k|64k|128k|256k)-(?:code|prose)-c(?:1|2|4|8|16)"
     r"|ttft(?:cold|warm)-code-c1)"
@@ -1186,8 +1187,29 @@ def public_benchmark_result(
         raise RuntimeMatrixError("matrix summary is missing public metrics")
     decode_statistic = "mean" if concurrency == 1 else "p50"
     decode_value = decode.get(decode_statistic)
+    decode_count = decode.get("count")
+    decode_minimum = decode.get("min")
+    decode_maximum = decode.get("max")
+    # A client can drain several buffered SSE lines with nearly identical
+    # timestamps.  Keep raw timings, but do not publish a population statistic
+    # when streams disagree by two orders of magnitude.
+    if decode_count != concurrency:
+        decode_value = None
+    elif concurrency > 1 and all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in (decode_minimum, decode_maximum)
+    ):
+        if (
+            float(decode_minimum) <= 0
+            or float(decode_maximum) / float(decode_minimum)
+            > MAX_PUBLIC_DECODE_SPREAD_RATIO
+        ):
+            decode_value = None
     cached_max = cached.get("max")
-    if not isinstance(decode_value, (int, float)) or isinstance(decode_value, bool):
+    if decode_value is not None and (
+        not isinstance(decode_value, (int, float))
+        or isinstance(decode_value, bool)
+    ):
         raise RuntimeMatrixError("matrix summary has no decode throughput")
     if not isinstance(cached_max, (int, float)) or isinstance(cached_max, bool):
         raise RuntimeMatrixError("matrix summary has no cache observation")
@@ -1311,6 +1333,27 @@ def ttft_cache_benchmark_result(
             / cold_ttft_seconds
         ),
     }
+
+
+def validate_ttft_cache_contract(
+    ttft_cache_result: dict[str, Any] | None,
+    *,
+    shared_matrix: bool,
+    benchmark_contract: dict[str, Any] | None,
+) -> None:
+    """Require one supported shared contract for emitted TTFT cache evidence."""
+    supported_schemas = {
+        TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
+    }
+    if ttft_cache_result is not None and (
+        not shared_matrix
+        or benchmark_contract is None
+        or benchmark_contract.get("schema_version") not in supported_schemas
+    ):
+        raise RuntimeMatrixError(
+            "64K TTFT cache evidence requires shared benchmark contract schema 7 or 8"
+        )
 
 
 def attach_sealed_comparison(
@@ -2078,15 +2121,11 @@ def run_isolated_matrix(
         if row["cell"] not in {"ttftcold-code-c1", "ttftwarm-code-c1"}
     ]
     ttft_cache_result = ttft_cache_benchmark_result(rows, cells_by_name)
-    if ttft_cache_result is not None and (
-        not shared_matrix
-        or benchmark_contract is None
-        or benchmark_contract.get("schema_version")
-        != TTFT_CACHE_BENCHMARK_SCHEMA_VERSION
-    ):
-        raise RuntimeMatrixError(
-            "64K TTFT cache evidence requires shared benchmark contract schema 7"
-        )
+    validate_ttft_cache_contract(
+        ttft_cache_result,
+        shared_matrix=shared_matrix,
+        benchmark_contract=benchmark_contract,
+    )
     assert arguments.installation_id is not None
     assert arguments.benchmark_timestamp_unix_ns is not None
     assert arguments.benchmark_contract_sha256 is not None
