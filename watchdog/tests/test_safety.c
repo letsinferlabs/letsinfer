@@ -149,6 +149,40 @@ void test_safety_supervisor_discovers_private_targets(void) {
     );
     TEST_ASSERT(length > 0 && (size_t)length < sizeof(target));
     TEST_ASSERT(mkdir(target, 0700) == 0);
+    char state[512];
+    char ack[512];
+    TEST_ASSERT(snprintf(
+        state,
+        sizeof(state),
+        "%s/protected-placement.state",
+        target
+    ) > 0);
+    TEST_ASSERT(snprintf(
+        ack,
+        sizeof(ack),
+        "%s/protected-placement.ack",
+        target
+    ) > 0);
+    const int state_fd = open(
+        state,
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+        0600
+    );
+    TEST_ASSERT(state_fd >= 0);
+    const char *pending =
+        "version=1\n"
+        "generation=0123456789abcdef0123456789abcdef\n"
+        "phase=pending\n"
+        "container_name=letsinfer-placement-fixture\n"
+        "container_id=-\n"
+        "pid=-\n"
+        "start_ticks=-\n"
+        "boot_id=-\n"
+        "cgroup=-\n";
+    TEST_ASSERT(
+        write(state_fd, pending, strlen(pending)) == (ssize_t)strlen(pending)
+    );
+    TEST_ASSERT(close(state_fd) == 0);
     watchdog_safety_config config = {
         .state_path = root,
         .thresholds = thresholds()
@@ -160,6 +194,35 @@ void test_safety_supervisor_discovers_private_targets(void) {
     TEST_ASSERT(watchdog_safety_supervisor_active(&supervisor) == 0u);
     TEST_ASSERT(!watchdog_safety_supervisor_armed(&supervisor));
     TEST_ASSERT(!watchdog_safety_supervisor_tripped(&supervisor));
+    watchdog_safety_result results[WATCHDOG_SAFETY_MAX_TARGETS];
+    size_t result_count = 0u;
+    const watchdog_sample sample = {0};
+    TEST_ASSERT(watchdog_safety_supervisor_tick(
+        &supervisor,
+        &sample,
+        NULL,
+        NULL,
+        results,
+        &result_count
+    ) == 0);
+    TEST_ASSERT(result_count == 1u);
+    TEST_ASSERT(strcmp(results[0].kind, "protection.pending") == 0);
+    const int ack_fd = open(ack, O_RDONLY | O_CLOEXEC);
+    TEST_ASSERT(ack_fd >= 0);
+    char acknowledgement[512];
+    const ssize_t ack_length = read(
+        ack_fd,
+        acknowledgement,
+        sizeof(acknowledgement) - 1u
+    );
+    TEST_ASSERT(close(ack_fd) == 0);
+    TEST_ASSERT(ack_length > 0);
+    acknowledgement[ack_length] = '\0';
+    TEST_ASSERT(strstr(
+        acknowledgement,
+        "generation=0123456789abcdef0123456789abcdef"
+    ) != NULL);
+    TEST_ASSERT(strstr(acknowledgement, "phase=pending") != NULL);
     watchdog_safety_supervisor_close(&supervisor);
     char events[512];
     const int events_length = snprintf(
@@ -169,6 +232,8 @@ void test_safety_supervisor_discovers_private_targets(void) {
         target
     );
     TEST_ASSERT(events_length > 0 && (size_t)events_length < sizeof(events));
+    TEST_ASSERT(unlink(ack) == 0);
+    TEST_ASSERT(unlink(state) == 0);
     TEST_ASSERT(unlink(events) == 0);
     TEST_ASSERT(rmdir(target) == 0);
     TEST_ASSERT(rmdir(root) == 0);
@@ -187,7 +252,7 @@ void test_safety_process_exit_latches_trip(void) {
     char state[512];
     char trip[512];
     char events[512];
-    TEST_ASSERT(snprintf(state, sizeof(state), "%s/protected-engine.state", root) > 0);
+    TEST_ASSERT(snprintf(state, sizeof(state), "%s/protected-placement.state", root) > 0);
     TEST_ASSERT(snprintf(trip, sizeof(trip), "%s/protection-trip.json", root) > 0);
     TEST_ASSERT(snprintf(events, sizeof(events), "%s/safety-events.ndjson", root) > 0);
 
@@ -257,7 +322,7 @@ void test_safety_descriptor_loss_degrades_without_trip(void) {
     char state[512];
     char trip[512];
     char events[512];
-    TEST_ASSERT(snprintf(state, sizeof(state), "%s/protected-engine.state", root) > 0);
+    TEST_ASSERT(snprintf(state, sizeof(state), "%s/protected-placement.state", root) > 0);
     TEST_ASSERT(snprintf(trip, sizeof(trip), "%s/protection-trip.json", root) > 0);
     TEST_ASSERT(snprintf(events, sizeof(events), "%s/safety-events.ndjson", root) > 0);
 
