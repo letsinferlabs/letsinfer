@@ -16458,7 +16458,13 @@ def benchmark_runtime(arguments: argparse.Namespace) -> int:
         ):
             raise LetsInferError("installed runtime has no valid installation identity")
         if benchmark_placement_group_id is not None:
-            command.append("--active-placement-group")
+            command.extend(
+                [
+                    "--active-placement-group",
+                    "--active-placement-group-id",
+                    benchmark_placement_group_id,
+                ]
+            )
             if arguments.container is None:
                 command.extend(["--container", config["name"]])
         if arguments.base_url is None:

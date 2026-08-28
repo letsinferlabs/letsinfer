@@ -21,8 +21,10 @@ validated public `benchmark.json`.
   context matrix. Schema-6 expands both short domains to C1, C2, and C4.
   Schema-7 adds a dedicated 64K cold/warm TTFT pair that reloads one exact
   prompt with a one-token response budget. Schema-8 keeps the short C1/C2/C4
-  matrix and binds tokenization and results to the Engine execution payload
-  instead of container packaging metadata.
+  matrix, binds tokenization and results to the Engine execution payload
+  instead of container packaging metadata, and may select `fresh-context`
+  isolation so unrelated context tiers receive independent processes while
+  C1/C2/C4 within one tier share prefix state.
 - **Durable jobs** — Ctrl-C detaches, `letsinfer benchmark` reattaches to live
   progress, and an explicit stop safely restores prior inference.
 - **Full-system evidence** — JSON records throughput, TTFT, prefix state,
@@ -75,6 +77,12 @@ matrix and requires the reload to report a larger prefix-cache hit. The resident
 stays active while the worker temporarily owns inference. On success, failure,
 cancellation, or terminal disconnect, the worker restores the prior service
 state.
+
+Schema-8 `fresh-context` isolation groups short, each declared long context,
+and the cold/warm TTFT pair separately. Every group starts one fresh process
+and store; its C1/C2/C4 cells retain shared prefix state. This prevents an
+unrelated earlier workload from changing a nominally cold C1 while preserving
+the concurrency and cache progression the context group is intended to measure.
 
 The runner rejects runtime, model, Engine OCI, tokenizer, prompt, source,
 container, cache, or sampling drift. It also rejects unsafe launch headroom and

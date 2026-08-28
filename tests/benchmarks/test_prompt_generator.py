@@ -104,7 +104,47 @@ def ttft_cache_contract() -> dict[str, object]:
     return value
 
 
+def execution_payload_contract() -> dict[str, object]:
+    value = ttft_cache_contract()
+    value["schema_version"] = 8
+    value["generator"]["version"] = 8  # type: ignore[index]
+    value["execution"]["isolation"] = "fresh-context"  # type: ignore[index]
+    value["tokenizer"]["engine_payload_sha256"] = value["tokenizer"].pop(  # type: ignore[index,union-attr]
+        "engine_image_sha256"
+    )
+    return value
+
+
 class PromptGeneratorTests(unittest.TestCase):
+    def test_schema_eight_retains_short_shared_and_ttft_workloads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "schema-eight"
+            plan_path = prompt_generator.materialize(
+                execution_payload_contract(),
+                output,
+                len,
+                model_id="fixture-model",
+                model_revision="a" * 40,
+            )
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            contexts = {row["name"]: row for row in plan["contexts"]}
+
+        self.assertEqual(
+            list(contexts), ["short", "32k", "ttftcold", "ttftwarm"]
+        )
+        self.assertEqual(
+            sorted(contexts["short"]["cells"]),
+            [
+                "code-c1",
+                "code-c2",
+                "code-c4",
+                "prose-c1",
+                "prose-c2",
+                "prose-c4",
+            ],
+        )
+        self.assertEqual(len(plan["fixtures"]), 14)
+
     def test_schema_seven_materializes_one_exact_64k_ttft_reload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "schema-seven"
