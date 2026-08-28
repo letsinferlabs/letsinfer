@@ -21,6 +21,7 @@ from unittest import mock
 from core import cli
 from core.engine_protocol import artifact_storage_slug
 from core.runtime_packs import RuntimePackError, candidate_id, validate_runtime_config
+from tests.gateway.helpers import routing_facts, routing_link
 from tests.orchestration.helpers import parallel_contract
 from tests.runtime_fixture import runtime_candidate
 
@@ -650,6 +651,79 @@ class RuntimeCandidateCliTests(unittest.TestCase):
         self.assertEqual(calls["a" * 32]["peer_endpoint"], "https://10.44.0.2:9770")
         self.assertEqual(calls["b" * 32]["peer_endpoint"], "https://10.44.0.1:9770")
         self.assertEqual(calls["a" * 32]["kind"], "connectx")
+
+    def test_placement_topology_consumes_facts_after_synchronous_link_renewal(self) -> None:
+        now = 1_800_000_000
+        main_id = "a" * 32
+        child_id = "b" * 32
+        main_certificate = "c" * 64
+        child_certificate = "d" * 64
+        rows = [
+            {
+                "member_id": main_id,
+                "state": "active",
+                "certificate_sha256": main_certificate,
+                "facts": routing_facts(
+                    main_id,
+                    observed_at_unix=now,
+                    links=[
+                        routing_link(
+                            child_id,
+                            peer_certificate_sha256=child_certificate,
+                            observed_at_unix=now,
+                        )
+                    ],
+                ),
+            },
+            {
+                "member_id": child_id,
+                "state": "active",
+                "certificate_sha256": child_certificate,
+                "facts": routing_facts(
+                    child_id,
+                    observed_at_unix=now,
+                    links=[
+                        routing_link(
+                            main_id,
+                            peer_certificate_sha256=main_certificate,
+                            observed_at_unix=now,
+                        )
+                    ],
+                ),
+            },
+        ]
+        events: list[str] = []
+
+        def synchronize() -> dict[str, list[str]]:
+            events.append("facts")
+            return {"refreshed": [main_id, child_id], "failed": []}
+
+        def refresh_links() -> dict[str, list[str]]:
+            self.assertEqual(events, ["facts"])
+            events.append("links")
+            return {"refreshed": [], "failed": []}
+
+        store = mock.MagicMock()
+        store.__enter__.return_value = store
+
+        def members() -> list[dict]:
+            self.assertEqual(events, ["facts", "links", "facts"])
+            return rows
+
+        store.members.side_effect = members
+        store.device_allocations.return_value = []
+        identity = types.SimpleNamespace(role="main", member_id=main_id)
+        with (
+            mock.patch.object(cli, "read_site_identity", return_value=identity),
+            mock.patch.object(cli, "_synchronize_member_facts", side_effect=synchronize),
+            mock.patch.object(cli, "_refresh_site_links_once", side_effect=refresh_links),
+            mock.patch.object(cli, "SiteStore", return_value=store),
+            mock.patch.object(cli.time, "time", return_value=now),
+        ):
+            _identity, graph = cli._fresh_site_topology()
+
+        self.assertEqual(events, ["facts", "links", "facts"])
+        self.assertIn((main_id, child_id), graph.links)
 
     def test_link_monitor_ignores_stale_or_unusable_direct_addresses(self) -> None:
         subject = {

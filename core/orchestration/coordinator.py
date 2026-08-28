@@ -259,7 +259,7 @@ class PlacementGroupOrchestrator:
             "stop": "stopping", "remove": "removing",
         }[action]
         state["error"] = None
-        if action == "remove":
+        if action in {"stop", "remove"}:
             status = self.fetch_status(
                 self.members[placement.node_id], self.plan.placement_group_id
             )
@@ -299,17 +299,18 @@ class PlacementGroupOrchestrator:
             self.protection_trips[placement.placement_id] = trip
             if (observed_placement is None or placement_state == "removed") and trip:
                 raise PlacementGroupOrchestrationError(
-                    "refusing to finalize a removed member with a protection trip"
+                    "refusing to finalize an absent member with a protection trip"
                 )
             if observed_placement is None or placement_state == "removed":
+                terminal_state = "stopped" if action == "stop" else "removed"
                 response = {
                     "protocol": PROTOCOL,
                     "operation_id": operation_id,
                     "state": "succeeded",
-                    "result": {"state": "removed"},
+                    "result": {"state": terminal_state},
                 }
                 self.results[placement.placement_id] = dict(response["result"])
-                state["state"] = "removed"
+                state["state"] = terminal_state
                 return response
         job = placement_job(
             self.plan,
@@ -441,6 +442,8 @@ class PlacementGroupOrchestrator:
         ]
         pending = [placement for placement in placements if placement not in completed]
         failures: list[tuple[Placement, BaseException]] = []
+        preempted: set[str] = set()
+        preemption_started = False
         if not pending:
             return completed, failures
         with ThreadPoolExecutor(
@@ -458,12 +461,55 @@ class PlacementGroupOrchestrator:
                     completed.append(placement)
                 except BaseException as error:
                     member_state = self.states[placement.placement_id]
-                    member_state["state"] = "failed"
-                    member_state["error"] = type(error).__name__
+                    if placement.placement_id not in preempted:
+                        member_state["state"] = "failed"
+                        member_state["error"] = type(error).__name__
                     failures.append((placement, error))
+                    if action in {"start", "recover"} and not preemption_started:
+                        preemption_started = True
+                        stopped, stop_failures = self._invoke_phase(
+                            placements, "stop"
+                        )
+                        preempted.update(
+                            item.placement_id for item in stopped
+                        )
+                        failures.extend(stop_failures)
         completed.sort(key=lambda item: item.task_id)
         failures.sort(key=lambda item: item[0].task_id)
         return completed, failures
+
+    def _rollback_start_failure(
+        self,
+        *,
+        audit_action: str,
+    ) -> list[tuple[Placement, BaseException]]:
+        """Preempt every placement and retain allocations until stop is proven."""
+        self.store.set_placement_group_allocation_state(
+            self.plan.placement_group_id,
+            "draining",
+            actor_type=self.actor_type,
+            actor_id=self.actor_id,
+            origin_interface=self.origin_interface,
+            correlation_id=self.correlation_id,
+        )
+        _stopped, failures = self._run_phases(
+            "stop",
+            reverse=True,
+            audit_action=audit_action,
+            desired_state="stopped",
+            state="stopping",
+            stop_on_failure=False,
+        )
+        if not failures:
+            self.store.set_placement_group_allocation_state(
+                self.plan.placement_group_id,
+                "reserved",
+                actor_type=self.actor_type,
+                actor_id=self.actor_id,
+                origin_interface=self.origin_interface,
+                correlation_id=self.correlation_id,
+            )
+        return failures
 
     def _run_phases(
         self,
@@ -492,30 +538,39 @@ class PlacementGroupOrchestrator:
 
     def start(self) -> dict[str, Any]:
         self._persist(action="placement_group.start", desired_state="running", state="starting")
-        started: list[Placement] = []
         try:
-            started, failures = self._run_phases(
+            _started, failures = self._run_phases(
                 "start",
                 audit_action="placement_group.start",
                 desired_state="running",
                 state="starting",
             )
             if failures:
+                failed_tasks = sorted({item.task_id for item, _error in failures})
                 raise PlacementGroupOrchestrationError(
                     "placement-group start failed on task(s): "
-                    + ",".join(item.task_id for item, _error in failures)
+                    + ",".join(failed_tasks)
                 )
         except BaseException as error:
-            for placement in reversed(started):
-                try:
-                    self._invoke(placement, "stop")
-                except BaseException:
-                    self.states[placement.placement_id]["state"] = "failed"
-                    self.states[placement.placement_id]["error"] = "rollback_failed"
+            rollback_failures = self._rollback_start_failure(
+                audit_action="placement_group.start"
+            )
             self._persist(
                 action="placement_group.start", desired_state="stopped", state="failed",
-                error=type(error).__name__,
+                error=(
+                    "start_rollback_failed"
+                    if rollback_failures
+                    else type(error).__name__
+                ),
             )
+            if rollback_failures:
+                failed_tasks = sorted(
+                    {item.task_id for item, _failure in rollback_failures}
+                )
+                raise PlacementGroupOrchestrationError(
+                    "placement-group start failed and rollback failed on task(s): "
+                    + ",".join(failed_tasks)
+                ) from error
             if isinstance(error, PlacementGroupOrchestrationError):
                 raise
             raise PlacementGroupOrchestrationError(f"placement-group start failed: {type(error).__name__}") from error
@@ -667,33 +722,42 @@ class PlacementGroupOrchestrator:
         self._persist(action="placement_group.recover", desired_state="running", state="recovering")
         self.stop()
         self._persist(action="placement_group.recover", desired_state="running", state="recovering")
-        started: list[Placement] = []
         action = "recover" if acknowledge_trips else "start"
         try:
-            started, failures = self._run_phases(
+            _started, failures = self._run_phases(
                 action,
                 audit_action="placement_group.recover",
                 desired_state="running",
                 state="recovering",
             )
             if failures:
+                failed_tasks = sorted({item.task_id for item, _error in failures})
                 raise PlacementGroupOrchestrationError(
                     "placement-group recovery failed on task(s): "
-                    + ",".join(item.task_id for item, _error in failures)
+                    + ",".join(failed_tasks)
                 )
         except BaseException as error:
-            for placement in reversed(started):
-                try:
-                    self._invoke(placement, "stop")
-                except BaseException:
-                    self.states[placement.placement_id]["state"] = "failed"
-                    self.states[placement.placement_id]["error"] = "rollback_failed"
+            rollback_failures = self._rollback_start_failure(
+                audit_action="placement_group.recover"
+            )
             self._persist(
                 action="placement_group.recover",
                 desired_state="running",
                 state="failed",
-                error=type(error).__name__,
+                error=(
+                    "recovery_rollback_failed"
+                    if rollback_failures
+                    else type(error).__name__
+                ),
             )
+            if rollback_failures:
+                failed_tasks = sorted(
+                    {item.task_id for item, _failure in rollback_failures}
+                )
+                raise PlacementGroupOrchestrationError(
+                    "placement-group recovery failed and rollback failed on task(s): "
+                    + ",".join(failed_tasks)
+                ) from error
             if isinstance(error, PlacementGroupOrchestrationError):
                 raise
             raise PlacementGroupOrchestrationError(
