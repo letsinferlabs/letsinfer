@@ -1313,6 +1313,27 @@ def ttft_cache_benchmark_result(
     }
 
 
+def validate_ttft_cache_contract(
+    ttft_cache_result: dict[str, Any] | None,
+    *,
+    shared_matrix: bool,
+    benchmark_contract: dict[str, Any] | None,
+) -> None:
+    """Require one supported shared contract for emitted TTFT cache evidence."""
+    supported_schemas = {
+        TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
+        EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
+    }
+    if ttft_cache_result is not None and (
+        not shared_matrix
+        or benchmark_contract is None
+        or benchmark_contract.get("schema_version") not in supported_schemas
+    ):
+        raise RuntimeMatrixError(
+            "64K TTFT cache evidence requires shared benchmark contract schema 7 or 8"
+        )
+
+
 def attach_sealed_comparison(
     summary: dict[str, Any], plan: dict[str, Any]
 ) -> None:
@@ -2078,15 +2099,11 @@ def run_isolated_matrix(
         if row["cell"] not in {"ttftcold-code-c1", "ttftwarm-code-c1"}
     ]
     ttft_cache_result = ttft_cache_benchmark_result(rows, cells_by_name)
-    if ttft_cache_result is not None and (
-        not shared_matrix
-        or benchmark_contract is None
-        or benchmark_contract.get("schema_version")
-        != TTFT_CACHE_BENCHMARK_SCHEMA_VERSION
-    ):
-        raise RuntimeMatrixError(
-            "64K TTFT cache evidence requires shared benchmark contract schema 7"
-        )
+    validate_ttft_cache_contract(
+        ttft_cache_result,
+        shared_matrix=shared_matrix,
+        benchmark_contract=benchmark_contract,
+    )
     assert arguments.installation_id is not None
     assert arguments.benchmark_timestamp_unix_ns is not None
     assert arguments.benchmark_contract_sha256 is not None
