@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import json
 import os
@@ -52,6 +53,14 @@ MAX_ERROR_CHARS = 512
 
 class MemberJobError(RuntimeError):
     """A placement job is unauthenticated, invalid, replayed, or failed."""
+
+
+@dataclasses.dataclass(frozen=True)
+class MemberJobAdmission:
+    """The durable result of accepting one member lifecycle operation."""
+
+    replay: dict[str, Any] | None
+    preempted_operation_ids: tuple[str, ...]
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -324,7 +333,7 @@ class MemberJobStore:
             self.connection.commit()
             self._secure_files()
 
-    def begin(self, job: Mapping[str, Any]) -> dict[str, Any] | None:
+    def begin(self, job: Mapping[str, Any]) -> MemberJobAdmission:
         serialized = _bounded_json(dict(job), "placement-group job", MAX_JOB_BYTES)
         job_sha256 = hashlib.sha256((serialized + "\n").encode("utf-8")).hexdigest()
         with self.transaction():
@@ -336,7 +345,10 @@ class MemberJobStore:
                 if row["job_sha256"] != job_sha256:
                     raise MemberJobError("placement-group operation identity was replayed with different bytes")
                 if row["state"] == "succeeded":
-                    return json.loads(row["result_json"])
+                    return MemberJobAdmission(
+                        replay=json.loads(row["result_json"]),
+                        preempted_operation_ids=(),
+                    )
                 if row["state"] == "failed":
                     raise MemberJobError(str(row["error"] or "placement-group operation failed"))
                 raise MemberJobError("placement-group operation is already running")
@@ -363,6 +375,35 @@ class MemberJobStore:
                     raise MemberJobError("placement is not available for recovery")
             elif job["action"] != "stage":
                 raise MemberJobError("placement must be staged before lifecycle actions")
+            running = [
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT operation_id,action FROM jobs "
+                    "WHERE placement_id=? AND state='running' ORDER BY received_at_unix,operation_id",
+                    (job["placement_id"],),
+                )
+            ]
+            preempted_operation_ids: tuple[str, ...] = ()
+            if running:
+                if job["action"] != "stop" or any(
+                    row["action"] not in {"start", "recover"} for row in running
+                ):
+                    raise MemberJobError(
+                        "another placement operation is already running"
+                    )
+                preempted_operation_ids = tuple(
+                    str(row["operation_id"]) for row in running
+                )
+                placeholders = ",".join("?" for _item in preempted_operation_ids)
+                self.connection.execute(
+                    "UPDATE jobs SET state='failed',error=?,finished_at_unix=? "
+                    f"WHERE operation_id IN ({placeholders}) AND state='running'",
+                    (
+                        "placement start was preempted by stop",
+                        int(time.time()),
+                        *preempted_operation_ids,
+                    ),
+                )
             self.connection.execute(
                 "INSERT INTO jobs(operation_id,job_sha256,placement_group_id,placement_id,action,state,received_at_unix) "
                 "VALUES(?,?,?,?,?, 'running',?)",
@@ -371,7 +412,20 @@ class MemberJobStore:
                     job["placement_id"], job["action"], int(time.time()),
                 ),
             )
-        return None
+            if placement is not None:
+                self.connection.execute(
+                    "UPDATE placements SET last_operation_id=?,updated_at_unix=? "
+                    "WHERE placement_id=?",
+                    (
+                        job["operation_id"],
+                        int(time.time()),
+                        job["placement_id"],
+                    ),
+                )
+        return MemberJobAdmission(
+            replay=None,
+            preempted_operation_ids=preempted_operation_ids,
+        )
 
     def finish(self, job: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
         if _contains_sensitive_key(result):
@@ -391,6 +445,17 @@ class MemberJobStore:
             ).rowcount
             if changed != 1:
                 raise MemberJobError("placement-group operation state changed concurrently")
+            current = self.connection.execute(
+                "SELECT last_operation_id FROM placements WHERE placement_id=?",
+                (job["placement_id"],),
+            ).fetchone()
+            if (
+                current is not None
+                and current["last_operation_id"] != job["operation_id"]
+            ):
+                raise MemberJobError(
+                    "placement-group operation was superseded concurrently"
+                )
             self.connection.execute(
                 """INSERT INTO placements
                    (placement_id,placement_group_id,plan_sha256,runtime_digest,
@@ -424,9 +489,23 @@ class MemberJobStore:
             )
             self.connection.execute(
                 "UPDATE placements SET state='failed',last_operation_id=?,updated_at_unix=? "
-                "WHERE placement_id=?",
-                (job["operation_id"], int(time.time()), job["placement_id"]),
+                "WHERE placement_id=? AND last_operation_id=?",
+                (
+                    job["operation_id"],
+                    int(time.time()),
+                    job["placement_id"],
+                    job["operation_id"],
+                ),
             )
+
+    def is_running(self, operation_id: str) -> bool:
+        """Return whether an admitted operation still owns execution."""
+        if not ID_RE.fullmatch(operation_id):
+            raise MemberJobError("placement-group operation identity is invalid")
+        row = self.connection.execute(
+            "SELECT state FROM jobs WHERE operation_id=?", (operation_id,)
+        ).fetchone()
+        return row is not None and row["state"] == "running"
 
     def placement_for_group(self, placement_group_id: str) -> dict[str, Any] | None:
         if not ID_RE.fullmatch(placement_group_id):
@@ -477,7 +556,10 @@ class MemberAgent:
         self,
         *,
         member_id: str,
-        handler: Callable[[Mapping[str, Any], str | None], Mapping[str, Any]],
+        handler: Callable[
+            [Mapping[str, Any], str | None, Callable[[], bool]],
+            Mapping[str, Any],
+        ],
         observer: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         store_path: pathlib.Path | None = None,
     ) -> None:
@@ -489,15 +571,30 @@ class MemberAgent:
         self.store_path = store_path
         with MemberJobStore(self.store_path, recover_incomplete=True):
             pass
-        self._queue: queue.Queue[tuple[dict[str, Any], str | None] | None] = (
+        self._ordinary_queue: queue.Queue[
+            tuple[dict[str, Any], str | None] | None
+        ] = (
             queue.Queue(maxsize=MAX_QUEUED_JOBS)
         )
-        self._worker = threading.Thread(
+        self._control_queue: queue.Queue[
+            tuple[dict[str, Any], str | None] | None
+        ] = queue.Queue(maxsize=MAX_QUEUED_JOBS)
+        self._active_lock = threading.Lock()
+        self._active_cancellations: dict[str, threading.Event] = {}
+        self._ordinary_worker = threading.Thread(
             target=self._work,
+            args=(self._ordinary_queue,),
             name="letsinfer-child-lifecycle",
             daemon=True,
         )
-        self._worker.start()
+        self._control_worker = threading.Thread(
+            target=self._work,
+            args=(self._control_queue,),
+            name="letsinfer-child-lifecycle-control",
+            daemon=True,
+        )
+        self._ordinary_worker.start()
+        self._control_worker.start()
 
     def _validated(
         self, payload: Any, engine_credential: str | None
@@ -513,15 +610,35 @@ class MemberAgent:
             raise MemberJobError("placement-group credentials are accepted only during stage")
         return job
 
-    def _work(self) -> None:
+    def _cancel_operations(self, operation_ids: tuple[str, ...]) -> None:
+        """Signal every active operation superseded by an accepted stop."""
+        with self._active_lock:
+            for operation_id in operation_ids:
+                cancellation = self._active_cancellations.get(operation_id)
+                if cancellation is not None:
+                    cancellation.set()
+
+    def _work(
+        self,
+        work_queue: queue.Queue[tuple[dict[str, Any], str | None] | None],
+    ) -> None:
+        """Execute one bounded queue while preserving durable supersession."""
         while True:
-            item = self._queue.get()
+            item = work_queue.get()
             if item is None:
-                self._queue.task_done()
+                work_queue.task_done()
                 return
             job, engine_credential = item
+            cancellation = threading.Event()
+            with self._active_lock:
+                self._active_cancellations[job["operation_id"]] = cancellation
             try:
-                result = self.handler(job, engine_credential)
+                with MemberJobStore(self.store_path) as store:
+                    if not store.is_running(job["operation_id"]):
+                        continue
+                result = self.handler(
+                    job, engine_credential, cancellation.is_set
+                )
                 if not isinstance(result, Mapping):
                     raise MemberJobError(
                         "member lifecycle handler returned an invalid result"
@@ -535,7 +652,9 @@ class MemberAgent:
                 except BaseException:
                     pass
             finally:
-                self._queue.task_done()
+                with self._active_lock:
+                    self._active_cancellations.pop(job["operation_id"], None)
+                work_queue.task_done()
 
     def submit(
         self, payload: Any, *, engine_credential: str | None = None
@@ -544,7 +663,7 @@ class MemberAgent:
         job = self._validated(payload, engine_credential)
         with MemberJobStore(self.store_path) as store:
             try:
-                replay = store.begin(job)
+                admission = store.begin(job)
             except MemberJobError as error:
                 if str(error) != "placement-group operation is already running":
                     raise
@@ -555,16 +674,22 @@ class MemberAgent:
                     "state": "running",
                     "result": None,
                 }
-            if replay is not None:
+            if admission.replay is not None:
                 return {
                     "protocol": PROTOCOL,
                     "operation_id": job["operation_id"],
                     "replayed": True,
                     "state": "succeeded",
-                    "result": replay,
+                    "result": admission.replay,
                 }
+        self._cancel_operations(admission.preempted_operation_ids)
+        work_queue = (
+            self._control_queue
+            if job["action"] in {"stop", "remove"}
+            else self._ordinary_queue
+        )
         try:
-            self._queue.put_nowait((job, engine_credential))
+            work_queue.put_nowait((job, engine_credential))
         except queue.Full as error:
             with MemberJobStore(self.store_path) as store:
                 store.fail(job, error)
@@ -582,11 +707,17 @@ class MemberAgent:
     ) -> dict[str, Any]:
         job = self._validated(payload, engine_credential)
         with MemberJobStore(self.store_path) as store:
-            replay = store.begin(job)
-            if replay is not None:
-                return {"protocol": PROTOCOL, "operation_id": job["operation_id"], "replayed": True, "result": replay}
+            admission = store.begin(job)
+            if admission.replay is not None:
+                return {"protocol": PROTOCOL, "operation_id": job["operation_id"], "replayed": True, "result": admission.replay}
+            self._cancel_operations(admission.preempted_operation_ids)
+            cancellation = threading.Event()
+            with self._active_lock:
+                self._active_cancellations[job["operation_id"]] = cancellation
             try:
-                result = self.handler(job, engine_credential)
+                result = self.handler(
+                    job, engine_credential, cancellation.is_set
+                )
                 if not isinstance(result, Mapping):
                     raise MemberJobError("member lifecycle handler returned an invalid result")
                 stored = store.finish(job, result)
@@ -595,6 +726,9 @@ class MemberAgent:
                 if isinstance(error, MemberJobError):
                     raise
                 raise MemberJobError(f"placement-group {job['action']} failed: {type(error).__name__}") from error
+            finally:
+                with self._active_lock:
+                    self._active_cancellations.pop(job["operation_id"], None)
         return {"protocol": PROTOCOL, "operation_id": job["operation_id"], "replayed": False, "result": stored}
 
     def status(self, placement_group_id: str) -> dict[str, Any]:
@@ -624,7 +758,9 @@ class MemberAgent:
         return {"protocol": PROTOCOL, "job": job}
 
     def close(self) -> None:
-        try:
-            self._queue.put_nowait(None)
-        except queue.Full:
-            return
+        """Request bounded shutdown of both ordinary and control workers."""
+        for work_queue in (self._ordinary_queue, self._control_queue):
+            try:
+                work_queue.put_nowait(None)
+            except queue.Full:
+                continue

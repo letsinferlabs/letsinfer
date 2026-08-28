@@ -124,6 +124,30 @@ class LocalPlacementExecutorTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_protection_ack_wait_spans_a_delayed_watchdog_directory_scan(self) -> None:
+        ack_path = pathlib.Path(self.temporary.name) / "protected-engine.ack"
+
+        def publish_ack(_seconds: float) -> None:
+            ack_path.write_text(
+                "version=1\n"
+                f"generation={'f' * 32}\n"
+                "phase=pending\n"
+                "container_id=-\n",
+                encoding="ascii",
+            )
+            ack_path.chmod(0o600)
+
+        with (
+            mock.patch.object(cli.time, "monotonic", side_effect=[0.0, 0.0, 11.0]),
+            mock.patch.object(cli.time, "sleep", side_effect=publish_ack),
+        ):
+            cli._await_protection_ack(
+                ack_path,
+                "f" * 32,
+                "pending",
+                None,
+            )
+
     def test_start_runs_only_sealed_runtime_command_and_arms_protection(self) -> None:
         inspection = {
             "Id": "d" * 64,
@@ -168,7 +192,11 @@ class LocalPlacementExecutorTests(unittest.TestCase):
             pathlib.Path(self.config["runtime_cache_root"])
         )
         run.assert_called_once_with(["docker", "run"])
-        ready.assert_called_once_with(self.config["container_name"], self.task["readiness"])
+        ready.assert_called_once_with(
+            self.config["container_name"],
+            self.task["readiness"],
+            cancelled=None,
+        )
         self.assertEqual([call.args[2] for call in protect.call_args_list], ["pending", "starting", "armed"])
         self.assertEqual(command.call_args.kwargs["placement_context"]["task_id"], "task-1")
 
@@ -394,7 +422,7 @@ class LocalPlacementExecutorTests(unittest.TestCase):
 
         self.assertEqual(result, {"state": "running"})
         clear.assert_called_once_with(self.config)
-        start.assert_called_once_with(self.config)
+        start.assert_called_once_with(self.config, cancelled=None)
 
     def test_observation_rejects_stale_running_journal_without_container(self) -> None:
         executor = cli.LocalPlacementExecutor(self.node_id)
