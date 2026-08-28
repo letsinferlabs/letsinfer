@@ -1,0 +1,11 @@
+#!/bin/sh
+# Returns deterministic RTX 5090 inventory or driver summary output.
+case "${1:-}" in
+    --query-gpu=*)
+        printf '0, GPU-FIXTURE-RTX5090, NVIDIA GeForce RTX 5090 Fixture, 00000000:01:00.0, 575.64.03, 32607, 12.0, [N/A], HMM\n'
+        ;;
+    "")
+        printf '| NVIDIA-SMI 575.64.03 | CUDA Version: 12.9 |\n'
+        ;;
+    *) exit 2 ;;
+esac

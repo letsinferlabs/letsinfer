@@ -77,6 +77,162 @@ class SiteStateTests(unittest.TestCase):
         )
         return plan, release
 
+    def replace_with_schema_three_placement_tables(
+        self,
+        identity: state.SiteIdentity,
+        *,
+        group_state: str = "removed",
+        desired_state: str = "removed",
+    ) -> None:
+        """Replace only placement-owned tables with the exact schema-three shape."""
+        connection = sqlite3.connect(state.database_path())
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.executescript(
+            """
+            DROP TABLE device_allocations;
+            DROP TABLE placements;
+            DROP TABLE placement_groups;
+            DROP TABLE request_summaries;
+            CREATE TABLE placements (
+                placement_id TEXT PRIMARY KEY,
+                service_id TEXT NOT NULL REFERENCES model_services(service_id),
+                model TEXT NOT NULL,
+                runtime TEXT NOT NULL,
+                target TEXT NOT NULL,
+                strategy TEXT NOT NULL CHECK(strategy IN ('single','parallel')),
+                state TEXT NOT NULL,
+                topology_sha256 TEXT NOT NULL,
+                members_json TEXT NOT NULL,
+                endpoints_json TEXT NOT NULL,
+                capacity_json TEXT NOT NULL,
+                updated_at_unix INTEGER NOT NULL
+            ) STRICT;
+            CREATE TABLE engine_groups (
+                group_id TEXT PRIMARY KEY,
+                placement_id TEXT NOT NULL REFERENCES placements(placement_id),
+                source TEXT NOT NULL,
+                runtime_digest TEXT NOT NULL,
+                manifest_sha256 TEXT NOT NULL,
+                topology_sha256 TEXT NOT NULL,
+                engine_credential_sha256 TEXT NOT NULL,
+                strategy TEXT NOT NULL CHECK(strategy IN ('single','parallel')),
+                runtime_execution_contract_sha256 TEXT NOT NULL,
+                failure_policy TEXT NOT NULL
+                  CHECK(failure_policy IN ('independent','whole-group')),
+                required_tasks INTEGER NOT NULL,
+                plan_json TEXT NOT NULL,
+                plan_sha256 TEXT NOT NULL,
+                desired_state TEXT NOT NULL
+                  CHECK(desired_state IN ('running','stopped','removed')),
+                state TEXT NOT NULL,
+                members_json TEXT NOT NULL,
+                last_error TEXT,
+                created_at_unix INTEGER NOT NULL,
+                updated_at_unix INTEGER NOT NULL
+            ) STRICT;
+            CREATE TABLE device_allocations (
+                allocation_id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                member_id TEXT NOT NULL REFERENCES members(member_id),
+                device_uuid TEXT NOT NULL,
+                state TEXT NOT NULL
+                  CHECK(state IN ('reserved','active','draining','released')),
+                created_at_unix INTEGER NOT NULL,
+                updated_at_unix INTEGER NOT NULL,
+                UNIQUE(group_id,member_id,device_uuid)
+            ) STRICT;
+            CREATE UNIQUE INDEX device_allocations_exclusive
+              ON device_allocations(member_id,device_uuid)
+              WHERE state IN ('reserved','active','draining');
+            CREATE TABLE request_summaries (
+                request_id TEXT PRIMARY KEY,
+                key_id TEXT,
+                model TEXT NOT NULL,
+                placement_id TEXT,
+                member_id TEXT,
+                received_unix_ms INTEGER NOT NULL,
+                completed_unix_ms INTEGER,
+                status TEXT NOT NULL,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                cached_tokens INTEGER,
+                queue_ms INTEGER,
+                ttft_ms INTEGER,
+                decode_ms INTEGER,
+                retries INTEGER NOT NULL DEFAULT 0,
+                exact_tokens INTEGER NOT NULL DEFAULT 0
+            ) STRICT;
+            """
+        )
+        service_id = "1" * 32
+        placement_id = "2" * 32
+        group_id = "3" * 32
+        now = 1_800_000_000
+        connection.execute(
+            "INSERT INTO model_services"
+            "(service_id,model,desired_state,created_at_unix,updated_at_unix) "
+            "VALUES(?,?,?,?,?)",
+            (service_id, "fixture-model", "removed", now, now),
+        )
+        connection.execute(
+            "INSERT INTO placements VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                placement_id,
+                service_id,
+                "fixture-model",
+                "fixture-runtime",
+                "fixture-target",
+                "parallel",
+                "stopped",
+                "4" * 64,
+                json.dumps([identity.member_id]),
+                "[]",
+                "{}",
+                now,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO engine_groups VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                group_id,
+                placement_id,
+                "registry.example/runtime@sha256:" + "5" * 64,
+                "6" * 64,
+                "7" * 64,
+                "4" * 64,
+                "8" * 64,
+                "parallel",
+                "9" * 64,
+                "whole-group",
+                1,
+                "{}",
+                "a" * 64,
+                desired_state,
+                group_state,
+                json.dumps([identity.member_id]),
+                None,
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO device_allocations VALUES(?,?,?,?,?,?,?)",
+            (
+                "b" * 32,
+                group_id,
+                identity.member_id,
+                "GPU-fixture",
+                "released",
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            "UPDATE site_meta SET value='3' WHERE key='schema_version'"
+        )
+        connection.commit()
+        connection.close()
+
     def test_setup_separates_site_and_member_keys(self) -> None:
         identity = state.setup_site("Home", "127.0.0.1")
         self.assertEqual(identity.role, "main")
@@ -206,6 +362,44 @@ class SiteStateTests(unittest.TestCase):
                 ).fetchone()[0],
                 "4",
             )
+
+    def test_schema_three_removed_group_migrates_with_legacy_foreign_key(self) -> None:
+        identity = state.setup_site("Home", "127.0.0.1")
+        self.replace_with_schema_three_placement_tables(identity)
+
+        with state.SiteStore(identity=identity) as store:
+            tables = {
+                row["name"]
+                for row in store.connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertNotIn("engine_groups", tables)
+            self.assertEqual(store.placement_groups(), [])
+            self.assertEqual(store.placements(), [])
+            self.assertEqual(store.device_allocations(), [])
+            self.assertEqual(
+                list(store.connection.execute("PRAGMA foreign_key_check")), []
+            )
+            self.assertEqual(
+                store.connection.execute(
+                    "SELECT value FROM site_meta WHERE key='schema_version'"
+                ).fetchone()[0],
+                "4",
+            )
+
+    def test_schema_three_active_group_still_blocks_placement_cut(self) -> None:
+        identity = state.setup_site("Home", "127.0.0.1")
+        self.replace_with_schema_three_placement_tables(
+            identity,
+            group_state="running",
+            desired_state="running",
+        )
+
+        with self.assertRaisesRegex(
+            state.SiteError, "legacy placement state must be removed"
+        ):
+            state.SiteStore(identity=identity)
 
     def test_fresh_adoption_window_expires_and_closes_after_external_pairing(self) -> None:
         identity = state.setup_site("Home", "127.0.0.1")

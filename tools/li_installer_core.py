@@ -26,10 +26,12 @@ class CoreInstallError(RuntimeError):
     """The immutable CLI installation cannot be completed safely."""
 
 
+# Returns one canonical JSON document for immutable source identity.
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
 
+# Persists directory metadata after one atomic filesystem transition.
 def _fsync_directory(path: pathlib.Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -38,6 +40,7 @@ def _fsync_directory(path: pathlib.Path) -> None:
         os.close(descriptor)
 
 
+# Verifies one installed source tree against its exact manifest.
 def _verify_installed_tree(root: pathlib.Path, expected: dict[str, Any]) -> None:
     manifest_path = root / INSTALL_MANIFEST
     if manifest_path.is_symlink() or not manifest_path.is_file():
@@ -76,6 +79,7 @@ def _verify_installed_tree(root: pathlib.Path, expected: dict[str, Any]) -> None
             raise CoreInstallError(f"installed source mismatch: {record['path']}")
 
 
+# Replaces one managed symlink through an atomic same-directory transition.
 def _atomic_link(link: pathlib.Path, target: pathlib.Path, *, parent_mode: int) -> None:
     link.parent.mkdir(mode=parent_mode, parents=True, exist_ok=True)
     if link.exists() and not link.is_symlink():
@@ -90,6 +94,7 @@ def _atomic_link(link: pathlib.Path, target: pathlib.Path, *, parent_mode: int) 
         temporary.unlink(missing_ok=True)
 
 
+# Installs and activates one immutable Core source identity.
 def install(
     source: pathlib.Path,
     home: pathlib.Path,
@@ -202,6 +207,7 @@ def install(
     }
 
 
+# Parses the Core installation contract and emits its machine result.
 def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="install the immutable Let's Infer CLI")
     parser.add_argument("--source", type=pathlib.Path, default=pathlib.Path("."))

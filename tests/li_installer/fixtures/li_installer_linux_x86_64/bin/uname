@@ -1,0 +1,4 @@
+#!/bin/sh
+# Returns a deterministic Linux x86_64 kernel version.
+[ "$#" -eq 1 ] && [ "$1" = "-r" ] || exit 2
+printf '6.14.0-fixture-x86_64\n'

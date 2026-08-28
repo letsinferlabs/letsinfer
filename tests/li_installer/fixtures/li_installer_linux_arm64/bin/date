@@ -1,0 +1,4 @@
+#!/bin/sh
+# Returns a deterministic observation timestamp.
+[ "$#" -eq 1 ] && [ "$1" = "+%s" ] || exit 2
+printf '1700000001\n'
