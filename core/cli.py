@@ -19454,20 +19454,30 @@ class LocalPlacementExecutor:
             / job["placement_id"]
         )
         if protection_root.exists():
-            if (
-                protection_root.resolve(strict=True)
-                != expected_protection_root.resolve(strict=True)
-                or protection_trip_latched({"protection_root": str(protection_root)})
+            if protection_root.resolve(strict=True) != expected_protection_root.resolve(
+                strict=True
             ):
                 raise LetsInferError("refusing to remove an unsafe placement-group protection slot")
             state_path, _, _ = protection_paths(
                 {"protection_root": str(protection_root)}
             )
-            if (
-                state_path.is_file()
-                and _parse_protection_lines(state_path).get("phase") != "disarmed"
-            ):
+            phase = (
+                _parse_protection_lines(state_path).get("phase")
+                if state_path.is_file()
+                else None
+            )
+            if phase is not None and phase != "disarmed":
                 raise LetsInferError("placement-group protection must be disarmed before removal")
+            if protection_trip_latched(
+                {"protection_root": str(protection_root)}
+            ):
+                if phase != "disarmed":
+                    raise LetsInferError(
+                        "refusing to remove an unsafe placement-group protection slot"
+                    )
+                clear_protection_trip(
+                    {"protection_root": str(protection_root)}
+                )
         root = _placement_group_path(job["placement_group_id"])
         if root.resolve(strict=True) != (default_placement_group_root() / job["placement_group_id"]).resolve(strict=True):
             raise LetsInferError("refusing to remove a non-canonical placement-group directory")
