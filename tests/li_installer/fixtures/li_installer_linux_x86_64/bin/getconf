@@ -1,0 +1,4 @@
+#!/bin/sh
+# Returns a deterministic online CPU count.
+[ "$#" -eq 1 ] && [ "$1" = "_NPROCESSORS_ONLN" ] || exit 2
+printf '32\n'

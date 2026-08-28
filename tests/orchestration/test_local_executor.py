@@ -409,6 +409,56 @@ class LocalPlacementExecutorTests(unittest.TestCase):
                 executor.stop(self.job)
         stop.assert_not_called()
 
+    def test_remove_uses_the_placement_protection_slot_and_accepts_absence(self) -> None:
+        """Remove only this placement's canonical present or retired Watchdog slot."""
+        executor = cli.LocalPlacementExecutor(self.node_id)
+        root = pathlib.Path(self.temporary.name)
+        protection_root = pathlib.Path(self.config["protection_root"])
+        placement_group_parent = root / "placement-groups"
+
+        for protection_exists in (True, False):
+            with self.subTest(protection_exists=protection_exists):
+                placement_group_root = (
+                    placement_group_parent / self.placement_group_id
+                )
+                placement_group_root.mkdir(parents=True, exist_ok=True)
+                if protection_exists:
+                    protection_root.mkdir(parents=True)
+
+                with (
+                    mock.patch.object(
+                        cli,
+                        "_read_placement_group_config",
+                        return_value=self.config,
+                    ),
+                    mock.patch.object(
+                        cli, "container_inspect", return_value=None
+                    ),
+                    mock.patch.object(
+                        cli,
+                        "_placement_group_path",
+                        return_value=placement_group_root,
+                    ),
+                    mock.patch.object(
+                        cli,
+                        "default_placement_group_root",
+                        return_value=placement_group_parent,
+                    ),
+                    mock.patch.object(
+                        cli,
+                        "default_watchdog_data_root",
+                        return_value=root / "watchdog",
+                    ),
+                    mock.patch.object(
+                        cli, "certificate_sha256", return_value="7" * 64
+                    ),
+                ):
+                    result = executor.remove(self.job)
+
+                self.assertEqual(result["state"], "removed")
+                self.assertFalse(placement_group_root.exists())
+                self.assertFalse(protection_root.exists())
+
     def test_explicit_recovery_clears_only_its_trip_before_start(self) -> None:
         executor = cli.LocalPlacementExecutor(self.node_id)
         with (

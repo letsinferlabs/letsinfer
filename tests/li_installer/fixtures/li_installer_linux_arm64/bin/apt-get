@@ -1,0 +1,10 @@
+#!/bin/sh
+# Returns a deterministic version or accepts the exact fixture installation plan.
+if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then
+    printf 'apt 2.8.3-fixture (arm64)\n'
+elif [ "$*" = "install -y avahi-utils build-essential cmake" ]; then
+    exit 0
+else
+    printf 'unexpected apt-get arguments: %s\n' "$*" >&2
+    exit 2
+fi

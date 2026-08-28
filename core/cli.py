@@ -5518,11 +5518,11 @@ def wait_for_ready(
                 details.append(_safe_diagnostic(runtime_error))
             suffix = f" ({'; '.join(details)})" if details else ""
             raise LetsInferError(f"Engine container exited during startup{suffix}")
-        require_memory_reserve(manifest, phase="runtime")
         docker_health = (
             (inspection.get("State", {}).get("Health") or {}).get("Status")
         )
         if docker_health == "healthy" and health_ready(port, cert_path):
+            require_memory_reserve(manifest, phase="runtime")
             return
         _cancellable_sleep(2, cancelled)
     raise LetsInferError(
@@ -10573,6 +10573,8 @@ def scale_command(arguments: argparse.Namespace) -> int:
 def _resolve_direct_install_placement(
     arguments: argparse.Namespace,
     manifest: Mapping[str, Any],
+    *,
+    ignore_allocations: bool = False,
 ) -> tuple[Any, TopologyGraph, Any]:
     """Resolve an explicit runtime only across the explicitly selected nodes."""
     identity, graph = _fresh_site_topology()
@@ -10588,7 +10590,11 @@ def _resolve_direct_install_placement(
     node_graph = TopologyGraph(
         [graph.members[member_id] for member_id in selected],
         allocated_devices={
-            member_id: tuple(graph.allocated_devices.get(member_id, ()))
+            member_id: (
+                ()
+                if ignore_allocations
+                else tuple(graph.allocated_devices.get(member_id, ()))
+            )
             for member_id in selected
         },
     )
@@ -10604,6 +10610,54 @@ def _resolve_direct_install_placement(
     except TopologyError as error:
         raise LetsInferError(f"cannot resolve runtime placement: {error}") from error
     return identity, node_graph, placement
+
+
+def _direct_install_replacement_group_ids(
+    node_ids: Sequence[str],
+) -> tuple[str, ...]:
+    """Return active placement groups intersecting approved replacement nodes."""
+    wanted = set(node_ids)
+    with _site_store() as store:
+        groups = [
+            row
+            for row in store.placement_groups()
+            if row["state"] != "removed"
+            and row["desired_state"] != "removed"
+        ]
+    return tuple(
+        dict.fromkeys(
+            row["placement_group_id"]
+            for row in groups
+            if any(
+                placement["node_id"] in wanted
+                for placement in row["plan"]["placements"]
+            )
+        )
+    )
+
+
+def _prepare_direct_install_placement(
+    arguments: argparse.Namespace,
+    manifest: Mapping[str, Any],
+) -> tuple[Any, TopologyGraph, Any]:
+    """Resolve, replace approved residents, and revalidate exact free resources."""
+    replace_existing = bool(getattr(arguments, "replace_existing", False))
+    resolved = _resolve_direct_install_placement(
+        arguments,
+        manifest,
+        ignore_allocations=replace_existing,
+    )
+    if not replace_existing:
+        return resolved
+    replacements = _direct_install_replacement_group_ids(
+        resolved[2].node_ids
+    )
+    _remove_placement_groups_by_id(replacements)
+    return _resolve_direct_install_placement(
+        arguments,
+        manifest,
+        ignore_allocations=False,
+    )
 
 
 def install(arguments: argparse.Namespace) -> int:
@@ -10670,7 +10724,7 @@ def install(arguments: argparse.Namespace) -> int:
         control_root=release_root,
         receipt=prepared_receipt,
         release_identity=release_identity,
-        resolved_topology=_resolve_direct_install_placement(arguments, manifest),
+        resolved_topology=_prepare_direct_install_placement(arguments, manifest),
     )
 
 
@@ -19387,7 +19441,7 @@ class LocalPlacementExecutor:
         expected_protection_root = (
             default_watchdog_data_root()
             / PROTECTION_ROOT_NAME
-            / job["placement_group_id"]
+            / job["placement_id"]
         )
         if protection_root.exists():
             if (

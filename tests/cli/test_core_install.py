@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 
-from tools.install_core import CoreInstallError, install
+from tools.li_installer_core import CoreInstallError, install
 from tests.runtime_fixture import runtime_candidate
 
 
