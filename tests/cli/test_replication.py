@@ -210,5 +210,123 @@ class ReplicaSelectionTests(unittest.TestCase):
         remove.assert_called_once_with(["4" * 32])
 
 
+class DirectRuntimeReplacementTests(unittest.TestCase):
+    def test_direct_preflight_omits_allocations_only_when_requested(self) -> None:
+        """Preserve resident allocations unless an explicit replacement preflights."""
+        node_ids = ("a" * 32, "b" * 32)
+        identity = types.SimpleNamespace(member_id=node_ids[0])
+        graph = types.SimpleNamespace(
+            members={
+                node_ids[0]: mock.sentinel.main_facts,
+                node_ids[1]: mock.sentinel.child_facts,
+            },
+            allocated_devices={
+                node_ids[0]: ("GPU-main",),
+                node_ids[1]: ("GPU-child",),
+            },
+        )
+        target = {"placement": {"node_count": 2}}
+        store = mock.MagicMock()
+        store.__enter__.return_value = store
+        store.members.return_value = _members()
+        occupied_graph = mock.Mock()
+        available_graph = mock.Mock()
+        occupied_graph.resolve.return_value = mock.sentinel.occupied
+        available_graph.resolve.return_value = mock.sentinel.available
+
+        with (
+            mock.patch.object(
+                cli,
+                "_fresh_site_topology",
+                return_value=(identity, graph),
+            ),
+            mock.patch.object(cli, "_site_store", return_value=store),
+            mock.patch.object(
+                cli,
+                "_selected_install_node_ids",
+                return_value=node_ids,
+            ),
+            mock.patch.object(cli, "target_contract", return_value=target),
+            mock.patch.object(
+                cli,
+                "TopologyGraph",
+                side_effect=(occupied_graph, available_graph),
+            ) as topology,
+        ):
+            cli._resolve_direct_install_placement(
+                argparse.Namespace(),
+                {},
+            )
+            cli._resolve_direct_install_placement(
+                argparse.Namespace(),
+                {},
+                ignore_allocations=True,
+            )
+
+        self.assertEqual(
+            topology.call_args_list[0].kwargs["allocated_devices"],
+            graph.allocated_devices,
+        )
+        self.assertEqual(
+            topology.call_args_list[1].kwargs["allocated_devices"],
+            {node_id: () for node_id in node_ids},
+        )
+
+    def test_approved_replacement_removes_residents_between_two_resolutions(self) -> None:
+        """Discount residents only for preflight, then prove the freed topology."""
+        arguments = argparse.Namespace(replace_existing=True)
+        manifest = {"model": {"alias": "example-model"}}
+        node_ids = ("a" * 32, "b" * 32)
+        occupied = (
+            mock.sentinel.identity,
+            mock.sentinel.occupied_graph,
+            types.SimpleNamespace(node_ids=node_ids),
+        )
+        available = (
+            mock.sentinel.identity,
+            mock.sentinel.available_graph,
+            mock.sentinel.available_placement,
+        )
+        events: list[tuple[object, ...]] = []
+
+        def resolve(_arguments, _manifest, *, ignore_allocations=False):
+            events.append(("resolve", ignore_allocations))
+            return occupied if ignore_allocations else available
+
+        with (
+            mock.patch.object(
+                cli,
+                "_resolve_direct_install_placement",
+                side_effect=resolve,
+            ),
+            mock.patch.object(
+                cli,
+                "_direct_install_replacement_group_ids",
+                return_value=("c" * 32,),
+            ) as replacements,
+            mock.patch.object(
+                cli,
+                "_remove_placement_groups_by_id",
+                side_effect=lambda values: events.append(
+                    ("remove", *values)
+                ),
+            ),
+        ):
+            result = cli._prepare_direct_install_placement(
+                arguments, manifest
+            )
+
+        self.assertEqual(result, available)
+        self.assertEqual(
+            events,
+            [
+                ("resolve", True),
+                ("remove", "c" * 32),
+                ("resolve", False),
+            ],
+        )
+        replacements.assert_called_once_with(node_ids)
+
+
 if __name__ == "__main__":
     unittest.main()
