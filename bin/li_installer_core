@@ -6,4 +6,4 @@ PROJECT_ROOT=$(CDPATH= cd -P -- "${SCRIPT_DIR}/.." && pwd)
 cd "$PROJECT_ROOT"
 export PYTHONDONTWRITEBYTECODE=1
 PYTHON_COMMAND=${LETSINFER_PYTHON:-python3}
-exec "$PYTHON_COMMAND" -m tools.install_core --source "$PROJECT_ROOT" "$@"
+exec "$PYTHON_COMMAND" -m tools.li_installer_core --source "$PROJECT_ROOT" "$@"

@@ -11,43 +11,179 @@ user_install=0
 run_setup=1
 repair_docker_access=0
 docker_exec_group=""
-progress_active=0
 progress_enabled=1
-interactive_output=0
-brand_mark=">"
-success_mark="+"
-failure_mark="x"
-badge_text=">  LET'S INFER"
-blue=""
-green=""
-red=""
-dim=""
-reset=""
 
-clear_progress() {
-    if [ "$progress_active" -eq 1 ]; then
+# BEGIN DISPLAY MANAGER
+
+display_manager_progress_active=0
+display_manager_interactive=0
+display_manager_brand_mark=">"
+display_manager_success_mark="+"
+display_manager_failure_mark="x"
+display_manager_badge_text=">  LET'S INFER"
+display_manager_blue=""
+display_manager_green=""
+display_manager_red=""
+display_manager_dim=""
+display_manager_reset=""
+
+# Configures presentation from explicit terminal, locale, color, and progress facts.
+display_manager_configure() {
+    display_manager_requested_interactive=$1
+    display_manager_locale=$2
+    display_manager_color_enabled=$3
+    display_manager_progress_enabled=$4
+    case "$display_manager_requested_interactive/$display_manager_color_enabled/$display_manager_progress_enabled" in
+        0/0/0|0/0/1|0/1/0|0/1/1|1/0/0|1/0/1|1/1/0|1/1/1) ;;
+        *) return 1 ;;
+    esac
+    display_manager_interactive=$display_manager_requested_interactive
+    if [ "$display_manager_interactive" -eq 1 ] \
+        && [ "$display_manager_progress_enabled" -eq 1 ]; then
+        display_manager_progress_active=1
+    fi
+    case "$display_manager_locale" in
+        *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*)
+            display_manager_brand_mark="ϟ"
+            display_manager_success_mark="✓"
+            display_manager_failure_mark="✗"
+            ;;
+    esac
+    if [ "$display_manager_interactive" -eq 1 ] \
+        && [ "$display_manager_color_enabled" -eq 1 ]; then
+        display_manager_reset=$(printf '\033[0m')
+        display_manager_blue=$(printf '\033[1;38;2;0;156;223m')
+        display_manager_green=$(printf '\033[1;38;2;97;187;70m')
+        display_manager_red=$(printf '\033[1;38;2;226;56;56m')
+        display_manager_dim=$(printf '\033[2m')
+        display_manager_badge_text=$(printf \
+            '\033[1;38;2;30;30;30;48;2;247;247;247m %s  LET\047S INFER \033[0m' \
+            "$display_manager_brand_mark")
+    else
+        display_manager_badge_text="$display_manager_brand_mark  LET'S INFER"
+    fi
+}
+
+# Clears the active progress row before another presentation replaces it.
+display_manager_clear_progress() {
+    if [ "$display_manager_progress_active" -eq 1 ]; then
         printf '\r\033[2K' >&2
     fi
 }
 
-progress() {
-    percent=$1
-    message=$2
-    if [ "$progress_active" -eq 1 ]; then
+# Presents one stable installation stage on an interactive terminal.
+display_manager_present_progress() {
+    display_manager_percent=$1
+    display_manager_message=$2
+    if [ "$display_manager_progress_active" -eq 1 ]; then
         printf '\r\033[2K%s  %sINSTALL%s  %s%3s%%%s  %s' \
-            "$badge_text" "$blue" "$reset" "$blue" "$percent" "$reset" \
-            "$message" >&2
+            "$display_manager_badge_text" "$display_manager_blue" \
+            "$display_manager_reset" "$display_manager_blue" \
+            "$display_manager_percent" "$display_manager_reset" \
+            "$display_manager_message" >&2
     fi
 }
 
-finish_progress() {
-    if [ "$progress_active" -eq 1 ]; then
-        progress 100 "Complete"
+# Completes the active progress row without presenting product state.
+display_manager_finish_progress() {
+    if [ "$display_manager_progress_active" -eq 1 ]; then
+        display_manager_present_progress 100 "Complete"
         printf '\n' >&2
-        progress_active=0
+        display_manager_progress_active=0
     fi
 }
 
+# Presents one installation failure through the configured language and marks.
+display_manager_present_failure() {
+    display_manager_clear_progress
+    display_manager_progress_active=0
+    if [ "$display_manager_interactive" -eq 1 ]; then
+        printf '%s  %sINSTALL%s\n\n%s%s  Installation failed%s\n   %s\n' \
+            "$display_manager_badge_text" "$display_manager_red" \
+            "$display_manager_reset" "$display_manager_red" \
+            "$display_manager_failure_mark" "$display_manager_reset" "$*" >&2
+    else
+        printf 'letsinfer install: %s\n' "$*" >&2
+    fi
+}
+
+# Presents a required login refresh and ends the interactive lifecycle.
+display_manager_present_login_refresh() {
+    display_manager_clear_progress
+    display_manager_progress_active=0
+    if [ "$display_manager_interactive" -eq 1 ]; then
+        printf '%s  %sINSTALL%s\n\n%s!  Login refresh required%s\n   %s\n' \
+            "$display_manager_badge_text" "$display_manager_blue" \
+            "$display_manager_reset" "$display_manager_blue" \
+            "$display_manager_reset" "$*" >&2
+    else
+        printf 'letsinfer install: %s\n' "$*" >&2
+    fi
+}
+
+# Presents one installation notice without exposing display mechanics to callers.
+display_manager_present_notice() {
+    display_manager_clear_progress
+    printf 'letsinfer install: %s\n' "$*" >&2
+}
+
+# Requests explicit approval through the controlling terminal when available.
+display_manager_request_approval() {
+    display_manager_approval_description=$1
+    if ! ( : </dev/tty && : >/dev/tty ) 2>/dev/null; then
+        return 1
+    fi
+    printf '%s\nContinue? [y/N] ' \
+        "$display_manager_approval_description" >/dev/tty
+    display_manager_approval_answer=""
+    IFS= read -r display_manager_approval_answer </dev/tty || true
+    case "$display_manager_approval_answer" in
+        y|Y|yes|YES|Yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Presents the bounded diagnostic tail from one failed installation phase.
+display_manager_present_log_tail() {
+    display_manager_clear_progress
+    tail -n "$2" "$1" >&2
+}
+
+# Presents one verified installation summary without transforming its fields.
+display_manager_present_summary() {
+    sed -n '1,$p' "$1" >&2
+}
+
+# Presents the one user-local launcher path action required after installation.
+display_manager_present_path_notice() {
+    printf 'Open a new shell after adding %s/bin to PATH.\n' "$1" >&2
+}
+
+# Presents the completed Core installation and canonical platform.
+display_manager_present_completion() {
+    display_manager_version=$1
+    display_manager_completion=$2
+    display_manager_operating_system=$3
+    display_manager_architecture=$4
+    if [ "$display_manager_interactive" -eq 1 ]; then
+        printf '%s  %s%s%s  Let\047s Infer %s %s\n' \
+            "$display_manager_badge_text" "$display_manager_green" \
+            "$display_manager_success_mark" "$display_manager_reset" \
+            "$display_manager_version" "$display_manager_completion" >&2
+        printf '   %s%s/%s%s\n' "$display_manager_dim" \
+            "$display_manager_operating_system" "$display_manager_architecture" \
+            "$display_manager_reset" >&2
+    else
+        printf 'Let\047s Infer %s %s for %s/%s.\n' \
+            "$display_manager_version" "$display_manager_completion" \
+            "$display_manager_operating_system" \
+            "$display_manager_architecture" >&2
+    fi
+}
+
+# END DISPLAY MANAGER
+
+# Prints the supported public bootstrap arguments and installation boundary.
 usage() {
     cat <<'EOF'
 Usage: install.sh [--version VERSION] [--prefix PATH] [--user] [--no-setup] [--no-progress]
@@ -61,19 +197,13 @@ Docker socket group or restarting a stale user service manager when required.
 EOF
 }
 
+# Ends installation through the single configured display failure boundary.
 fail() {
-    clear_progress
-    progress_active=0
-    if [ "$interactive_output" -eq 1 ]; then
-        printf '%s  %sINSTALL%s\n\n%s%s  Installation failed%s\n   %s\n' \
-            "$badge_text" "$red" "$reset" "$red" "$failure_mark" \
-            "$reset" "$*" >&2
-    else
-        printf 'letsinfer install: %s\n' "$*" >&2
-    fi
+    display_manager_present_failure "$*"
     exit 1
 }
 
+# Returns the first macOS Python satisfying the complete Core runtime contract.
 select_macos_python() {
     if [ -n "${LETSINFER_PYTHON:-}" ]; then
         set -- "$LETSINFER_PYTHON"
@@ -133,38 +263,29 @@ PY
     return 1
 }
 
+# Presents a required login refresh and exits with its stable status.
 pause_for_login_refresh() {
-    clear_progress
-    progress_active=0
-    if [ "$interactive_output" -eq 1 ]; then
-        printf '%s  %sINSTALL%s\n\n%s!  Login refresh required%s\n   %s\n' \
-            "$badge_text" "$blue" "$reset" "$blue" "$reset" "$*" >&2
-    else
-        printf 'letsinfer install: %s\n' "$*" >&2
-    fi
+    display_manager_present_login_refresh "$*"
     exit 2
 }
 
+# Obtains explicit approval before granting Docker socket access.
 approve_docker_repair() {
     repair_description=$1
     if [ "$repair_docker_access" -eq 1 ]; then
         return 0
     fi
+    if display_manager_request_approval "$repair_description"; then
+        repair_docker_access=1
+        return 0
+    fi
     if ( : </dev/tty && : >/dev/tty ) 2>/dev/null; then
-        printf '%s\nContinue? [y/N] ' "$repair_description" >/dev/tty
-        answer=
-        IFS= read -r answer </dev/tty || true
-        case "$answer" in
-            y|Y|yes|YES|Yes)
-                repair_docker_access=1
-                return 0
-                ;;
-        esac
         fail "Docker access repair was not approved"
     fi
     fail "Docker access repair requires approval; rerun with --repair-docker-access"
 }
 
+# Returns whether one exact group identifier occurs in a normalized group list.
 gid_list_contains() {
     wanted_gid=$1
     gid_list=$2
@@ -174,6 +295,7 @@ gid_list_contains() {
     esac
 }
 
+# Activates newly granted Docker group access for this installation process.
 activate_docker_group_for_install() {
     operator=$1
     socket_group=$2
@@ -185,11 +307,11 @@ activate_docker_group_for_install() {
             "$operator belongs to $socket_group, but a refreshed group process cannot reach Docker. Close every session for this account, sign in again, and rerun install.sh."
     fi
     docker_exec_group=$socket_group
-    clear_progress
-    printf 'letsinfer install: using refreshed %s group access for this installation.\n' \
-        "$socket_group" >&2
+    display_manager_present_notice \
+        "using refreshed $socket_group group access for this installation."
 }
 
+# Returns the validated distribution identity from one Linux release document.
 linux_distribution_id() {
     os_release_path=$1
     [ -f "$os_release_path" ] || return 1
@@ -224,6 +346,7 @@ print(distribution)
 PY
 }
 
+# Installs and verifies Docker through the selected Linux package provider.
 install_linux_docker() {
     os_release_path=$1
     command -v sudo >/dev/null 2>&1 \
@@ -233,9 +356,8 @@ install_linux_docker() {
     distribution=$(linux_distribution_id "$os_release_path") \
         || fail "Linux distribution metadata is invalid: $os_release_path"
 
-    clear_progress
-    printf 'letsinfer install: Docker is not installed; installing it with sudo for %s.\n' \
-        "$distribution" >&2
+    display_manager_present_notice \
+        "Docker is not installed; installing it with sudo for $distribution."
     case "$distribution" in
         ubuntu|debian)
             command -v apt-get >/dev/null 2>&1 \
@@ -281,6 +403,7 @@ install_linux_docker() {
         || fail "Docker installed, but its daemon did not become healthy"
 }
 
+# Verifies an existing Docker CLI or installs it through the Linux provider.
 ensure_linux_docker() {
     os_release_path=${1:-/etc/os-release}
     if command -v docker >/dev/null 2>&1; then
@@ -291,6 +414,7 @@ ensure_linux_docker() {
     install_linux_docker "$os_release_path"
 }
 
+# Applies Docker readiness only to platforms that require it.
 ensure_platform_docker() {
     target_platform=$1
     os_release_path=${2:-/etc/os-release}
@@ -298,15 +422,15 @@ ensure_platform_docker() {
     ensure_linux_docker "$os_release_path"
 }
 
+# Installs and verifies local discovery through the selected Linux provider.
 install_linux_mdns() {
     os_release_path=$1
     command -v sudo >/dev/null 2>&1 \
         || fail "Avahi is unavailable and sudo is required to install it"
     distribution=$(linux_distribution_id "$os_release_path") \
         || fail "Linux distribution metadata is invalid: $os_release_path"
-    clear_progress
-    printf 'letsinfer install: installing local discovery support with sudo for %s.\n' \
-        "$distribution" >&2
+    display_manager_present_notice \
+        "installing local discovery support with sudo for $distribution."
     case "$distribution" in
         ubuntu|debian)
             command -v apt-get >/dev/null 2>&1 \
@@ -342,6 +466,7 @@ install_linux_mdns() {
     hash -r 2>/dev/null || :
 }
 
+# Verifies existing local discovery or installs it through the Linux provider.
 ensure_linux_mdns() {
     os_release_path=${1:-/etc/os-release}
     if ! command -v avahi-publish-service >/dev/null 2>&1 \
@@ -362,6 +487,7 @@ ensure_linux_mdns() {
         || fail "local discovery daemon is unavailable"
 }
 
+# Applies local-discovery readiness only to platforms that require it.
 ensure_platform_mdns() {
     target_platform=$1
     os_release_path=${2:-/etc/os-release}
@@ -369,6 +495,7 @@ ensure_platform_mdns() {
     ensure_linux_mdns "$os_release_path"
 }
 
+# Verifies or explicitly repairs operator access to the Linux Docker daemon.
 preflight_linux_docker() {
     operator=$1
     if docker info >/dev/null 2>&1; then
@@ -419,6 +546,7 @@ preflight_linux_docker() {
     activate_docker_group_for_install "$operator" "$socket_group"
 }
 
+# Returns whether a transient user service can reach the Docker daemon.
 docker_user_service_access() {
     unit_suffix=$1
     systemd-run --user --quiet --wait --collect \
@@ -426,6 +554,7 @@ docker_user_service_access() {
         docker info >/dev/null 2>&1
 }
 
+# Verifies persistent user services inherit working Docker access.
 preflight_linux_docker_service() {
     if docker_user_service_access initial; then
         return 0
@@ -510,34 +639,25 @@ case "$letsinfer_home" in
 esac
 LETSINFER_HOME=$letsinfer_home
 export LETSINFER_HOME
+installer_interactive_output=0
 case "${TERM:-}" in
     ""|dumb) ;;
     *)
         if [ -t 2 ]; then
-            interactive_output=1
-            if [ "$progress_enabled" -eq 1 ]; then
-                progress_active=1
-            fi
+            installer_interactive_output=1
         fi
         ;;
 esac
-case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
-    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*)
-        brand_mark="ϟ"
-        success_mark="✓"
-        failure_mark="✗"
-        ;;
-esac
-if [ "$interactive_output" -eq 1 ] && [ -z "${NO_COLOR+x}" ]; then
-    reset=$(printf '\033[0m')
-    blue=$(printf '\033[1;38;2;0;156;223m')
-    green=$(printf '\033[1;38;2;97;187;70m')
-    red=$(printf '\033[1;38;2;226;56;56m')
-    dim=$(printf '\033[2m')
-    badge_text=$(printf '\033[1;38;2;30;30;30;48;2;247;247;247m %s  LET\047S INFER \033[0m' "$brand_mark")
-else
-    badge_text="$brand_mark  LET'S INFER"
+installer_color_output=0
+if [ -z "${NO_COLOR+x}" ]; then
+    installer_color_output=1
 fi
+display_manager_configure \
+    "$installer_interactive_output" \
+    "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" \
+    "$installer_color_output" \
+    "$progress_enabled" \
+    || fail "display manager configuration is invalid"
 
 case "$(uname -s)" in
     Linux) platform_os="linux" ;;
@@ -595,18 +715,21 @@ umask 077
 mkdir -p "$LETSINFER_HOME"
 chmod 0700 "$LETSINFER_HOME"
 temporary=$(mktemp -d "/tmp/letsinfer-install.XXXXXXXX")
+# Removes the exact temporary installation root owned by this invocation.
 cleanup() {
-    clear_progress
+    display_manager_clear_progress
     rm -rf -- "$temporary"
 }
 trap cleanup EXIT HUP INT TERM
 
+# Returns whether native OpenSSL development headers can be compiled.
 openssl_development_ready() {
     command -v cc >/dev/null 2>&1 || return 1
     printf '#include <openssl/ssl.h>\n' \
         | cc -E - >/dev/null 2>&1
 }
 
+# Installs and verifies build requirements needed by automatic Core setup.
 ensure_setup_dependencies() {
     [ "$run_setup" -eq 1 ] || return 0
     if [ "$platform_os" = "linux" ]; then
@@ -618,7 +741,7 @@ ensure_setup_dependencies() {
         [ "$ready" -eq 0 ] || return 0
         command -v sudo >/dev/null 2>&1 \
             || fail "sudo is required to install system build requirements"
-        progress 10 "Installing system requirements"
+        display_manager_present_progress 10 "Installing system requirements"
         dependency_log="$temporary/dependencies.log"
         if command -v apt-get >/dev/null 2>&1; then
             if ! {
@@ -626,26 +749,26 @@ ensure_setup_dependencies() {
                 sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
                     build-essential cmake openssl libssl-dev
             } >"$dependency_log" 2>&1; then
-                tail -n 40 "$dependency_log" >&2
+                display_manager_present_log_tail "$dependency_log" 40
                 fail "apt could not install system build requirements"
             fi
         elif command -v dnf >/dev/null 2>&1; then
             if ! sudo dnf install -y gcc gcc-c++ make cmake openssl openssl-devel \
                 >"$dependency_log" 2>&1; then
-                tail -n 40 "$dependency_log" >&2
+                display_manager_present_log_tail "$dependency_log" 40
                 fail "dnf could not install system build requirements"
             fi
         elif command -v zypper >/dev/null 2>&1; then
             if ! sudo zypper --non-interactive install \
                 gcc gcc-c++ make cmake openssl libopenssl-devel \
                 >"$dependency_log" 2>&1; then
-                tail -n 40 "$dependency_log" >&2
+                display_manager_present_log_tail "$dependency_log" 40
                 fail "zypper could not install system build requirements"
             fi
         elif command -v pacman >/dev/null 2>&1; then
             if ! sudo pacman --sync --needed --noconfirm \
                 base-devel cmake openssl >"$dependency_log" 2>&1; then
-                tail -n 40 "$dependency_log" >&2
+                display_manager_present_log_tail "$dependency_log" 40
                 fail "pacman could not install system build requirements"
             fi
         else
@@ -660,7 +783,7 @@ ensure_setup_dependencies() {
     fi
 }
 
-progress 5 "Resolving release"
+display_manager_present_progress 5 "Resolving release"
 ensure_setup_dependencies
 
 checksums="$temporary/SHA256SUMS"
@@ -673,6 +796,7 @@ if [ "$allow_insecure" = "1" ]; then
     curl_protocols="=https,http,file"
 fi
 
+# Downloads one release input after enforcing its approved URL scheme.
 download() {
     source_url=$1
     output_path=$2
@@ -737,7 +861,7 @@ fi
 
 download "$release_base/SHA256SUMS.sig" "$signature"
 download "$release_base/$archive_name" "$archive"
-progress 35 "Verifying signed release"
+display_manager_present_progress 35 "Verifying signed release"
 
 if [ -n "$signers_override" ]; then
     [ -f "$signers_override" ] \
@@ -785,7 +909,7 @@ if digest.hexdigest() != expected:
     raise SystemExit(1)
 PY
 
-progress 55 "Verifying source archive"
+display_manager_present_progress 55 "Verifying source archive"
 
 unpacked="$temporary/unpacked"
 mkdir "$unpacked"
@@ -802,17 +926,17 @@ fi
 
 if [ "$run_setup" -eq 1 ] && [ "$platform_os" = "linux" ] \
     && [ "$user_install" -eq 0 ]; then
-    progress 65 "Preparing platform networking"
+    display_manager_present_progress 65 "Preparing platform networking"
     network_log="$temporary/platform-network.log"
     if ! (cd "$unpacked/letsinfer" && \
         "$python_command" -m core.platform.network apply-if-detected) \
         >"$network_log" 2>&1; then
-        tail -n 40 "$network_log" >&2
+        display_manager_present_log_tail "$network_log" 40
         fail "platform network setup failed"
     fi
 fi
 
-progress 70 "Installing core"
+display_manager_present_progress 70 "Installing core"
 
 if [ "$run_setup" -eq 1 ]; then
     if [ "$platform_os" = "linux" ]; then
@@ -835,20 +959,20 @@ fi
 umask 022
 if [ "$user_install" -eq 1 ]; then
     if [ "$platform_os" = "macos" ]; then
-        "$unpacked/letsinfer/bin/letsinfer-install" \
+        "$unpacked/letsinfer/bin/li_installer_core" \
             --home "$LETSINFER_HOME" --launcher-root "$prefix/bin" \
             --python "$python_command" >/dev/null
     else
-        "$unpacked/letsinfer/bin/letsinfer-install" \
+        "$unpacked/letsinfer/bin/li_installer_core" \
             --home "$LETSINFER_HOME" --launcher-root "$prefix/bin" >/dev/null
     fi
     command_path="$prefix/bin/letsinfer"
 else
     if [ "$platform_os" = "macos" ]; then
-        "$unpacked/letsinfer/bin/letsinfer-install" \
+        "$unpacked/letsinfer/bin/li_installer_core" \
             --home "$LETSINFER_HOME" --python "$python_command" >/dev/null
     else
-        "$unpacked/letsinfer/bin/letsinfer-install" \
+        "$unpacked/letsinfer/bin/li_installer_core" \
             --home "$LETSINFER_HOME" >/dev/null
     fi
     sudo install -d -m 0755 "$launcher_dir"
@@ -870,7 +994,7 @@ if [ "$run_setup" -eq 1 ]; then
     setup_json="$temporary/setup.json"
     setup_log="$temporary/setup.stderr"
     setup_summary="$temporary/setup.summary"
-    progress 80 "Initializing services"
+    display_manager_present_progress 80 "Initializing services"
     if [ -n "$docker_exec_group" ]; then
         LETSINFER_SETUP_COMMAND=$command_path
         export LETSINFER_SETUP_COMMAND
@@ -888,10 +1012,10 @@ if [ "$run_setup" -eq 1 ]; then
         setup_failed=0
     fi
     if [ "$setup_failed" -ne 0 ]; then
-        clear_progress
-        progress_active=0
+        display_manager_clear_progress
+        display_manager_progress_active=0
         if [ -s "$setup_log" ]; then
-            tail -n 80 "$setup_log" >&2
+            display_manager_present_log_tail "$setup_log" 80
         fi
         fail "site initialization failed"
     fi
@@ -931,28 +1055,21 @@ PY
     fi
 fi
 
-finish_progress
+display_manager_finish_progress
 
 if [ "$run_setup" -eq 1 ]; then
     completion="installed and initialized"
 else
     completion="installed"
 fi
-if [ "$interactive_output" -eq 1 ]; then
-    printf '%s  %s%s%s  Let\047s Infer %s %s\n' \
-        "$badge_text" "$green" "$success_mark" "$reset" "$version" \
-        "$completion" >&2
-    printf '   %s%s/%s%s\n' "$dim" "$platform_os" "$platform_arch" "$reset" >&2
-else
-    printf 'Let\047s Infer %s %s for %s/%s.\n' \
-        "$version" "$completion" "$platform_os" "$platform_arch" >&2
-fi
+display_manager_present_completion \
+    "$version" "$completion" "$platform_os" "$platform_arch"
 if [ "$run_setup" -eq 1 ]; then
-    sed -n '1,$p' "$setup_summary" >&2
+    display_manager_present_summary "$setup_summary"
 fi
 if [ "$user_install" -eq 1 ]; then
     case ":$current_path:" in
         *":$prefix/bin:"*) ;;
-        *) printf 'Open a new shell after adding %s/bin to PATH.\n' "$prefix" >&2 ;;
+        *) display_manager_present_path_notice "$prefix" ;;
     esac
 fi

@@ -1,0 +1,518 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/li_installer_installation_probe_v1.schema.json",
+  "title": "Let's Infer installation probe",
+  "description": "One platform, dependency, and hardware observation produced before installation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "platform",
+    "service_manager",
+    "dependencies",
+    "hardware",
+    "errors"
+  ],
+  "properties": {
+    "schema": {
+      "$ref": "#/$defs/schemaIdentity"
+    },
+    "status": {
+      "enum": [
+        "ready",
+        "missing_dependencies",
+        "service_manager_unavailable",
+        "unsupported",
+        "failed"
+      ]
+    },
+    "platform": {
+      "$ref": "#/$defs/platform"
+    },
+    "service_manager": {
+      "$ref": "#/$defs/serviceManager"
+    },
+    "dependencies": {
+      "$ref": "#/$defs/dependencies"
+    },
+    "hardware": {
+      "type": ["object", "null"],
+      "oneOf": [
+        {
+          "$ref": "#/$defs/hardware"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "$defs": {
+    "nullableString": {
+      "type": ["string", "null"]
+    },
+    "schemaIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "const": "letsinfer.installer.installation-probe"
+        },
+        "version": {
+          "const": 1
+        }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "architecture", "identifier"],
+      "properties": {
+        "os": {
+          "enum": ["linux", "macos"]
+        },
+        "architecture": {
+          "enum": ["arm64", "x86_64"]
+        },
+        "identifier": {
+          "type": "string",
+          "pattern": "^(linux|macos)-(arm64|x86_64)$"
+        }
+      }
+    },
+    "serviceManager": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "scope", "user_domain_available", "persistence"],
+      "properties": {
+        "provider": {
+          "enum": ["systemd", "launchd"]
+        },
+        "scope": {
+          "enum": ["user", "gui"]
+        },
+        "user_domain_available": {
+          "type": "boolean"
+        },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mechanism", "available"],
+          "properties": {
+            "mechanism": {
+              "enum": ["systemd-linger", "launch-agent"]
+            },
+            "available": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "path", "installable"],
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "installable": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "curl",
+        "mktemp",
+        "openssl",
+        "python",
+        "ssh",
+        "ssh_keygen",
+        "sudo",
+        "tar"
+      ],
+      "properties": {
+        "curl": {
+          "$ref": "#/$defs/dependency"
+        },
+        "mktemp": {
+          "$ref": "#/$defs/dependency"
+        },
+        "openssl": {
+          "$ref": "#/$defs/dependency"
+        },
+        "python": {
+          "$ref": "#/$defs/dependency"
+        },
+        "ssh": {
+          "$ref": "#/$defs/dependency"
+        },
+        "ssh_keygen": {
+          "$ref": "#/$defs/dependency"
+        },
+        "sudo": {
+          "$ref": "#/$defs/dependency"
+        },
+        "tar": {
+          "$ref": "#/$defs/dependency"
+        },
+        "apt_get": {
+          "$ref": "#/$defs/dependency"
+        },
+        "avahi_browse": {
+          "$ref": "#/$defs/dependency"
+        },
+        "avahi_publish_service": {
+          "$ref": "#/$defs/dependency"
+        },
+        "brew": {
+          "$ref": "#/$defs/dependency"
+        },
+        "cc": {
+          "$ref": "#/$defs/dependency"
+        },
+        "cmake": {
+          "$ref": "#/$defs/dependency"
+        },
+        "ctest": {
+          "$ref": "#/$defs/dependency"
+        },
+        "dnf": {
+          "$ref": "#/$defs/dependency"
+        },
+        "docker": {
+          "$ref": "#/$defs/dependency"
+        },
+        "launchctl": {
+          "$ref": "#/$defs/dependency"
+        },
+        "loginctl": {
+          "$ref": "#/$defs/dependency"
+        },
+        "nvidia_ctk": {
+          "$ref": "#/$defs/dependency"
+        },
+        "nvidia_smi": {
+          "$ref": "#/$defs/dependency"
+        },
+        "pacman": {
+          "$ref": "#/$defs/dependency"
+        },
+        "sg": {
+          "$ref": "#/$defs/dependency"
+        },
+        "stat": {
+          "$ref": "#/$defs/dependency"
+        },
+        "sw_vers": {
+          "$ref": "#/$defs/dependency"
+        },
+        "sysctl": {
+          "$ref": "#/$defs/dependency"
+        },
+        "system_profiler": {
+          "$ref": "#/$defs/dependency"
+        },
+        "systemctl": {
+          "$ref": "#/$defs/dependency"
+        },
+        "systemd_run": {
+          "$ref": "#/$defs/dependency"
+        },
+        "zypper": {
+          "$ref": "#/$defs/dependency"
+        }
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "observation",
+        "operating_system",
+        "host",
+        "accelerators",
+        "software",
+        "topology"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/provider"
+        },
+        "observation": {
+          "$ref": "#/$defs/observation"
+        },
+        "operating_system": {
+          "$ref": "#/$defs/operatingSystem"
+        },
+        "host": {
+          "$ref": "#/$defs/host"
+        },
+        "accelerators": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/accelerator"
+          }
+        },
+        "software": {
+          "$ref": "#/$defs/software"
+        },
+        "topology": {
+          "$ref": "#/$defs/topology"
+        }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "mode"],
+      "properties": {
+        "id": {
+          "enum": ["linux", "macos"]
+        },
+        "mode": {
+          "enum": ["live", "fixture"]
+        }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_at_unix", "boot_id"],
+      "properties": {
+        "observed_at_unix": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "boot_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "operatingSystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["distribution", "version", "build", "kernel_version"],
+      "properties": {
+        "distribution": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "build": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "kernel_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hardware_model",
+        "cpu_model",
+        "logical_cpu_count",
+        "memory_bytes",
+        "memory_source"
+      ],
+      "properties": {
+        "hardware_model": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "cpu_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "logical_cpu_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory_source": {
+          "enum": ["proc-meminfo", "sysctl"]
+        }
+      }
+    },
+    "accelerator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "vendor",
+        "vendor_name",
+        "name",
+        "uuid",
+        "pci_address",
+        "driver",
+        "compute",
+        "memory",
+        "partitioning",
+        "gpu_core_count",
+        "bus"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "vendor": {
+          "enum": ["amd", "apple", "intel", "nvidia", "unknown"]
+        },
+        "vendor_name": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "uuid": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "pci_address": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "driver": {
+          "$ref": "#/$defs/driver"
+        },
+        "compute": {
+          "$ref": "#/$defs/compute"
+        },
+        "memory": {
+          "$ref": "#/$defs/acceleratorMemory"
+        },
+        "partitioning": {
+          "$ref": "#/$defs/partitioning"
+        },
+        "gpu_core_count": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "bus": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    },
+    "driver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "source"],
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "source": {
+          "enum": ["macos", "nvidia-smi", "unknown"]
+        }
+      }
+    },
+    "compute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api", "version", "capability", "architecture", "family"],
+      "properties": {
+        "api": {
+          "enum": ["cuda", "metal", "unknown"]
+        },
+        "version": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "capability": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "architecture": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "family": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    },
+    "acceleratorMemory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["topology", "framebuffer_bytes", "addressing_mode"],
+      "properties": {
+        "topology": {
+          "enum": ["unified", "discrete", "unknown"]
+        },
+        "framebuffer_bytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "addressing_mode": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    },
+    "partitioning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mig_mode"],
+      "properties": {
+        "mig_mode": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    },
+    "software": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "docker_version",
+        "nvidia_container_toolkit_version",
+        "nvidia_cuda_max_version"
+      ],
+      "properties": {
+        "docker_version": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "nvidia_container_toolkit_version": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "nvidia_cuda_max_version": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    },
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mutable_links_observed"],
+      "properties": {
+        "mutable_links_observed": {
+          "const": false
+        }
+      }
+    }
+  }
+}

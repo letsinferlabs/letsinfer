@@ -1,0 +1,4 @@
+#!/bin/sh
+# Returns a deterministic Linux ARM64 CPU model.
+[ "$#" -eq 0 ] || exit 2
+printf 'Model name:                         Cortex-X925 Fixture\n'

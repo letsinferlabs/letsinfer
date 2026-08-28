@@ -1,0 +1,14 @@
+#!/bin/sh
+# Returns deterministic display inventory for one Apple GPU.
+[ "$#" -eq 1 ] && [ "$1" = "SPDisplaysDataType" ] || exit 2
+printf '%s\n' \
+    'Graphics/Displays:' \
+    '' \
+    '    Apple M4 Max Fixture:' \
+    '' \
+    '      Chipset Model: Apple M4 Max Fixture' \
+    '      Type: GPU' \
+    '      Bus: Built-In' \
+    '      Total Number of Cores: 40' \
+    '      Vendor: Apple (0x106b)' \
+    '      Metal Support: Metal 4'
