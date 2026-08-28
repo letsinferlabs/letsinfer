@@ -1,0 +1,8 @@
+#!/bin/sh
+# Returns deterministic macOS release values.
+[ "$#" -eq 1 ] || exit 2
+case "$1" in
+    -productVersion) printf '15.0-fixture\n' ;;
+    -buildVersion) printf '24A-FIXTURE\n' ;;
+    *) exit 2 ;;
+esac

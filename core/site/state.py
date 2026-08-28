@@ -943,6 +943,10 @@ class SiteStore:
             str(row["name"])
             for row in self.connection.execute("PRAGMA table_info(placements)")
         }
+        engine_group_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(engine_groups)")
+        }
         legacy = (
             "placement_id" in group_columns
             or "service_id" in placement_columns
@@ -956,6 +960,13 @@ class SiteStore:
                 "WHERE state!='removed' OR desired_state!='removed'"
             ).fetchone()[0]
         )
+        if engine_group_columns:
+            non_removed += int(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM engine_groups "
+                    "WHERE state!='removed' OR desired_state!='removed'"
+                ).fetchone()[0]
+            )
         unreleased = int(
             self.connection.execute(
                 "SELECT COUNT(*) FROM device_allocations WHERE state!='released'"
@@ -971,6 +982,7 @@ class SiteStore:
                 """
                 BEGIN IMMEDIATE;
                 DROP TABLE device_allocations;
+                DROP TABLE IF EXISTS engine_groups;
                 DROP TABLE placement_groups;
                 DROP TABLE placements;
                 DROP TABLE request_summaries;

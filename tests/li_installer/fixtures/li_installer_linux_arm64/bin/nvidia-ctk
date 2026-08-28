@@ -1,0 +1,4 @@
+#!/bin/sh
+# Returns a deterministic NVIDIA Container Toolkit version.
+[ "$#" -eq 1 ] && [ "$1" = "--version" ] || exit 2
+printf 'NVIDIA Container Toolkit CLI version 1.20.0-fixture\n'

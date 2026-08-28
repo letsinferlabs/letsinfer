@@ -1,0 +1,4 @@
+#!/bin/sh
+# Returns a deterministic Linux x86_64 CPU model.
+[ "$#" -eq 0 ] || exit 2
+printf 'Model name:                         Intel(R) Core(TM) i9-14900KS Fixture\n'

@@ -388,7 +388,7 @@ class BootstrapInstallTests(unittest.TestCase):
             '"$python_command" - "$checksums" "$archive_name" "$archive"'
         )
         extraction = script.index('tar -xzf "$archive"')
-        installation = script.index('"$unpacked/letsinfer/bin/letsinfer-install"')
+        installation = script.index('"$unpacked/letsinfer/bin/li_installer_core"')
         public_install_umask = script.index("umask 022", extraction)
         private_setup_umask = script.index("umask 077", public_install_umask)
         setup = script.index('"$command_path" core-setup')

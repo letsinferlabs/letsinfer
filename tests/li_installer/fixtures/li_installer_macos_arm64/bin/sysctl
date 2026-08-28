@@ -1,0 +1,11 @@
+#!/bin/sh
+# Returns deterministic macOS host values for requested sysctl names.
+[ "$#" -eq 2 ] && [ "$1" = "-n" ] || exit 2
+case "$2" in
+    kern.bootsessionuuid) printf 'FIXTURE-BOOT-ID\n' ;;
+    hw.model) printf 'MacFixture1,1\n' ;;
+    machdep.cpu.brand_string) printf 'Apple M4 Max Fixture\n' ;;
+    hw.logicalcpu) printf '16\n' ;;
+    hw.memsize) printf '137438953472\n' ;;
+    *) exit 2 ;;
+esac

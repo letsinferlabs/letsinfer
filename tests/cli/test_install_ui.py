@@ -150,7 +150,7 @@ esac
 """,
         )
         self._executable(
-            self.source / "bin" / "letsinfer-install",
+            self.source / "bin" / "li_installer_core",
             """#!/bin/sh
 launcher_root=
 while [ "$#" -gt 0 ]; do

@@ -1809,6 +1809,54 @@ class RuntimeCandidateCliTests(unittest.TestCase):
                 {},
             )
 
+    def test_startup_memory_gate_runs_only_after_runtime_readiness(self) -> None:
+        starting = {
+            "State": {"Running": True, "Health": {"Status": "starting"}}
+        }
+        healthy = {
+            "State": {"Running": True, "Health": {"Status": "healthy"}}
+        }
+        with (
+            mock.patch.object(
+                cli, "container_inspect", side_effect=(starting, healthy)
+            ),
+            mock.patch.object(cli, "health_ready", return_value=True),
+            mock.patch.object(cli, "require_memory_reserve") as reserve,
+            mock.patch.object(cli, "_cancellable_sleep") as sleep,
+        ):
+            cli.wait_for_ready(
+                "engine",
+                18000,
+                30,
+                pathlib.Path("/tmp/server.crt"),
+                {},
+            )
+
+        sleep.assert_called_once_with(2, None)
+        reserve.assert_called_once_with({}, phase="runtime")
+
+    def test_healthy_startup_must_pass_runtime_memory_gate(self) -> None:
+        healthy = {
+            "State": {"Running": True, "Health": {"Status": "healthy"}}
+        }
+        with (
+            mock.patch.object(cli, "container_inspect", return_value=healthy),
+            mock.patch.object(cli, "health_ready", return_value=True),
+            mock.patch.object(
+                cli,
+                "require_memory_reserve",
+                side_effect=cli.LetsInferError("runtime memory floor failed"),
+            ),
+            self.assertRaisesRegex(cli.LetsInferError, "runtime memory floor failed"),
+        ):
+            cli.wait_for_ready(
+                "engine",
+                18000,
+                30,
+                pathlib.Path("/tmp/server.crt"),
+                {},
+            )
+
     def test_service_commits_runtime_selection_before_engine_start(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
