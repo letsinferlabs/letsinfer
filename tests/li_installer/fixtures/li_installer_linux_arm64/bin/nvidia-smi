@@ -1,0 +1,11 @@
+#!/bin/sh
+# Returns deterministic GB10 inventory or driver summary output.
+case "${1:-}" in
+    --query-gpu=*)
+        printf '0, GPU-FIXTURE-GB10, NVIDIA GB10 Fixture, 0000000F:01:00.0, 580.159.03, [N/A], 12.1, [N/A], ATS\n'
+        ;;
+    "")
+        printf '| NVIDIA-SMI 580.159.03 | CUDA Version: 13.0 |\n'
+        ;;
+    *) exit 2 ;;
+esac

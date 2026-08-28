@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tools.install_core import install
+from tools.li_installer_core import install
 from tools.prune_core import CorePruneError, plan, prune
 
 

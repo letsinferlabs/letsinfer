@@ -1,0 +1,4 @@
+#!/bin/sh
+# Returns a deterministic Docker client version.
+[ "$#" -eq 3 ] && [ "$1" = "version" ] && [ "$2" = "--format" ] || exit 2
+printf '29.2.1-fixture\n'

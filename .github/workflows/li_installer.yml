@@ -1,0 +1,108 @@
+name: Installer builds
+
+on:
+  pull_request:
+    branches:
+      - main
+      - release
+    paths:
+      - ".github/workflows/li_installer.yml"
+      - "bin/li_installer_*"
+      - "install.sh"
+      - "li_installer/**"
+      - "schemas/li_installer_*"
+      - "tests/li_installer/**"
+      - "tools/li_installer_*"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/li_installer.yml"
+      - "bin/li_installer_*"
+      - "install.sh"
+      - "li_installer/**"
+      - "schemas/li_installer_*"
+      - "tests/li_installer/**"
+      - "tools/li_installer_*"
+
+concurrency:
+  group: li_installer-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.identity }} installer
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - identity: linux_arm64
+            operating_system: linux
+            architecture: arm64
+            runner: ubuntu-24.04-arm
+          - identity: linux_x86_64
+            operating_system: linux
+            architecture: x86_64
+            runner: ubuntu-24.04
+          - identity: macos_arm64
+            operating_system: macos
+            architecture: arm64
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify source formatting
+        run: |
+          cargo fmt --manifest-path li_installer/Cargo.toml --all -- --check
+          cargo fmt --manifest-path tests/li_installer/validator/Cargo.toml --all -- --check
+          git diff --check
+      - name: Run native installer contracts
+        env:
+          MATRIX_OPERATING_SYSTEM: ${{ matrix.operating_system }}
+        run: |
+          args=(
+            --cargo-command "$(command -v cargo)"
+            --mktemp-command "$(command -v mktemp)"
+            --rm-command "$(command -v rm)"
+          )
+          if [[ "$MATRIX_OPERATING_SYSTEM" == macos ]]; then
+            args+=(--swiftc-command "$(command -v swiftc)")
+          fi
+          sh tests/li_installer/li_installer_run.sh "${args[@]}"
+      - name: Build deterministic native archive
+        env:
+          MATRIX_ARCHITECTURE: ${{ matrix.architecture }}
+          MATRIX_IDENTITY: ${{ matrix.identity }}
+          MATRIX_OPERATING_SYSTEM: ${{ matrix.operating_system }}
+        run: |
+          mkdir "$RUNNER_TEMP/li_installer_first" "$RUNNER_TEMP/li_installer_second"
+          args=(
+            --operating-system "$MATRIX_OPERATING_SYSTEM"
+            --architecture "$MATRIX_ARCHITECTURE"
+            --cargo-command "$(command -v cargo)"
+          )
+          if [[ "$MATRIX_OPERATING_SYSTEM" == macos ]]; then
+            args+=(--swiftc-command "$(command -v swiftc)")
+          fi
+          archive="li_installer_${MATRIX_IDENTITY}.tar.gz"
+          python3 tools/li_installer_build_assets.py \
+            "${args[@]}" --output "$RUNNER_TEMP/li_installer_first/$archive"
+          python3 tools/li_installer_build_assets.py \
+            "${args[@]}" --output "$RUNNER_TEMP/li_installer_second/$archive"
+          cmp \
+            "$RUNNER_TEMP/li_installer_first/$archive" \
+            "$RUNNER_TEMP/li_installer_second/$archive"
+          tar -tzf "$RUNNER_TEMP/li_installer_first/$archive"
+      - name: Upload native archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: li_installer_${{ matrix.identity }}
+          path: ${{ runner.temp }}/li_installer_first/li_installer_${{ matrix.identity }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7

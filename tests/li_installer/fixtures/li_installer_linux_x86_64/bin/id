@@ -1,0 +1,4 @@
+#!/bin/sh
+# Returns a deterministic root identity for a mutation-free package-manager fixture.
+[ "$#" -eq 1 ] && [ "$1" = "-u" ] || exit 2
+printf '0\n'
