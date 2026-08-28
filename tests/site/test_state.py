@@ -94,6 +94,34 @@ class SiteStateTests(unittest.TestCase):
             self.assertEqual(store.members()[0]["member_id"], identity.member_id)
             self.assertTrue(store.verify_audit()["valid"])
 
+    def test_read_identity_migrates_verified_schema_three_bytes(self) -> None:
+        expected = state.setup_site("Home", "127.0.0.1")
+        value = json.loads(state.identity_path().read_text(encoding="utf-8"))
+        value["schema_version"] = 3
+        state.identity_path().write_text(
+            json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(state.read_identity(), expected)
+        migrated = json.loads(state.identity_path().read_text(encoding="utf-8"))
+        self.assertEqual(migrated["schema_version"], 4)
+
+    def test_schema_three_migration_verifies_keys_before_mutation(self) -> None:
+        state.setup_site("Home", "127.0.0.1")
+        value = json.loads(state.identity_path().read_text(encoding="utf-8"))
+        value["schema_version"] = 3
+        value["member_public_key_sha256"] = "0" * 64
+        state.identity_path().write_text(
+            json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(state.SiteError, "cryptographic keys"):
+            state.read_identity()
+        preserved = json.loads(state.identity_path().read_text(encoding="utf-8"))
+        self.assertEqual(preserved["schema_version"], 3)
+
     def test_cleanup_exposure_reader_survives_invalid_site_identity(self) -> None:
         identity = state.setup_site("Home", "127.0.0.1")
         with state.SiteStore(identity=identity) as store:

@@ -41,6 +41,7 @@ ID_RE = re.compile(r"^[0-9a-f]{32}$")
 KEY_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 SCHEMA_VERSION = 4
+LEGACY_IDENTITY_SCHEMA_VERSION = 3
 CHECKPOINT_INTERVAL = 100
 MAX_REASON_BYTES = 512
 MAX_TAG_BYTES = 128
@@ -412,6 +413,9 @@ def read_identity(path: pathlib.Path | None = None) -> SiteIdentity:
         raise SiteError("site identity is not valid JSON") from error
     if not isinstance(value, dict):
         raise SiteError("site identity must be a JSON object")
+    migrate_identity = value.get("schema_version") == LEGACY_IDENTITY_SCHEMA_VERSION
+    if migrate_identity:
+        value = {**value, "schema_version": SCHEMA_VERSION}
     identity = _identity_from(value)
     if identity.role == "main":
         site_fingerprint = _generate_identity_key(site_key_path(), site_public_key_path())
@@ -433,6 +437,8 @@ def read_identity(path: pathlib.Path | None = None) -> SiteIdentity:
         site_ca_certificate_path(),
         identity.member_id,
     )
+    if migrate_identity:
+        _atomic_private(source, _canonical_bytes(value))
     return identity
 
 
