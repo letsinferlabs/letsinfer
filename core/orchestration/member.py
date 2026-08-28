@@ -49,6 +49,35 @@ LABELED_SECRET_RE = re.compile(
     r"(\s*[:=]\s*)(?:bearer\s+)?([^\s,;]+)"
 )
 MAX_ERROR_CHARS = 512
+MEMBER_JOB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS placements (
+    placement_id TEXT PRIMARY KEY,
+    placement_group_id TEXT NOT NULL UNIQUE,
+    plan_sha256 TEXT NOT NULL,
+    runtime_digest TEXT NOT NULL,
+    manifest_sha256 TEXT NOT NULL,
+    topology_sha256 TEXT NOT NULL,
+    engine_credential_sha256 TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    placement_json TEXT NOT NULL,
+    source TEXT,
+    state TEXT NOT NULL CHECK(state IN ('staged','running','stopped','failed','removed')),
+    last_operation_id TEXT NOT NULL,
+    updated_at_unix INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS jobs (
+    operation_id TEXT PRIMARY KEY,
+    job_sha256 TEXT NOT NULL,
+    placement_group_id TEXT NOT NULL,
+    placement_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('stage','start','recover','stop','remove')),
+    state TEXT NOT NULL CHECK(state IN ('running','succeeded','failed')),
+    result_json TEXT,
+    error TEXT,
+    received_at_unix INTEGER NOT NULL,
+    finished_at_unix INTEGER
+) STRICT;
+"""
 
 
 class MemberJobError(RuntimeError):
@@ -264,37 +293,8 @@ class MemberJobStore:
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=FULL")
-        self.connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS placements (
-                placement_id TEXT PRIMARY KEY,
-                placement_group_id TEXT NOT NULL UNIQUE,
-                plan_sha256 TEXT NOT NULL,
-                runtime_digest TEXT NOT NULL,
-                manifest_sha256 TEXT NOT NULL,
-                topology_sha256 TEXT NOT NULL,
-                engine_credential_sha256 TEXT NOT NULL,
-                node_id TEXT NOT NULL,
-                placement_json TEXT NOT NULL,
-                source TEXT,
-                state TEXT NOT NULL CHECK(state IN ('staged','running','stopped','failed','removed')),
-                last_operation_id TEXT NOT NULL,
-                updated_at_unix INTEGER NOT NULL
-            ) STRICT;
-            CREATE TABLE IF NOT EXISTS jobs (
-                operation_id TEXT PRIMARY KEY,
-                job_sha256 TEXT NOT NULL,
-                placement_group_id TEXT NOT NULL,
-                placement_id TEXT NOT NULL,
-                action TEXT NOT NULL CHECK(action IN ('stage','start','recover','stop','remove')),
-                state TEXT NOT NULL CHECK(state IN ('running','succeeded','failed')),
-                result_json TEXT,
-                error TEXT,
-                received_at_unix INTEGER NOT NULL,
-                finished_at_unix INTEGER
-            ) STRICT;
-            """
-        )
+        self.connection.executescript(MEMBER_JOB_SCHEMA)
+        self._migrate_legacy_schema()
         if recover_incomplete:
             self.connection.execute(
                 "UPDATE jobs SET state='failed',"
@@ -303,6 +303,56 @@ class MemberJobStore:
                 (int(time.time()),),
             )
         self._secure_files()
+
+    def _migrate_legacy_schema(self) -> None:
+        """Reset a terminal schema-three journal without discarding active work."""
+        job_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(jobs)")
+        }
+        if "group_id" not in job_columns:
+            if not {"placement_group_id", "placement_id"}.issubset(job_columns):
+                raise MemberJobError("member job database schema is invalid")
+            return
+        group_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(groups)")
+        }
+        if not {"group_id", "state"}.issubset(group_columns):
+            raise MemberJobError("legacy member job database schema is invalid")
+        running_jobs = int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM jobs WHERE state='running'"
+            ).fetchone()[0]
+        )
+        potentially_active = int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM groups WHERE state NOT IN ('stopped','removed')"
+            ).fetchone()[0]
+        )
+        current_placements = int(
+            self.connection.execute("SELECT COUNT(*) FROM placements").fetchone()[0]
+        )
+        if running_jobs or potentially_active or current_placements:
+            raise MemberJobError(
+                "legacy member job state must be stopped or removed before the "
+                "placement journal cut"
+            )
+        try:
+            self.connection.executescript(
+                """
+                BEGIN IMMEDIATE;
+                DROP TABLE jobs;
+                DROP TABLE groups;
+                DROP TABLE placements;
+                """
+                + MEMBER_JOB_SCHEMA
+                + "COMMIT;"
+            )
+        except BaseException:
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
 
     def _secure_files(self) -> None:
         for path in (self.path, self.path.with_name(self.path.name + "-wal"), self.path.with_name(self.path.name + "-shm")):

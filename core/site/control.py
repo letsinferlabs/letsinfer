@@ -1154,10 +1154,13 @@ def fetch_member_job_status(
     if job is not None and (
         not isinstance(job, dict)
         or set(job) != {
-            "operation_id", "placement_group_id", "action", "state", "result", "error",
-            "received_at_unix", "finished_at_unix",
+            "operation_id", "placement_group_id", "placement_id", "action",
+            "state", "result", "error", "received_at_unix",
+            "finished_at_unix",
         }
         or job.get("operation_id") != operation_id
+        or not isinstance(job.get("placement_id"), str)
+        or not ID_RE.fullmatch(job["placement_id"])
         or job.get("state") not in {"running", "succeeded", "failed"}
     ):
         raise ControlError("member job-status payload is invalid")
