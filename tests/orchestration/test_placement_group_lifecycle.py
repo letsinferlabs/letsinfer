@@ -590,7 +590,8 @@ class PlacementGroupLifecycleTests(unittest.TestCase):
                 orchestrator.stop.assert_called_once_with()
                 orchestrator.remove.assert_called_once_with()
 
-    def test_replacement_removes_failed_group_with_released_allocation(self) -> None:
+    def test_model_remove_cleans_running_group_after_allocations_were_released(self) -> None:
+        """Stop exact tasks without reacquiring allocations released by reconciliation."""
         store = _Store()
         store.group["desired_state"] = "stopped"
         store.group["state"] = "failed"
@@ -603,6 +604,9 @@ class PlacementGroupLifecycleTests(unittest.TestCase):
             "member_states": [],
         }
         orchestrator = mock.Mock()
+        orchestrator.stop.side_effect = cli.SiteError(
+            "placement allocation transition is invalid: released -> draining"
+        )
         orchestrator.remove.return_value = removed
         with tempfile.TemporaryDirectory() as directory:
             runtime_home = pathlib.Path(directory)
@@ -621,10 +625,41 @@ class PlacementGroupLifecycleTests(unittest.TestCase):
                     "_restore_placement_group_orchestrator",
                     return_value=(orchestrator, {}),
                 ),
+                mock.patch.object(
+                    store,
+                    "members",
+                    return_value=[
+                        {
+                            "member_id": store.placement["node_id"],
+                            "display_name": "Home",
+                            "state": "active",
+                        }
+                    ],
+                    create=True,
+                ),
+                mock.patch.object(
+                    cli,
+                    "read_site_identity",
+                    return_value=types.SimpleNamespace(
+                        member_id=store.placement["node_id"]
+                    ),
+                ),
+                mock.patch("sys.stdout", io.StringIO()),
             ):
-                cli._remove_placement_groups_by_id([store.placement_group_id])
+                self.assertEqual(
+                    cli._remove_model_placements(
+                        argparse.Namespace(
+                            model="example-model",
+                            node=[],
+                            all_nodes=True,
+                            json=True,
+                        )
+                    ),
+                    0,
+                )
 
-        orchestrator.stop.assert_called_once_with()
+        orchestrator.stop.assert_not_called()
+        orchestrator.stop_after_allocation_release.assert_called_once_with()
         orchestrator.remove.assert_called_once_with()
 
     def test_replacement_retries_incomplete_group_removal(self) -> None:

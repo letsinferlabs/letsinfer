@@ -585,15 +585,17 @@ class PlacementGroupOrchestrator:
         )
         return result
 
-    def stop(self) -> dict[str, Any]:
-        self.store.set_placement_group_allocation_state(
-            self.plan.placement_group_id,
-            "draining",
-            actor_type=self.actor_type,
-            actor_id=self.actor_id,
-            origin_interface=self.origin_interface,
-            correlation_id=self.correlation_id,
-        )
+    def _stop_placements(self, *, manage_allocations: bool) -> dict[str, Any]:
+        """Stop every exact placement with an explicit allocation owner."""
+        if manage_allocations:
+            self.store.set_placement_group_allocation_state(
+                self.plan.placement_group_id,
+                "draining",
+                actor_type=self.actor_type,
+                actor_id=self.actor_id,
+                origin_interface=self.origin_interface,
+                correlation_id=self.correlation_id,
+            )
         self._persist(action="placement_group.stop", desired_state="stopped", state="stopping")
         _completed, failures = self._run_phases(
             "stop",
@@ -613,15 +615,24 @@ class PlacementGroupOrchestrator:
                 + ",".join(item.task_id for item, _error in failures)
             )
         result = self._persist(action="placement_group.stop", desired_state="stopped", state="stopped")
-        self.store.set_placement_group_allocation_state(
-            self.plan.placement_group_id,
-            "reserved",
-            actor_type=self.actor_type,
-            actor_id=self.actor_id,
-            origin_interface=self.origin_interface,
-            correlation_id=self.correlation_id,
-        )
+        if manage_allocations:
+            self.store.set_placement_group_allocation_state(
+                self.plan.placement_group_id,
+                "reserved",
+                actor_type=self.actor_type,
+                actor_id=self.actor_id,
+                origin_interface=self.origin_interface,
+                correlation_id=self.correlation_id,
+            )
         return result
+
+    def stop(self) -> dict[str, Any]:
+        """Stop every placement and return its active allocation to reserve."""
+        return self._stop_placements(manage_allocations=True)
+
+    def stop_after_allocation_release(self) -> dict[str, Any]:
+        """Stop every placement without reacquiring already released devices."""
+        return self._stop_placements(manage_allocations=False)
 
     def remove(self) -> dict[str, Any]:
         self._persist(action="placement_group.remove", desired_state="removed", state="removing")
