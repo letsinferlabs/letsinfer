@@ -57,6 +57,7 @@ CONTEXTS = ("32k", "64k", "128k", "256k")
 PLAN_CONTEXTS = ("short",) + CONTEXTS
 TTFT_CONTEXTS = ("ttftcold", "ttftwarm")
 ALL_PLAN_CONTEXTS = PLAN_CONTEXTS + TTFT_CONTEXTS
+MAX_PUBLIC_DECODE_SPREAD_RATIO = 100.0
 SAFE_CELL = re.compile(
     r"(?:(?:short|32k|64k|128k|256k)-(?:code|prose)-c(?:1|2|4|8|16)"
     r"|ttft(?:cold|warm)-code-c1)"
@@ -1186,8 +1187,29 @@ def public_benchmark_result(
         raise RuntimeMatrixError("matrix summary is missing public metrics")
     decode_statistic = "mean" if concurrency == 1 else "p50"
     decode_value = decode.get(decode_statistic)
+    decode_count = decode.get("count")
+    decode_minimum = decode.get("min")
+    decode_maximum = decode.get("max")
+    # A client can drain several buffered SSE lines with nearly identical
+    # timestamps.  Keep raw timings, but do not publish a population statistic
+    # when streams disagree by two orders of magnitude.
+    if decode_count != concurrency:
+        decode_value = None
+    elif concurrency > 1 and all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in (decode_minimum, decode_maximum)
+    ):
+        if (
+            float(decode_minimum) <= 0
+            or float(decode_maximum) / float(decode_minimum)
+            > MAX_PUBLIC_DECODE_SPREAD_RATIO
+        ):
+            decode_value = None
     cached_max = cached.get("max")
-    if not isinstance(decode_value, (int, float)) or isinstance(decode_value, bool):
+    if decode_value is not None and (
+        not isinstance(decode_value, (int, float))
+        or isinstance(decode_value, bool)
+    ):
         raise RuntimeMatrixError("matrix summary has no decode throughput")
     if not isinstance(cached_max, (int, float)) or isinstance(cached_max, bool):
         raise RuntimeMatrixError("matrix summary has no cache observation")
