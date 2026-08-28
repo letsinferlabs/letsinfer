@@ -459,6 +459,103 @@ class LocalPlacementExecutorTests(unittest.TestCase):
                 self.assertFalse(placement_group_root.exists())
                 self.assertFalse(protection_root.exists())
 
+    def test_remove_acknowledges_a_disarmed_failed_process_trip(self) -> None:
+        """An explicit removal may retire a crash trip after Watchdog disarm."""
+        executor = cli.LocalPlacementExecutor(self.node_id)
+        root = pathlib.Path(self.temporary.name)
+        protection_root = pathlib.Path(self.config["protection_root"])
+        placement_group_parent = root / "placement-groups"
+        placement_group_root = placement_group_parent / self.placement_group_id
+        placement_group_root.mkdir(parents=True)
+        protection_root.mkdir(parents=True)
+        state_path, _, trip_path = cli.protection_paths(
+            {"protection_root": str(protection_root)}
+        )
+        state_path.write_text("phase=disarmed\n", encoding="ascii")
+        trip_path.write_text('{"reason":"protected_process_exited"}\n', encoding="ascii")
+        state_path.chmod(0o600)
+        trip_path.chmod(0o600)
+
+        with (
+            mock.patch.object(
+                cli,
+                "_read_placement_group_config",
+                return_value=self.config,
+            ),
+            mock.patch.object(cli, "container_inspect", return_value=None),
+            mock.patch.object(
+                cli,
+                "_placement_group_path",
+                return_value=placement_group_root,
+            ),
+            mock.patch.object(
+                cli,
+                "default_placement_group_root",
+                return_value=placement_group_parent,
+            ),
+            mock.patch.object(
+                cli,
+                "default_watchdog_data_root",
+                return_value=root / "watchdog",
+            ),
+            mock.patch.object(cli, "certificate_sha256", return_value="7" * 64),
+        ):
+            result = executor.remove(self.job)
+
+        self.assertEqual(result["state"], "removed")
+        self.assertFalse(placement_group_root.exists())
+        self.assertFalse(protection_root.exists())
+
+    def test_remove_does_not_clear_an_armed_failed_process_trip(self) -> None:
+        """Removal still rejects a trip whose Watchdog slot was never disarmed."""
+        executor = cli.LocalPlacementExecutor(self.node_id)
+        root = pathlib.Path(self.temporary.name)
+        protection_root = pathlib.Path(self.config["protection_root"])
+        placement_group_parent = root / "placement-groups"
+        placement_group_root = placement_group_parent / self.placement_group_id
+        placement_group_root.mkdir(parents=True)
+        protection_root.mkdir(parents=True)
+        state_path, _, trip_path = cli.protection_paths(
+            {"protection_root": str(protection_root)}
+        )
+        state_path.write_text("phase=armed\n", encoding="ascii")
+        trip_path.write_text('{"reason":"protected_process_exited"}\n', encoding="ascii")
+        state_path.chmod(0o600)
+        trip_path.chmod(0o600)
+
+        with (
+            mock.patch.object(
+                cli,
+                "_read_placement_group_config",
+                return_value=self.config,
+            ),
+            mock.patch.object(cli, "container_inspect", return_value=None),
+            mock.patch.object(
+                cli,
+                "_placement_group_path",
+                return_value=placement_group_root,
+            ),
+            mock.patch.object(
+                cli,
+                "default_placement_group_root",
+                return_value=placement_group_parent,
+            ),
+            mock.patch.object(
+                cli,
+                "default_watchdog_data_root",
+                return_value=root / "watchdog",
+            ),
+            mock.patch.object(cli, "certificate_sha256", return_value="7" * 64),
+        ):
+            with self.assertRaisesRegex(
+                cli.LetsInferError, "must be disarmed before removal"
+            ):
+                executor.remove(self.job)
+
+        self.assertTrue(trip_path.is_file())
+        self.assertTrue(placement_group_root.is_dir())
+        self.assertTrue(protection_root.is_dir())
+
     def test_explicit_recovery_clears_only_its_trip_before_start(self) -> None:
         executor = cli.LocalPlacementExecutor(self.node_id)
         with (
