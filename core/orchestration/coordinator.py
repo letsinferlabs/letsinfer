@@ -432,12 +432,14 @@ class PlacementGroupOrchestrator:
         self,
         placements: list[Placement],
         action: str,
+        *,
+        skip_removed: bool = False,
     ) -> tuple[list[Placement], list[tuple[Placement, BaseException]]]:
         """Invoke one runtime-declared phase concurrently and await every task."""
         completed = [
             placement
             for placement in placements
-            if action == "remove"
+            if (action == "remove" or skip_removed)
             and self.states[placement.placement_id]["state"] == "removed"
         ]
         pending = [placement for placement in placements if placement not in completed]
@@ -520,11 +522,16 @@ class PlacementGroupOrchestrator:
         desired_state: str,
         state: str,
         stop_on_failure: bool = True,
+        skip_removed: bool = False,
     ) -> tuple[list[Placement], list[tuple[Placement, BaseException]]]:
         completed: list[Placement] = []
         failures: list[tuple[Placement, BaseException]] = []
         for phase in self._task_phases(reverse=reverse):
-            phase_completed, phase_failures = self._invoke_phase(phase, action)
+            phase_completed, phase_failures = self._invoke_phase(
+                phase,
+                action,
+                skip_removed=skip_removed,
+            )
             completed.extend(phase_completed)
             failures.extend(phase_failures)
             self._persist(
@@ -604,6 +611,7 @@ class PlacementGroupOrchestrator:
             desired_state="stopped",
             state="stopping",
             stop_on_failure=False,
+            skip_removed=not manage_allocations,
         )
         if failures:
             self._persist(
