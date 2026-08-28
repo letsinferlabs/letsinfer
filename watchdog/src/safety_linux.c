@@ -548,7 +548,7 @@ int watchdog_safety_open(watchdog_safety_runtime *runtime, const watchdog_safety
     runtime->pid_fd = -1;
     runtime->config = *config;
     if (copy_text(runtime->state_path, sizeof(runtime->state_path), config->state_path) != 0
-        || make_peer_path(runtime->ack_path, config->state_path, "protected-engine.ack") != 0
+        || make_peer_path(runtime->ack_path, config->state_path, "protected-placement.ack") != 0
         || make_peer_path(runtime->trip_path, config->state_path, "protection-trip.json") != 0
         || make_peer_path(runtime->event_path, config->state_path, "safety-events.ndjson") != 0) return -1;
     runtime->config.state_path = runtime->state_path;
@@ -784,7 +784,7 @@ static int scan_targets(watchdog_safety_supervisor *supervisor) {
             const int length = snprintf(
                 state_path,
                 sizeof(state_path),
-                "%s/%s/protected-engine.state",
+                "%s/%s/protected-placement.state",
                 supervisor->root_path,
                 entry->d_name
             );

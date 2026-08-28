@@ -785,7 +785,7 @@ def collect_local_facts(
 
 
 def _protection_trip_exists(path: pathlib.Path) -> bool:
-    """Return whether any bounded protected-engine slot has a safe trip latch."""
+    """Return whether any bounded protected-placement slot has a safe trip latch."""
     if not path.exists():
         return False
     if path.is_symlink():
@@ -801,7 +801,7 @@ def _protection_trip_exists(path: pathlib.Path) -> bool:
         if not re.fullmatch(r"[0-9a-f]{32}", child.name):
             continue
         if child.is_symlink() or not child.is_dir():
-            raise InventoryError("protected-engine slot is unsafe")
+            raise InventoryError("protected-placement slot is unsafe")
         trip = child / "protection-trip.json"
         if trip.is_symlink():
             raise InventoryError("protection trip latch is unsafe")
