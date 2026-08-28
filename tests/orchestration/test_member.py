@@ -10,7 +10,9 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
+from core.site import control
 from core.orchestration.member import (
     MemberAgent,
     MemberJobError,
@@ -311,6 +313,57 @@ class MemberJobTests(unittest.TestCase):
                     break
                 time.sleep(0.01)
             self.assertEqual(status["result"], {"state": "stage"})
+
+    def test_completed_job_status_round_trips_through_control_client(self) -> None:
+        """Accept the exact completed MemberAgent payload at the coordinator boundary."""
+        with tempfile.TemporaryDirectory() as directory:
+            agent = MemberAgent(
+                member_id=self.node_id,
+                store_path=pathlib.Path(directory) / "jobs.sqlite3",
+                handler=lambda job, _credential, _cancelled: {
+                    "state": job["action"]
+                },
+            )
+            job = self.job()
+            agent.execute(job, engine_credential=self.credential)
+            response = agent.job_status(job["operation_id"])
+
+            with mock.patch.object(
+                control,
+                "_member_control_request",
+                return_value=response,
+            ):
+                observed = control.fetch_member_job_status(
+                    "https://node.example:9770",
+                    expected_member_id=self.node_id,
+                    expected_certificate_sha256="f" * 64,
+                    operation_id=job["operation_id"],
+                )
+
+            self.assertEqual(observed, response)
+            self.assertEqual(
+                observed["job"]["placement_id"], job["placement_id"]
+            )
+            malformed = {
+                **response,
+                "job": {**response["job"], "placement_id": "not-an-id"},
+            }
+            with (
+                mock.patch.object(
+                    control,
+                    "_member_control_request",
+                    return_value=malformed,
+                ),
+                self.assertRaisesRegex(
+                    control.ControlError, "job-status payload"
+                ),
+            ):
+                control.fetch_member_job_status(
+                    "https://node.example:9770",
+                    expected_member_id=self.node_id,
+                    expected_certificate_sha256="f" * 64,
+                    operation_id=job["operation_id"],
+                )
 
     def test_stop_preempts_a_running_start_on_the_control_worker(self) -> None:
         start_entered = threading.Event()
