@@ -355,11 +355,36 @@ class MemberJobStore:
             raise
 
     def _secure_files(self) -> None:
-        for path in (self.path, self.path.with_name(self.path.name + "-wal"), self.path.with_name(self.path.name + "-shm")):
-            if path.exists():
-                if path.is_symlink() or path.stat().st_uid != os.getuid():
-                    raise MemberJobError(f"member job database file is unsafe: {path}")
-                path.chmod(0o600)
+        for path in (
+            self.path,
+            self.path.with_name(self.path.name + "-wal"),
+            self.path.with_name(self.path.name + "-shm"),
+        ):
+            try:
+                descriptor = os.open(
+                    path,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                )
+            except FileNotFoundError:
+                # SQLite may remove a WAL/SHM sidecar asynchronously as the
+                # final connection closes.  Its disappearance is already the
+                # safe terminal state; never turn that bounded cleanup race
+                # into a lifecycle failure.
+                continue
+            try:
+                details = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(details.st_mode)
+                    or details.st_uid != os.getuid()
+                ):
+                    raise MemberJobError(
+                        f"member job database file is unsafe: {path}"
+                    )
+                os.fchmod(descriptor, 0o600)
+            finally:
+                os.close(descriptor)
 
     def close(self) -> None:
         self.connection.close()
