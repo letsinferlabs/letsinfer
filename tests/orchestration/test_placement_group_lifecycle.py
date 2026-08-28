@@ -555,7 +555,7 @@ class PlacementGroupLifecycleTests(unittest.TestCase):
         orchestrator.stop.assert_called_once_with()
         orchestrator.remove.assert_called_once_with()
 
-    def test_remove_retries_incomplete_group_without_stopping_again(self) -> None:
+    def test_remove_retries_stop_before_incomplete_group_cleanup(self) -> None:
         for incomplete_state in ("failed", "removing"):
             with self.subTest(state=incomplete_state):
                 store = _Store()
@@ -587,7 +587,7 @@ class PlacementGroupLifecycleTests(unittest.TestCase):
                         cli._placement_group_lifecycle("example-model", "remove"),
                         removed,
                     )
-                orchestrator.stop.assert_not_called()
+                orchestrator.stop.assert_called_once_with()
                 orchestrator.remove.assert_called_once_with()
 
     def test_replacement_removes_failed_group_with_released_allocation(self) -> None:
@@ -624,7 +624,7 @@ class PlacementGroupLifecycleTests(unittest.TestCase):
             ):
                 cli._remove_placement_groups_by_id([store.placement_group_id])
 
-        orchestrator.stop.assert_not_called()
+        orchestrator.stop.assert_called_once_with()
         orchestrator.remove.assert_called_once_with()
 
     def test_replacement_retries_incomplete_group_removal(self) -> None:
@@ -660,7 +660,7 @@ class PlacementGroupLifecycleTests(unittest.TestCase):
             ):
                 cli._remove_placement_groups_by_id([store.placement_group_id])
 
-        orchestrator.stop.assert_not_called()
+        orchestrator.stop.assert_called_once_with()
         orchestrator.remove.assert_called_once_with()
 
     def test_replacement_forgets_failed_group_after_runtime_object_was_pruned(self) -> None:

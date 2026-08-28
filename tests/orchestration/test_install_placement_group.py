@@ -145,6 +145,10 @@ class PlacementGroupInstallTests(unittest.TestCase):
                 self.engine_credential = "x" * 48
                 self.engine_credential_sha256 = "5" * 64
                 self.results = {}
+                self.states = {
+                    placement.placement_id: {"state": "staged"}
+                    for placement in self.plan.placements
+                }
                 self.stop_calls = 0
                 instances.append(self)
 
@@ -164,9 +168,13 @@ class PlacementGroupInstallTests(unittest.TestCase):
                     }
                     for placement in self.plan.placements
                 }
+                for state in self.states.values():
+                    state["state"] = "running"
 
             def stop(self):
                 self.stop_calls += 1
+                for state in self.states.values():
+                    state["state"] = "stopped"
 
         arguments = argparse.Namespace(
             no_service=False,
