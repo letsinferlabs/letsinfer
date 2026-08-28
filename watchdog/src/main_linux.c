@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define WATCHDOG_VERSION "0.11.0-rc.33"
+#define WATCHDOG_VERSION "0.11.0-rc.34"
 
 static void usage(FILE *stream, const char *program) {
     fprintf(stream,
@@ -25,7 +25,7 @@ static void usage(FILE *stream, const char *program) {
         "  --sample-ms N          Sampling interval (default 1000)\n"
         "  --flush-ms N           Durable flush interval (default 10000)\n"
         "  --max-controllers N    Concurrent controllers, maximum 16\n"
-        "  --protect-root PATH    Private protected-engine directory root\n"
+        "  --protect-root PATH    Private protected-placement directory root\n"
         "  --warning-bytes N      Required available-memory warning threshold\n"
         "  --stop-bytes N         Required available-memory admission-pressure threshold\n"
         "  --kill-bytes N         Required available-memory critical-pressure threshold\n"
@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
         .flush_interval_ms = WATCHDOG_DEFAULT_FLUSH_INTERVAL_MS,
         .max_controllers = WATCHDOG_DEFAULT_MAX_CONTROLLERS,
         .safety = {
-            .state_path = "/var/lib/letsinfer/watchdog/protected-engines"
+            .state_path = "/var/lib/letsinfer/watchdog/protected-placements"
         }
     };
     static const struct option options[] = {
