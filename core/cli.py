@@ -40,7 +40,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from benchmarks import benchmark_record as benchmark_record_contract
 
@@ -269,6 +269,8 @@ REGISTRY_DIGEST_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 WATCHDOG_PROTOCOL_VERSION = 3
 TOPOLOGY_ONLINE_SECONDS = 5
 MAX_AUTOMATIC_LINK_CANDIDATES_PER_PAIR = 16
+# Cover three complete Watchdog persistence windows while retaining a hard fail-closed bound.
+PROTECTION_ACK_TIMEOUT_SECONDS = 30.0
 WATCHDOG_CONTROLLER_STREAM_FLOOR = 16
 WATCHDOG_CONTROLLER_STREAM_LIMIT = 16
 MANAGED_LABEL = "io.letsinfer.managed"
@@ -2557,7 +2559,7 @@ def _await_protection_ack(
     phase: str,
     container_id: str | None,
     *,
-    timeout_seconds: float = 10.0,
+    timeout_seconds: float = PROTECTION_ACK_TIMEOUT_SECONDS,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     expected_id = container_id or "-"
@@ -5466,15 +5468,37 @@ def collect_container_evidence(
     )
 
 
+def _cancellable_sleep(
+    seconds: float,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Sleep in bounded slices so a placement stop can preempt startup."""
+    if cancelled is None:
+        time.sleep(seconds)
+        return
+    deadline = time.monotonic() + seconds
+    while True:
+        if cancelled():
+            raise LetsInferError("placement-group start was preempted by stop")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.1, remaining))
+
+
 def wait_for_ready(
     name: str,
     port: int,
     timeout_seconds: int,
     cert_path: pathlib.Path,
     manifest: dict[str, Any],
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
+        if cancelled is not None and cancelled():
+            raise LetsInferError("placement-group start was preempted by stop")
         inspection = container_inspect(name)
         if inspection is None or not inspection.get("State", {}).get(
             "Running", False
@@ -5500,7 +5524,7 @@ def wait_for_ready(
         )
         if docker_health == "healthy" and health_ready(port, cert_path):
             return
-        time.sleep(2)
+        _cancellable_sleep(2, cancelled)
     raise LetsInferError(
         "server endpoint and Docker healthcheck were not healthy before the startup timeout"
     )
@@ -8288,6 +8312,13 @@ def _fresh_site_topology() -> tuple[Any, TopologyGraph]:
             "cannot resolve placement while authenticated member facts are unavailable: "
             + ",".join(synchronized["failed"])
         )
+    _refresh_site_links_once()
+    synchronized = _synchronize_member_facts()
+    if synchronized["failed"]:
+        raise LetsInferError(
+            "cannot resolve placement while refreshed link facts are unavailable: "
+            + ",".join(synchronized["failed"])
+        )
     try:
         with SiteStore(identity=identity) as store:
             members = [row for row in store.members() if row["state"] == "active"]
@@ -8897,9 +8928,11 @@ def install_placement_group(
                     for placement in plan.placements
                 ],
             )
+            start_attempted = False
             started = False
             try:
                 orchestrator.stage()
+                start_attempted = True
                 orchestrator.start()
                 started = True
                 credential_root = secrets_root() / "placement-groups" / plan.placement_group_id
@@ -8977,10 +9010,25 @@ def install_placement_group(
                     )
                 except BaseException as state_error:
                     rollback_error = rollback_error or state_error
-                try:
-                    store.set_placement_group_allocation_state(plan.placement_group_id, "released")
-                except BaseException as allocation_error:
-                    rollback_error = rollback_error or allocation_error
+                inactive_states = {"stopped", "removed"}
+                stop_confirmed = (
+                    not start_attempted
+                    or all(
+                        item["state"] in inactive_states
+                        for item in orchestrator.states.values()
+                    )
+                )
+                if stop_confirmed:
+                    try:
+                        store.set_placement_group_allocation_state(
+                            plan.placement_group_id, "released"
+                        )
+                    except BaseException as allocation_error:
+                        rollback_error = rollback_error or allocation_error
+                elif rollback_error is None:
+                    rollback_error = PlacementGroupOrchestrationError(
+                        "managed placement stop was not confirmed"
+                    )
                 if rollback_error is not None:
                     raise LetsInferError(
                         "placement-group installation failed and rollback was incomplete: "
@@ -9261,11 +9309,8 @@ def _placement_group_lifecycle(
                 elif action == "recover":
                     result = orchestrator.recover(acknowledge_trips=True)
                 elif action == "remove":
-                    if (
-                        row["desired_state"] != "removed"
-                        and row["state"] not in {"staged", "stopped"}
-                    ):
-                        stopped = orchestrator.stop()
+                    if row["state"] not in {"staged", "stopped", "removed"}:
+                        orchestrator.stop()
                     result = orchestrator.remove()
                 else:
                     raise LetsInferError("placement-group lifecycle action is invalid")
@@ -10210,16 +10255,9 @@ def _remove_placement_groups_by_id(placement_group_ids: Sequence[str]) -> None:
                 )
                 continue
             orchestrator, _manifest = _restore_placement_group_orchestrator(store, row)
-            allocations_released = bool(allocations) and all(
-                allocation["state"] == "released" for allocation in allocations
-            )
-            if (
-                row["desired_state"] != "removed"
-                and row["state"] not in {"staged", "stopped"}
-                and not allocations_released
-            ):
-                stopped = orchestrator.stop()
-            removed = orchestrator.remove()
+            if row["state"] not in {"staged", "stopped", "removed"}:
+                orchestrator.stop()
+            orchestrator.remove()
 
 
 def _install_catalog_nodes(
@@ -18611,7 +18649,10 @@ class LocalPlacementExecutor:
         self.node_id = member_id
 
     def __call__(
-        self, job: Mapping[str, Any], engine_credential: str | None
+        self,
+        job: Mapping[str, Any],
+        engine_credential: str | None,
+        cancelled: Callable[[], bool],
     ) -> Mapping[str, Any]:
         action = job["action"]
         if action == "stage":
@@ -18619,9 +18660,9 @@ class LocalPlacementExecutor:
                 raise LetsInferError("placement-group stage credential is unavailable")
             return self.stage(job, engine_credential)
         if action == "start":
-            return self.start(job)
+            return self.start(job, cancelled=cancelled)
         if action == "recover":
-            return self.recover(job)
+            return self.recover(job, cancelled=cancelled)
         if action == "stop":
             return self.stop(job)
         if action == "remove":
@@ -18858,9 +18899,15 @@ class LocalPlacementExecutor:
             raise
 
     def _wait_runtime_command(
-        self, name: str, readiness: Mapping[str, Any]
+        self,
+        name: str,
+        readiness: Mapping[str, Any],
+        *,
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
         for _attempt in range(readiness["retries"]):
+            if cancelled is not None and cancelled():
+                raise LetsInferError("placement-group start was preempted by stop")
             inspection = container_inspect(name)
             if inspection is None or not inspection.get("State", {}).get("Running", False):
                 raise LetsInferError("placement-group container exited before readiness")
@@ -18869,27 +18916,42 @@ class LocalPlacementExecutor:
             )
             if result.returncode == 0:
                 return
-            time.sleep(readiness["interval_seconds"])
+            _cancellable_sleep(readiness["interval_seconds"], cancelled)
         raise LetsInferError("runtime-owned placement-group readiness timed out")
 
-    def start(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
+    def start(
+        self,
+        job: Mapping[str, Any],
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Mapping[str, Any]:
         config = _read_placement_group_config(job["placement_group_id"])
         self._assert_job_matches_config(job, config)
-        return self._start_config(config)
+        return self._start_config(config, cancelled=cancelled)
 
-    def _start_config(self, config: Mapping[str, Any]) -> Mapping[str, Any]:
+    def _start_config(
+        self,
+        config: Mapping[str, Any],
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Mapping[str, Any]:
         try:
             with storage_lock(letsinfer_home_root()):
-                return self._start_config_locked(config)
+                return self._start_config_locked(config, cancelled=cancelled)
         except StorageUsageError as error:
             raise LetsInferError(str(error)) from error
 
     def _start_config_locked(
-        self, config: Mapping[str, Any]
+        self,
+        config: Mapping[str, Any],
+        *,
+        cancelled: Callable[[], bool] | None = None,
     ) -> Mapping[str, Any]:
+        if cancelled is not None and cancelled():
+            raise LetsInferError("placement-group start was preempted by stop")
         manifest = config["_manifest"]
         if self._config_uses_native(config):
-            return self._start_native_config(config)
+            return self._start_native_config(config, cancelled=cancelled)
         verify_active_core_watchdog()
         task = config["placement"]
         qualification_mode, evidence_dir = _placement_group_launch_mode(config)
@@ -18916,6 +18978,8 @@ class LocalPlacementExecutor:
             model_cache=pathlib.Path(config["model_cache"]),
             runtime_artifact_root=runtime_root,
         )
+        if cancelled is not None and cancelled():
+            raise LetsInferError("placement-group start was preempted by stop")
         require_memory_reserve(manifest, phase="launch")
         rdma_binding = _placement_group_rdma_binding(
             config["_placement_group"], config["node_id"]
@@ -18950,6 +19014,8 @@ class LocalPlacementExecutor:
         inspection = container_inspect(config["container_name"])
         publish_protection_state(protection, generation, "pending")
         try:
+            if cancelled is not None and cancelled():
+                raise LetsInferError("placement-group start was preempted by stop")
             if inspection is None:
                 run(command)
                 inspection = container_inspect(config["container_name"])
@@ -18983,6 +19049,8 @@ class LocalPlacementExecutor:
             publish_protection_state(
                 protection, generation, "starting", inspection=inspection
             )
+            if cancelled is not None and cancelled():
+                raise LetsInferError("placement-group start was preempted by stop")
             if task["launcher"] == "manifest":
                 wait_for_ready(
                     config["container_name"],
@@ -18990,9 +19058,16 @@ class LocalPlacementExecutor:
                     manifest["container"]["startup_timeout_seconds"],
                     pathlib.Path(config["tls_certificate_file"]),
                     manifest,
+                    cancelled=cancelled,
                 )
             else:
-                self._wait_runtime_command(config["container_name"], task["readiness"])
+                self._wait_runtime_command(
+                    config["container_name"],
+                    task["readiness"],
+                    cancelled=cancelled,
+                )
+            if cancelled is not None and cancelled():
+                raise LetsInferError("placement-group start was preempted by stop")
             if task["endpoint_owner"] and not model_identity_ready(
                 manifest,
                 task["port_base"],
@@ -19054,8 +19129,13 @@ class LocalPlacementExecutor:
         }
 
     def _start_native_config(
-        self, config: Mapping[str, Any]
+        self,
+        config: Mapping[str, Any],
+        *,
+        cancelled: Callable[[], bool] | None = None,
     ) -> Mapping[str, Any]:
+        if cancelled is not None and cancelled():
+            raise LetsInferError("placement-group start was preempted by stop")
         if platform.system() != "Darwin":
             raise LetsInferError("native Apple Engines require macOS")
         manifest = config["_manifest"]
@@ -19128,6 +19208,10 @@ class LocalPlacementExecutor:
         ]
         try:
             while time.monotonic() < deadline:
+                if cancelled is not None and cancelled():
+                    raise LetsInferError(
+                        "placement-group start was preempted by stop"
+                    )
                 _enabled, active, _detail = macos_services.service_state(label)
                 if active != "active":
                     raise LetsInferError("native Engine exited during startup")
@@ -19137,7 +19221,7 @@ class LocalPlacementExecutor:
                     pathlib.Path(config["tls_certificate_file"]),
                 ):
                     break
-                time.sleep(1)
+                _cancellable_sleep(1, cancelled)
             else:
                 raise LetsInferError("native Engine readiness timed out")
             if task["endpoint_owner"] and not model_identity_ready(
@@ -19239,13 +19323,18 @@ class LocalPlacementExecutor:
             "protection_trip_latched": False,
         }
 
-    def recover(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
+    def recover(
+        self,
+        job: Mapping[str, Any],
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Mapping[str, Any]:
         """Explicitly acknowledge this slot's durable trip and restart it."""
         config = _read_placement_group_config(job["placement_group_id"])
         self._assert_job_matches_config(job, config)
         if not self._config_uses_native(config):
             clear_protection_trip(config)
-        return self._start_config(config)
+        return self._start_config(config, cancelled=cancelled)
 
     def stop(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
         config = _read_placement_group_config(job["placement_group_id"])

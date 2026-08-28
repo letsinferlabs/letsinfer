@@ -203,6 +203,104 @@ class CoordinatorOrchestrationTests(unittest.TestCase):
         self.assertIn(("stop", "task-1"), calls)
         self.assertEqual(self.store.placement_groups()[0]["state"], "failed")
 
+    def test_failed_start_preempts_an_in_flight_member_before_returning(self) -> None:
+        calls: list[tuple[str, str]] = []
+        member_start_submitted = threading.Event()
+        member_stop_submitted = threading.Event()
+        member_operation_id: str | None = None
+
+        def submit(_member, job, _credential):
+            nonlocal member_operation_id
+            action = job["action"]
+            task_id = job["placement"]["task_id"]
+            calls.append((action, task_id))
+            if action == "start" and task_id == "task-1":
+                member_operation_id = job["operation_id"]
+                member_start_submitted.set()
+                return {
+                    "protocol": PROTOCOL,
+                    "operation_id": job["operation_id"],
+                    "replayed": False,
+                    "state": "running",
+                    "result": None,
+                }
+            if action == "start" and task_id == "task-2":
+                self.assertTrue(member_start_submitted.wait(timeout=1))
+                raise RuntimeError("synthetic peer failure")
+            if action == "stop" and task_id == "task-1":
+                member_stop_submitted.set()
+            return {
+                "protocol": PROTOCOL,
+                "operation_id": job["operation_id"],
+                "replayed": False,
+                "state": "succeeded",
+                "result": {"state": action},
+            }
+
+        def job_status(_member, operation_id):
+            self.assertEqual(operation_id, member_operation_id)
+            self.assertTrue(member_stop_submitted.wait(timeout=1))
+            return {
+                "protocol": PROTOCOL,
+                "job": {
+                    "operation_id": operation_id,
+                    "state": "failed",
+                    "result": None,
+                    "error": "placement start was preempted by stop",
+                },
+            }
+
+        orchestrator = self.orchestrator(submit)
+        orchestrator.fetch_job_status = job_status
+        orchestrator.stage()
+
+        with self.assertRaisesRegex(
+            PlacementGroupOrchestrationError, "start failed"
+        ):
+            orchestrator.start()
+
+        self.assertTrue(member_stop_submitted.is_set())
+        self.assertIn(("stop", "task-1"), calls)
+        group = self.store.placement_groups()[0]
+        self.assertEqual(group["state"], "failed")
+        self.assertTrue(
+            all(item["state"] == "stopped" for item in group["placements"])
+        )
+        self.assertEqual(
+            {row["state"] for row in self.store.device_allocations()},
+            {"reserved"},
+        )
+
+    def test_failed_start_keeps_allocations_draining_when_stop_is_unconfirmed(self) -> None:
+        def submit(_member, job, _credential):
+            action = job["action"]
+            task_id = job["placement"]["task_id"]
+            if action == "start" and task_id == "task-2":
+                raise RuntimeError("synthetic start failure")
+            if action == "stop" and task_id == "task-1":
+                raise RuntimeError("synthetic stop failure")
+            return {
+                "protocol": PROTOCOL,
+                "operation_id": job["operation_id"],
+                "replayed": False,
+                "state": "succeeded",
+                "result": {"state": action},
+            }
+
+        orchestrator = self.orchestrator(submit)
+        orchestrator.stage()
+
+        with self.assertRaisesRegex(
+            PlacementGroupOrchestrationError, "rollback failed"
+        ):
+            orchestrator.start()
+
+        self.assertEqual(
+            {row["state"] for row in self.store.device_allocations()},
+            {"draining"},
+        )
+        self.assertEqual(self.store.placement_groups()[0]["state"], "failed")
+
     def test_stopped_group_removes_every_task_in_reverse_startup_order(self) -> None:
         calls: list[tuple[str, str]] = []
 

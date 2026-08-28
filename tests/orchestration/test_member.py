@@ -90,7 +90,7 @@ class MemberJobTests(unittest.TestCase):
             agent = MemberAgent(
                 member_id=self.node_id,
                 store_path=pathlib.Path(directory) / "jobs.sqlite3",
-                handler=lambda job, _credential: calls.append(job["action"]) or {"state": "staged"},
+                handler=lambda job, _credential, _cancelled: calls.append(job["action"]) or {"state": "staged"},
             )
             job = self.job()
             first = agent.execute(job, engine_credential=self.credential)
@@ -107,7 +107,7 @@ class MemberJobTests(unittest.TestCase):
             agent = MemberAgent(
                 member_id=self.node_id,
                 store_path=pathlib.Path(directory) / "jobs.sqlite3",
-                handler=lambda job, _credential: {"state": job["action"]},
+                handler=lambda job, _credential, _cancelled: {"state": job["action"]},
             )
             with self.assertRaisesRegex(MemberJobError, "staged"):
                 agent.execute(self.job(action="start"))
@@ -124,7 +124,7 @@ class MemberJobTests(unittest.TestCase):
             agent = MemberAgent(
                 member_id=self.node_id,
                 store_path=pathlib.Path(directory) / "jobs.sqlite3",
-                handler=lambda _job, _credential: {"api_token": "do-not-store"},
+                handler=lambda _job, _credential, _cancelled: {"api_token": "do-not-store"},
             )
             with self.assertRaisesRegex(MemberJobError, "credentials or secrets"):
                 agent.execute(self.job(), engine_credential=self.credential)
@@ -134,7 +134,7 @@ class MemberJobTests(unittest.TestCase):
             agent = MemberAgent(
                 member_id=self.node_id,
                 store_path=pathlib.Path(directory) / "jobs.sqlite3",
-                handler=lambda job, _credential: {"state": job["action"]},
+                handler=lambda job, _credential, _cancelled: {"state": job["action"]},
                 observer=lambda _group: {
                     "state": "failed",
                     "protection_trip_latched": True,
@@ -150,7 +150,7 @@ class MemberJobTests(unittest.TestCase):
         started = threading.Event()
         release = threading.Event()
 
-        def handler(job, credential):
+        def handler(job, credential, _cancelled):
             self.assertEqual(credential, self.credential)
             started.set()
             release.wait(timeout=5)
@@ -182,11 +182,64 @@ class MemberJobTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(status["result"], {"state": "stage"})
 
+    def test_stop_preempts_a_running_start_on_the_control_worker(self) -> None:
+        start_entered = threading.Event()
+        stop_entered = threading.Event()
+
+        def handler(job, _credential, cancelled):
+            if job["action"] == "start":
+                start_entered.set()
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and not cancelled():
+                    time.sleep(0.01)
+                if cancelled():
+                    raise RuntimeError("start cancelled")
+                raise RuntimeError("start was not preempted")
+            if job["action"] == "stop":
+                stop_entered.set()
+            return {"state": job["action"]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = MemberAgent(
+                member_id=self.node_id,
+                store_path=pathlib.Path(directory) / "jobs.sqlite3",
+                handler=handler,
+            )
+            staged = self.job()
+            agent.execute(staged, engine_credential=self.credential)
+            start = self.job(action="start", operation_id="9" * 32)
+            stop = self.job(action="stop", operation_id="a" * 32)
+
+            agent.submit(start)
+            self.assertTrue(start_entered.wait(timeout=1))
+            agent.submit(stop)
+            self.assertTrue(stop_entered.wait(timeout=1))
+
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                start_status = agent.job_status(start["operation_id"])["job"]
+                stop_status = agent.job_status(stop["operation_id"])["job"]
+                if (
+                    start_status["state"] == "failed"
+                    and stop_status["state"] == "succeeded"
+                ):
+                    break
+                time.sleep(0.01)
+
+            self.assertEqual(start_status["state"], "failed")
+            self.assertEqual(
+                start_status["error"],
+                "placement start was preempted by stop",
+            )
+            self.assertEqual(stop_status["state"], "succeeded")
+            placement = agent.status(staged["placement_group_id"])["placement"]
+            self.assertEqual(placement["state"], "stopped")
+
     def test_async_failure_retains_bounded_redacted_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = pathlib.Path(directory) / "jobs.sqlite3"
 
-            def fail(_job, _credential):
+            def fail(_job, _credential, _cancelled):
                 raise RuntimeError("adapter failed; api_key=do-not-store")
 
             agent = MemberAgent(
