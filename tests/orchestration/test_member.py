@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import pathlib
+import sqlite3
 import tempfile
 import threading
 import time
@@ -26,6 +27,82 @@ from tests.orchestration.helpers import release_identity
 class MemberJobTests(unittest.TestCase):
     node_id = "1" * 32
     credential = "A" * 43
+
+    def legacy_database(
+        self,
+        path: pathlib.Path,
+        *,
+        group_state: str = "removed",
+        job_state: str = "succeeded",
+    ) -> None:
+        """Create the exact schema-three member journal around legacy group IDs."""
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            """
+            CREATE TABLE groups (
+                group_id TEXT PRIMARY KEY,
+                plan_sha256 TEXT NOT NULL,
+                runtime_digest TEXT NOT NULL,
+                manifest_sha256 TEXT NOT NULL,
+                topology_sha256 TEXT NOT NULL,
+                engine_credential_sha256 TEXT NOT NULL,
+                member_id TEXT NOT NULL,
+                task_json TEXT NOT NULL,
+                source TEXT,
+                state TEXT NOT NULL
+                  CHECK(state IN ('staged','running','stopped','failed','removed')),
+                last_operation_id TEXT NOT NULL,
+                updated_at_unix INTEGER NOT NULL
+            ) STRICT;
+            CREATE TABLE jobs (
+                operation_id TEXT PRIMARY KEY,
+                job_sha256 TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                action TEXT NOT NULL
+                  CHECK(action IN ('stage','start','recover','stop','remove')),
+                state TEXT NOT NULL CHECK(state IN ('running','succeeded','failed')),
+                result_json TEXT,
+                error TEXT,
+                received_at_unix INTEGER NOT NULL,
+                finished_at_unix INTEGER
+            ) STRICT;
+            """
+        )
+        group_id = "7" * 32
+        operation_id = "8" * 32
+        connection.execute(
+            "INSERT INTO groups VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                group_id,
+                "1" * 64,
+                "2" * 64,
+                "3" * 64,
+                "4" * 64,
+                "5" * 64,
+                self.node_id,
+                "{}",
+                "registry.example/runtime@sha256:" + "6" * 64,
+                group_state,
+                operation_id,
+                1_800_000_000,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                operation_id,
+                "9" * 64,
+                group_id,
+                "remove",
+                job_state,
+                "{}" if job_state == "succeeded" else None,
+                None,
+                1_800_000_000,
+                None if job_state == "running" else 1_800_000_001,
+            ),
+        )
+        connection.commit()
+        connection.close()
 
     def job(self, *, action: str = "stage", operation_id: str = "2" * 32) -> dict:
         release = release_identity()
@@ -83,6 +160,59 @@ class MemberJobTests(unittest.TestCase):
         changed["source"] = "registry.example/runtime:latest"
         with self.assertRaisesRegex(MemberJobError, "immutable"):
             validate_placement_job(changed, expected_node_id=self.node_id)
+
+    def test_terminal_schema_three_member_journal_resets_before_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = pathlib.Path(directory) / "jobs.sqlite3"
+            self.legacy_database(database)
+            agent = MemberAgent(
+                member_id=self.node_id,
+                store_path=database,
+                handler=lambda job, _credential, _cancelled: {
+                    "state": job["action"]
+                },
+            )
+
+            result = agent.execute(
+                self.job(), engine_credential=self.credential
+            )
+
+            self.assertEqual(result["result"], {"state": "stage"})
+            with MemberJobStore(database) as store:
+                tables = {
+                    row["name"]
+                    for row in store.connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                job_columns = {
+                    row["name"]
+                    for row in store.connection.execute("PRAGMA table_info(jobs)")
+                }
+            self.assertNotIn("groups", tables)
+            self.assertIn("placement_group_id", job_columns)
+            self.assertIn("placement_id", job_columns)
+            self.assertNotIn("group_id", job_columns)
+
+    def test_active_schema_three_member_journal_fails_closed(self) -> None:
+        for group_state, job_state in (
+            ("running", "succeeded"),
+            ("removed", "running"),
+            ("failed", "failed"),
+        ):
+            with self.subTest(group_state=group_state, job_state=job_state):
+                with tempfile.TemporaryDirectory() as directory:
+                    database = pathlib.Path(directory) / "jobs.sqlite3"
+                    self.legacy_database(
+                        database,
+                        group_state=group_state,
+                        job_state=job_state,
+                    )
+                    with self.assertRaisesRegex(
+                        MemberJobError,
+                        "legacy member job state must be stopped or removed",
+                    ):
+                        MemberJobStore(database)
 
     def test_agent_is_idempotent_and_rejects_changed_replay(self) -> None:
         calls: list[str] = []
