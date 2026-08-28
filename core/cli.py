@@ -10258,8 +10258,15 @@ def _remove_placement_groups_by_id(placement_group_ids: Sequence[str]) -> None:
                 )
                 continue
             orchestrator, _manifest = _restore_placement_group_orchestrator(store, row)
+            allocations_released = bool(allocations) and all(
+                allocation["state"] == "released"
+                for allocation in allocations
+            )
             if row["state"] not in {"staged", "stopped", "removed"}:
-                orchestrator.stop()
+                if allocations_released:
+                    orchestrator.stop_after_allocation_release()
+                else:
+                    orchestrator.stop()
             orchestrator.remove()
 
 
