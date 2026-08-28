@@ -16,6 +16,7 @@ from core.platform.network import NetworkPlan, apply_network_plan
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
 INSTALLER = REPOSITORY_ROOT / "install.sh"
+PREVIOUS_INSTALLER_ENTRY_POINT = REPOSITORY_ROOT / "bin/letsinfer-install"
 RELEASE_ALLOWED_SIGNERS = REPOSITORY_ROOT / "core/trust/release-allowed-signers"
 WORKFLOW = REPOSITORY_ROOT / ".github/workflows/release-core.yml"
 
@@ -167,6 +168,12 @@ exit 0
 
 
 class BootstrapInstallTests(unittest.TestCase):
+    def test_previous_installer_entry_point_dispatches_to_current_installer(self) -> None:
+        self.assertTrue(PREVIOUS_INSTALLER_ENTRY_POINT.stat().st_mode & 0o111)
+        source = PREVIOUS_INSTALLER_ENTRY_POINT.read_text(encoding="utf-8")
+        self.assertIn("-m tools.li_installer_core", source)
+        self.assertNotIn("-m tools.install_core", source)
+
     def test_existing_usable_docker_is_left_unchanged(self) -> None:
         result, log = _docker_installer_harness(docker_present=True)
         self.assertEqual(result.returncode, 0, result.stderr)
