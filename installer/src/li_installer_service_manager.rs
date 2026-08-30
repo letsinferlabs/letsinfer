@@ -45,6 +45,8 @@ const SETUP_GATEWAY_PUBLIC_HOST: &str = "0.0.0.0";
 const SETUP_GATEWAY_PUBLIC_PORT: u16 = 8000;
 const SETUP_WATCHDOG_HOST: &str = "127.0.0.1";
 const SETUP_WATCHDOG_PORT: u16 = 9_445;
+const SETUP_NODE_PROTECTION_CLIENT_TIMEOUT_MILLISECONDS: u64 = 5_000;
+const SETUP_NODE_PROTECTION_SERVER_TIMEOUT_MILLISECONDS: u64 = 10_000;
 const HOME_QUARANTINE_ATTEMPTS: u64 = 32;
 static HOME_QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static PRIVATE_DIRECTORY_UMASK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1416,8 +1418,8 @@ fn setup_input(
                 "health": local_api(&configuration.join("li_gateway_health.sock")),
                 "node_protection": {
                     "socket_path": path_text(&configuration.join("li_node_protection.sock")),
-                    "read_timeout_milliseconds": 1000,
-                    "write_timeout_milliseconds": 1000,
+                    "read_timeout_milliseconds": SETUP_NODE_PROTECTION_CLIENT_TIMEOUT_MILLISECONDS,
+                    "write_timeout_milliseconds": SETUP_NODE_PROTECTION_CLIENT_TIMEOUT_MILLISECONDS,
                     "maximum_cache_milliseconds": 3000,
                     "poll_interval_milliseconds": 1000
                 },
@@ -2279,8 +2281,8 @@ fn setup_placement_safety(
     Ok(json!({
         "platform": "linux",
         "maximum_workers": 8,
-        "read_timeout_milliseconds": 1000,
-        "write_timeout_milliseconds": 1000,
+        "read_timeout_milliseconds": SETUP_NODE_PROTECTION_SERVER_TIMEOUT_MILLISECONDS,
+        "write_timeout_milliseconds": SETUP_NODE_PROTECTION_SERVER_TIMEOUT_MILLISECONDS,
         "accept_poll_interval_milliseconds": 50,
         "gateway": {
             "path": path_text(&gateway),
@@ -2885,6 +2887,18 @@ mod tests {
         assert_eq!(gateway.port(), 9_444);
         assert_eq!(watchdog.port(), 9_445);
         assert!(watchdog.ip().is_loopback());
+    }
+
+    // Keeps the persistent Watchdog channel safely outside its one-second sampling cadence.
+    #[test]
+    fn setup_node_protection_deadline_has_a_bounded_watchdog_margin() {
+        assert_eq!(SETUP_NODE_PROTECTION_CLIENT_TIMEOUT_MILLISECONDS, 5_000);
+        assert_eq!(SETUP_NODE_PROTECTION_SERVER_TIMEOUT_MILLISECONDS, 10_000);
+        assert!(
+            SETUP_NODE_PROTECTION_SERVER_TIMEOUT_MILLISECONDS
+                > SETUP_NODE_PROTECTION_CLIENT_TIMEOUT_MILLISECONDS
+        );
+        assert!(SETUP_NODE_PROTECTION_SERVER_TIMEOUT_MILLISECONDS > 1_000);
     }
 
     // Creates one valid closed Core setup result document for protocol tests and mutation.
