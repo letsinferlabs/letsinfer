@@ -1055,6 +1055,19 @@ impl OpenSslCoreSetupResidentTrustIssuer {
             .read_private_file(path, maximum, self.owner_user_id)
             .map_err(|_| material_error("OpenSSL trust output is invalid"))
     }
+
+    // Generates one portable SEC1 P-256 private key accepted by OpenSSL and rustls providers.
+    fn generate_p256_private_key(&self, destination: &Path) -> Result<(), CoreSetupProviderError> {
+        self.run(vec![
+            "ecparam".into(),
+            "-name".into(),
+            "prime256v1".into(),
+            "-genkey".into(),
+            "-noout".into(),
+            "-out".into(),
+            Self::argument(destination)?,
+        ])
+    }
 }
 
 impl CoreSetupResidentTrustIssuer for OpenSslCoreSetupResidentTrustIssuer {
@@ -1199,15 +1212,7 @@ impl OpenSslCoreSetupResidentTrustIssuer {
             )
             .map_err(|_| material_error("OpenSSL trust workspace is unavailable"))?;
         let path = |value: &Path| Self::argument(value);
-        self.run(vec![
-            "genpkey".into(),
-            "-algorithm".into(),
-            "EC".into(),
-            "-pkeyopt".into(),
-            "ec_paramgen_curve:P-256".into(),
-            "-out".into(),
-            path(&private_key)?,
-        ])?;
+        self.generate_p256_private_key(&private_key)?;
         self.run(vec![
             "pkey".into(),
             "-in".into(),
@@ -1392,15 +1397,7 @@ impl OpenSslCoreSetupResidentTrustIssuer {
             })
             .map_err(|_| material_error("OpenSSL trust workspace is unavailable"))?;
         let path = |value: &Path| Self::argument(value);
-        self.run(vec![
-            "genpkey".into(),
-            "-algorithm".into(),
-            "EC".into(),
-            "-pkeyopt".into(),
-            "ec_paramgen_curve:P-256".into(),
-            "-out".into(),
-            path(&authority_private_key)?,
-        ])?;
+        self.generate_p256_private_key(&authority_private_key)?;
         self.run(vec![
             "req".into(),
             "-new".into(),
@@ -1494,15 +1491,7 @@ impl OpenSslCoreSetupResidentTrustIssuer {
         purpose: &str,
     ) -> Result<(), CoreSetupProviderError> {
         let path = |value: &Path| Self::argument(value);
-        self.run(vec![
-            "genpkey".into(),
-            "-algorithm".into(),
-            "EC".into(),
-            "-pkeyopt".into(),
-            "ec_paramgen_curve:P-256".into(),
-            "-out".into(),
-            path(private_key)?,
-        ])?;
+        self.generate_p256_private_key(private_key)?;
         self.run(vec![
             "req".into(),
             "-new".into(),
