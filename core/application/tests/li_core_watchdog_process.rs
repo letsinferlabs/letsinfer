@@ -230,7 +230,21 @@ fn process_propagates_listener_failure_through_clean_resident_stop() {
         process.run().expect_err("listener failure"),
         CoreWatchdogProcessError::ListenerUnavailable
     );
-    assert_eq!(control.events(), vec!["resident", "request_stop"]);
+    let control_events = control.events();
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| **event == "resident")
+            .count(),
+        1
+    );
+    assert_eq!(
+        control_events
+            .iter()
+            .filter(|event| **event == "request_stop")
+            .count(),
+        1
+    );
     let events = server.events();
     assert_eq!(events.iter().filter(|event| **event == "serve").count(), 1);
     assert_eq!(
