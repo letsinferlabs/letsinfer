@@ -520,8 +520,10 @@ impl WatchdogRustlsStream {
         }
     }
 
-    // Terminates the underlying socket without exposing TLS or peer details.
-    fn shutdown(&self) {
+    // Flushes the complete authenticated response before terminating the native socket.
+    fn shutdown(&mut self) {
+        self.connection.conn.send_close_notify();
+        let _ = self.connection.flush();
         let _ = self.connection.sock.shutdown(Shutdown::Both);
     }
 }
@@ -591,20 +593,23 @@ fn serve_rustls_connection(
         .set_nonblocking(false)
         .map_err(|_| tcp_listener_error("protocol socket cannot become blocking"))?;
     let mut stream = WatchdogRustlsStream::new(connection, certificate_sha256);
-    let outcome = protocol_listener.serve_authenticated_stream(&mut stream)?;
-    if let WatchdogProtocolConnectionOutcome::Subscribed(subscription) = outcome {
-        let wake = Arc::new(SystemWatchdogLiveWake::new());
-        let mut receiver = fanout.subscribe(wake)?;
-        let clock = SystemWatchdogLiveClock::new();
-        let control = WatchdogRustlsLiveControl { state: &state };
-        let mut sink = WatchdogRustlsLiveSink {
-            subscription: &subscription,
-            stream: &mut stream,
-        };
-        receiver.serve(&mut sink, &clock, &control)?;
-    }
+    let result = (|| {
+        let outcome = protocol_listener.serve_authenticated_stream(&mut stream)?;
+        if let WatchdogProtocolConnectionOutcome::Subscribed(subscription) = outcome {
+            let wake = Arc::new(SystemWatchdogLiveWake::new());
+            let mut receiver = fanout.subscribe(wake)?;
+            let clock = SystemWatchdogLiveClock::new();
+            let control = WatchdogRustlsLiveControl { state: &state };
+            let mut sink = WatchdogRustlsLiveSink {
+                subscription: &subscription,
+                stream: &mut stream,
+            };
+            receiver.serve(&mut sink, &clock, &control)?;
+        }
+        Ok(())
+    })();
     stream.shutdown();
-    Ok(())
+    result
 }
 
 // Adapts one retained protocol subscription to the resident fanout sink contract.
