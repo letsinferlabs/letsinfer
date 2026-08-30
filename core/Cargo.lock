@@ -336,7 +336,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "li_audit_manager"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "getrandom 0.4.3",
  "li_core_interface",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "li_authentication_manager"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "getrandom 0.4.3",
  "li_core_interface",
@@ -357,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "li_benchmark_manager"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "base64",
  "li_core_interface",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "li_benchmark_worker"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "li_benchmark_manager",
  "li_core_interface",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "li_core_application"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "base64",
  "flate2",
@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "li_core_cli"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "li_audit_manager",
  "li_authentication_manager",
@@ -443,11 +443,11 @@ dependencies = [
 
 [[package]]
 name = "li_core_interface"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 
 [[package]]
 name = "li_core_update_manager"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "flate2",
  "li_core_interface",
@@ -461,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "li_database"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "rusqlite",
  "serde",
@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "li_gateway_manager"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "getrandom 0.4.3",
  "li_authentication_manager",
@@ -490,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "li_hardware_manager"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "getrandom 0.4.3",
  "li_core_interface",
@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "li_node_manager"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "base64",
  "li_audit_manager",
@@ -529,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "li_pairing_manager"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "getrandom 0.4.3",
  "li_core_interface",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "li_placement_manager"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "getrandom 0.4.3",
  "li_core_interface",
@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "li_runtime_manager"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "base64",
  "flate2",
@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "li_watchdog_manager"
-version = "0.11.0-rc.116"
+version = "0.11.0-rc.117"
 dependencies = [
  "li_core_interface",
  "libc",
