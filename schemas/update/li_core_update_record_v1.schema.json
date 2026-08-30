@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/update/li_core_update_record_v1.schema.json",
+  "title": "Let's Infer Core update record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "update_id",
+    "idempotency_key",
+    "requested_version",
+    "phase",
+    "current_version",
+    "current_source_identity",
+    "prepared_receipt_id",
+    "prepared_version",
+    "prepared_source_identity",
+    "service_snapshot_receipt_id",
+    "activation_receipt_id",
+    "activation_previous_version",
+    "activation_previous_source_identity",
+    "activation_version",
+    "activation_source_identity",
+    "failure_code",
+    "failure_message"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_core_update_record" },
+        "version": { "const": 1 }
+      }
+    },
+    "update_id": { "$ref": "#/$defs/sha256" },
+    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "requested_version": { "$ref": "#/$defs/optional_version" },
+    "phase": {
+      "enum": [
+        "requested",
+        "prepared",
+        "services_snapshotted",
+        "activated",
+        "services_rebound",
+        "verified",
+        "committed",
+        "rolling_back",
+        "current",
+        "cleanup_pending",
+        "succeeded",
+        "rolled_back",
+        "recovery_required"
+      ]
+    },
+    "current_version": { "$ref": "#/$defs/optional_version" },
+    "current_source_identity": { "$ref": "#/$defs/optional_sha256" },
+    "prepared_receipt_id": { "$ref": "#/$defs/optional_sha256" },
+    "prepared_version": { "$ref": "#/$defs/optional_version" },
+    "prepared_source_identity": { "$ref": "#/$defs/optional_sha256" },
+    "service_snapshot_receipt_id": { "$ref": "#/$defs/optional_sha256" },
+    "activation_receipt_id": { "$ref": "#/$defs/optional_sha256" },
+    "activation_previous_version": { "$ref": "#/$defs/optional_version" },
+    "activation_previous_source_identity": { "$ref": "#/$defs/optional_sha256" },
+    "activation_version": { "$ref": "#/$defs/optional_version" },
+    "activation_source_identity": { "$ref": "#/$defs/optional_sha256" },
+    "failure_code": { "$ref": "#/$defs/optional_technical_name" },
+    "failure_message": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1, "maxLength": 1024 }
+      ]
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "optional_sha256": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+    },
+    "version": { "type": "string", "minLength": 5, "maxLength": 128 },
+    "optional_version": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/version" }]
+    },
+    "technical_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "optional_technical_name": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/technical_name" }]
+    }
+  }
+}

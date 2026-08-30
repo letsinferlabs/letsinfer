@@ -1,0 +1,24 @@
+[workspace]
+members = [
+    "application",
+    "audit",
+    "authentication",
+    "benchmark",
+    "benchmark_worker",
+    "cli",
+    "database",
+    "gateway",
+    "hardware",
+    "interface",
+    "node",
+    "pairing",
+    "placement",
+    "runtime",
+    "update",
+    "watchdog",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.11.0-rc.114"
+rust-version = "1.97.1"

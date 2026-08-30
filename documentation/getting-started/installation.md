@@ -11,13 +11,15 @@ curl -fsSL https://letsinfer.ai/install.sh | sh
 ```
 
 The installer detects your OS and architecture, downloads the signed release,
-verifies its checksum and complete source manifest, installs immutable core
-files below `$LETSINFER_HOME/core`, exposes `letsinfer` in
-`/usr/local/bin`, and initializes the node through a private installer action.
+verifies its signed checksum document and closed embedded Core release
+manifest, installs immutable core files below `$LETSINFER_HOME/core`, exposes
+`letsinfer` in `/usr/local/bin`, and initializes the node through a private
+installer action.
 
-On Linux, setup checks for its compiler, CMake, and OpenSSL requirements and
-uses the system package manager to install any that are missing before services
-are initialized.
+The native installer verifies Docker access, OpenSSL, a supported GitHub CLI,
+Avahi or mDNS tools, the platform service manager, and persistent user-service
+readiness. It installs only supported native dependencies before setup and
+never installs Rust, a C compiler, or CMake to run the prebuilt Core binaries.
 
 Run the installer as the account that will operate Let's Infer, not as root.
 The default install asks for sudo to create the launcher and enable persistent
@@ -68,12 +70,16 @@ Useful installer options:
 --no-setup
 --no-progress
 --repair-docker-access
+--control-address ROUTABLE_ADDRESS
 ```
 
 Use `--no-setup` only when you want to install files without initializing a
 node. `--repair-docker-access` explicitly approves the otherwise interactive
 Docker group or user-service-manager repair, which is useful for unattended
-installation.
+installation. The Rust installer normally observes the default-route IPv4
+address. Use `--control-address` only to select a different routable management
+address on a multi-homed node; loopback and wildcard listener addresses are
+rejected before setup mutates the host.
 
 ## Choose the data directory
 
@@ -116,16 +122,21 @@ A normal model install is complete only when the local API is ready:
 2. your hardware is matched to the best qualified runtime;
 3. exact model artifacts, the runtime pack, and Engine distribution are acquired and
    deduplicated;
-4. persistent node, gateway, recovery, and engine services are installed;
-   Linux also installs the independent Watchdog;
+4. PlacementManager prepares the runtime tasks behind the existing Node and
+   Gateway residents; Linux also keeps the independent Watchdog resident;
 5. the model starts; and
 6. the command waits for the OpenAI-compatible endpoint to become ready.
 
-On Linux, the selected runtime starts again after reboot. The recovery
-controller also handles ordinary engine failures. A protection or OOM trip is
-different: it stays latched so an automatic restart cannot hide the cause. Run
-`letsinfer status` or `letsinfer doctor`, then use `letsinfer model recover MODEL` when it
-is safe to continue.
+Core setup opens the primary database only for bounded identity and bootstrap
+work, closes that operation-scoped access, and then activates the residents.
+The `li_node` resident exclusively owns the primary database after activation.
+
+On Linux, the selected runtime starts again after reboot. NodeManager's
+recovery journal and PlacementManager handle ordinary interrupted runtime
+lifecycles; there is no separate recovery resident. A protection or OOM trip
+is different: it stays latched so an automatic restart cannot hide the cause.
+Run `letsinfer status` or `letsinfer doctor`, then use
+`letsinfer model recover MODEL` when it is safe to continue.
 
 On Apple Silicon macOS, a native runtime stages its exact archive or standalone
 Python payload below the Let's Infer data root and runs the adapter plus

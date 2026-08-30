@@ -21,7 +21,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.runtime_packs import (  # noqa: E402
+from benchmarks.li_benchmark_contract import (  # noqa: E402
     BENCHMARK_GENERATOR,
     BENCHMARK_RENDER_CONTRACT,
     BENCHMARK_SUITE,

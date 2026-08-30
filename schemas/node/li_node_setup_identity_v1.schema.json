@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/node/li_node_setup_identity_v1.schema.json",
+  "title": "Let's Infer Node setup identity ownership",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_id",
+    "schema",
+    "request_id",
+    "attempt",
+    "receipt_identity",
+    "node_id",
+    "machine_id",
+    "installation_id",
+    "display_name",
+    "role",
+    "control_address",
+    "observed_at_unix_milliseconds",
+    "outbox_event_id"
+  ],
+  "properties": {
+    "record_id": { "const": "li_core_setup_identity" },
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_node_setup_identity" },
+        "version": { "const": 1 }
+      }
+    },
+    "request_id": { "$ref": "#/$defs/sha256" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 64 },
+    "receipt_identity": { "$ref": "#/$defs/sha256" },
+    "node_id": { "$ref": "#/$defs/identity" },
+    "machine_id": { "$ref": "#/$defs/identity" },
+    "installation_id": { "$ref": "#/$defs/sha256" },
+    "display_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "role": { "enum": ["main", "child"] },
+    "control_address": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^\\S+$"
+    },
+    "observed_at_unix_milliseconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "outbox_event_id": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    }
+  }
+}

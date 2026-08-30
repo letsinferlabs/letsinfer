@@ -60,7 +60,9 @@ class MacOSReleaseContractTests(unittest.TestCase):
         decoder = (
             APP_ROOT / "LetsInfer/DataSources/Watchdog/WatchdogProtocol.swift"
         ).read_text(encoding="utf-8")
-        proto = (REPOSITORY_ROOT / "watchdog/proto/watchdog.proto").read_text(
+        proto = (
+            REPOSITORY_ROOT / "schemas/watchdog/li_watchdog_protocol_v1.proto"
+        ).read_text(
             encoding="utf-8"
         )
         self.assertIn("static let supportedProtocolVersion: UInt32 = 3", client)

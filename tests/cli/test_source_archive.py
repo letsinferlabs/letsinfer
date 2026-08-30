@@ -17,6 +17,8 @@ from tools.source_archive import (
     LOCAL_ONLY_PATHS,
     PUBLIC_DIRECTORIES,
     PUBLIC_ROOT_FILES,
+    RUST_TOOLCHAIN_CONTENT,
+    RUST_TOOLCHAIN_NAME,
     SourceArchiveError,
     build_archive,
     verify_archive,
@@ -28,7 +30,12 @@ class SourceArchiveTests(unittest.TestCase):
         for name in PUBLIC_ROOT_FILES:
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"{name}\n", encoding="utf-8")
+            content = (
+                RUST_TOOLCHAIN_CONTENT
+                if name == RUST_TOOLCHAIN_NAME
+                else f"{name}\n".encode()
+            )
+            path.write_bytes(content)
         for name in PUBLIC_DIRECTORIES:
             path = root / name
             path.mkdir(parents=True, exist_ok=True)
@@ -42,40 +49,48 @@ class SourceArchiveTests(unittest.TestCase):
         *,
         schema_version: object = 1,
         uname: str = "",
+        canonical_manifest: bool = True,
+        include_toolchain: bool = True,
     ) -> None:
-        record = {
-            "path": relative,
-            "bytes": len(content),
-            "mode": 0o644,
-            "sha256": hashlib.sha256(content).hexdigest(),
-        }
-        manifest = json.dumps(
+        payloads = {relative: content}
+        if include_toolchain and relative != RUST_TOOLCHAIN_NAME:
+            payloads[RUST_TOOLCHAIN_NAME] = RUST_TOOLCHAIN_CONTENT
+        records = [
             {
-                "schema_version": schema_version,
-                "product": "letsinfer",
-                "files": [record],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
+                "path": name,
+                "bytes": len(payload),
+                "mode": 0o644,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            for name, payload in sorted(payloads.items())
+        ]
+        document = {
+            "schema_version": schema_version,
+            "product": "letsinfer",
+            "files": records,
+        }
+        manifest = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            if canonical_manifest
+            else json.dumps(document, indent=2, sort_keys=True)
         ).encode() + b"\n"
         memory = io.BytesIO()
         with tarfile.open(fileobj=memory, mode="w", format=tarfile.USTAR_FORMAT) as archive:
-            directories = ["letsinfer"]
-            parent = pathlib.PurePosixPath("letsinfer", relative).parent
-            while parent.as_posix() != "letsinfer":
-                directories.append(parent.as_posix())
-                parent = parent.parent
+            directories = {"letsinfer"}
+            for relative_path in payloads:
+                parent = pathlib.PurePosixPath("letsinfer", relative_path).parent
+                while parent.as_posix() != "letsinfer":
+                    directories.add(parent.as_posix())
+                    parent = parent.parent
             for name in sorted(set(directories), key=lambda item: (item.count("/"), item)):
                 info = tarfile.TarInfo(name)
                 info.type = tarfile.DIRTYPE
                 info.mode = 0o755
                 info.mtime = 0
                 archive.addfile(info)
-            for name, payload in (
-                ("letsinfer/SOURCE-MANIFEST.json", manifest),
-                (f"letsinfer/{relative}", content),
-            ):
-                info = tarfile.TarInfo(name)
+            archive_payloads = {"SOURCE-MANIFEST.json": manifest, **payloads}
+            for name, payload in archive_payloads.items():
+                info = tarfile.TarInfo(f"letsinfer/{name}")
                 info.mode = 0o644
                 info.size = len(payload)
                 info.mtime = 0
@@ -106,11 +121,50 @@ class SourceArchiveTests(unittest.TestCase):
             self.assertEqual(first.read_bytes(), second.read_bytes())
             with tarfile.open(first, "r:gz") as archive:
                 names = {member.name for member in archive.getmembers()}
+                toolchain = archive.extractfile(f"letsinfer/{RUST_TOOLCHAIN_NAME}")
+                self.assertIsNotNone(toolchain)
+                assert toolchain is not None
+                self.assertEqual(toolchain.read(), RUST_TOOLCHAIN_CONTENT)
             for name in LOCAL_ONLY_PATHS:
                 self.assertFalse(any(item == f"letsinfer/{name}" or item.startswith(f"letsinfer/{name}/") for item in names))
             self.assertFalse(
                 any(item == "letsinfer/apps" or item.startswith("letsinfer/apps/") for item in names)
             )
+
+    # Binds source creation and verification to one exact compiler declaration.
+    def test_rust_toolchain_declaration_is_required_and_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            self._source(root)
+            (root / RUST_TOOLCHAIN_NAME).write_text(
+                '[toolchain]\nchannel = "stable"\n', encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                SourceArchiveError, "toolchain declaration is invalid"
+            ):
+                build_archive(root, root / "source.tar.gz")
+
+            archive = root / "missing-toolchain.tar.gz"
+            self._write_custom_archive(
+                archive,
+                "core/source.txt",
+                b"safe\n",
+                include_toolchain=False,
+            )
+            with self.assertRaisesRegex(
+                SourceArchiveError, "toolchain declaration is missing"
+            ):
+                verify_archive(archive)
+
+            self._write_custom_archive(
+                archive,
+                RUST_TOOLCHAIN_NAME,
+                b'[toolchain]\nchannel = "1.97.0"\n',
+            )
+            with self.assertRaisesRegex(
+                SourceArchiveError, "toolchain declaration is invalid"
+            ):
+                verify_archive(archive)
 
     def test_symlink_in_public_source_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -193,6 +247,19 @@ class SourceArchiveTests(unittest.TestCase):
                 schema_version=True,
             )
             with self.assertRaisesRegex(SourceArchiveError, "manifest identity"):
+                verify_archive(archive)
+
+    # Rejects semantic JSON aliases so the reported manifest digest names exact archived bytes.
+    def test_verifier_rejects_noncanonical_manifest_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = pathlib.Path(temporary) / "source.tar.gz"
+            self._write_custom_archive(
+                archive,
+                "core/source.txt",
+                b"safe\n",
+                canonical_manifest=False,
+            )
+            with self.assertRaisesRegex(SourceArchiveError, "not canonical JSON"):
                 verify_archive(archive)
 
     def test_verifier_bounds_manifest_and_payload_before_unbounded_reads(self) -> None:

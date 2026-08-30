@@ -7,9 +7,7 @@ on:
       - macos-release
     paths:
       - "apps/macos/**"
-      - "core/site/**"
-      - "watchdog/proto/**"
-      - "watchdog/include/watchdog/protobuf.h"
+      - "schemas/watchdog/li_watchdog_protocol_v1.proto"
       - ".github/workflows/release-macos.yml"
       - "documentation/operations/macos-release.md"
   push:

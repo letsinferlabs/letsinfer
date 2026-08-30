@@ -49,6 +49,21 @@ class OpenAIMatrixTests(unittest.TestCase):
             },
         }
 
+    def test_release_semantics_fail_before_source_tree_reads(self) -> None:
+        with (
+            mock.patch.object(
+                MATRIX,
+                "validate_release_manifest",
+                side_effect=MATRIX.QualificationError("semantic failure"),
+            ) as semantics,
+            mock.patch.object(MATRIX, "verify_letsinfer_release_sources") as sources,
+            self.assertRaisesRegex(MATRIX.QualificationError, "semantic failure"),
+        ):
+            MATRIX.validate_release_sources({}, pathlib.Path("/unread"))
+
+        semantics.assert_called_once_with({})
+        sources.assert_not_called()
+
     def write_contract(
         self, root: pathlib.Path, *, second_cell_reuses: bool = False
     ) -> pathlib.Path:

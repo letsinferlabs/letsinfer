@@ -1,0 +1,206 @@
+syntax = "proto3";
+
+package letsinfer.watchdog.v1;
+
+enum Resolution {
+  RESOLUTION_UNSPECIFIED = 0;
+  RESOLUTION_RAW_1_SECOND = 1;
+  RESOLUTION_1_MINUTE = 2;
+  RESOLUTION_15_MINUTES = 3;
+}
+
+message ClientEnvelope {
+  uint64 request_id = 1;
+  oneof payload {
+    GetLatestRequest get_latest = 10;
+    SubscribeRequest subscribe = 11;
+    QueryRangeRequest query_range = 12;
+    GetCapabilitiesRequest get_capabilities = 13;
+    Ping ping = 14;
+    GetSiteStatusRequest get_site_status = 15;
+    GetResidentStatusRequest get_resident_status = 16;
+  }
+}
+
+message GetLatestRequest {}
+
+message SubscribeRequest {
+  uint32 history_seconds = 1;
+}
+
+message QueryRangeRequest {
+  uint64 start_unix_ms = 1;
+  uint64 end_unix_ms = 2;
+  Resolution resolution = 3;
+}
+
+message GetCapabilitiesRequest {}
+
+message GetSiteStatusRequest {}
+
+message GetResidentStatusRequest {}
+
+message Ping {
+  uint64 nonce = 1;
+}
+
+message ServerEnvelope {
+  uint64 request_id = 1;
+  oneof payload {
+    TelemetrySample latest = 10;
+    TelemetryBatch history = 11;
+    HistoryComplete history_complete = 12;
+    TelemetrySample live = 13;
+    Capabilities capabilities = 14;
+    Gap gap = 15;
+    Error error = 16;
+    Pong pong = 17;
+    SiteStatus site_status = 18;
+    ResidentStatus resident_status = 19;
+  }
+}
+
+message TelemetrySample {
+  uint64 sequence = 1;
+  uint64 unix_ms = 2;
+  uint64 monotonic_ms = 3;
+  uint32 flags = 4;
+  uint32 cpu_percent = 5;
+  repeated uint32 cpu_core_percent = 6 [packed = true];
+  uint32 memory_percent = 7;
+  uint32 disk_percent = 8;
+  GpuMetrics gpu = 9;
+  sint32 system_temp_deci_c = 10;
+  sint32 nvme_temp_deci_c = 11;
+  uint32 load1_centi = 12;
+  uint32 memory_used_mib = 13;
+  uint32 memory_total_mib = 14;
+  uint32 disk_used_mib = 15;
+  uint32 disk_total_mib = 16;
+  uint32 network_rx_kib_s = 17;
+  uint32 network_tx_kib_s = 18;
+  uint32 disk_read_kib_s = 19;
+  uint32 disk_write_kib_s = 20;
+  uint32 workload_id = 21;
+  uint32 workload_type = 22;
+  uint32 cpu_clock_mhz = 23;
+  uint32 system_ram_clock_mhz = 24;
+  uint32 active_requests = 25;
+  uint32 queued_requests = 26;
+  uint64 requests_received = 27;
+  uint64 requests_admitted = 28;
+  uint64 requests_completed = 29;
+  uint64 requests_failed = 30;
+  uint64 requests_cancelled = 31;
+  uint64 requests_retried = 32;
+  uint64 input_tokens = 33;
+  uint64 output_tokens = 34;
+  uint64 cached_tokens = 35;
+  uint64 queue_milliseconds = 36;
+  uint64 ttft_milliseconds = 37;
+  uint64 decode_milliseconds = 38;
+  uint64 exact_token_requests = 39;
+  uint64 prefix_cache_hits = 40;
+  uint64 usage_records_dropped = 41;
+  uint64 usage_write_errors = 42;
+  uint32 connected_clients = 43;
+}
+
+message GpuMetrics {
+  uint32 percent = 1;
+  uint32 memory_percent = 2;
+  repeated uint32 engine_percent = 3 [packed = true];
+  sint32 temperature_deci_c = 4;
+  uint32 power_deci_w = 5;
+  uint32 clock_mhz = 6;
+  uint32 vram_clock_mhz = 7;
+}
+
+message TelemetryBatch {
+  repeated TelemetrySample samples = 1;
+}
+
+message HistoryComplete {
+  uint64 through_sequence = 1;
+}
+
+message Capabilities {
+  uint32 protocol_version = 1;
+  uint32 sample_interval_ms = 2;
+  uint32 durable_flush_interval_ms = 3;
+  uint32 max_cpu_cores = 4;
+  repeated Resolution resolutions = 5;
+  bool mutual_tls_required = 6;
+  uint32 physical_gpu_count = 7;
+}
+
+message Gap {
+  uint64 first_missing_sequence = 1;
+  uint64 latest_sequence = 2;
+}
+
+message Error {
+  uint32 code = 1;
+  string message = 2;
+}
+
+message Pong {
+  uint64 nonce = 1;
+}
+
+message SiteStatus {
+  string release = 1;
+  string model = 2;
+  string engine = 3;
+  string runtime_name = 4;
+  string runtime_version = 5;
+  string manifest_sha256 = 6;
+  string cache_provider = 7;
+  bool cache_persistent = 8;
+  uint32 inference_port = 9;
+  uint32 max_connections = 10;
+  uint32 max_active_requests = 11;
+  uint32 max_context_tokens = 12;
+  string service_state = 13;
+  string engine_state = 14;
+  string protection_phase = 15;
+  bool protection_armed = 16;
+  bool trip_latched = 17;
+  string container_name = 18;
+  string installation_id = 19;
+}
+
+enum ResidentLifecycle {
+  RESIDENT_LIFECYCLE_UNSPECIFIED = 0;
+  RESIDENT_LIFECYCLE_READY = 1;
+}
+
+message ResidentStatus {
+  string node_id = 1;
+  string core_release = 2;
+  string core_source_identity = 3;
+  string installation_id = 4;
+  ResidentLifecycle lifecycle = 5;
+}
+
+message Workload {
+  uint64 id = 1;
+  string external_id = 2;
+  string type = 3;
+  string name = 4;
+  string model = 5;
+  string runtime = 6;
+  uint64 started_unix_ms = 7;
+  uint64 ended_unix_ms = 8;
+  string status = 9;
+  string metadata_json = 10;
+}
+
+message Event {
+  uint64 id = 1;
+  uint64 unix_ms = 2;
+  string kind = 3;
+  uint32 severity = 4;
+  uint64 workload_id = 5;
+  string payload_json = 6;
+}

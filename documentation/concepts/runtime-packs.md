@@ -156,7 +156,9 @@ Engine distribution, installation identity, source authority, qualification
 state, and selection policy. Source authority records how exact bytes were
 selected; qualification records evidence status. Neither field substitutes
 for the placement's observed lifecycle. A bounded history supports explicit
-rollback, and schema-3 receipts are migrated when read.
+rollback. Current Rust installation receipts use the closed current schema;
+unsupported or foreign schema identities fail closed and are neither migrated
+nor reinterpreted.
 
 `letsinfer node usage` reports the local owned stores without double-counting
 Docker’s shared layer store. Its explicit cleanup preserves active snapshots

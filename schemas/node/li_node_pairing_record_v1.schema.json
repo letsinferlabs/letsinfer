@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/node/li_node_pairing_record_v1.schema.json",
+  "title": "Let's Infer Node pairing record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "invite_id",
+    "main_node_id",
+    "mode",
+    "nonce",
+    "open_replay",
+    "enrollment_replay",
+    "approval_replay",
+    "setup_salt",
+    "created_at_unix_milliseconds",
+    "expires_at_unix_milliseconds",
+    "attempts",
+    "state",
+    "comparison_code",
+    "enrollment",
+    "credentials"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_node_pairing_record" },
+        "version": { "const": 1 }
+      }
+    },
+    "invite_id": { "$ref": "#/$defs/identity" },
+    "main_node_id": { "$ref": "#/$defs/identity" },
+    "mode": { "$ref": "#/$defs/mode" },
+    "nonce": { "$ref": "#/$defs/sha256" },
+    "open_replay": { "$ref": "#/$defs/replay_identity" },
+    "enrollment_replay": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/replay_identity" }]
+    },
+    "approval_replay": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/replay_identity" }]
+    },
+    "setup_salt": {
+      "type": "array",
+      "minItems": 16,
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/byte" }
+    },
+    "created_at_unix_milliseconds": { "type": "integer", "minimum": 0 },
+    "expires_at_unix_milliseconds": { "type": "integer", "minimum": 1 },
+    "attempts": { "type": "integer", "minimum": 0, "maximum": 5 },
+    "state": { "enum": ["open", "pending_approval", "active"] },
+    "comparison_code": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": { "type": "integer", "minimum": 48, "maximum": 57 }
+        }
+      ]
+    },
+    "enrollment": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/enrollment" }]
+    },
+    "credentials": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/credentials" }]
+    }
+  },
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "installation_identity": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "byte": { "type": "integer", "minimum": 0, "maximum": 255 },
+    "bytes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 65536,
+      "items": { "$ref": "#/$defs/byte" }
+    },
+    "replay_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["idempotency_sha256", "request_sha256"],
+      "properties": {
+        "idempotency_sha256": { "$ref": "#/$defs/sha256" },
+        "request_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "mode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "candidate_public_key", "direct_interface"],
+      "properties": {
+        "kind": { "enum": ["lan", "remote", "connectx"] },
+        "candidate_public_key": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+        },
+        "direct_interface": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1, "maxLength": 64 }
+          ]
+        }
+      }
+    },
+    "enrollment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "child_node_id",
+        "child_machine_id",
+        "child_installation_id",
+        "child_name",
+        "child_address",
+        "child_public_key_fingerprint",
+        "credential_id",
+        "peer_leaf_sha256",
+        "credential_valid_from_unix_milliseconds",
+        "credential_expires_at_unix_milliseconds",
+        "credential_state"
+      ],
+      "properties": {
+        "child_node_id": { "$ref": "#/$defs/identity" },
+        "child_machine_id": { "$ref": "#/$defs/identity" },
+        "child_installation_id": { "$ref": "#/$defs/installation_identity" },
+        "child_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "child_address": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "child_public_key_fingerprint": { "$ref": "#/$defs/sha256" },
+        "credential_id": { "$ref": "#/$defs/identity" },
+        "peer_leaf_sha256": { "$ref": "#/$defs/sha256" },
+        "credential_valid_from_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "credential_expires_at_unix_milliseconds": { "type": "integer", "minimum": 1 },
+        "credential_state": { "enum": ["pending_approval", "active"] }
+      }
+    },
+    "credentials": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "main_public_key",
+        "main_ca_certificate",
+        "child_certificate",
+        "membership_signature",
+        "child_leaf_sha256",
+        "valid_from_unix_milliseconds",
+        "expires_at_unix_milliseconds"
+      ],
+      "properties": {
+        "main_public_key": { "$ref": "#/$defs/bytes" },
+        "main_ca_certificate": { "$ref": "#/$defs/bytes" },
+        "child_certificate": { "$ref": "#/$defs/bytes" },
+        "membership_signature": { "$ref": "#/$defs/bytes" },
+        "child_leaf_sha256": { "$ref": "#/$defs/sha256" },
+        "valid_from_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "expires_at_unix_milliseconds": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

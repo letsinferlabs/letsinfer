@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/runtime/li_runtime_embedded_application_receipt_v1.schema.json",
+  "title": "Let's Infer RuntimeManager embedded-application receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "candidate_id",
+    "version",
+    "logical_model",
+    "target_id",
+    "runtime_digest",
+    "manifest_digest",
+    "payload_id",
+    "source_revision",
+    "bundle_id",
+    "embedded_engine",
+    "minimum_version",
+    "application_version",
+    "entrypoint",
+    "port_count"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_runtime_embedded_application_receipt" },
+        "version": { "const": 1 }
+      }
+    },
+    "candidate_id": { "$ref": "#/$defs/technical" },
+    "version": { "$ref": "#/$defs/version" },
+    "logical_model": { "$ref": "#/$defs/technical" },
+    "target_id": { "$ref": "#/$defs/technical" },
+    "runtime_digest": { "$ref": "#/$defs/sha256" },
+    "manifest_digest": { "$ref": "#/$defs/sha256" },
+    "payload_id": { "$ref": "#/$defs/sha256" },
+    "source_revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "bundle_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9][A-Za-z0-9-]*)+$"
+    },
+    "embedded_engine": { "$ref": "#/$defs/technical" },
+    "minimum_version": { "$ref": "#/$defs/version" },
+    "application_version": { "$ref": "#/$defs/version" },
+    "entrypoint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
+    },
+    "port_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4
+    }
+  },
+  "$defs": {
+    "technical": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[a-z0-9._-]+$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 128,
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

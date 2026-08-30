@@ -152,7 +152,7 @@ model- and engine-agnostic.
 - [Features](documentation/features.md)
 - [Installation](documentation/getting-started/installation.md)
 - [CLI reference](documentation/reference/cli.md)
-- [Nodes, replication, and trust](documentation/concepts/sites.md)
+- [Nodes, replication, and trust](documentation/concepts/nodes.md)
 - [Runtime development](documentation/reference/runtime-format.md)
 - [Updates and rollback](documentation/operations/upgrades-and-rollback.md)
 - [Watchdog](documentation/operations/watchdog.md)
@@ -175,13 +175,20 @@ radical or new Engine work uses
 [`letsinfer-engine-authoring`](https://github.com/letsinferlabs/skills/blob/main/skills/letsinfer-engine-authoring/SKILL.md),
 and qualification uses
 [`letsinfer-benchmark`](https://github.com/letsinferlabs/skills/blob/main/skills/letsinfer-benchmark/SKILL.md).
-Run the core tests with:
+Run the production Core and supporting tooling gates with:
 
 ```bash
+python3 tools/li_core_audit.py --root core
+cargo fmt --manifest-path core/Cargo.toml --all -- --check
+RUSTFLAGS="-D warnings" cargo test \
+  --manifest-path core/Cargo.toml --workspace --all-targets --locked
 python3 -m tools.core_regression
 ```
 
-The same complete suite and native Watchdog tests are required on every core
-pull request. See [Testing and pull-request gates](documentation/contributing/testing.md).
+The Rust workspace owns every production manager, resident, CLI capability,
+and native provider. The Python runner is limited to build, release, installer,
+benchmark-authoring, qualification, and portable tooling; every Core pull
+request runs both gates. See
+[Testing and pull-request gates](documentation/contributing/testing.md).
 
 Let's Infer is licensed under [AGPL-3.0-only](LICENSE).

@@ -1,0 +1,300 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/benchmark/li_benchmark_common_v1.schema.json",
+  "title": "Let's Infer benchmark common contracts",
+  "$comment": "Cross-field hashes, ordered uniqueness, concurrency/token cardinality, telemetry maxima, TTFT arithmetic, and record IDs remain mandatory semantic validation in Core.",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "git_revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "positive_number": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "nullable_positive_number": {
+      "oneOf": [
+        {"$ref": "#/$defs/positive_number"},
+        {"type": "null"}
+      ]
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_tokens",
+        "min_completion_tokens",
+        "require_natural_stop",
+        "temperature",
+        "seed"
+      ],
+      "properties": {
+        "output_tokens": {"type": "integer", "minimum": 1},
+        "min_completion_tokens": {"type": "integer", "minimum": 1},
+        "require_natural_stop": {"type": "boolean"},
+        "temperature": {"type": "number", "minimum": 0},
+        "seed": {"type": "integer", "minimum": 0}
+      }
+    },
+    "contract_v8": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "suite",
+        "generator",
+        "domains",
+        "execution",
+        "tokenizer",
+        "request",
+        "short",
+        "ttft_cache",
+        "sample_interval_seconds",
+        "cases"
+      ],
+      "properties": {
+        "schema_version": {"const": 8},
+        "suite": {"const": "letsinfer-code-prose-v1"},
+        "generator": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version"],
+          "properties": {
+            "id": {"const": "letsinfer-code-prose"},
+            "version": {"const": 8}
+          }
+        },
+        "domains": {
+          "enum": [["code"], ["prose"], ["code", "prose"]]
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["isolation", "prefix_state", "samples_per_cell", "stream_prefix"],
+          "properties": {
+            "isolation": {"enum": ["fresh-matrix", "fresh-context"]},
+            "prefix_state": {"const": "shared"},
+            "samples_per_cell": {"const": 1},
+            "stream_prefix": {"const": "shared-body"}
+          }
+        },
+        "tokenizer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["capability", "model_sha256", "engine_payload_sha256", "render_contract"],
+          "properties": {
+            "capability": {"const": "engine-rendered-chat-count-v1"},
+            "model_sha256": {"$ref": "#/$defs/sha256"},
+            "engine_payload_sha256": {"$ref": "#/$defs/sha256"},
+            "render_contract": {"const": "openai-chat-user-v1"}
+          }
+        },
+        "request": {"$ref": "#/$defs/request"},
+        "short": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["domains", "prompt_tokens", "concurrencies", "request"],
+          "properties": {
+            "domains": {"const": ["code", "prose"]},
+            "prompt_tokens": {"type": "integer", "minimum": 1},
+            "concurrencies": {"const": [1, 2, 4]},
+            "request": {"$ref": "#/$defs/request"}
+          }
+        },
+        "ttft_cache": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["prompt_tokens", "prompt_domain", "repetitions", "request"],
+          "properties": {
+            "prompt_tokens": {"const": 64000},
+            "prompt_domain": {"const": "code"},
+            "repetitions": {"const": 2},
+            "request": {
+              "allOf": [
+                {"$ref": "#/$defs/request"},
+                {
+                  "type": "object",
+                  "properties": {
+                    "output_tokens": {"const": 1},
+                    "min_completion_tokens": {"const": 1},
+                    "require_natural_stop": {"const": false},
+                    "temperature": {"const": 0}
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "sample_interval_seconds": {"type": "integer", "minimum": 1, "maximum": 60},
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "prompt_tokens", "concurrencies"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+              "prompt_tokens": {"type": "integer", "minimum": 1},
+              "concurrencies": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {"type": "integer", "minimum": 1, "maximum": 128}
+              }
+            }
+          }
+        }
+      }
+    },
+    "telemetry_v1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interval_seconds", "columns", "samples"],
+      "properties": {
+        "interval_seconds": {"enum": [1, null]},
+        "columns": {
+          "const": [
+            "elapsed_seconds",
+            "gpu_usage_percent",
+            "gpu_temperature_c",
+            "cpu_usage_percent",
+            "cpu_temperature_c",
+            "cpu_clock_mhz",
+            "gpu_clock_mhz",
+            "vram_clock_mhz",
+            "system_ram_clock_mhz",
+            "nvme_usage_percent",
+            "nvme_temperature_c",
+            "nvme_read_kib_per_second",
+            "nvme_write_kib_per_second"
+          ]
+        },
+        "samples": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "result_v1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workload",
+        "prompt_domain",
+        "prompt_suite",
+        "prompt_set_sha256",
+        "actual_prompt_tokens",
+        "aggregate_tps",
+        "decode_tps",
+        "ttft_seconds",
+        "ttft_statistic",
+        "ttft_p95_seconds",
+        "is_prefix_cached",
+        "max_gpu_usage_percent",
+        "max_gpu_temperature_c",
+        "max_cpu_temperature_c",
+        "max_cpu_usage_percent",
+        "max_cpu_clock_mhz",
+        "max_gpu_clock_mhz",
+        "max_vram_clock_mhz",
+        "max_system_ram_clock_mhz",
+        "max_nvme_usage_percent",
+        "max_nvme_temperature_c",
+        "max_nvme_read_kib_per_second",
+        "max_nvme_write_kib_per_second",
+        "telemetry"
+      ],
+      "properties": {
+        "workload": {"type": "string", "pattern": "^pp[1-9][0-9]*,tg[1-9][0-9]*,c[1-9][0-9]*$"},
+        "prompt_domain": {"enum": ["code", "prose"]},
+        "prompt_suite": {"const": "letsinfer-code-prose-v1"},
+        "prompt_set_sha256": {"$ref": "#/$defs/sha256"},
+        "actual_prompt_tokens": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}},
+        "aggregate_tps": {"$ref": "#/$defs/positive_number"},
+        "decode_tps": {"$ref": "#/$defs/nullable_positive_number"},
+        "ttft_seconds": {"$ref": "#/$defs/positive_number"},
+        "ttft_statistic": {"enum": ["single", "mean", "p50"]},
+        "ttft_p95_seconds": {"$ref": "#/$defs/nullable_positive_number"},
+        "is_prefix_cached": {"type": "boolean"},
+        "max_gpu_usage_percent": {"oneOf": [{"type": "number", "minimum": 0, "maximum": 100}, {"type": "null"}]},
+        "max_gpu_temperature_c": {"oneOf": [{"type": "number", "minimum": -100, "maximum": 250}, {"type": "null"}]},
+        "max_cpu_temperature_c": {"oneOf": [{"type": "number", "minimum": -100, "maximum": 250}, {"type": "null"}]},
+        "max_cpu_usage_percent": {"oneOf": [{"type": "number", "minimum": 0, "maximum": 100}, {"type": "null"}]},
+        "max_cpu_clock_mhz": {"oneOf": [{"const": -1}, {"$ref": "#/$defs/positive_number"}]},
+        "max_gpu_clock_mhz": {"oneOf": [{"const": -1}, {"$ref": "#/$defs/positive_number"}]},
+        "max_vram_clock_mhz": {"oneOf": [{"const": -1}, {"$ref": "#/$defs/positive_number"}]},
+        "max_system_ram_clock_mhz": {"oneOf": [{"const": -1}, {"$ref": "#/$defs/positive_number"}]},
+        "max_nvme_usage_percent": {"oneOf": [{"const": -1}, {"type": "number", "minimum": 0, "maximum": 100}]},
+        "max_nvme_temperature_c": {"anyOf": [{"const": -1}, {"type": "number", "minimum": -100, "maximum": 250}]},
+        "max_nvme_read_kib_per_second": {"oneOf": [{"const": -1}, {"type": "number", "minimum": 0}]},
+        "max_nvme_write_kib_per_second": {"oneOf": [{"const": -1}, {"type": "number", "minimum": 0}]},
+        "telemetry": {"$ref": "#/$defs/telemetry_v1"}
+      }
+    },
+    "ttft_cache_result_v1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workload",
+        "prompt_domain",
+        "prompt_suite",
+        "prompt_sha256",
+        "actual_prompt_tokens",
+        "cold_ttft_seconds",
+        "warm_ttft_seconds",
+        "cold_cached_prompt_tokens",
+        "warm_cached_prompt_tokens",
+        "ttft_speedup_ratio",
+        "ttft_reduction_percent"
+      ],
+      "properties": {
+        "workload": {"const": "pp64000,tg1,c1"},
+        "prompt_domain": {"const": "code"},
+        "prompt_suite": {"const": "letsinfer-code-prose-v1"},
+        "prompt_sha256": {"$ref": "#/$defs/sha256"},
+        "actual_prompt_tokens": {"type": "integer", "minimum": 1},
+        "cold_ttft_seconds": {"$ref": "#/$defs/positive_number"},
+        "warm_ttft_seconds": {"$ref": "#/$defs/positive_number"},
+        "cold_cached_prompt_tokens": {"type": "integer", "minimum": 0},
+        "warm_cached_prompt_tokens": {"type": "integer", "minimum": 0},
+        "ttft_speedup_ratio": {"$ref": "#/$defs/positive_number"},
+        "ttft_reduction_percent": {"type": "number"}
+      }
+    },
+    "oci_subject_v7": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_id", "runtime_version", "model_uri", "model_revision", "engine_payload_sha256", "measured_engine_oci", "target", "target_contract_sha256"],
+      "properties": {
+        "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*$"},
+        "runtime_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"},
+        "model_uri": {"type": "string", "pattern": "^hf://[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"},
+        "model_revision": {"$ref": "#/$defs/git_revision"},
+        "engine_payload_sha256": {"$ref": "#/$defs/sha256"},
+        "measured_engine_oci": {"type": "string", "pattern": "^[^\\s@]+@sha256:[0-9a-f]{64}$"},
+        "target": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+        "target_contract_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "native_subject_v8": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_id", "runtime_version", "model_uri", "model_revision", "engine_payload_sha256", "measured_engine_kind", "target", "target_contract_sha256"],
+      "properties": {
+        "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*$"},
+        "runtime_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"},
+        "model_uri": {"type": "string", "pattern": "^hf://[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"},
+        "model_revision": {"$ref": "#/$defs/git_revision"},
+        "engine_payload_sha256": {"$ref": "#/$defs/sha256"},
+        "measured_engine_kind": {"enum": ["native-archive", "python-standalone", "embedded-application"]},
+        "target": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+        "target_contract_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

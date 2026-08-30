@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/node/li_node_protection_session_generation_v1.schema.json",
+  "title": "Let's Infer Node protection session generation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_id",
+    "schema",
+    "node_id",
+    "core_installation_id",
+    "watchdog_source_identity",
+    "begin_idempotency_key",
+    "watchdog_session_nonce",
+    "watchdog_session_id",
+    "session_generation",
+    "state"
+  ],
+  "properties": {
+    "record_id": {
+      "type": "string",
+      "pattern": "^li_node_protection_session_generation_[0-9a-f]{32}$"
+    },
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_node_protection_session_generation" },
+        "version": { "const": 1 }
+      }
+    },
+    "node_id": { "$ref": "#/$defs/hex_32" },
+    "core_installation_id": { "$ref": "#/$defs/hex_64" },
+    "watchdog_source_identity": { "$ref": "#/$defs/hex_64" },
+    "begin_idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "watchdog_session_nonce": { "$ref": "#/$defs/hex_64" },
+    "watchdog_session_id": { "$ref": "#/$defs/hex_64" },
+    "session_generation": { "type": "integer", "minimum": 1 },
+    "state": { "enum": ["active", "ended"] }
+  },
+  "$defs": {
+    "hex_32": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "hex_64": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

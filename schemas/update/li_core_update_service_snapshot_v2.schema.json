@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/update/li_core_update_service_snapshot_v2.schema.json",
+  "title": "Let's Infer Core update service snapshot v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "update_id",
+    "receipt_id",
+    "current_version",
+    "current_source_identity",
+    "platform",
+    "role",
+    "services"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_core_update_service_snapshot" },
+        "version": { "const": 2 }
+      }
+    },
+    "update_id": { "$ref": "#/$defs/sha256" },
+    "receipt_id": { "$ref": "#/$defs/sha256" },
+    "current_version": { "type": "string", "minLength": 5, "maxLength": 128 },
+    "current_source_identity": { "$ref": "#/$defs/sha256" },
+    "platform": { "enum": ["linux", "macos"] },
+    "role": { "enum": ["main", "child"] },
+    "services": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/service" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "optional_sha256": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "loaded_identity", "active_identity"],
+      "properties": {
+        "service": { "enum": ["node", "gateway", "watchdog"] },
+        "loaded_identity": { "$ref": "#/$defs/optional_sha256" },
+        "active_identity": { "$ref": "#/$defs/optional_sha256" }
+      }
+    }
+  }
+}

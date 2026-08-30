@@ -1,0 +1,21 @@
+[package]
+name = "li_installer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+publish = false
+
+[dependencies]
+flate2 = "1"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+
+[lib]
+path = "src/li_installer.rs"
+
+[[bin]]
+name = "li_installer"
+path = "src/bin/li_installer.rs"

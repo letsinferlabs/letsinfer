@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/core/li_core_native_service_snapshot_v1.schema.json",
+  "title": "Let's Infer native Core service snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "platform", "services"],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_core_native_service_snapshot" },
+        "version": { "const": 1 }
+      }
+    },
+    "platform": { "enum": ["linux", "macos"] },
+    "services": { "type": "array" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "platform": { "const": "linux" } } },
+      "then": {
+        "properties": {
+          "services": {
+            "minItems": 3,
+            "maxItems": 3,
+            "prefixItems": [
+              {
+                "allOf": [
+                  { "$ref": "#/$defs/linux_service" },
+                  { "properties": { "identity": { "const": "li_gateway.service" } } }
+                ]
+              },
+              {
+                "allOf": [
+                  { "$ref": "#/$defs/linux_service" },
+                  { "properties": { "identity": { "const": "li_node.service" } } }
+                ]
+              },
+              {
+                "allOf": [
+                  { "$ref": "#/$defs/linux_service" },
+                  { "properties": { "identity": { "const": "li_watchdog.service" } } }
+                ]
+              }
+            ],
+            "items": false
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "services": {
+            "minItems": 2,
+            "maxItems": 2,
+            "prefixItems": [
+              {
+                "allOf": [
+                  { "$ref": "#/$defs/macos_service" },
+                  { "properties": { "identity": { "const": "ai.letsinfer.gateway" } } }
+                ]
+              },
+              {
+                "allOf": [
+                  { "$ref": "#/$defs/macos_service" },
+                  { "properties": { "identity": { "const": "ai.letsinfer.node" } } }
+                ]
+              }
+            ],
+            "items": false
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes_base64", "mode", "sha256"],
+      "properties": {
+        "bytes_base64": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 87384,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        },
+        "mode": { "enum": [384, 420] },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "linux_service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "definition", "enablement", "activity"],
+      "properties": {
+        "identity": { "type": "string" },
+        "definition": {
+          "oneOf": [
+            { "$ref": "#/$defs/definition" },
+            { "type": "null" }
+          ]
+        },
+        "enablement": { "enum": ["enabled", "disabled", "static", "absent"] },
+        "activity": { "enum": ["active", "inactive", "failed"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "enablement": { "const": "absent" } } },
+          "then": { "properties": { "definition": { "type": "null" } } },
+          "else": { "properties": { "definition": { "$ref": "#/$defs/definition" } } }
+        },
+        {
+          "if": { "properties": { "activity": { "const": "active" } } },
+          "then": { "properties": { "enablement": { "not": { "const": "absent" } } } }
+        }
+      ]
+    },
+    "macos_service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "definition", "enablement", "activity", "disabled"],
+      "properties": {
+        "identity": { "type": "string" },
+        "definition": {
+          "oneOf": [
+            { "$ref": "#/$defs/definition" },
+            { "type": "null" }
+          ]
+        },
+        "enablement": { "enum": ["loaded", "unloaded", "absent"] },
+        "activity": { "enum": ["active", "inactive"] },
+        "disabled": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "enablement": { "const": "absent" } } },
+          "then": { "properties": { "definition": { "type": "null" } } },
+          "else": { "properties": { "definition": { "$ref": "#/$defs/definition" } } }
+        },
+        {
+          "if": { "properties": { "activity": { "const": "active" } } },
+          "then": { "properties": { "enablement": { "const": "loaded" } } }
+        }
+      ]
+    }
+  }
+}

@@ -25,8 +25,9 @@ validated public `benchmark.json`.
   instead of container packaging metadata, and may select `fresh-context`
   isolation so unrelated context tiers receive independent processes while
   C1/C2/C4 within one tier share prefix state.
-- **Durable jobs** — Ctrl-C detaches, `letsinfer benchmark` reattaches to live
-  progress, and an explicit stop safely restores prior inference.
+- **Durable jobs** — `letsinfer benchmark run MODEL` returns after acceptance,
+  `letsinfer benchmark status` shows active progress, and an explicit stop asks
+  the resident Node to restore prior inference asynchronously.
 - **Full-system evidence** — JSON records throughput, TTFT, prefix state,
   clocks, utilization, temperatures, memory, NVMe, power, network, and a
   telemetry timeline.
@@ -41,7 +42,7 @@ validated public `benchmark.json`.
 Use the CLI:
 
 ```bash
-letsinfer benchmark qwen3.8-27b --c1
+letsinfer benchmark run qwen3.8-27b --c1
 ```
 
 With no selectors, the runner executes exactly the contexts, concurrencies, and
@@ -51,12 +52,12 @@ cross-product with flags such as `--32k`, `--64k`, `--c1`, or `--c4`.
 The benchmark is a durable job:
 
 ```bash
-letsinfer benchmark          # attach to live progress
-letsinfer benchmark stop     # cancel and restore prior inference state
+letsinfer benchmark status   # show active progress
+letsinfer benchmark stop     # request cancellation and restoration
 letsinfer benchmark clean    # remove local generated benchmark data
 ```
 
-Ctrl-C detaches. It does not cancel the worker.
+The run command returns after the resident Node accepts the durable job.
 
 ## Isolation
 
@@ -75,8 +76,8 @@ prompt plan. Schema-6 runs those same fixed prompts at C1, C2, and C4 before
 the long matrix. Schema-7 runs one unique 64K prompt twice after the long
 matrix and requires the reload to report a larger prefix-cache hit. The resident Watchdog
 stays active while the worker temporarily owns inference. On success, failure,
-cancellation, or terminal disconnect, the worker restores the prior service
-state.
+or cancellation, the resident Node stops the worker and restores the prior
+service state asynchronously.
 
 Schema-8 `fresh-context` isolation groups short, each declared long context,
 and the cold/warm TTFT pair separately. Every group starts one fresh process
