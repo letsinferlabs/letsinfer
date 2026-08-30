@@ -2452,7 +2452,13 @@ mod tests {
         };
         let macos = hardware["operating_system"] == "macos";
         let core_update = serde_json::json!({
-            "release_platform": if macos { "macos_arm64" } else { "linux_arm64" },
+            "release_platform": if macos {
+                "macos_arm64"
+            } else if cfg!(target_arch = "aarch64") {
+                "linux_arm64"
+            } else {
+                "linux_x86_64"
+            },
             "letsinfer_home": "/tmp/letsinfer", "home_directory": if macos { "/Users/test" } else { "/home/test" },
             "setup_state_directory": "/tmp/letsinfer/setup", "configuration_root": "/tmp",
             "curl_command": "/usr/bin/curl", "ssh_keygen_command": "/usr/bin/ssh-keygen",
