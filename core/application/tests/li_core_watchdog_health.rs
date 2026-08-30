@@ -162,6 +162,38 @@ fn watchdog_health_redacts_transport_authentication_and_timeout_failures() {
     }
 }
 
+// Retries startup transport absence while preserving terminal authentication failures.
+#[test]
+fn watchdog_service_adapter_classifies_startup_failures() {
+    for (failure, expected) in [
+        (
+            CoreWatchdogHealthError::TransportUnavailable,
+            Ok(CoreServiceSetupObservation::NotReady),
+        ),
+        (
+            CoreWatchdogHealthError::DeadlineExceeded,
+            Ok(CoreServiceSetupObservation::NotReady),
+        ),
+        (CoreWatchdogHealthError::AuthenticationUnavailable, Err(())),
+        (CoreWatchdogHealthError::InvalidResponse, Err(())),
+    ] {
+        let health = CoreWatchdogServiceHealth::new(
+            configuration(),
+            Arc::new(MockExchange::new(MockOutcome::Failure(failure))),
+        )
+        .unwrap();
+        let result = health.observe(
+            linux_context(),
+            CoreResidentProcess::Watchdog,
+            Duration::from_secs(90),
+        );
+        match expected {
+            Ok(observation) => assert_eq!(result, Ok(observation)),
+            Err(()) => assert!(result.is_err()),
+        }
+    }
+}
+
 // Returns not ready at an exhausted deadline without opening a transport.
 #[test]
 fn watchdog_health_does_not_start_after_its_deadline() {
