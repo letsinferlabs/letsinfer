@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use std::{fs, os::unix::fs::PermissionsExt};
 
@@ -42,6 +42,16 @@ use li_watchdog_manager::{
 };
 use ring::signature::{UnparsedPublicKey, ED25519};
 use sha2::{Digest, Sha256};
+
+// Serializes fixtures that invoke the production OpenSSL command runner.
+static NATIVE_OPENSSL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+// Acquires exclusive ownership of production OpenSSL fixtures for one complete test.
+fn native_openssl_test_guard() -> MutexGuard<'static, ()> {
+    NATIVE_OPENSSL_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 // Supplies deterministic distinct entropy while recording every requested closure.
 struct EntropyMock {
@@ -92,17 +102,21 @@ struct NativeFailureRunner {
     calls: AtomicUsize,
 }
 
-// Runs real OpenSSL while rejecting any accidental native Ed25519 dependency.
-struct NativeEd25519RejectingRunner;
+// Runs real OpenSSL while rejecting every accidental native private-key generator.
+struct NativeKeyGenerationRejectingRunner;
 
-impl PairingNativeCommandRunner for NativeEd25519RejectingRunner {
-    // Rejects native Ed25519 commands and delegates the remaining P-256 trust work.
+impl PairingNativeCommandRunner for NativeKeyGenerationRejectingRunner {
+    // Rejects native private-key generation and delegates certificate issuance work.
     fn run(
         &self,
         command: &PairingNativeCommand,
         timeout: Duration,
         maximum_output_bytes: usize,
     ) -> Result<PairingNativeCommandOutput, PairingError> {
+        assert!(!matches!(
+            command.arguments().first().map(String::as_str),
+            Some("ecparam" | "genpkey")
+        ));
         assert!(!command
             .arguments()
             .iter()
@@ -1135,6 +1149,7 @@ fn openssl_material_issuer_generates_verified_identity_and_cleans_workspace() {
     let Some(openssl) = openssl_path() else {
         return;
     };
+    let _process_guard = native_openssl_test_guard();
     let temporary = tempfile::tempdir().expect("temporary");
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
         .expect("root permissions");
@@ -1273,12 +1288,13 @@ fn openssl_material_issuer_generates_verified_identity_and_cleans_workspace() {
     io.rollback(material.receipt()).expect("rollback");
 }
 
-// Proves setup never delegates Ed25519 generation to platform OpenSSL implementations.
+// Proves setup never delegates private-key generation to platform OpenSSL implementations.
 #[test]
-fn rust_benchmark_signing_avoids_native_ed25519_dependency() {
+fn rust_private_key_generation_avoids_platform_openssl_dependency() {
     let Some(openssl) = openssl_path() else {
         return;
     };
+    let _process_guard = native_openssl_test_guard();
     let temporary = tempfile::tempdir().expect("temporary");
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
         .expect("root permissions");
@@ -1287,7 +1303,7 @@ fn rust_benchmark_signing_avoids_native_ed25519_dependency() {
         openssl,
         workspace_root.clone(),
         unsafe { libc::geteuid() },
-        Arc::new(NativeEd25519RejectingRunner),
+        Arc::new(NativeKeyGenerationRejectingRunner),
         Arc::new(SystemCoreSetupTrustWorkspaceIo),
     )
     .expect("issuer");
@@ -1326,6 +1342,7 @@ fn openssl_material_issuer_closes_the_macos_main_matrix() {
     let Some(openssl) = openssl_path() else {
         return;
     };
+    let _process_guard = native_openssl_test_guard();
     let temporary = tempfile::tempdir().expect("temporary");
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
         .expect("root permissions");
