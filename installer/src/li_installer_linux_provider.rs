@@ -540,9 +540,13 @@ fn nvidia_accelerators(arguments: &ProbeArguments) -> Result<(JsonValue, Option<
     };
     let fields = "index,uuid,name,pci.bus_id,driver_version,memory.total,compute_cap,mig.mode.current,addressing_mode";
     let query = format!("--query-gpu={}", fields);
-    let output = run_command(command, &[&query, "--format=csv,noheader,nounits"])?;
-    let summary = run_command(command, &[])?;
-    let cuda_version = nvidia_cuda_version(&summary);
+    let output = match run_command(command, &[&query, "--format=csv,noheader,nounits"]) {
+        Ok(output) => output,
+        Err(_) => return Ok((JsonValue::Array(Vec::new()), None)),
+    };
+    let cuda_version = run_command(command, &[])
+        .ok()
+        .and_then(|summary| nvidia_cuda_version(&summary));
     let mut accelerators = Vec::new();
     for line in output.lines() {
         let values: Vec<&str> = line.split(',').map(str::trim).collect();

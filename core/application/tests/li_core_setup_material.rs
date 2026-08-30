@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::io::Cursor;
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -1250,6 +1251,25 @@ fn openssl_material_issuer_generates_verified_identity_and_cleans_workspace() {
     GatewayNativeTlsServerConfiguration::load(&gateway_files, &SystemGatewayNativeFileIo)
         .expect("Gateway TLS consumer");
     let watchdog = material.watchdog_trust().expect("Watchdog trust");
+    let watchdog_subject_alt_name = Command::new(&openssl)
+        .args([
+            "x509",
+            "-in",
+            watchdog
+                .server_certificate_file()
+                .to_str()
+                .expect("Watchdog certificate path"),
+            "-noout",
+            "-ext",
+            "subjectAltName",
+        ])
+        .output()
+        .expect("Watchdog certificate identity inspection");
+    assert!(watchdog_subject_alt_name.status.success());
+    let watchdog_subject_alt_name =
+        String::from_utf8(watchdog_subject_alt_name.stdout).expect("Watchdog certificate identity");
+    assert!(watchdog_subject_alt_name.contains("IP Address:127.0.0.1"));
+    assert!(!watchdog_subject_alt_name.contains("homeai.local"));
     let watchdog_files = WatchdogTlsFileSet::new(
         owner_user_id,
         watchdog.server_certificate_file().to_path_buf(),
