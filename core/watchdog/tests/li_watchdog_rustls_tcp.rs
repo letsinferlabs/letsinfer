@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use li_core_interface::{InstallationId, NodeId, Sha256Digest};
 use li_watchdog_manager::{
     decode_watchdog_protocol_frame, decode_watchdog_protocol_response,
     encode_watchdog_protocol_frame, encode_watchdog_protocol_request,
@@ -20,10 +21,11 @@ use li_watchdog_manager::{
     WatchdogLiveFanoutLimits, WatchdogProtectedEngine, WatchdogProtocolCapabilities,
     WatchdogProtocolDataError, WatchdogProtocolDataProvider, WatchdogProtocolDispatcher,
     WatchdogProtocolHistoryCursor, WatchdogProtocolListener, WatchdogProtocolListenerLimits,
-    WatchdogProtocolRequest, WatchdogProtocolRequestKind, WatchdogProtocolResolution,
-    WatchdogProtocolResponse, WatchdogProtocolSiteStatus, WatchdogRustlsServerConfiguration,
-    WatchdogRustlsTcpLimits, WatchdogRustlsTcpServer, WatchdogSample, WatchdogTlsFile,
-    WatchdogTlsFileProvider, WatchdogTlsFileSet,
+    WatchdogProtocolRequest, WatchdogProtocolRequestKind, WatchdogProtocolResidentLifecycle,
+    WatchdogProtocolResidentStatus, WatchdogProtocolResolution, WatchdogProtocolResponse,
+    WatchdogProtocolSiteStatus, WatchdogRustlsServerConfiguration, WatchdogRustlsTcpLimits,
+    WatchdogRustlsTcpServer, WatchdogSample, WatchdogTlsFile, WatchdogTlsFileProvider,
+    WatchdogTlsFileSet,
 };
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
@@ -179,12 +181,15 @@ impl WatchdogProtocolDataProvider for PingOnlyDataProvider {
         Err(WatchdogProtocolDataError::Unavailable)
     }
 
-    // Rejects an unused resident-status request.
-    fn resident_status(
-        &self,
-    ) -> Result<li_watchdog_manager::WatchdogProtocolResidentStatus, WatchdogProtocolDataError>
-    {
-        Err(WatchdogProtocolDataError::Unavailable)
+    // Returns a full-sized ready identity that crosses the native TLS close boundary.
+    fn resident_status(&self) -> Result<WatchdogProtocolResidentStatus, WatchdogProtocolDataError> {
+        WatchdogProtocolResidentStatus::ready(
+            NodeId::parse("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
+            "test-core-release".to_string(),
+            Sha256Digest::parse(&"c".repeat(64)).unwrap(),
+            InstallationId::parse(&"d".repeat(64)).unwrap(),
+        )
+        .map_err(|_| WatchdogProtocolDataError::Unavailable)
     }
 }
 
@@ -452,6 +457,39 @@ fn rustls_loopback_accepts_the_exact_controller_leaf_and_dispatches_ping() {
         client.conn.protocol_version(),
         Some(rustls::ProtocolVersion::TLSv1_3)
     );
+
+    server.shutdown().unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+// Proves one full resident response and TLS close notification arrive before native shutdown.
+#[test]
+fn rustls_loopback_flushes_resident_health_before_graceful_close() {
+    let identity = tls_identity();
+    let (server, worker) = running_server(&identity, 4, 1_000);
+    let mut client = connect_controller(
+        server.local_address().unwrap(),
+        &identity,
+        &identity.controller_certificate,
+        &identity.controller_private_key,
+    )
+    .unwrap();
+    client
+        .write_all(&request_frame(
+            17,
+            WatchdogProtocolRequestKind::GetResidentStatus,
+        ))
+        .unwrap();
+    client.flush().unwrap();
+    let response = read_response(&mut client).unwrap();
+    assert!(matches!(
+        response.kind(),
+        li_watchdog_manager::WatchdogProtocolResponseKind::ResidentStatus(status)
+            if status.lifecycle() == WatchdogProtocolResidentLifecycle::Ready
+                && status.core_release() == "test-core-release"
+    ));
+    let mut terminal = [0_u8; 1];
+    assert_eq!(client.read(&mut terminal).unwrap(), 0);
 
     server.shutdown().unwrap();
     worker.join().unwrap().unwrap();
