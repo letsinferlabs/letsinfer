@@ -1,0 +1,4 @@
+#!/bin/sh
+# Reproduces an installed NVIDIA client whose kernel driver is unavailable.
+printf 'NVIDIA-SMI has failed because it could not communicate with the NVIDIA driver.\n' >&2
+exit 9
