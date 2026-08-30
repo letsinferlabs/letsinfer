@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::CString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -294,7 +294,7 @@ impl WatchdogLinuxHostFileProvider for SystemWatchdogLinuxHostFileProvider {
             }
             Err(_) => return Err(native_sample_error("native file could not be opened")),
         };
-        read_bounded_file(file, maximum_bytes).map(WatchdogLinuxCapability::Available)
+        read_bounded_native_file(file, maximum_bytes)
     }
 
     // Lists one fixed native directory under an explicit entry bound.
@@ -648,16 +648,25 @@ struct LinuxWatchdogSampleState {
     has_baseline: bool,
 }
 
-// Reads one file completely under its exact caller-owned byte bound.
-fn read_bounded_file(file: File, maximum_bytes: usize) -> Result<Vec<u8>, WatchdogError> {
+// Reads one native file while preserving the kernel's explicit no-data capability state.
+fn read_bounded_native_file(
+    file: impl Read,
+    maximum_bytes: usize,
+) -> Result<WatchdogLinuxCapability<Vec<u8>>, WatchdogError> {
     let mut payload = Vec::new();
-    file.take(maximum_bytes as u64 + 1)
+    if let Err(error) = file
+        .take(maximum_bytes as u64 + 1)
         .read_to_end(&mut payload)
-        .map_err(|_| native_sample_error("native file could not be read"))?;
+    {
+        if error.raw_os_error() == Some(libc::ENODATA) {
+            return Ok(WatchdogLinuxCapability::Unsupported);
+        }
+        return Err(native_sample_error("native file could not be read"));
+    }
     if payload.len() > maximum_bytes {
         return Err(native_sample_error("native file exceeded its byte bound"));
     }
-    Ok(payload)
+    Ok(WatchdogLinuxCapability::Available(payload))
 }
 
 // Converts one required native capability into strict UTF-8 text.
@@ -1087,4 +1096,42 @@ fn system_clock_milliseconds(clock: libc::clockid_t) -> Result<u64, WatchdogErro
 // Creates one stable redacted Linux sampling failure.
 const fn native_sample_error(reason: &'static str) -> WatchdogError {
     WatchdogError::provider("Linux sampling", reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    // Produces one exact native read failure without consulting the test host.
+    struct NativeReadFailure {
+        error: i32,
+    }
+
+    impl Read for NativeReadFailure {
+        // Returns the caller-selected kernel error on every attempted read.
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::from_raw_os_error(self.error))
+        }
+    }
+
+    // Treats ENODATA as an absent optional sensor while preserving real I/O failures and bounds.
+    #[test]
+    fn native_read_preserves_capability_and_failure_boundaries() {
+        assert_eq!(
+            read_bounded_native_file(
+                NativeReadFailure {
+                    error: libc::ENODATA,
+                },
+                MAX_SMALL_VALUE_BYTES,
+            ),
+            Ok(WatchdogLinuxCapability::Unsupported)
+        );
+        assert!(read_bounded_native_file(
+            NativeReadFailure { error: libc::EIO },
+            MAX_SMALL_VALUE_BYTES,
+        )
+        .is_err());
+        assert!(read_bounded_native_file(io::Cursor::new([0_u8; 2]), 1).is_err());
+    }
 }
