@@ -20,5 +20,5 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.11.0-rc.115"
+version = "0.11.0-rc.116"
 rust-version = "1.97.1"
