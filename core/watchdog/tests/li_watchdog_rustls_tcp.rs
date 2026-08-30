@@ -372,6 +372,7 @@ fn rustls_configuration_closes_every_injected_identity_boundary() {
         Arc::new(SequenceSessionProvider::new(
             identity.controller_sha256.clone(),
         )),
+        NodeId::parse(&"b".repeat(32)).unwrap(),
         WatchdogProtocolListenerLimits::new(1, 1, 100, 100).unwrap(),
     ));
     let tls = WatchdogRustlsServerConfiguration::load(
@@ -466,30 +467,32 @@ fn rustls_loopback_accepts_the_exact_controller_leaf_and_dispatches_ping() {
 #[test]
 fn rustls_loopback_flushes_resident_health_before_graceful_close() {
     let identity = tls_identity();
-    let (server, worker) = running_server(&identity, 4, 1_000);
-    let mut client = connect_controller(
-        server.local_address().unwrap(),
-        &identity,
-        &identity.controller_certificate,
-        &identity.controller_private_key,
-    )
-    .unwrap();
-    client
-        .write_all(&request_frame(
-            17,
-            WatchdogProtocolRequestKind::GetResidentStatus,
-        ))
+    let (server, worker) = running_resident_health_server(&identity, 4, 1_000);
+    for request_id in 17..22 {
+        let mut client = connect_controller(
+            server.local_address().unwrap(),
+            &identity,
+            &identity.controller_certificate,
+            &identity.controller_private_key,
+        )
         .unwrap();
-    client.flush().unwrap();
-    let response = read_response(&mut client).unwrap();
-    assert!(matches!(
-        response.kind(),
-        li_watchdog_manager::WatchdogProtocolResponseKind::ResidentStatus(status)
-            if status.lifecycle() == WatchdogProtocolResidentLifecycle::Ready
-                && status.core_release() == "test-core-release"
-    ));
-    let mut terminal = [0_u8; 1];
-    assert_eq!(client.read(&mut terminal).unwrap(), 0);
+        client
+            .write_all(&request_frame(
+                request_id,
+                WatchdogProtocolRequestKind::GetResidentStatus,
+            ))
+            .unwrap();
+        client.flush().unwrap();
+        let response = read_response(&mut client).unwrap();
+        assert!(matches!(
+            response.kind(),
+            li_watchdog_manager::WatchdogProtocolResponseKind::ResidentStatus(status)
+                if status.lifecycle() == WatchdogProtocolResidentLifecycle::Ready
+                    && status.core_release() == "test-core-release"
+        ));
+        let mut terminal = [0_u8; 1];
+        assert_eq!(client.read(&mut terminal).unwrap(), 0);
+    }
 
     server.shutdown().unwrap();
     worker.join().unwrap().unwrap();
@@ -621,8 +624,13 @@ fn rustls_loopback_closes_malformed_and_oversized_post_handshake_frames() {
 #[test]
 fn rustls_loopback_streams_shared_resident_fanout_without_replay() {
     let identity = tls_identity();
-    let (server, worker, fanout) =
-        running_server_with_fingerprint(&identity, 4, 1_000, identity.controller_sha256.clone());
+    let (server, worker, fanout) = running_server_with_fingerprint(
+        &identity,
+        4,
+        1_000,
+        identity.controller_sha256.clone(),
+        NodeId::parse(&"b".repeat(32)).unwrap(),
+    );
     fanout.publish(&protocol_sample(1)).unwrap();
     let mut client = connect_controller(
         server.local_address().unwrap(),
@@ -809,6 +817,26 @@ fn running_server_for_fingerprint(
         maximum_workers,
         handshake_timeout_milliseconds,
         allowed_fingerprint,
+        NodeId::parse(&"b".repeat(32)).unwrap(),
+    );
+    (server, worker)
+}
+
+// Creates one server whose exact allowlisted controller owns idle-safe resident health only.
+fn running_resident_health_server(
+    identity: &TestTlsIdentity,
+    maximum_workers: usize,
+    handshake_timeout_milliseconds: u64,
+) -> (
+    Arc<WatchdogRustlsTcpServer>,
+    JoinHandle<Result<(), WatchdogError>>,
+) {
+    let (server, worker, _) = running_server_with_fingerprint(
+        identity,
+        maximum_workers,
+        handshake_timeout_milliseconds,
+        identity.controller_sha256.clone(),
+        NodeId::parse(CONTROLLER_ID).unwrap(),
     );
     (server, worker)
 }
@@ -819,6 +847,7 @@ fn running_server_with_fingerprint(
     maximum_workers: usize,
     handshake_timeout_milliseconds: u64,
     allowed_fingerprint: String,
+    resident_status_controller_id: NodeId,
 ) -> (
     Arc<WatchdogRustlsTcpServer>,
     JoinHandle<Result<(), WatchdogError>>,
@@ -852,6 +881,7 @@ fn running_server_with_fingerprint(
         ))),
         registry,
         Arc::new(SequenceSessionProvider::new(allowed_fingerprint)),
+        resident_status_controller_id,
         WatchdogProtocolListenerLimits::new(maximum_workers, 8, 500, 500).unwrap(),
     ));
     let fanout = Arc::new(WatchdogLiveFanout::new(

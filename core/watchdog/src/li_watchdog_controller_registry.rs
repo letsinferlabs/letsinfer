@@ -293,22 +293,31 @@ impl WatchdogControllerRegistry {
     ) -> Result<Self, WatchdogError> {
         validate_registry_bound(maximum_active_bindings)?;
         let loaded = snapshot_provider.load()?;
-        let mut state = match loaded.as_deref() {
-            Some(snapshot) => parse_snapshot(&allowlist, maximum_active_bindings, snapshot)?,
-            None => WatchdogControllerRegistryState {
-                revision: 1,
-                entries: BTreeMap::new(),
-                persisted_snapshot: None,
+        let empty_state = || WatchdogControllerRegistryState {
+            revision: 1,
+            entries: BTreeMap::new(),
+            persisted_snapshot: None,
+        };
+        let (mut state, replaces_empty_bootstrap) = match loaded.as_deref() {
+            Some(snapshot) => match parse_snapshot(&allowlist, maximum_active_bindings, snapshot) {
+                Ok(state) => (state, false),
+                Err(_) if is_empty_initial_snapshot(snapshot) => (empty_state(), true),
+                Err(error) => return Err(error),
             },
+            None => (empty_state(), false),
         };
         let canonical = encode_snapshot(&allowlist, &state)?;
-        match loaded {
+        match loaded.as_deref() {
+            Some(snapshot) if replaces_empty_bootstrap => {
+                snapshot_provider.commit(Some(snapshot), &canonical)?;
+                state.persisted_snapshot = Some(canonical);
+            }
             Some(snapshot) if snapshot != canonical => {
                 return Err(controller_error(
                     "controller registry snapshot is not canonical",
                 ))
             }
-            Some(snapshot) => state.persisted_snapshot = Some(snapshot),
+            Some(snapshot) => state.persisted_snapshot = Some(snapshot.to_vec()),
             None => {
                 snapshot_provider.commit(None, &canonical)?;
                 state.persisted_snapshot = Some(canonical);
@@ -468,6 +477,11 @@ impl WatchdogControllerRegistry {
                     == Some(binding)
             })
             .map_err(|_| WatchdogError::StateUnavailable)
+    }
+
+    // Returns whether one certificate is paired with the exact allowlisted controller identity.
+    pub fn authorizes_controller(&self, controller_id: &str, certificate_sha256: &str) -> bool {
+        self.allowlist.authorizes(controller_id, certificate_sha256)
     }
 
     // Returns whether every accepted mutation commits an exact restart snapshot first.
@@ -668,36 +682,12 @@ fn parse_snapshot(
     maximum_active_bindings: usize,
     snapshot: &[u8],
 ) -> Result<WatchdogControllerRegistryState, WatchdogError> {
-    if maximum_active_bindings == 0
-        || maximum_active_bindings > maximum_watchdog_targets()
-        || snapshot.is_empty()
-        || snapshot.len() > WATCHDOG_CONTROLLER_SNAPSHOT_MAX_BYTES
-        || snapshot.last() != Some(&b'\n')
-        || snapshot.contains(&0)
-    {
+    if maximum_active_bindings == 0 || maximum_active_bindings > maximum_watchdog_targets() {
         return Err(controller_error(
             "controller registry snapshot framing is invalid",
         ));
     }
-    let text = std::str::from_utf8(snapshot)
-        .map_err(|_| controller_error("controller registry snapshot text is invalid"))?;
-    let checksum_start = text
-        .rfind("checksum=")
-        .filter(|index| *index > 0 && text.as_bytes()[index - 1] == b'\n')
-        .ok_or_else(|| controller_error("controller registry snapshot checksum is missing"))?;
-    let body = &text[..checksum_start];
-    let checksum_line = &text[checksum_start..text.len() - 1];
-    let checksum = checksum_line
-        .strip_prefix("checksum=")
-        .filter(|value| lower_hex(value, 8))
-        .ok_or_else(|| controller_error("controller registry snapshot checksum is invalid"))?;
-    let expected = u32::from_str_radix(checksum, 16)
-        .map_err(|_| controller_error("controller registry snapshot checksum is invalid"))?;
-    if watchdog_crc32(body.as_bytes()) != expected {
-        return Err(controller_error(
-            "controller registry snapshot checksum does not match",
-        ));
-    }
+    let body = validated_snapshot_body(snapshot)?;
     let mut lines = body.split_terminator('\n');
     if lines.next() != Some("schema=li_watchdog.controller-registry")
         || lines.next() != Some("version=1")
@@ -803,6 +793,59 @@ fn parse_snapshot(
         entries,
         persisted_snapshot: None,
     })
+}
+
+// Returns the checksum-verified snapshot body before any identity-specific parsing.
+fn validated_snapshot_body(snapshot: &[u8]) -> Result<&str, WatchdogError> {
+    if snapshot.is_empty()
+        || snapshot.len() > WATCHDOG_CONTROLLER_SNAPSHOT_MAX_BYTES
+        || snapshot.last() != Some(&b'\n')
+        || snapshot.contains(&0)
+    {
+        return Err(controller_error(
+            "controller registry snapshot framing is invalid",
+        ));
+    }
+    let text = std::str::from_utf8(snapshot)
+        .map_err(|_| controller_error("controller registry snapshot text is invalid"))?;
+    let checksum_start = text
+        .rfind("checksum=")
+        .filter(|index| *index > 0 && text.as_bytes()[index - 1] == b'\n')
+        .ok_or_else(|| controller_error("controller registry snapshot checksum is missing"))?;
+    let body = &text[..checksum_start];
+    let checksum_line = &text[checksum_start..text.len() - 1];
+    let checksum = checksum_line
+        .strip_prefix("checksum=")
+        .filter(|value| lower_hex(value, 8))
+        .ok_or_else(|| controller_error("controller registry snapshot checksum is invalid"))?;
+    let expected = u32::from_str_radix(checksum, 16)
+        .map_err(|_| controller_error("controller registry snapshot checksum is invalid"))?;
+    if watchdog_crc32(body.as_bytes()) != expected {
+        return Err(controller_error(
+            "controller registry snapshot checksum does not match",
+        ));
+    }
+    Ok(body)
+}
+
+// Recognizes only a valid revision-one snapshot with no session or tombstone state.
+fn is_empty_initial_snapshot(snapshot: &[u8]) -> bool {
+    let Ok(body) = validated_snapshot_body(snapshot) else {
+        return false;
+    };
+    let mut lines = body.split_terminator('\n');
+    lines.next() == Some("schema=li_watchdog.controller-registry")
+        && lines.next() == Some("version=1")
+        && lines
+            .next()
+            .and_then(|line| line.strip_prefix("installation_id="))
+            .is_some_and(|value| lower_hex(value, WATCHDOG_INSTALLATION_ID_BYTES))
+        && lines
+            .next()
+            .and_then(|line| line.strip_prefix("allowlist_sha256="))
+            .is_some_and(|value| lower_hex(value, WATCHDOG_CONTROLLER_FINGERPRINT_BYTES))
+        && lines.next() == Some("revision=1")
+        && lines.next().is_none()
 }
 
 // Rejects a process or protection generation already controlled by another identity.

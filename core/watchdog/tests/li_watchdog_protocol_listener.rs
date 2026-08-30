@@ -246,6 +246,54 @@ fn protocol_service_composes_manager_listener_and_controller_registry() {
         .is_err());
 }
 
+// Allows only repeated idle-safe status reads for the exact setup health controller.
+#[test]
+fn resident_health_controller_never_acquires_or_widens_a_runtime_session() {
+    let registry = controller_registry();
+    let sessions = Arc::new(MockSessions::new(binding('a', '1', 1, 'a', 101)));
+    let listener = WatchdogProtocolListener::new(
+        Arc::new(WatchdogProtocolDispatcher::new(Arc::new(
+            MockDataProvider::ordinary(),
+        ))),
+        registry.clone(),
+        sessions.clone(),
+        NodeId::parse(&"a".repeat(32)).unwrap(),
+        WatchdogProtocolListenerLimits::new(2, 2, 1_000, 1_000).unwrap(),
+    );
+    for request_id in 1..=5 {
+        let mut stream = MockAuthenticatedStream::new(
+            request_frame(request_id, WatchdogProtocolRequestKind::GetResidentStatus),
+            '1',
+        );
+        assert!(matches!(
+            listener.serve_authenticated_stream(&mut stream).unwrap(),
+            WatchdogProtocolConnectionOutcome::Completed
+        ));
+        assert!(matches!(
+            decode_output(&stream.output)[0].kind(),
+            WatchdogProtocolResponseKind::ResidentStatus(status)
+                if status.lifecycle()
+                    == li_watchdog_manager::WatchdogProtocolResidentLifecycle::Ready
+        ));
+    }
+
+    let mut denied = MockAuthenticatedStream::new(
+        request_frame(6, WatchdogProtocolRequestKind::Ping { nonce: 6 }),
+        '1',
+    );
+    assert!(matches!(
+        listener.serve_authenticated_stream(&mut denied).unwrap(),
+        WatchdogProtocolConnectionOutcome::Completed
+    ));
+    assert_error(
+        &decode_output(&denied.output)[0],
+        403,
+        "controller is not authorized for request",
+    );
+    assert_eq!(sessions.calls.load(Ordering::Acquire), 0);
+    assert!(registry.active_bindings().unwrap().is_empty());
+}
+
 // Rejects authentication, replay, malformed, oversized, truncated, and timeout paths.
 #[test]
 fn protocol_listener_fails_closed_at_every_accepted_stream_boundary() {
@@ -899,6 +947,7 @@ fn protocol_listener(
         ))),
         registry,
         sessions,
+        NodeId::parse(&"f".repeat(32)).unwrap(),
         limits,
     )
 }
