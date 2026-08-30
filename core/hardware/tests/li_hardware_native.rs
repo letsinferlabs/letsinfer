@@ -7,7 +7,7 @@ use std::io::Write;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use li_hardware_manager::{
@@ -15,6 +15,9 @@ use li_hardware_manager::{
 };
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+
+// Serializes fixtures that create and forcibly terminate native process groups.
+static NATIVE_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 // Returns an immediate deterministic timeout for native command tests.
 struct TimeoutWait;
@@ -93,9 +96,17 @@ fn assert_redacted(result: Result<String, HardwareError>, path: &Path) {
     assert!(!error.to_string().contains(&path.display().to_string()));
 }
 
+// Acquires exclusive ownership of process-group fixtures for one complete test.
+fn native_process_test_guard() -> MutexGuard<'static, ()> {
+    NATIVE_PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // Reads a private regular UTF-8 file and executes a private regular command.
 #[test]
 fn system_native_io_reads_and_runs_trusted_inputs() {
+    let _process_guard = native_process_test_guard();
     let fixture = FixtureDirectory::new();
     let text = fixture.write("facts", b"hardware facts\n", 0o600);
     let command = fixture.write("probe", b"#!/bin/sh\nprintf 'hardware probe\\n'\n", 0o700);
@@ -155,6 +166,7 @@ fn system_native_io_rejects_oversized_file_output() {
 // Rejects non-executable, linked, writable, failing, empty, and unbounded commands.
 #[test]
 fn system_native_io_rejects_unsafe_or_failed_commands() {
+    let _process_guard = native_process_test_guard();
     let fixture = FixtureDirectory::new();
     let non_executable = fixture.write("non-executable", b"#!/bin/sh\nprintf x\n", 0o600);
     let writable = fixture.write("writable", b"#!/bin/sh\nprintf x\n", 0o722);
@@ -200,6 +212,7 @@ fn system_native_io_rejects_unbounded_command_arguments() {
 // Kills and reaps a native process when the injected wait contract times out.
 #[test]
 fn system_native_io_bounds_command_runtime() {
+    let _process_guard = native_process_test_guard();
     let fixture = FixtureDirectory::new();
     let command = fixture.write("slow", b"#!/bin/sh\n/bin/sleep 60\n", 0o700);
     let io = SystemHardwareNativeIo::new(Arc::new(TimeoutWait));
@@ -212,6 +225,7 @@ fn system_native_io_bounds_command_runtime() {
 // Kills descendants which outlive their direct parent while retaining captured stdout.
 #[test]
 fn system_native_io_bounds_descendant_inherited_output() {
+    let _process_guard = native_process_test_guard();
     let fixture = FixtureDirectory::new();
     let command = fixture.write(
         "descendant",

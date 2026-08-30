@@ -17,7 +17,7 @@ use li_core_interface::Sha256Digest;
 use li_core_update_manager::CoreUpdateNodeRole;
 use li_pairing_manager::{PairingNativeCommand, PairingNativeCommandRunner};
 use ring::rand::SystemRandom;
-use ring::signature::{Ed25519KeyPair, KeyPair};
+use ring::signature::{EcdsaKeyPair, Ed25519KeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -1056,17 +1056,18 @@ impl OpenSslCoreSetupResidentTrustIssuer {
             .map_err(|_| material_error("OpenSSL trust output is invalid"))
     }
 
-    // Generates one portable SEC1 P-256 private key accepted by OpenSSL and rustls providers.
+    // Generates one ring-compatible PKCS#8 P-256 private key for portable certificate issuance.
     fn generate_p256_private_key(&self, destination: &Path) -> Result<(), CoreSetupProviderError> {
-        self.run(vec![
-            "ecparam".into(),
-            "-name".into(),
-            "prime256v1".into(),
-            "-genkey".into(),
-            "-noout".into(),
-            "-out".into(),
-            Self::argument(destination)?,
-        ])
+        let private_document =
+            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new())
+                .map_err(|_| material_error("P-256 trust issuance failed"))?;
+        let mut private_key = pem_document("PRIVATE KEY", private_document.as_ref());
+        let result = self
+            .io
+            .write_private_file(destination, &private_key, 16 * 1024, self.owner_user_id)
+            .map_err(|_| material_error("OpenSSL trust workspace is unavailable"));
+        private_key.fill(0);
+        result
     }
 }
 
@@ -1191,7 +1192,6 @@ impl OpenSslCoreSetupResidentTrustIssuer {
         let private_public_der = workspace.join("li_site_private_public_key.der");
         let local_der = workspace.join("li_local_control_certificate.der");
         for output in [
-            &private_key,
             &public_key,
             &ca_certificate,
             &request,
@@ -1362,13 +1362,10 @@ impl OpenSslCoreSetupResidentTrustIssuer {
         let client_certificate = workspace.join(format!("li_{role}_client.crt"));
         let client_der = workspace.join(format!("li_{role}_client.der"));
         for output in [
-            &authority_private_key,
             &authority_certificate,
-            &server_private_key,
             &server_request,
             &server_certificate,
             &server_der,
-            &client_private_key,
             &client_request,
             &client_certificate,
             &client_der,
