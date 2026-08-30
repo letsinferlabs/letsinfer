@@ -13,9 +13,10 @@ provider operation receives the deterministic update
 identity and must be idempotent, so a journal-write failure or process restart
 resumes the same operation rather than fabricating a second handoff.
 Journal reads and writes reject zero revisions, foreign identities, altered
-records, and non-advancing revisions. A replace error is treated as an
-ambiguous postcommit only when a fresh read returns the exact proposed record
-at a newer revision.
+records, and non-advancing revisions. An unavailable replace result is treated
+as an ambiguous postcommit only when a fresh read returns the exact proposed
+record at a newer revision. A definitive revision conflict is never mistaken
+for another manager's identical mutation.
 
 `FilesystemCoreUpdateArtifactProvider` now owns the production immutable Core
 layout beneath `LETSINFER_HOME/core`. It validates the exact
