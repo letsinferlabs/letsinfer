@@ -516,7 +516,7 @@ class CoreReleaseBuildTests(unittest.TestCase):
         workflow = (REPOSITORY_ROOT / ".github/workflows/release-core.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn('source="$RUNNER_TEMP/native-source/letsinfer"', workflow)
+        self.assertIn('source="$GITHUB_WORKSPACE"', workflow)
         self.assertEqual(
             workflow.count('python3 "$source/tools/li_core_build_release.py"'),
             1,
@@ -543,35 +543,23 @@ class CoreReleaseBuildTests(unittest.TestCase):
             workflow,
         )
 
-    # Builds a release push once from the exact source already validated by its promotion PR.
-    def test_release_workflow_builds_the_promoted_source_without_retesting(self) -> None:
+    # Builds a release push once from the exact checkout already validated by its promotion PR.
+    def test_release_workflow_builds_the_promoted_checkout_without_retesting(self) -> None:
         workflow = (REPOSITORY_ROOT / ".github/workflows/release-core.yml").read_text(
             encoding="utf-8"
         )
-        freeze_start = workflow.index("  freeze-source:\n")
         build_start = workflow.index("  build-native-installer:\n")
         publish_start = workflow.index("  publish:\n")
-        freeze = workflow[freeze_start:build_start]
         build = workflow[build_start:publish_start]
 
         self.assertIn("if: github.event_name == 'pull_request'", workflow)
-        self.assertNotIn("needs:\n      - validate-linux", freeze)
-        self.assertIn("name: li_core_frozen_source", freeze)
-        self.assertNotIn("name: letsinfer_core_frozen_source", workflow)
-        self.assertIn(
-            "path: ${{ runner.temp }}/frozen-source/letsinfer-source.tar.gz",
-            freeze,
-        )
-        self.assertIn("needs:\n      - freeze-source", build)
-        self.assertIn("name: li_core_frozen_source", build)
-        self.assertIn(
-            'frozen_source="$RUNNER_TEMP/frozen-source/letsinfer-source.tar.gz"',
-            build,
-        )
-        self.assertEqual(build.count('tar -xzf "$frozen_source"'), 1)
+        self.assertNotIn("freeze-source", workflow)
+        self.assertNotIn("li_core_frozen_source", workflow)
+        self.assertNotIn("needs:\n      - validate-linux", build)
+        self.assertEqual(build.count('source="$GITHUB_WORKSPACE"'), 2)
         self.assertNotIn("tools.source_archive build", build)
-        self.assertEqual(freeze.count("tools.source_archive build"), 1)
-        self.assertNotIn("cmp \\\n", freeze)
+        self.assertNotIn("native-source", build)
+        self.assertNotIn("cmp \\\n", build)
         publish = workflow[publish_start:]
         self.assertNotIn("validate-linux", publish)
         self.assertNotIn("validate-macos", publish)

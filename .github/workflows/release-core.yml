@@ -124,38 +124,9 @@ jobs:
           cmp "$RUNNER_TEMP/source-a.tar.gz" "$RUNNER_TEMP/source-b.tar.gz"
           python3 -m tools.source_archive verify "$RUNNER_TEMP/source-a.tar.gz"
 
-  freeze-source:
-    name: Freeze validated source
-    if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out exact validated revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Freeze exact release source
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          mkdir "$RUNNER_TEMP/frozen-source"
-          python3 -m tools.source_archive build \
-            --source . \
-            --output "$RUNNER_TEMP/frozen-source/letsinfer-source.tar.gz"
-          python3 -m tools.source_archive verify \
-            "$RUNNER_TEMP/frozen-source/letsinfer-source.tar.gz"
-      - name: Upload exact frozen source
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: li_core_frozen_source
-          path: ${{ runner.temp }}/frozen-source/letsinfer-source.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-
   build-native-installer:
     name: Build ${{ matrix.identity }} native release assets
     if: github.event_name == 'push'
-    needs:
-      - freeze-source
     strategy:
       fail-fast: false
       matrix:
@@ -191,27 +162,13 @@ jobs:
           test "$(RUSTUP_TOOLCHAIN="$toolchain" rustc --version --verbose | sed -n 's/^host: //p')" = "$LI_RUST_HOST"
           test "$(RUSTUP_TOOLCHAIN="$toolchain" cargo --version | awk '{print $2}')" = "$LI_RUST_VERSION"
           printf 'RUSTUP_TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
-      - name: Download exact frozen source
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
-        with:
-          name: li_core_frozen_source
-          path: ${{ runner.temp }}/frozen-source
-      - name: Prepare canonical source root
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          frozen_source="$RUNNER_TEMP/frozen-source/letsinfer-source.tar.gz"
-          python3 -m tools.source_archive verify "$frozen_source"
-          mkdir "$RUNNER_TEMP/native-source"
-          tar -xzf "$frozen_source" \
-            -C "$RUNNER_TEMP/native-source"
       - name: Build native installer
         env:
           MATRIX_ARCHITECTURE: ${{ matrix.architecture }}
           MATRIX_IDENTITY: ${{ matrix.identity }}
           MATRIX_OPERATING_SYSTEM: ${{ matrix.operating_system }}
         run: |
-          source="$RUNNER_TEMP/native-source/letsinfer"
+          source="$GITHUB_WORKSPACE"
           mkdir "$RUNNER_TEMP/li_installer"
           args=(
             --operating-system "$MATRIX_OPERATING_SYSTEM"
@@ -241,7 +198,7 @@ jobs:
           MATRIX_ARCHITECTURE: ${{ matrix.architecture }}
           MATRIX_OPERATING_SYSTEM: ${{ matrix.operating_system }}
         run: |
-          source="$RUNNER_TEMP/native-source/letsinfer"
+          source="$GITHUB_WORKSPACE"
           package=$(cargo pkgid \
             --manifest-path "$source/core/Cargo.toml" \
             -p li_core_application)
