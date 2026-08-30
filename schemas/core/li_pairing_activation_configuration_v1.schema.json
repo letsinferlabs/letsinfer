@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/core/li_pairing_activation_configuration_v1.schema.json",
+  "title": "Let's Infer Pairing Activation Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "receipt",
+    "request_identity",
+    "main",
+    "main_private_port",
+    "main_certificate_sha256",
+    "credentials",
+    "original_cli",
+    "original_node",
+    "original_gateway",
+    "child_node",
+    "child_gateway",
+    "child_cli"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_pairing_activation_configuration" },
+        "version": { "const": 1 }
+      }
+    },
+    "receipt": { "$ref": "#/$defs/sha256" },
+    "request_identity": { "$ref": "#/$defs/sha256" },
+    "main_private_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "main_certificate_sha256": { "$ref": "#/$defs/sha256" },
+    "main": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "machine_id",
+        "installation_id",
+        "display_name",
+        "control_address",
+        "latest_hardware_observation_id",
+        "created_at_unix_milliseconds",
+        "updated_at_unix_milliseconds"
+      ],
+      "properties": {
+        "node_id": { "$ref": "#/$defs/identity32" },
+        "machine_id": { "$ref": "#/$defs/identity32" },
+        "installation_id": { "$ref": "#/$defs/sha256" },
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "control_address": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "latest_hardware_observation_id": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/identity32" }]
+        },
+        "created_at_unix_milliseconds": { "type": "integer", "minimum": 1 },
+        "updated_at_unix_milliseconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "credentials": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "main_public_key_base64",
+        "main_ca_certificate_base64",
+        "child_certificate_base64",
+        "membership_signature_base64",
+        "child_leaf_sha256",
+        "valid_from_unix_milliseconds",
+        "expires_at_unix_milliseconds"
+      ],
+      "properties": {
+        "main_public_key_base64": { "$ref": "#/$defs/base64" },
+        "main_ca_certificate_base64": { "$ref": "#/$defs/base64" },
+        "child_certificate_base64": { "$ref": "#/$defs/base64" },
+        "membership_signature_base64": { "$ref": "#/$defs/base64" },
+        "child_leaf_sha256": { "$ref": "#/$defs/sha256" },
+        "valid_from_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "expires_at_unix_milliseconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "original_cli": { "$ref": "#/$defs/document" },
+    "original_node": { "$ref": "#/$defs/document" },
+    "original_gateway": { "$ref": "#/$defs/document" },
+    "child_node": { "$ref": "#/$defs/document" },
+    "child_gateway": { "$ref": "#/$defs/document" },
+    "child_cli": { "$ref": "#/$defs/document" }
+  },
+  "$defs": {
+    "identity32": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "base64": { "type": "string", "minLength": 4, "maxLength": 87384 },
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes_base64", "sha256"],
+      "properties": {
+        "bytes_base64": { "$ref": "#/$defs/base64" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

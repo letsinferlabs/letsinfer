@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/node/li_node_watchdog_session_record_v1.schema.json",
+  "title": "Let's Infer Node Watchdog session persistence record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_id",
+    "record_kind",
+    "controller_id",
+    "certificate_sha256",
+    "session_generation",
+    "target_placement_group_id",
+    "target_placement_id",
+    "protected_target_sha256",
+    "state"
+  ],
+  "properties": {
+    "record_id": { "type": "string" },
+    "record_kind": { "enum": ["controller", "certificate"] },
+    "controller_id": { "$ref": "#/$defs/hex_32" },
+    "certificate_sha256": { "$ref": "#/$defs/hex_64" },
+    "session_generation": { "type": "integer", "minimum": 1 },
+    "target_placement_group_id": { "$ref": "#/$defs/hex_32" },
+    "target_placement_id": { "$ref": "#/$defs/hex_32" },
+    "protected_target_sha256": { "$ref": "#/$defs/hex_64" },
+    "state": { "enum": ["active", "revoked"] }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "record_kind": { "const": "controller" },
+        "record_id": {
+          "pattern": "^li_watchdog_controller_[0-9a-f]{32}$"
+        }
+      }
+    },
+    {
+      "properties": {
+        "record_kind": { "const": "certificate" },
+        "record_id": {
+          "pattern": "^li_watchdog_certificate_[0-9a-f]{64}$"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "hex_32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "hex_64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

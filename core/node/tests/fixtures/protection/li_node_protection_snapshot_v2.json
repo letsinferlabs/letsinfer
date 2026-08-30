@@ -1,0 +1,13 @@
+{
+  "schema": { "name": "li_node_protection_api", "version": 2 },
+  "request_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "connection_id": "9999999999999999999999999999999999999999999999999999999999999999",
+  "request": {
+    "action": "read_gateway_snapshot",
+    "arguments": {
+      "node_id": "11111111111111111111111111111111",
+      "placement_group_id": "88888888888888888888888888888888",
+      "endpoint_node_id": "11111111111111111111111111111111"
+    }
+  }
+}

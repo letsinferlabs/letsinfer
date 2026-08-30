@@ -1,0 +1,16 @@
+{
+  "schema": { "name": "li_node_protection_api", "version": 2 },
+  "request_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "connection_id": "9999999999999999999999999999999999999999999999999999999999999999",
+  "request": {
+    "action": "begin_watchdog_session",
+    "arguments": {
+      "idempotency_key": "begin-watchdog-session-1",
+      "node_id": "11111111111111111111111111111111",
+      "core_installation_id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "watchdog_source_identity": "3333333333333333333333333333333333333333333333333333333333333333",
+      "watchdog_session_nonce": "4444444444444444444444444444444444444444444444444444444444444444",
+      "minimum_sample_sequence": 7
+    }
+  }
+}

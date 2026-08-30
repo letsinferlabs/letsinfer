@@ -1,0 +1,24 @@
+[package]
+name = "li_core_cli"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+li_audit_manager = { path = "../audit" }
+li_authentication_manager = { path = "../authentication" }
+li_core_interface = { path = "../interface" }
+li_core_update_manager = { path = "../update" }
+li_gateway_manager = { path = "../gateway" }
+li_node_manager = { path = "../node" }
+li_placement_manager = { path = "../placement" }
+libc = "0.2"
+sha2 = "0.10"
+
+[dev-dependencies]
+li_benchmark_manager = { path = "../benchmark" }
+tempfile = "3"
+
+[lib]
+path = "src/li_core_cli.rs"

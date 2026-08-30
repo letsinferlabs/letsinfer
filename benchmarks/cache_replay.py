@@ -271,11 +271,10 @@ def main() -> int:
             f"refusing existing output directory: {arguments.output_directory}"
         )
     manifest = common.read_json_object(arguments.release_manifest, "release manifest")
-    release, engine, model_id = common.validate_release_manifest(manifest)
+    source_root = pathlib.Path(__file__).resolve().parents[1]
+    release, engine, model_id = common.validate_release_sources(manifest, source_root)
     if manifest.get("cache", {}).get("persistent") is not True:
         raise CacheReplayError("release does not declare persistent cache support")
-    source_root = pathlib.Path(__file__).resolve().parents[1]
-    common.verify_letsinfer_release_sources(manifest, source_root)
     population = read_completed(arguments.population_directory, "population")
     restored = read_completed(arguments.restored_directory, "restored")
     expected_manifest_hash = common.sha256_file(arguments.release_manifest)

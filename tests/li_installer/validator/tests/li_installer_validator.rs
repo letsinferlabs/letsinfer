@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use li_installer_validator::{
-    validate_component_event_stream, validate_installation_probe, COMPONENT_EVENTS,
-};
+use li_installer_validator::validate_installation_probe;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
@@ -41,9 +39,9 @@ fn valid_document() -> Value {
         },
         "dependencies": {
             "curl": dependency("curl fixture", "/mock/curl", false),
+            "gh": dependency("gh version 2.97.0 (fixture)", "/mock/gh", true),
             "mktemp": dependency("", "/mock/mktemp", false),
             "openssl": dependency("OpenSSL fixture", "/mock/openssl", true),
-            "python": dependency("Python 3.12 fixture", "/mock/python", true),
             "ssh": dependency("OpenSSH fixture", "/mock/ssh", true),
             "ssh_keygen": dependency("OpenSSH fixture", "/mock/ssh-keygen", false),
             "sudo": dependency("sudo fixture", "/mock/sudo", false),
@@ -172,6 +170,19 @@ fn rejects_dependency_without_install_policy() {
         .any(|error| error.contains("missing required property installable")));
 }
 
+// Rejects a probe that omits the GitHub CLI observation emitted on every platform.
+#[test]
+fn rejects_missing_github_cli_observation() {
+    let mut document = valid_document();
+    document["dependencies"]
+        .as_object_mut()
+        .expect("dependencies should be an object")
+        .remove("gh");
+    assert!(validation_errors(&document)
+        .iter()
+        .any(|error| error.contains("missing required property gh")));
+}
+
 // Accepts a fail-closed Linux observation when systemd lingering is disabled.
 #[test]
 fn accepts_unavailable_systemd_linger() {
@@ -190,31 +201,4 @@ fn rejects_ready_document_without_systemd_linger() {
     assert!(validation_errors(&document)
         .iter()
         .any(|error| error.contains("unavailable state has no error")));
-}
-
-// Accepts every event in the closed native-component vocabulary.
-#[test]
-fn accepts_component_events() {
-    for event in COMPONENT_EVENTS {
-        assert!(validate_component_event_stream(&format!("{}\n", event), event).is_empty());
-    }
-}
-
-// Rejects unknown, mismatched, repeated, and unterminated component events.
-#[test]
-fn rejects_invalid_component_events() {
-    let expected = "letsinfer.event=dependencies_ready";
-    assert!(!validate_component_event_stream("letsinfer.event=unknown\n", expected).is_empty());
-    assert!(
-        !validate_component_event_stream("letsinfer.event=dependencies_installed\n", expected)
-            .is_empty()
-    );
-    assert!(!validate_component_event_stream(
-        "letsinfer.event=dependencies_ready\nletsinfer.event=dependencies_ready\n",
-        expected
-    )
-    .is_empty());
-    assert!(
-        !validate_component_event_stream("letsinfer.event=dependencies_ready", expected).is_empty()
-    );
 }

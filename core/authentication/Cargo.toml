@@ -1,0 +1,15 @@
+[package]
+name = "li_authentication_manager"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+getrandom = "0.4"
+li_core_interface = { path = "../interface" }
+sha2 = "0.10"
+subtle = "2"
+
+[lib]
+path = "src/li_authentication_manager.rs"

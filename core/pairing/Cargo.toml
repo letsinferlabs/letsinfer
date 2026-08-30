@@ -1,0 +1,19 @@
+[package]
+name = "li_pairing_manager"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+getrandom = "0.4"
+libc = "0.2"
+li_core_interface = { path = "../interface" }
+sha2 = "0.10"
+subtle = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+path = "src/li_pairing_manager.rs"

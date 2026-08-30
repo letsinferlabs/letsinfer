@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/core/li_core_setup_configuration_receipt_v1.schema.json",
+  "title": "Let's Infer Core setup configuration receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "transaction_identity", "intent_sha256"],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "li_core_setup_configuration_receipt"},
+        "version": {"const": 1}
+      }
+    },
+    "transaction_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "intent_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

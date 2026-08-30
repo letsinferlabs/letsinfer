@@ -1,0 +1,36 @@
+[package]
+name = "li_node_manager"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+base64 = "0.22"
+li_audit_manager = { path = "../audit" }
+li_authentication_manager = { path = "../authentication" }
+li_benchmark_manager = { path = "../benchmark" }
+li_core_interface = { path = "../interface" }
+li_core_update_manager = { path = "../update" }
+li_database = { path = "../database" }
+li_gateway_manager = { path = "../gateway" }
+li_hardware_manager = { path = "../hardware" }
+li_placement_manager = { path = "../placement" }
+li_pairing_manager = { path = "../pairing" }
+li_runtime_manager = { path = "../runtime" }
+li_watchdog_manager = { path = "../watchdog" }
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+rcgen = "0.13.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"
+tempfile = "3"
+
+[lib]
+path = "src/li_node_manager.rs"

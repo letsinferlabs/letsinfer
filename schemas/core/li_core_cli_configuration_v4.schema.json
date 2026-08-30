@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/core/li_core_cli_configuration_v4.schema.json",
+  "title": "Let's Infer Core CLI configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "local_node_socket", "entropy_source", "client", "pairing", "uninstall", "remote_main"],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "li_core_cli_configuration"},
+        "version": {"const": 4}
+      }
+    },
+    "local_node_socket": {"$ref": "#/$defs/path"},
+    "entropy_source": {"$ref": "#/$defs/path"},
+    "client": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeout_milliseconds", "maximum_response_bytes"],
+      "properties": {
+        "timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000},
+        "maximum_response_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576}
+      }
+    },
+    "pairing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_configuration_file", "installation", "watchdog_health"],
+      "properties": {
+        "node_configuration_file": {"$ref": "#/$defs/path"},
+        "installation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "source_identity"],
+          "properties": {
+            "version": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[0-9A-Za-z.+-]+$"},
+            "source_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "watchdog_health": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["authority_certificate_file", "controller_certificate_file", "controller_private_key_file"],
+              "properties": {
+                "authority_certificate_file": {"$ref": "#/$defs/path"},
+                "controller_certificate_file": {"$ref": "#/$defs/path"},
+                "controller_private_key_file": {"$ref": "#/$defs/path"}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "uninstall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["launcher_file", "privilege_command"],
+      "properties": {
+        "launcher_file": {"$ref": "#/$defs/path"},
+        "privilege_command": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/path"}
+          ]
+        }
+      }
+    },
+    "remote_main": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["address", "port", "server_certificate_sha256", "client_certificate_file", "client_private_key_file"],
+          "properties": {
+            "address": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^\\S+$"},
+            "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "server_certificate_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "client_certificate_file": {"$ref": "#/$defs/path"},
+            "client_private_key_file": {"$ref": "#/$defs/path"}
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "path": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^/(?:[^/\\u0000-\\u001f\\u007f]+/)*[^/\\u0000-\\u001f\\u007f]+$",
+      "not": {"pattern": "(?:^|/)\\.{1,2}(?:/|$)"}
+    }
+  }
+}

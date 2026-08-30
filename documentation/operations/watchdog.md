@@ -42,19 +42,23 @@ explicitly clears the safety latch and
 starts the affected placement again; controller UIs show that action only when
 a trip is actually latched.
 
-`letsinfer.service` owns Watchdog, `letsinfer-engine.service` owns the transient
-guarded launch, and `letsinfer-recovery.timer` repairs ordinary engine failures.
-Docker auto-restart remains disabled so there is one recovery authority.
+`li_watchdog.service` owns the Rust Watchdog resident, PlacementManager owns
+each guarded runtime task, and the resident `li_node` recovery journal repairs
+ordinary interrupted lifecycles. Docker auto-restart remains disabled so there
+is one recovery authority and no compatibility recovery timer.
+Watchdog never opens the `li_node` database or manager stores. It consumes the
+owner-authenticated local Node protection API v2 for its active session and
+status.
 The resident binary belongs to core, while its active memory/PSI containment
 thresholds come from the selected immutable runtime. Core updates preserve
 those exact thresholds for compatible runtimes; they never replace them with a
 generic model-independent memory floor while inference is restored.
 
 Watchdog has a 24 MiB soft memory threshold, a strict 30 MiB cgroup limit, and
-no swap. The engine and transient Python launcher are outside that resident
-budget. Telemetry uses bounded CRC-protected rings and a bounded mutual-TLS
-protobuf endpoint; slow controllers receive an explicit gap rather than unbounded
-buffering.
+no swap. The Engine and any runtime-owned transient standalone-Python launcher
+are outside that resident budget; neither is Python Core. Telemetry uses
+bounded CRC-protected rings and a bounded mutual-TLS protobuf endpoint; slow
+controllers receive an explicit gap rather than unbounded buffering.
 
 Core owns a floor and hard limit of 16 concurrent Watchdog telemetry/control
 streams. An older runtime declaration such as `max_controllers: 2` therefore
@@ -65,6 +69,9 @@ state. Against the current 19–22 MiB resident baseline, that bounded table and
 control-plane streams, not the 128 (or other) inference API connections
 declared by a runtime.
 
+The current Watchdog configuration is schema v2.
+`schemas/watchdog/li_watchdog_protocol_v1.proto` is the schema-file identity
+that carries wire protocol v3; those versions name different boundaries.
 Protocol v3 exposes capabilities, latest state, bounded history, live
 subscriptions, and typed Let's Infer status over that same authenticated endpoint.
 The typed status includes the manifest-bound release, model, engine, runtime,

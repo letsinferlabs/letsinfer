@@ -1,0 +1,338 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/hardware/li_hardware_observation_v1.schema.json",
+  "title": "Let's Infer HardwareManager observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "observation_id",
+    "node_id",
+    "boot_id",
+    "platform",
+    "processor",
+    "memory_bytes",
+    "accelerators",
+    "interconnects",
+    "observed_at_unix_milliseconds"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_hardware_observation" },
+        "version": { "const": 1 }
+      }
+    },
+    "observation_id": { "$ref": "#/$defs/identity" },
+    "node_id": { "$ref": "#/$defs/identity" },
+    "boot_id": { "$ref": "#/$defs/boot_id" },
+    "platform": { "$ref": "#/$defs/platform" },
+    "processor": { "$ref": "#/$defs/processor" },
+    "memory_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "accelerators": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/accelerator" }
+    },
+    "interconnects": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/interconnect" }
+    },
+    "observed_at_unix_milliseconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "technical_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(?:[^\\s\\u0000-\\u001F\\u007F]|[^\\s\\u0000-\\u001F\\u007F][^\\u0000-\\u001F\\u007F]*[^\\s\\u0000-\\u001F\\u007F])$"
+    },
+    "device_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^\\s\\u0000-\\u001F\\u007F]+$"
+    },
+    "boot_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^\\S+$"
+    },
+    "interface": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operating_system", "architecture"],
+      "properties": {
+        "operating_system": { "enum": ["linux", "macos"] },
+        "architecture": { "enum": ["arm64", "x86_64"] }
+      }
+    },
+    "processor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "logical_cpu_count"],
+      "properties": {
+        "model": { "$ref": "#/$defs/display_name" },
+        "logical_cpu_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "accelerator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device_id",
+        "vendor",
+        "name",
+        "memory",
+        "compute",
+        "driver",
+        "telemetry"
+      ],
+      "properties": {
+        "device_id": { "$ref": "#/$defs/device_id" },
+        "vendor": { "$ref": "#/$defs/vendor" },
+        "name": { "$ref": "#/$defs/display_name" },
+        "memory": { "$ref": "#/$defs/memory" },
+        "compute": { "$ref": "#/$defs/compute" },
+        "driver": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/driver" }
+          ]
+        },
+        "telemetry": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/telemetry" }
+          ]
+        }
+      }
+    },
+    "vendor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "nvidia" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "apple" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name"],
+          "properties": {
+            "kind": { "const": "other" },
+            "name": { "$ref": "#/$defs/technical_name" }
+          }
+        }
+      ]
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["topology", "framebuffer_bytes", "addressing_mode"],
+      "properties": {
+        "topology": { "enum": ["unified", "discrete", "unknown"] },
+        "framebuffer_bytes": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "addressing_mode": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/technical_name" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "topology": { "const": "discrete" } } },
+          "then": { "properties": { "framebuffer_bytes": { "type": "integer" } } }
+        },
+        {
+          "if": { "properties": { "topology": { "const": "unified" } } },
+          "then": { "properties": { "framebuffer_bytes": { "type": "null" } } }
+        }
+      ]
+    },
+    "compute": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["api", "architecture", "maximum_version"],
+          "properties": {
+            "api": { "const": "cuda" },
+            "architecture": { "$ref": "#/$defs/technical_name" },
+            "maximum_version": {
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "#/$defs/technical_name" }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["api", "family", "version"],
+          "properties": {
+            "api": { "const": "metal" },
+            "family": { "$ref": "#/$defs/technical_name" },
+            "version": { "$ref": "#/$defs/technical_name" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["api", "api_name", "capability"],
+          "properties": {
+            "api": { "const": "other" },
+            "api_name": { "$ref": "#/$defs/technical_name" },
+            "capability": {
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "#/$defs/technical_name" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "driver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "version"],
+      "properties": {
+        "source": { "$ref": "#/$defs/technical_name" },
+        "version": { "$ref": "#/$defs/technical_name" }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "temperature_millicelsius",
+        "graphics_clock_mhz",
+        "memory_clock_mhz",
+        "utilization_per_mille",
+        "power_milliwatts",
+        "framebuffer_used_bytes"
+      ],
+      "properties": {
+        "temperature_millicelsius": {
+          "type": ["integer", "null"],
+          "minimum": -1000,
+          "maximum": 250000
+        },
+        "graphics_clock_mhz": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "memory_clock_mhz": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "utilization_per_mille": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "power_milliwatts": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "framebuffer_used_bytes": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "interconnect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "interface",
+        "device_ids",
+        "is_available",
+        "speed_mbps",
+        "mtu"
+      ],
+      "properties": {
+        "kind": { "enum": ["pcie", "nvlink", "rdma", "ethernet", "wifi", "other"] },
+        "interface": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/interface" }
+          ]
+        },
+        "device_ids": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/device_id" }
+        },
+        "is_available": { "type": "boolean" },
+        "speed_mbps": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "mtu": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "anyOf": [
+        { "properties": { "interface": { "type": "string" } } },
+        { "properties": { "device_ids": { "minItems": 1 } } }
+      ]
+    }
+  }
+}

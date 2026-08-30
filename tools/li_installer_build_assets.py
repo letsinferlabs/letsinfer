@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Build one deterministic native Let's Infer installer archive."""
+"""Build or verify one deterministic native Let's Infer installer archive."""
 
 from __future__ import annotations
 
@@ -33,6 +33,22 @@ OPERATING_SYSTEM_ALIASES = {
     "darwin": "macos",
     "linux": "linux",
 }
+REPRODUCIBLE_SOURCE_ROOT = "/usr/src/letsinfer"
+REPRODUCIBLE_CARGO_HOME = "/usr/local/cargo"
+RUST_FLAG_SEPARATOR = "\x1f"
+MAXIMUM_ARCHIVE_BYTES = 256 * 1024 * 1024
+MAXIMUM_INSTALLER_BYTES = 128 * 1024 * 1024
+MAXIMUM_MACOS_PROBE_BYTES = 32 * 1024 * 1024
+MAXIMUM_SCHEMA_BYTES = 1024 * 1024
+EXECUTABLE_HEADER_BYTES = 24
+ARCHIVE_READ_BYTES = 1024 * 1024
+ELF_MACHINE_BY_ARCHITECTURE = {
+    "arm64": 183,
+    "x86_64": 62,
+}
+MACHO_ARM64_CPU_TYPE = 0x0100000C
+MACHO_EXECUTABLE_FILE_TYPE = 2
+MACHO_64_MAGIC = 0xFEEDFACF
 
 
 class InstallerBuildError(RuntimeError):
@@ -96,32 +112,50 @@ def run_command(arguments: Sequence[str], environment: dict[str, str] | None = N
     raise InstallerBuildError(detail)
 
 
-# Builds the shared Rust dependency manager and selected Rust probe.
-def build_rust_components(
+# Returns the closed compiler environment that removes machine-local paths from Rust outputs.
+def rust_release_environment(root: pathlib.Path) -> dict[str, str]:
+    source = root.resolve(strict=False)
+    environment = os.environ.copy()
+    cargo_home = pathlib.Path(
+        environment.get("CARGO_HOME", pathlib.Path.home() / ".cargo")
+    )
+    if not cargo_home.is_absolute():
+        cargo_home = pathlib.Path.cwd() / cargo_home
+    cargo_home = cargo_home.resolve(strict=False)
+    environment["CARGO_HOME"] = str(cargo_home)
+    environment.pop("RUSTFLAGS", None)
+    environment["CARGO_ENCODED_RUSTFLAGS"] = RUST_FLAG_SEPARATOR.join(
+        (
+            "-D",
+            "warnings",
+            f"--remap-path-prefix={cargo_home}={REPRODUCIBLE_CARGO_HOME}",
+            f"--remap-path-prefix={source}={REPRODUCIBLE_SOURCE_ROOT}",
+        )
+    )
+    return environment
+
+
+# Builds the one native Rust installer lifecycle owner.
+def build_rust_installer(
     root: pathlib.Path,
     cargo: pathlib.Path,
     target_root: pathlib.Path,
-    include_probe: bool,
-) -> dict[str, pathlib.Path]:
-    binaries = ["li_installer_dependency_manager"]
-    if include_probe:
-        binaries.append("li_installer_installation_probe")
+) -> pathlib.Path:
     command = [
         str(cargo),
         "build",
         "--release",
         "--locked",
         "--manifest-path",
-        str(root / "li_installer" / "Cargo.toml"),
+        str(root / "installer" / "Cargo.toml"),
         "--target-dir",
         str(target_root),
+        "--bin",
+        "li_installer",
     ]
-    for binary in binaries:
-        command.extend(("--bin", binary))
-    environment = os.environ.copy()
-    environment["RUSTFLAGS"] = "-D warnings"
+    environment = rust_release_environment(root)
     run_command(command, environment)
-    return {binary: target_root / "release" / binary for binary in binaries}
+    return target_root / "release" / "li_installer"
 
 
 # Builds the Swift Metal probe for the native macOS target.
@@ -130,22 +164,32 @@ def build_macos_probe(
     swiftc: pathlib.Path,
     output: pathlib.Path,
 ) -> pathlib.Path:
+    module_cache = output.parent / "swift_module_cache"
+    module_cache.mkdir(mode=0o700)
+    environment = os.environ.copy()
+    environment["CLANG_MODULE_CACHE_PATH"] = str(module_cache)
+    environment["SWIFT_MODULECACHE_PATH"] = str(module_cache)
     run_command(
         [
             str(swiftc),
             "-O",
             "-warnings-as-errors",
+            "-file-prefix-map",
+            f"{root.resolve(strict=False)}={REPRODUCIBLE_SOURCE_ROOT}",
+            "-debug-prefix-map",
+            f"{root.resolve(strict=False)}={REPRODUCIBLE_SOURCE_ROOT}",
             "-framework",
             "Metal",
             str(
                 root
-                / "li_installer"
+                / "installer"
                 / "macos"
-                / "li_installer_installation_probe.swift"
+                / "li_installer_macos_probe.swift"
             ),
             "-o",
             str(output),
-        ]
+        ],
+        environment,
     )
     return output
 
@@ -187,7 +231,7 @@ def write_archive(staging: pathlib.Path, output: pathlib.Path) -> None:
     with tarfile.open(fileobj=archive, mode="w", format=tarfile.PAX_FORMAT) as handle:
         paths = [staging, *sorted(staging.rglob("*"), key=lambda item: item.as_posix())]
         for path in paths:
-            relative = pathlib.PurePosixPath("li_installer")
+            relative = pathlib.PurePosixPath("installer")
             if path != staging:
                 relative /= pathlib.PurePosixPath(path.relative_to(staging).as_posix())
             record = tar_record(path, relative)
@@ -200,6 +244,194 @@ def write_archive(staging: pathlib.Path, output: pathlib.Path) -> None:
     with output.open("wb") as destination:
         with gzip.GzipFile(filename="", mode="wb", fileobj=destination, mtime=0) as compressed:
             compressed.write(archive.getvalue())
+
+
+# Returns the closed ordered member contract for one native installer target.
+def archive_members(
+    operating_system: str,
+    architecture: str,
+) -> tuple[tuple[str, bytes, int, int], ...]:
+    if (operating_system, architecture) not in SUPPORTED_TARGETS:
+        raise InstallerBuildError(
+            f"installer target is unsupported: {operating_system}_{architecture}"
+        )
+    members = [
+        ("installer", tarfile.DIRTYPE, 0o755, 0),
+        ("installer/bin", tarfile.DIRTYPE, 0o755, 0),
+        (
+            "installer/bin/li_installer",
+            tarfile.REGTYPE,
+            0o755,
+            MAXIMUM_INSTALLER_BYTES,
+        ),
+    ]
+    if operating_system == "macos":
+        members.append(
+            (
+                "installer/bin/li_installer_macos_probe",
+                tarfile.REGTYPE,
+                0o755,
+                MAXIMUM_MACOS_PROBE_BYTES,
+            )
+        )
+    members.extend(
+        (
+            ("installer/schemas", tarfile.DIRTYPE, 0o755, 0),
+            (
+                "installer/schemas/li_installer_installation_probe_v1.schema.json",
+                tarfile.REGTYPE,
+                0o644,
+                MAXIMUM_SCHEMA_BYTES,
+            ),
+        )
+    )
+    return tuple(members)
+
+
+# Verifies one released executable header against its exact native architecture.
+def verify_executable_header(
+    header: bytes,
+    operating_system: str,
+    architecture: str,
+    name: str,
+) -> None:
+    if len(header) < EXECUTABLE_HEADER_BYTES:
+        raise InstallerBuildError(f"installer executable header is truncated: {name}")
+    if operating_system == "linux":
+        expected_machine = ELF_MACHINE_BY_ARCHITECTURE[architecture]
+        if (
+            header[:4] != b"\x7fELF"
+            or header[4] != 2
+            or header[5] != 1
+            or header[6] != 1
+            or int.from_bytes(header[16:18], "little") not in (2, 3)
+            or int.from_bytes(header[18:20], "little") != expected_machine
+            or int.from_bytes(header[20:24], "little") != 1
+        ):
+            raise InstallerBuildError(
+                f"installer ELF architecture is invalid: {name}"
+            )
+        return
+    if (
+        int.from_bytes(header[:4], "little") != MACHO_64_MAGIC
+        or int.from_bytes(header[4:8], "little") != MACHO_ARM64_CPU_TYPE
+        or int.from_bytes(header[12:16], "little") != MACHO_EXECUTABLE_FILE_TYPE
+    ):
+        raise InstallerBuildError(
+            f"installer Mach-O architecture is invalid: {name}"
+        )
+
+
+# Reads one declared archive member exactly while retaining only its bounded header.
+def read_member(
+    handle: tarfile.TarFile,
+    member: tarfile.TarInfo,
+) -> bytes:
+    source = handle.extractfile(member)
+    if source is None:
+        raise InstallerBuildError(
+            f"installer archive member is unreadable: {member.name}"
+        )
+    header = source.read(min(member.size, EXECUTABLE_HEADER_BYTES))
+    if len(header) != min(member.size, EXECUTABLE_HEADER_BYTES):
+        raise InstallerBuildError(
+            f"installer archive member is truncated: {member.name}"
+        )
+    remaining = member.size - len(header)
+    while remaining:
+        content = source.read(min(remaining, ARCHIVE_READ_BYTES))
+        if not content:
+            raise InstallerBuildError(
+                f"installer archive member is truncated: {member.name}"
+            )
+        remaining -= len(content)
+    return header
+
+
+# Verifies one archive against the complete bounded native installer contract.
+def verify_archive(
+    archive: pathlib.Path,
+    operating_system: str,
+    architecture: str,
+) -> None:
+    expected = archive_members(operating_system, architecture)
+    expected_name = f"li_installer_{operating_system}_{architecture}.tar.gz"
+    if archive.name != expected_name:
+        raise InstallerBuildError(f"installer archive name must be {expected_name}")
+    try:
+        details = archive.lstat()
+    except OSError as error:
+        raise InstallerBuildError(f"installer archive is unavailable: {archive}") from error
+    if not stat.S_ISREG(details.st_mode):
+        raise InstallerBuildError(f"installer archive is not a regular file: {archive}")
+    if details.st_size <= 0 or details.st_size > MAXIMUM_ARCHIVE_BYTES:
+        raise InstallerBuildError("installer archive size is outside the supported bound")
+
+    observed = 0
+    expanded_bytes = 0
+    try:
+        with tarfile.open(archive, mode="r|gz") as handle:
+            for index, member in enumerate(handle):
+                if index >= len(expected):
+                    raise InstallerBuildError("installer archive contains an extra member")
+                name, member_type, mode, maximum_bytes = expected[index]
+                if member.name != name:
+                    raise InstallerBuildError(
+                        f"installer archive member {index} must be {name}"
+                    )
+                if member.issym() or member.islnk():
+                    raise InstallerBuildError(
+                        f"installer archive links are forbidden: {member.name}"
+                    )
+                if member.type != member_type:
+                    raise InstallerBuildError(
+                        f"installer archive member type is invalid: {member.name}"
+                    )
+                if member.mode != mode:
+                    raise InstallerBuildError(
+                        f"installer archive member mode is invalid: {member.name}"
+                    )
+                if (
+                    member.uid != 0
+                    or member.gid != 0
+                    or member.uname != "root"
+                    or member.gname != "root"
+                    or member.mtime != 0
+                    or member.pax_headers
+                ):
+                    raise InstallerBuildError(
+                        f"installer archive metadata is invalid: {member.name}"
+                    )
+                if member_type == tarfile.DIRTYPE:
+                    if member.size != 0:
+                        raise InstallerBuildError(
+                            f"installer archive directory size is invalid: {member.name}"
+                        )
+                elif member.size <= 0 or member.size > maximum_bytes:
+                    raise InstallerBuildError(
+                        f"installer archive member size is invalid: {member.name}"
+                    )
+                else:
+                    header = read_member(handle, member)
+                    if member.name.startswith("installer/bin/"):
+                        verify_executable_header(
+                            header,
+                            operating_system,
+                            architecture,
+                            member.name,
+                        )
+                    expanded_bytes += member.size
+                    if expanded_bytes > MAXIMUM_ARCHIVE_BYTES:
+                        raise InstallerBuildError(
+                            "installer archive expanded size exceeds the supported bound"
+                        )
+                observed += 1
+    except InstallerBuildError:
+        raise
+    except (OSError, EOFError, tarfile.TarError) as error:
+        raise InstallerBuildError("installer archive is corrupt") from error
+    if observed != len(expected):
+        raise InstallerBuildError("installer archive is missing a required member")
 
 
 # Builds and packages one native installer target from exact repository inputs.
@@ -222,39 +454,32 @@ def build_archive(
     with tempfile.TemporaryDirectory(prefix="li_installer_build_") as temporary_value:
         temporary = pathlib.Path(temporary_value)
         staging = temporary / "staging"
-        binaries = build_rust_components(
+        installer = build_rust_installer(
             root,
             cargo,
             temporary / "target",
-            include_probe=operating_system == "linux",
         )
-        dependency_manager = binaries["li_installer_dependency_manager"]
-        if operating_system == "linux":
-            installation_probe = binaries["li_installer_installation_probe"]
-        else:
+        stage_file(installer, staging / "bin" / "li_installer", 0o755)
+        if operating_system == "macos":
             if swiftc is None:
                 raise InstallerBuildError("Swift compiler is required for macOS")
-            installation_probe = build_macos_probe(
+            macos_probe = build_macos_probe(
                 root,
                 executable_path(swiftc, "Swift compiler"),
-                temporary / "li_installer_installation_probe",
+                temporary / "li_installer_macos_probe",
             )
-        stage_file(
-            installation_probe,
-            staging / "bin" / "li_installer_installation_probe",
-            0o755,
-        )
-        stage_file(
-            dependency_manager,
-            staging / "bin" / "li_installer_dependency_manager",
-            0o755,
-        )
+            stage_file(
+                macos_probe,
+                staging / "bin" / "li_installer_macos_probe",
+                0o755,
+            )
         stage_file(
             root / "schemas" / "li_installer_installation_probe_v1.schema.json",
             staging / "schemas" / "li_installer_installation_probe_v1.schema.json",
             0o644,
         )
         write_archive(staging, output)
+        verify_archive(output, operating_system, architecture)
 
 
 # Parses the native build contract and returns a process exit status.
@@ -262,20 +487,31 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--operating-system", choices=("linux", "macos"), required=True)
     parser.add_argument("--architecture", choices=("arm64", "x86_64"), required=True)
-    parser.add_argument("--cargo-command", type=pathlib.Path, required=True)
+    parser.add_argument("--cargo-command", type=pathlib.Path)
     parser.add_argument("--swiftc-command", type=pathlib.Path)
+    parser.add_argument("--verify-archive", action="store_true")
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parsed = parser.parse_args(arguments)
     root = pathlib.Path(__file__).resolve().parent.parent
     try:
-        build_archive(
-            root,
-            parsed.operating_system,
-            parsed.architecture,
-            parsed.cargo_command,
-            parsed.output.resolve(strict=False),
-            parsed.swiftc_command,
-        )
+        output = parsed.output.resolve(strict=False)
+        if parsed.verify_archive:
+            verify_archive(
+                output,
+                parsed.operating_system,
+                parsed.architecture,
+            )
+        else:
+            if parsed.cargo_command is None:
+                raise InstallerBuildError("Cargo is required to build an installer archive")
+            build_archive(
+                root,
+                parsed.operating_system,
+                parsed.architecture,
+                parsed.cargo_command,
+                output,
+                parsed.swiftc_command,
+            )
     except InstallerBuildError as error:
         parser.error(str(error))
     return 0

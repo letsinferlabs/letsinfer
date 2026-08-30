@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/node/li_node_pairing_replay_v1.schema.json",
+  "title": "Let's Infer Node pairing replay record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "idempotency_sha256",
+    "request_sha256",
+    "operation",
+    "invite_id",
+    "open"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_node_pairing_replay" },
+        "version": { "const": 1 }
+      }
+    },
+    "idempotency_sha256": { "$ref": "#/$defs/sha256" },
+    "request_sha256": { "$ref": "#/$defs/sha256" },
+    "operation": { "enum": ["open", "enroll", "approve"] },
+    "invite_id": { "$ref": "#/$defs/identity" },
+    "open": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/open_replay" }
+      ]
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "byte": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "mode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "candidate_public_key", "direct_interface"],
+      "properties": {
+        "kind": { "enum": ["lan", "remote", "connectx"] },
+        "candidate_public_key": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/sha256" }
+          ]
+        },
+        "direct_interface": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1, "maxLength": 64 }
+          ]
+        }
+      }
+    },
+    "open_replay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "nonce", "setup_salt", "expires_at_unix_milliseconds"],
+      "properties": {
+        "mode": { "$ref": "#/$defs/mode" },
+        "nonce": { "$ref": "#/$defs/sha256" },
+        "setup_salt": {
+          "type": "array",
+          "minItems": 16,
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/byte" }
+        },
+        "expires_at_unix_milliseconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "operation": { "const": "open" } },
+        "required": ["operation"]
+      },
+      "then": { "properties": { "open": { "$ref": "#/$defs/open_replay" } } },
+      "else": { "properties": { "open": { "type": "null" } } }
+    }
+  ]
+}

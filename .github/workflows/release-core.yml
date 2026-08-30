@@ -12,6 +12,10 @@ on:
   push:
     branches:
       - release
+    paths-ignore:
+      - "apps/macos/**"
+      - ".github/workflows/release-macos.yml"
+      - "documentation/operations/macos-release.md"
 
 concurrency:
   group: core-release
@@ -19,6 +23,9 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  LI_RUST_VERSION: "1.97.1"
 
 jobs:
   validate-linux:
@@ -29,6 +36,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Select and verify exact Rust toolchain
+        env:
+          LI_RUST_HOST: x86_64-unknown-linux-gnu
+        run: |
+          toolchain="$LI_RUST_VERSION-$LI_RUST_HOST"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" rustc --version --verbose | sed -n 's/^release: //p')" = "$LI_RUST_VERSION"
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" rustc --version --verbose | sed -n 's/^host: //p')" = "$LI_RUST_HOST"
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" cargo --version | awk '{print $2}')" = "$LI_RUST_VERSION"
+          printf 'RUSTUP_TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
       - name: Audit repository boundary
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -42,11 +59,13 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python3 -m tools.core_regression
-      - name: Build and test Watchdog
+      - name: Test native Rust Core
+        env:
+          RUSTFLAGS: -D warnings
         run: |
-          cmake -S watchdog -B "$RUNNER_TEMP/watchdog-build" -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/watchdog-build" --parallel 2
-          ctest --test-dir "$RUNNER_TEMP/watchdog-build" --output-on-failure
+          python3 -m tools.li_core_audit --root core
+          cargo fmt --manifest-path core/Cargo.toml --all -- --check
+          cargo test --manifest-path core/Cargo.toml --workspace --all-targets --locked
       - name: Verify deterministic public archive
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -71,14 +90,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Select and verify exact Rust toolchain
+        env:
+          LI_RUST_HOST: aarch64-apple-darwin
+        run: |
+          toolchain="$LI_RUST_VERSION-$LI_RUST_HOST"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" rustc --version --verbose | sed -n 's/^release: //p')" = "$LI_RUST_VERSION"
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" rustc --version --verbose | sed -n 's/^host: //p')" = "$LI_RUST_HOST"
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" cargo --version | awk '{print $2}')" = "$LI_RUST_VERSION"
+          printf 'RUSTUP_TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
       - name: Validate portable installer and source archive
         env:
           PYTHONDONTWRITEBYTECODE: "1"
+          RUSTFLAGS: -D warnings
         run: |
           git diff --check
+          python3 -m tools.li_core_audit --root core
+          cargo fmt --manifest-path core/Cargo.toml --all -- --check
+          cargo test --manifest-path core/Cargo.toml --workspace --all-targets --locked
+          swiftc -warnings-as-errors -typecheck \
+            core/hardware/macos/li_hardware_macos_probe.swift
           python3 -m unittest \
             tests.cli.test_bootstrap_install \
-            tests.cli.test_core_install \
             tests.cli.test_source_archive \
             tests.cli.test_sshsig
           python3 -m tools.source_archive build \
@@ -88,10 +122,195 @@ jobs:
           cmp "$RUNNER_TEMP/source-a.tar.gz" "$RUNNER_TEMP/source-b.tar.gz"
           python3 -m tools.source_archive verify "$RUNNER_TEMP/source-a.tar.gz"
 
+  freeze-source:
+    name: Freeze validated source
+    if: github.event_name == 'push'
+    needs:
+      - validate-linux
+      - validate-macos
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact validated revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build one deterministic source archive
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          mkdir "$RUNNER_TEMP/frozen-source"
+          python3 -m tools.source_archive build \
+            --source . \
+            --output "$RUNNER_TEMP/frozen-source/letsinfer-source-a.tar.gz"
+          python3 -m tools.source_archive build \
+            --source . \
+            --output "$RUNNER_TEMP/frozen-source/letsinfer-source-b.tar.gz"
+          cmp \
+            "$RUNNER_TEMP/frozen-source/letsinfer-source-a.tar.gz" \
+            "$RUNNER_TEMP/frozen-source/letsinfer-source-b.tar.gz"
+          python3 -m tools.source_archive verify \
+            "$RUNNER_TEMP/frozen-source/letsinfer-source-a.tar.gz"
+          mv \
+            "$RUNNER_TEMP/frozen-source/letsinfer-source-a.tar.gz" \
+            "$RUNNER_TEMP/frozen-source/letsinfer-source.tar.gz"
+          rm "$RUNNER_TEMP/frozen-source/letsinfer-source-b.tar.gz"
+      - name: Upload exact frozen source
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: li_core_frozen_source
+          path: ${{ runner.temp }}/frozen-source/letsinfer-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  build-native-installer:
+    name: Build ${{ matrix.identity }} native release assets
+    if: github.event_name == 'push'
+    needs:
+      - freeze-source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - identity: linux_arm64
+            operating_system: linux
+            architecture: arm64
+            rust_host: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - identity: linux_x86_64
+            operating_system: linux
+            architecture: x86_64
+            rust_host: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - identity: macos_arm64
+            operating_system: macos
+            architecture: arm64
+            rust_host: aarch64-apple-darwin
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select and verify exact Rust toolchain
+        env:
+          LI_RUST_HOST: ${{ matrix.rust_host }}
+        run: |
+          toolchain="$LI_RUST_VERSION-$LI_RUST_HOST"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" rustc --version --verbose | sed -n 's/^release: //p')" = "$LI_RUST_VERSION"
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" rustc --version --verbose | sed -n 's/^host: //p')" = "$LI_RUST_HOST"
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" cargo --version | awk '{print $2}')" = "$LI_RUST_VERSION"
+          printf 'RUSTUP_TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
+      - name: Download exact frozen source
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: li_core_frozen_source
+          path: ${{ runner.temp }}/frozen-source
+      - name: Prepare independent canonical source roots
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          frozen_source="$RUNNER_TEMP/frozen-source/letsinfer-source.tar.gz"
+          python3 -m tools.source_archive verify "$frozen_source"
+          mkdir \
+            "$RUNNER_TEMP/native-source-first" \
+            "$RUNNER_TEMP/native-source-second" \
+            "$RUNNER_TEMP/cargo-home-first" \
+            "$RUNNER_TEMP/cargo-home-second"
+          tar -xzf "$frozen_source" \
+            -C "$RUNNER_TEMP/native-source-first"
+          tar -xzf "$frozen_source" \
+            -C "$RUNNER_TEMP/native-source-second"
+          for cache in registry git; do
+            if [[ -d "$HOME/.cargo/$cache" ]]; then
+              cp -R "$HOME/.cargo/$cache" "$RUNNER_TEMP/cargo-home-first/"
+              cp -R "$HOME/.cargo/$cache" "$RUNNER_TEMP/cargo-home-second/"
+            fi
+          done
+      - name: Build deterministic native installer
+        env:
+          MATRIX_ARCHITECTURE: ${{ matrix.architecture }}
+          MATRIX_IDENTITY: ${{ matrix.identity }}
+          MATRIX_OPERATING_SYSTEM: ${{ matrix.operating_system }}
+        run: |
+          first_source="$RUNNER_TEMP/native-source-first/letsinfer"
+          second_source="$RUNNER_TEMP/native-source-second/letsinfer"
+          mkdir "$RUNNER_TEMP/li_installer_first" "$RUNNER_TEMP/li_installer_second"
+          args=(
+            --operating-system "$MATRIX_OPERATING_SYSTEM"
+            --architecture "$MATRIX_ARCHITECTURE"
+            --cargo-command "$(command -v cargo)"
+          )
+          if [[ "$MATRIX_OPERATING_SYSTEM" == macos ]]; then
+            args+=(--swiftc-command "$(command -v swiftc)")
+          fi
+          archive="li_installer_${MATRIX_IDENTITY}.tar.gz"
+          CARGO_HOME="$RUNNER_TEMP/cargo-home-first" \
+            python3 "$first_source/tools/li_installer_build_assets.py" \
+            "${args[@]}" --output "$RUNNER_TEMP/li_installer_first/$archive"
+          CARGO_HOME="$RUNNER_TEMP/cargo-home-second" \
+            python3 "$second_source/tools/li_installer_build_assets.py" \
+            "${args[@]}" --output "$RUNNER_TEMP/li_installer_second/$archive"
+          cmp \
+            "$RUNNER_TEMP/li_installer_first/$archive" \
+            "$RUNNER_TEMP/li_installer_second/$archive"
+          python3 "$first_source/tools/li_installer_build_assets.py" \
+            --verify-archive \
+            --operating-system "$MATRIX_OPERATING_SYSTEM" \
+            --architecture "$MATRIX_ARCHITECTURE" \
+            --output "$RUNNER_TEMP/li_installer_first/$archive"
+      - name: Upload native installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: li_installer_${{ matrix.identity }}
+          path: ${{ runner.temp }}/li_installer_first/li_installer_${{ matrix.identity }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+      - name: Build deterministic native Core
+        env:
+          MATRIX_ARCHITECTURE: ${{ matrix.architecture }}
+          MATRIX_OPERATING_SYSTEM: ${{ matrix.operating_system }}
+        run: |
+          first_source="$RUNNER_TEMP/native-source-first/letsinfer"
+          second_source="$RUNNER_TEMP/native-source-second/letsinfer"
+          package=$(cargo pkgid \
+            --manifest-path "$first_source/core/Cargo.toml" \
+            -p li_core_application)
+          version=${package##*@}
+          mkdir "$RUNNER_TEMP/li_core_first" "$RUNNER_TEMP/li_core_second"
+          args=(
+            --operating-system "$MATRIX_OPERATING_SYSTEM"
+            --architecture "$MATRIX_ARCHITECTURE"
+            --version "$version"
+            --cargo-command "$(command -v cargo)"
+          )
+          if [[ "$MATRIX_OPERATING_SYSTEM" == macos ]]; then
+            args+=(--swiftc-command "$(command -v swiftc)")
+          fi
+          archive="letsinfer-$MATRIX_OPERATING_SYSTEM-$MATRIX_ARCHITECTURE.tar.gz"
+          CARGO_HOME="$RUNNER_TEMP/cargo-home-first" \
+            python3 "$first_source/tools/li_core_build_release.py" \
+            "${args[@]}" --output "$RUNNER_TEMP/li_core_first/$archive"
+          CARGO_HOME="$RUNNER_TEMP/cargo-home-second" \
+            python3 "$second_source/tools/li_core_build_release.py" \
+            "${args[@]}" --output "$RUNNER_TEMP/li_core_second/$archive"
+          cmp \
+            "$RUNNER_TEMP/li_core_first/$archive" \
+            "$RUNNER_TEMP/li_core_second/$archive"
+      - name: Upload native Core
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: letsinfer_${{ matrix.identity }}
+          path: ${{ runner.temp }}/li_core_first/letsinfer-${{ matrix.operating_system }}-${{ matrix.architecture }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
     name: Publish core release
     if: github.event_name == 'push'
     needs:
+      - build-native-installer
       - validate-linux
       - validate-macos
     runs-on: ubuntu-24.04
@@ -107,17 +326,28 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Select and verify exact Rust toolchain
+        env:
+          LI_RUST_HOST: x86_64-unknown-linux-gnu
+        run: |
+          toolchain="$LI_RUST_VERSION-$LI_RUST_HOST"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" rustc --version --verbose | sed -n 's/^release: //p')" = "$LI_RUST_VERSION"
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" rustc --version --verbose | sed -n 's/^host: //p')" = "$LI_RUST_HOST"
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" cargo --version | awk '{print $2}')" = "$LI_RUST_VERSION"
+          printf 'RUSTUP_TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
       - name: Resolve and validate version
         id: version
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
-          version=$(python3 -c 'from core import PRODUCT_VERSION; print(PRODUCT_VERSION)')
+          package=$(cargo pkgid --manifest-path core/Cargo.toml -p li_core_application)
+          version=${package##*@}
           python3 - "$version" <<'PY'
           import re
           import sys
           if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?", sys.argv[1]) is None:
-              raise SystemExit("PRODUCT_VERSION must be a release or release candidate")
+              raise SystemExit("Rust Core version must be a release or release candidate")
           PY
           tag="v$version"
           if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
@@ -126,6 +356,18 @@ jobs:
           fi
           if [[ "$version" == *-rc.* ]]; then prerelease=true; else prerelease=false; fi
           printf 'version=%s\ntag=%s\nprerelease=%s\n' "$version" "$tag" "$prerelease" >> "$GITHUB_OUTPUT"
+      - name: Download native installer archives
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: li_installer_*
+          path: dist
+          merge-multiple: true
+      - name: Download native Core archives
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: letsinfer_*
+          path: dist
+          merge-multiple: true
       - name: Build exact release assets
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -133,15 +375,8 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$LETSINFER_RELEASE_SIGNING_KEY_B64"
-          mkdir dist
-          python3 -m tools.source_archive build --source . --output "$RUNNER_TEMP/source-a.tar.gz"
-          python3 -m tools.source_archive build --source . --output "$RUNNER_TEMP/source-b.tar.gz"
-          cmp "$RUNNER_TEMP/source-a.tar.gz" "$RUNNER_TEMP/source-b.tar.gz"
-          for platform in \
-            linux-x86_64 linux-arm64 macos-x86_64 macos-arm64; do
-            cp "$RUNNER_TEMP/source-a.tar.gz" "dist/letsinfer-$platform.tar.gz"
-          done
-          (cd dist && sha256sum letsinfer-*.tar.gz > SHA256SUMS)
+          mkdir -p dist
+          (cd dist && sha256sum letsinfer-*.tar.gz li_installer_*.tar.gz > SHA256SUMS)
           key_path="$RUNNER_TEMP/release-signing-key.pem"
           trap 'rm -f "$key_path"' EXIT
           printf '%s' "$LETSINFER_RELEASE_SIGNING_KEY_B64" | base64 --decode > "$key_path"
@@ -180,8 +415,10 @@ jobs:
           subject-path: |
             dist/letsinfer-linux-x86_64.tar.gz
             dist/letsinfer-linux-arm64.tar.gz
-            dist/letsinfer-macos-x86_64.tar.gz
             dist/letsinfer-macos-arm64.tar.gz
+            dist/li_installer_linux_arm64.tar.gz
+            dist/li_installer_linux_x86_64.tar.gz
+            dist/li_installer_macos_arm64.tar.gz
             dist/SHA256SUMS
             dist/SHA256SUMS.sig
             dist/install.sh
@@ -191,7 +428,8 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
           PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
-          args=("$TAG" dist/letsinfer-*.tar.gz dist/SHA256SUMS dist/SHA256SUMS.sig dist/install.sh \
+          args=("$TAG" dist/letsinfer-*.tar.gz dist/li_installer_*.tar.gz \
+            dist/SHA256SUMS dist/SHA256SUMS.sig dist/install.sh \
             --target "$GITHUB_SHA" --title "Let's Infer $TAG" --generate-notes)
           if [[ "$PRERELEASE" == true ]]; then args+=(--prerelease); else args+=(--latest); fi
           gh release create "${args[@]}"
@@ -204,10 +442,14 @@ jobs:
           mkdir "$RUNNER_TEMP/published"
           gh release download "$TAG" --dir "$RUNNER_TEMP/published" \
             --pattern 'letsinfer-*.tar.gz' --pattern 'SHA256SUMS' \
+            --pattern 'li_installer_*.tar.gz' \
             --pattern 'SHA256SUMS.sig' --pattern 'install.sh'
           for asset in \
             letsinfer-linux-x86_64.tar.gz letsinfer-linux-arm64.tar.gz \
-            letsinfer-macos-x86_64.tar.gz letsinfer-macos-arm64.tar.gz \
+            letsinfer-macos-arm64.tar.gz \
+            li_installer_linux_arm64.tar.gz \
+            li_installer_linux_x86_64.tar.gz \
+            li_installer_macos_arm64.tar.gz \
             SHA256SUMS SHA256SUMS.sig install.sh; do
             cmp "dist/$asset" "$RUNNER_TEMP/published/$asset"
           done
@@ -217,7 +459,10 @@ jobs:
             < "$RUNNER_TEMP/published/SHA256SUMS"
           for asset in \
             letsinfer-linux-x86_64.tar.gz letsinfer-linux-arm64.tar.gz \
-            letsinfer-macos-x86_64.tar.gz letsinfer-macos-arm64.tar.gz \
+            letsinfer-macos-arm64.tar.gz \
+            li_installer_linux_arm64.tar.gz \
+            li_installer_linux_x86_64.tar.gz \
+            li_installer_macos_arm64.tar.gz \
             SHA256SUMS SHA256SUMS.sig install.sh; do
             gh attestation verify "$RUNNER_TEMP/published/$asset" --repo "$GITHUB_REPOSITORY"
           done

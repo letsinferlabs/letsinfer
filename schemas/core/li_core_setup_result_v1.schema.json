@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/core/li_core_setup_result_v1.schema.json",
+  "title": "Let's Infer Core setup result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "node_id",
+    "machine_id",
+    "installation_id",
+    "display_name",
+    "role",
+    "control_address",
+    "api_key_file",
+    "inference_endpoint",
+    "services"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_core_setup_result" },
+        "version": { "const": 1 }
+      }
+    },
+    "status": { "enum": ["installed", "replayed"] },
+    "node_id": { "$ref": "#/$defs/identity" },
+    "machine_id": { "$ref": "#/$defs/identity" },
+    "installation_id": { "$ref": "#/$defs/sha256" },
+    "display_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "role": { "enum": ["main", "child"] },
+    "control_address": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^\\S+$"
+    },
+    "api_key_file": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/absolute_path" }
+      ]
+    },
+    "inference_endpoint": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 320,
+          "pattern": "^http://\\S+$"
+        }
+      ]
+    },
+    "services": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "enum": ["li_node", "li_gateway", "li_watchdog"] }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "role": { "const": "main" } } },
+      "then": {
+        "properties": {
+          "api_key_file": { "$ref": "#/$defs/absolute_path" },
+          "inference_endpoint": {
+            "type": "string",
+            "pattern": "^http://\\S+$"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "api_key_file": { "type": "null" },
+          "inference_endpoint": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "services": { "contains": { "const": "li_watchdog" } }
+        }
+      },
+      "then": {
+        "properties": {
+          "services": {
+            "prefixItems": [
+              { "const": "li_node" },
+              { "const": "li_watchdog" },
+              { "const": "li_gateway" }
+            ],
+            "minItems": 3,
+            "maxItems": 3
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "services": {
+            "prefixItems": [
+              { "const": "li_node" },
+              { "const": "li_gateway" }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "absolute_path": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^/(?:[^/\\u0000]+/?)*$"
+    }
+  }
+}

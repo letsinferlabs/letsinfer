@@ -21,16 +21,31 @@ from typing import Any
 
 ARCHIVE_ROOT = "letsinfer"
 MANIFEST_NAME = "SOURCE-MANIFEST.json"
-PUBLIC_ROOT_FILES = (".gitignore", "LICENSE", "NOTICE", "README.md", "install.sh")
+RUST_TOOLCHAIN_NAME = "rust-toolchain.toml"
+RUST_TOOLCHAIN_CONTENT = (
+    b'[toolchain]\n'
+    b'channel = "1.97.1"\n'
+    b'components = ["rustfmt"]\n'
+    b'profile = "minimal"\n'
+)
+PUBLIC_ROOT_FILES = (
+    ".gitignore",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "install.sh",
+    RUST_TOOLCHAIN_NAME,
+)
 PUBLIC_DIRECTORIES = (
     "benchmarks",
     "bin",
     "cache",
     "core",
     "documentation",
+    "installer",
+    "schemas",
     "tests",
     "tools",
-    "watchdog",
 )
 PUBLIC_PRODUCT_DIRECTORIES = frozenset({"apps"})
 LOCAL_ONLY_PATHS = frozenset(
@@ -95,6 +110,14 @@ def _normalized_mode(mode: int) -> int:
     return 0o755 if mode & 0o111 else 0o644
 
 
+# Requires one canonical compiler declaration and rejects private key material.
+def _validate_public_content(relative: pathlib.PurePosixPath, content: bytes) -> None:
+    if relative.as_posix() == RUST_TOOLCHAIN_NAME and content != RUST_TOOLCHAIN_CONTENT:
+        raise SourceArchiveError("public source Rust toolchain declaration is invalid")
+    if any(marker in content for marker in PRIVATE_KEY_MARKERS):
+        raise SourceArchiveError(f"private key material is forbidden in public source: {relative}")
+
+
 def _validate_public_relative(value: Any) -> pathlib.PurePosixPath:
     if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
         raise SourceArchiveError("public source path is invalid")
@@ -134,8 +157,7 @@ def _inspect_file(root: pathlib.Path, relative: pathlib.PurePosixPath) -> dict[s
         content = path.read_bytes()
     except OSError as error:
         raise SourceArchiveError(f"cannot read public source {relative}: {error}") from error
-    if any(marker in content for marker in PRIVATE_KEY_MARKERS):
-        raise SourceArchiveError(f"private key material is forbidden in public source: {relative}")
+    _validate_public_content(relative, content)
     return {
         "path": relative.as_posix(),
         "bytes": len(content),
@@ -154,20 +176,32 @@ def public_files(root: pathlib.Path) -> list[dict[str, Any]]:
         directory = root / directory_name
         if not directory.is_dir() or directory.is_symlink():
             raise SourceArchiveError(f"public source directory is missing: {directory_name}")
-        try:
-            candidates = sorted(directory.rglob("*"))
-        except OSError as error:
+        # Converts one native traversal failure into the stable source-archive boundary.
+        def fail_walk(error: OSError) -> None:
             raise SourceArchiveError(
                 f"cannot enumerate public source directory {directory_name}: {error}"
             ) from error
-        for path in candidates:
-            relative = pathlib.PurePosixPath(path.relative_to(root).as_posix())
-            if _is_generated(relative):
-                continue
-            mode = path.lstat().st_mode
-            if stat.S_ISDIR(mode):
-                continue
-            records.append(_inspect_file(root, relative))
+
+        for current, directory_names, file_names in os.walk(
+            directory, topdown=True, followlinks=False, onerror=fail_walk
+        ):
+            current_path = pathlib.Path(current)
+            retained_directories = []
+            for name in sorted(directory_names):
+                path = current_path / name
+                relative = pathlib.PurePosixPath(path.relative_to(root).as_posix())
+                if _is_generated(relative):
+                    continue
+                if path.is_symlink():
+                    records.append(_inspect_file(root, relative))
+                    continue
+                retained_directories.append(name)
+            directory_names[:] = retained_directories
+            for name in sorted(file_names):
+                path = current_path / name
+                relative = pathlib.PurePosixPath(path.relative_to(root).as_posix())
+                if not _is_generated(relative):
+                    records.append(_inspect_file(root, relative))
     paths = [record["path"] for record in records]
     if len(paths) != len(set(paths)):
         raise SourceArchiveError("public source file list contains duplicate paths")
@@ -336,6 +370,8 @@ def verify_archive(path: pathlib.Path) -> dict[str, Any]:
             manifest = json.loads(manifest_bytes)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise SourceArchiveError("source archive manifest is invalid") from error
+        if _canonical_json(manifest) != manifest_bytes:
+            raise SourceArchiveError("source archive manifest is not canonical JSON")
         if not isinstance(manifest, dict) or set(manifest) != {"schema_version", "product", "files"}:
             raise SourceArchiveError("source archive manifest fields are invalid")
         if (
@@ -371,6 +407,8 @@ def verify_archive(path: pathlib.Path) -> dict[str, Any]:
                 raise SourceArchiveError("source archive exceeds the byte limit")
         if len(expected_files) != len(manifest["files"]):
             raise SourceArchiveError("source archive manifest has duplicate paths")
+        if RUST_TOOLCHAIN_NAME not in expected_files:
+            raise SourceArchiveError("source archive Rust toolchain declaration is missing")
         actual_files = {
             member.name.removeprefix(expected_prefix): member
             for member in members
@@ -397,10 +435,7 @@ def verify_archive(path: pathlib.Path) -> dict[str, Any]:
                 or expected["sha256"] != _sha256_bytes(content)
             ):
                 raise SourceArchiveError(f"source archive member mismatch: {relative}")
-            if any(marker in content for marker in PRIVATE_KEY_MARKERS):
-                raise SourceArchiveError(
-                    f"private key material is forbidden in public source: {relative}"
-                )
+            _validate_public_content(pathlib.PurePosixPath(relative), content)
     return {
         "schema_version": 1,
         "files": len(expected_files),

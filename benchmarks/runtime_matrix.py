@@ -16,8 +16,10 @@ import contextlib
 import datetime as dt
 import hashlib
 import json
+import os
 import pathlib
 import re
+import shutil
 import ssl
 import sys
 import time
@@ -37,16 +39,16 @@ import openai_matrix as common  # pylint: disable=wrong-import-position
 import benchmark_record  # pylint: disable=wrong-import-position
 import prompt_generator  # pylint: disable=wrong-import-position
 import watchdog_client  # pylint: disable=wrong-import-position
-from core import ui  # pylint: disable=wrong-import-position
-from core.exact_tokens import (  # pylint: disable=wrong-import-position
+import li_benchmark_ui as ui  # pylint: disable=wrong-import-position
+from li_exact_tokens import (  # pylint: disable=wrong-import-position
     TokenCountError,
     parse_token_count_response,
     prepare_token_count_request,
 )
-from core.runtime_packs import (  # pylint: disable=wrong-import-position
+from li_benchmark_contract import (  # pylint: disable=wrong-import-position
     CONTEXT_ISOLATED_BENCHMARK_ISOLATION,
     EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
-    RuntimePackError,
+    BenchmarkContractError as RuntimePackError,
     TTFT_CACHE_BENCHMARK_SCHEMA_VERSION,
     benchmark_model_sha256,
 )
@@ -74,6 +76,35 @@ WATCHDOG_SETTLE_MS = 500
 
 class RuntimeMatrixError(common.QualificationError):
     """The runtime matrix contract was invalid or failed."""
+
+
+def resolved_letsinfer_binary(
+    selected: pathlib.Path | None,
+    search_path: str | None,
+) -> pathlib.Path:
+    """Return the canonical installed Let's Infer executable selected for this run."""
+    candidate = selected
+    if candidate is None:
+        installed = shutil.which("letsinfer", path=search_path)
+        if installed is None:
+            raise RuntimeMatrixError(
+                "installed Let's Infer CLI is unavailable; "
+                "install Core or pass --letsinfer-bin"
+            )
+        candidate = pathlib.Path(installed)
+    if not candidate.is_absolute():
+        raise RuntimeMatrixError("Let's Infer CLI path must be absolute")
+    try:
+        executable = candidate.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeMatrixError(
+            f"Let's Infer CLI is unavailable: {candidate}"
+        ) from error
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise RuntimeMatrixError(
+            f"Let's Infer CLI is not an executable file: {candidate}"
+        )
+    return executable
 
 
 def prefer_monitor_failure(
@@ -295,8 +326,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--letsinfer-bin",
         type=pathlib.Path,
-        default=pathlib.Path(__file__).resolve().parents[1] / "bin/letsinfer",
-        help="Let's Infer CLI used to resolve, launch, and stop the runtime",
+        help=(
+            "absolute Let's Infer CLI used to resolve, launch, and stop the runtime "
+            "(default: installed letsinfer from PATH)"
+        ),
     )
     parser.add_argument(
         "--store-root",
@@ -1631,22 +1664,12 @@ def benchmark_context_boundaries(
 
 
 def restart_active_placement_group(placement_group_id: str) -> None:
-    """Restart one exact active group through Core's generic lifecycle."""
+    """Reject the retired Python placement-control path after native worker cutover."""
     if re.fullmatch(r"[0-9a-f]{32}", placement_group_id) is None:
         raise RuntimeMatrixError("active placement-group identity is invalid")
-    try:
-        from core.cli import (  # pylint: disable=import-outside-toplevel
-            LetsInferError,
-            _start_placement_group_by_id,
-            _stop_placement_group_by_id,
-        )
-
-        _stop_placement_group_by_id(placement_group_id)
-        _start_placement_group_by_id(placement_group_id)
-    except LetsInferError as error:
-        raise RuntimeMatrixError(
-            f"cannot restart active benchmark placement group: {error}"
-        ) from error
+    raise RuntimeMatrixError(
+        "active placement restart belongs to the native benchmark worker"
+    )
 
 
 def _collect_cell_evidence(
@@ -2327,6 +2350,10 @@ def run_isolated_matrix(
 def main() -> int:
     global _PROGRESS_FILE, _PROGRESS_STARTED_UNIX_NS
     arguments = parse_arguments()
+    arguments.letsinfer_bin = resolved_letsinfer_binary(
+        arguments.letsinfer_bin,
+        os.environ.get("PATH"),
+    )
     _PROGRESS_FILE = arguments.progress_file
     _PROGRESS_STARTED_UNIX_NS = time.time_ns()
     if arguments.timeout <= 0:
@@ -2335,7 +2362,8 @@ def main() -> int:
         arguments.runtime, arguments.letsinfer_bin
     )
     manifest = common.read_json_object(manifest_path, "runtime manifest")
-    release, engine, model_id = common.validate_release_manifest(manifest)
+    source_root = pathlib.Path(__file__).resolve().parents[1]
+    release, engine, model_id = common.validate_release_sources(manifest, source_root)
     served_model = common.served_model_name(manifest)
     plan_path = arguments.prompt_plan
     benchmark_contract: dict[str, Any] | None = None
@@ -2432,8 +2460,6 @@ def main() -> int:
         arguments.measured_commit, manifest
     )
     base_url = common.validate_base_url(arguments.base_url)
-    source_root = pathlib.Path(__file__).resolve().parents[1]
-    common.verify_letsinfer_release_sources(manifest, source_root)
     source = verified_source_identity(
         source_root,
         manifest_path,
