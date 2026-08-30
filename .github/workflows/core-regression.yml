@@ -1,6 +1,10 @@
 name: Core regression
 
 on:
+  push:
+    branches:
+      - main
+      - release
   pull_request:
     branches:
       - main
@@ -14,6 +18,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  LI_RUST_VERSION: "1.97.1"
+
 jobs:
   regression:
     name: Core regression suite
@@ -23,19 +30,37 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Select and verify exact Rust toolchain
+        env:
+          LI_RUST_HOST: x86_64-unknown-linux-gnu
+        run: |
+          toolchain="$LI_RUST_VERSION-$LI_RUST_HOST"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" rustc --version --verbose | sed -n 's/^release: //p')" = "$LI_RUST_VERSION"
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" rustc --version --verbose | sed -n 's/^host: //p')" = "$LI_RUST_HOST"
+          test "$(RUSTUP_TOOLCHAIN="$toolchain" cargo --version | awk '{print $2}')" = "$LI_RUST_VERSION"
+          printf 'RUSTUP_TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
       - name: Validate Python and shell sources
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           git diff --check
-          python3 -m compileall -q core benchmarks tools
+          python3 -m compileall -q benchmarks tools
           sh -n install.sh
       - name: Run complete regression suite
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python3 -m tools.core_regression
-      - name: Build and test Watchdog
+      - name: Test native installer protocol
         run: |
-          cmake -S watchdog -B "$RUNNER_TEMP/watchdog-build" -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/watchdog-build" --parallel 2
-          ctest --test-dir "$RUNNER_TEMP/watchdog-build" --output-on-failure
+          sh tests/li_installer/li_installer_run.sh \
+            --cargo-command "$(command -v cargo)" \
+            --mktemp-command "$(command -v mktemp)" \
+            --rm-command "$(command -v rm)"
+      - name: Test native Rust Core
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          python3 -m tools.li_core_audit --root core
+          cargo fmt --manifest-path core/Cargo.toml --all -- --check
+          cargo test --manifest-path core/Cargo.toml --workspace --all-targets --locked

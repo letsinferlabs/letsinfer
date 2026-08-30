@@ -1,0 +1,25 @@
+[package]
+name = "li_runtime_manager"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+base64 = "0.22"
+getrandom = "0.4"
+flate2 = "1"
+libc = "0.2"
+li_core_interface = { path = "../interface" }
+ring = "0.17"
+serde = "1"
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+path = "src/li_runtime_manager.rs"

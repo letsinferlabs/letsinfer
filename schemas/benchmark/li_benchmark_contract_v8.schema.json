@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/benchmark/li_benchmark_contract_v8.schema.json",
+  "title": "Let's Infer benchmark contract schema 8",
+  "$comment": "This preserves the published schema_version wire field; li_ is the owning filename namespace.",
+  "$ref": "li_benchmark_common_v1.schema.json#/$defs/contract_v8"
+}

@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/core/li_core_service_cutover_v1.schema.json",
+  "title": "Let's Infer Core service cutover record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "request_id",
+    "receipt_id",
+    "platform",
+    "role",
+    "phase",
+    "installation",
+    "definitions",
+    "native_snapshot"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_core_service_cutover" },
+        "version": { "const": 1 }
+      }
+    },
+    "request_id": { "$ref": "#/$defs/sha256" },
+    "receipt_id": { "$ref": "#/$defs/sha256" },
+    "platform": { "enum": ["linux", "macos"] },
+    "role": { "enum": ["main", "child"] },
+    "phase": { "enum": ["prepared", "restoring", "restored", "committed"] },
+    "installation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "source_identity"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 128,
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "source_identity": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "definitions": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["service_identity", "sha256"],
+        "properties": {
+          "service_identity": {
+            "enum": [
+              "li_node.service",
+              "li_gateway.service",
+              "li_watchdog.service",
+              "ai.letsinfer.node",
+              "ai.letsinfer.gateway"
+            ]
+          },
+          "sha256": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    },
+    "native_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes_base64", "sha256"],
+      "properties": {
+        "bytes_base64": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 1398104,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "platform": { "const": "linux" } } },
+      "then": {
+        "properties": {
+          "definitions": {
+            "prefixItems": [
+              { "properties": { "service_identity": { "const": "li_node.service" } } },
+              { "properties": { "service_identity": { "const": "li_watchdog.service" } } },
+              { "properties": { "service_identity": { "const": "li_gateway.service" } } }
+            ],
+            "minItems": 3,
+            "maxItems": 3
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "definitions": {
+            "prefixItems": [
+              { "properties": { "service_identity": { "const": "ai.letsinfer.node" } } },
+              { "properties": { "service_identity": { "const": "ai.letsinfer.gateway" } } }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "schema": { "name": "li_node_protection_api", "version": 2 },
+  "request_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "connection_id": "9999999999999999999999999999999999999999999999999999999999999999",
+  "request": {
+    "action": "end_watchdog_session",
+    "arguments": {
+      "node_id": "11111111111111111111111111111111",
+      "watchdog_session_id": "5555555555555555555555555555555555555555555555555555555555555555",
+      "watchdog_session_generation": 3
+    }
+  }
+}

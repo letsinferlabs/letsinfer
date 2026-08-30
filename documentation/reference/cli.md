@@ -2,9 +2,15 @@
 
 [Back to documentation](../README.md)
 
-The installer initializes the node automatically. Run `letsinfer COMMAND
---help` for exact options in the installed release; retired pre-launch command
-paths have no aliases.
+The installer initializes the node automatically. Run `letsinfer --help` to
+list the public command groups; retired pre-launch command paths have no
+aliases. `letsinfer --version` reports the shared Rust Core workspace version
+without requiring initialized node state.
+
+All 47 registered command leaves dispatch through typed Rust capabilities.
+Benchmark commands execute the native `li_benchmark_worker`; neither Core nor
+the worker requires host Python. An exact runtime may carry its own pinned
+standalone CPython.
 
 ## Complete command tree
 
@@ -64,12 +70,16 @@ is downloaded and verified again before any affected runtime starts.
 
 ### `letsinfer node add`
 
-Shows incoming requests and discovers certificate-identified nodes that can be
-adopted as children. The main selects the pinned node and the candidate accepts
-that exact request locally, which activates the child without a second code;
-provider-owned high-speed networking is prepared without overwriting an
-external plan, while child invocation confirms coordinated detach and returns
-the machine to standalone discovery.
+Opens, joins, or approves one certificate-bound child-pairing workflow. LAN and
+remote invitations present one eight-digit setup code; the joining Node reads
+it from the controlling terminal rather than argv or environment. Remote mode
+then presents the same six-digit comparison code on both Nodes: the child must
+confirm the match locally and the main must run `--approve INVITATION --yes`
+before activation completes. ConnectX mode binds the preapproved key,
+interface, and direct route without overwriting an external network plan. The
+final child activation or standalone restoration is one atomic Node-owned
+operation and fails closed if the owner-authenticated local `li_node` socket is
+unavailable.
 
 ### `letsinfer node pause [NODE]`
 
@@ -150,8 +160,11 @@ clear that protected state.
 ### `letsinfer model rollback MODEL`
 
 Plans or applies a rollback to the retained prior immutable runtime for the
-selected model. Use `--dry-run` to review the exact placement groups and version change
-before mutation.
+selected model. Use `--target TARGET` to restrict one target, `--dry-run` to
+review every exact current-to-previous group and version change, and `--yes`
+to confirm mutation; rollback reuses retained installation identities without
+catalog resolution, and an activation failure reconstructs the current runtime
+before returning failure.
 
 ### `letsinfer model logs MODEL`
 
@@ -174,9 +187,9 @@ letsinfer benchmark
 
 ### `letsinfer benchmark run MODEL`
 
-Starts or resumes the canonical benchmark matrix for an installed model and
-the requested workload options. The job is durable, so Ctrl-C detaches while
-`benchmark stop` performs cancellation.
+Starts the canonical benchmark matrix for an installed model and returns after
+the durable job is accepted. The resident Node continues the work;
+`benchmark status` monitors it and `benchmark stop` requests cancellation.
 
 ### `letsinfer benchmark list MODEL`
 
@@ -186,14 +199,15 @@ capacity.
 
 ### `letsinfer benchmark status`
 
-Shows the active or most recent benchmark job, progress, workload, and durable
-result state. Use `--json` for monitoring and CI integrations.
+Shows the active ordinary benchmark job, progress, workload, and durable state,
+or reports that no ordinary benchmark is active. Use `--json` for monitoring
+and CI integrations.
 
 ### `letsinfer benchmark stop`
 
-Requests durable cancellation of the active ordinary benchmark and waits for
-its restoration boundary. It is distinct from Ctrl-C, which only detaches the
-terminal.
+Requests durable cancellation of the active ordinary benchmark and returns its
+current stopping state. The resident Node completes worker exit and serving
+restoration asynchronously.
 
 ### `letsinfer benchmark clean`
 
@@ -202,19 +216,23 @@ It does not delete installed models or reinterpret failed evidence as a pass.
 
 ### `letsinfer benchmark verification run PULL_REQUEST_URL`
 
-Runs the public verification contract against the exact finalized artifact
-for an eligible runtimes pull request. It never executes pull-request source
-or promotes an author's local result into qualification.
+Runs the public verification contract against the exact finalized artifact for
+an eligible runtimes pull request and returns after the durable job is accepted.
+`--detach` changes only the start message because execution is always
+resident-owned; Core never executes pull-request source or promotes an author's
+local result into qualification.
 
 ### `letsinfer benchmark verification status`
 
-Shows progress and outcome for the active or most recent pull-request
-verification job. Its JSON form is suitable for durable monitoring.
+Shows progress and outcome for the active pull-request verification job, or
+reports that no verification is active. Its JSON form is suitable for durable
+monitoring.
 
 ### `letsinfer benchmark verification stop`
 
-Requests durable cancellation of the active verification job and restores the
-prior serving state. It does not edit the pull request or publish evidence.
+Requests durable cancellation of the active verification job and returns its
+current stopping state. The resident Node restores prior serving state
+asynchronously and does not edit the pull request or publish evidence.
 
 ```text
 letsinfer auth
@@ -365,7 +383,9 @@ inspect every affected placement group before activation.
 
 Removes Let’s Infer-owned services, containers, images, and data after explicit
 confirmation. Use `--keep-models` to preserve model storage within the stated
-uninstall boundary.
+uninstall boundary. Before retiring services, uninstall asks local `li_node` to
+enumerate and remove exact runtime installations; it never opens the primary
+database and fails closed when the `li_node` socket is unavailable.
 
 ## Machine-readable output
 

@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/core/li_core_setup_configuration_intent_v1.schema.json",
+  "title": "Let's Infer Core setup configuration intent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "transaction_identity",
+    "provider_identity",
+    "request_identity",
+    "identity_receipt_identity",
+    "material_receipt_identity",
+    "material_identity",
+    "platform",
+    "role",
+    "configuration_directory",
+    "owner_user_id",
+    "documents"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "li_core_setup_configuration_intent"},
+        "version": {"const": 1}
+      }
+    },
+    "transaction_identity": {"$ref": "#/$defs/sha256"},
+    "provider_identity": {"$ref": "#/$defs/sha256"},
+    "request_identity": {"$ref": "#/$defs/sha256"},
+    "identity_receipt_identity": {"$ref": "#/$defs/sha256"},
+    "material_receipt_identity": {"$ref": "#/$defs/sha256"},
+    "material_identity": {"$ref": "#/$defs/sha256"},
+    "platform": {"enum": ["linux", "macos"]},
+    "role": {"enum": ["main", "child"]},
+    "configuration_directory": {"type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^/"},
+    "owner_user_id": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "documents": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": ["filename"],
+            "properties": {"filename": {"const": "li_core_cli_configuration.json"}}
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["filename"],
+            "properties": {"filename": {"const": "li_node.json"}}
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["filename"],
+            "properties": {"filename": {"const": "li_gateway.json"}}
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ],
+      "items": {"$ref": "#/$defs/document"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["platform"],
+        "properties": {"platform": {"const": "linux"}}
+      },
+      "then": {
+        "properties": {
+          "documents": {
+            "minItems": 4,
+            "maxItems": 4,
+            "contains": {
+              "type": "object",
+              "required": ["filename"],
+              "properties": {"filename": {"const": "li_watchdog.json"}}
+            },
+            "minContains": 1,
+            "maxContains": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "documents": {
+            "minItems": 3,
+            "maxItems": 3,
+            "not": {
+              "contains": {
+                "type": "object",
+                "required": ["filename"],
+                "properties": {"filename": {"const": "li_watchdog.json"}}
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "sha256", "contents_base64", "owned"],
+      "properties": {
+        "filename": {"enum": ["li_core_cli_configuration.json", "li_node.json", "li_gateway.json", "li_watchdog.json"]},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "contents_base64": {"type": "string", "minLength": 4, "maxLength": 87384, "pattern": "^[A-Za-z0-9+/]+={0,2}$"},
+        "owned": {"type": "boolean"}
+      }
+    }
+  }
+}

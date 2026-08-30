@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/benchmark/li_benchmark_result_v1.schema.json",
+  "title": "Let's Infer benchmark workload result",
+  "$ref": "li_benchmark_common_v1.schema.json#/$defs/result_v1"
+}

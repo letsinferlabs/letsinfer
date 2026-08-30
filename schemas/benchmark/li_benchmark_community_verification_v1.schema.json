@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/benchmark/li_benchmark_community_verification_v1.schema.json",
+  "title": "Let's Infer community verification record schema 1",
+  "$comment": "Canonical bytes, execution identity, paired method equivalence, score arithmetic, failure/restoration consistency, and verification_id are additionally enforced by Rust Core's verification record builder and reader.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "repository", "pull_request", "pull_request_url", "observed_head_sha", "submitted_at_unix", "verifier", "device_id", "subject", "candidate", "baseline", "run_order", "correctness", "safety", "restoration", "failure", "counts_toward_consensus", "run_score", "verification_id"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "kind": {"const": "letsinfer.runtime-verification"},
+    "repository": {"const": "letsinferlabs/runtimes"},
+    "pull_request": {"type": "integer", "minimum": 1},
+    "pull_request_url": {"type": "string", "pattern": "^https://github\\.com/letsinferlabs/runtimes/pull/[1-9][0-9]*$"},
+    "observed_head_sha": {"$ref": "#/$defs/git_revision"},
+    "submitted_at_unix": {"type": "integer", "minimum": 1},
+    "verifier": {"$ref": "#/$defs/github_identity"},
+    "device_id": {"$ref": "li_benchmark_common_v1.schema.json#/$defs/sha256"},
+    "subject": {"$ref": "#/$defs/execution_subject"},
+    "candidate": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "li_benchmark_record_v7.schema.json"},
+        {"$ref": "li_benchmark_record_v8.schema.json"}
+      ]
+    },
+    "baseline": {
+      "oneOf": [
+        {"$ref": "li_benchmark_record_v7.schema.json"},
+        {"$ref": "li_benchmark_record_v8.schema.json"}
+      ]
+    },
+    "run_order": {"const": ["baseline", "candidate"]},
+    "correctness": {"$ref": "#/$defs/correctness"},
+    "safety": {"$ref": "#/$defs/safety"},
+    "restoration": {"$ref": "#/$defs/restoration"},
+    "failure": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/failure"}]},
+    "counts_toward_consensus": {"type": "boolean"},
+    "run_score": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/score"}]},
+    "verification_id": {"$ref": "li_benchmark_common_v1.schema.json#/$defs/sha256"}
+  },
+  "$defs": {
+    "git_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "oci_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "github_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["github_login", "github_id", "github_type"],
+      "properties": {
+        "github_login": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"},
+        "github_id": {"type": "integer", "minimum": 1},
+        "github_type": {"const": "User"}
+      }
+    },
+    "model_revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "uri", "revision", "sha256"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+        "uri": {"type": "string", "pattern": "^hf://[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"},
+        "revision": {"$ref": "#/$defs/git_revision"},
+        "sha256": {"anyOf": [{"type": "null"}, {"$ref": "li_benchmark_common_v1.schema.json#/$defs/sha256"}]}
+      }
+    },
+    "execution_subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_schema_version", "repository", "pull_request", "proposal_head_sha", "proposal_base_sha", "proposal_tree_sha256", "candidate_id", "engine_mode", "build_workflow_run_id", "runtime_version", "runtime_pack_sha256", "runtime_oci_manifest_digest", "model_revisions", "benchmark_contract_sha256", "target_contract_sha256", "execution_sha256"],
+      "properties": {
+        "artifact_schema_version": {"const": 1},
+        "repository": {"const": "letsinferlabs/runtimes"},
+        "pull_request": {"type": "integer", "minimum": 1},
+        "proposal_head_sha": {"$ref": "#/$defs/git_revision"},
+        "proposal_base_sha": {"$ref": "#/$defs/git_revision"},
+        "proposal_tree_sha256": {"$ref": "li_benchmark_common_v1.schema.json#/$defs/sha256"},
+        "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*(--[a-z0-9][a-z0-9._-]*){3}$"},
+        "engine_mode": {"enum": ["reuse-engine", "build-engine", "build-native-engine"]},
+        "build_workflow_run_id": {"type": "integer", "minimum": 1},
+        "runtime_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"},
+        "runtime_pack_sha256": {"$ref": "li_benchmark_common_v1.schema.json#/$defs/sha256"},
+        "runtime_oci_manifest_digest": {"$ref": "#/$defs/oci_digest"},
+        "engine_payload_sha256": {"$ref": "li_benchmark_common_v1.schema.json#/$defs/sha256"},
+        "engine_oci_manifest_digest": {"$ref": "#/$defs/oci_digest"},
+        "model_revisions": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/model_revision"}},
+        "benchmark_contract_sha256": {"$ref": "li_benchmark_common_v1.schema.json#/$defs/sha256"},
+        "target_contract_sha256": {"$ref": "li_benchmark_common_v1.schema.json#/$defs/sha256"},
+        "execution_sha256": {"$ref": "li_benchmark_common_v1.schema.json#/$defs/sha256"}
+      },
+      "oneOf": [
+        {"required": ["engine_payload_sha256"]},
+        {"required": ["engine_oci_manifest_digest"]}
+      ]
+    },
+    "correctness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "failures"],
+      "properties": {
+        "passed": {"type": "boolean"},
+        "failures": {"type": "integer", "minimum": 0, "maximum": 1}
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "crashes", "out_of_memory", "protection_trips", "output_validation_failures"],
+      "properties": {
+        "passed": {"type": "boolean"},
+        "crashes": {"type": "integer", "minimum": 0, "maximum": 1},
+        "out_of_memory": {"type": "integer", "minimum": 0, "maximum": 1},
+        "protection_trips": {"type": "integer", "minimum": 0, "maximum": 1},
+        "output_validation_failures": {"type": "integer", "minimum": 0, "maximum": 1}
+      }
+    },
+    "restoration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "receipt_id"],
+      "properties": {
+        "passed": {"type": "boolean"},
+        "receipt_id": {"$ref": "li_benchmark_common_v1.schema.json#/$defs/sha256"}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "phase", "message"],
+      "properties": {
+        "category": {"enum": ["crash", "out_of_memory", "protection_trip", "output_validation", "incomplete_workload", "restoration"]},
+        "phase": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+        "message": {"type": "string", "pattern": "^.+$"}
+      }
+    },
+    "score_values": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["aggregate_tps_geomean", "baseline_aggregate_tps_geomean", "change_percent"],
+      "properties": {
+        "aggregate_tps_geomean": {"type": "number", "exclusiveMinimum": 0},
+        "baseline_aggregate_tps_geomean": {"type": "number", "exclusiveMinimum": 0},
+        "change_percent": {"type": "number"}
+      }
+    },
+    "score": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "domains", "overall"],
+      "properties": {
+        "policy": {"const": "letsinfer-throughput-geomean-v1"},
+        "domains": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "prose"],
+          "properties": {
+            "code": {"$ref": "#/$defs/score_values"},
+            "prose": {"$ref": "#/$defs/score_values"}
+          }
+        },
+        "overall": {"$ref": "#/$defs/score_values"}
+      }
+    }
+  }
+}

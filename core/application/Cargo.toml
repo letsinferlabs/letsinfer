@@ -1,0 +1,64 @@
+[package]
+name = "li_core_application"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+base64 = "0.22"
+flate2 = "1"
+getrandom = "0.4"
+li_audit_manager = { path = "../audit" }
+li_authentication_manager = { path = "../authentication" }
+li_benchmark_manager = { path = "../benchmark" }
+li_benchmark_worker = { path = "../benchmark_worker" }
+li_core_cli = { path = "../cli" }
+li_core_interface = { path = "../interface" }
+li_core_update_manager = { path = "../update" }
+li_database = { path = "../database" }
+li_gateway_manager = { path = "../gateway" }
+li_hardware_manager = { path = "../hardware" }
+li_node_manager = { path = "../node" }
+li_pairing_manager = { path = "../pairing" }
+li_placement_manager = { path = "../placement" }
+li_runtime_manager = { path = "../runtime" }
+li_watchdog_manager = { path = "../watchdog" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+ring = "0.17"
+rcgen = { version = "0.13.2", features = ["x509-parser"] }
+time = "0.3"
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
+zstd = "=0.13.3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+path = "src/li_core_application.rs"
+
+[[bin]]
+name = "li_watchdog"
+path = "src/li_watchdog.rs"
+
+[[bin]]
+name = "li_gateway"
+path = "src/li_gateway.rs"
+
+[[bin]]
+name = "li_node"
+path = "src/li_node.rs"
+
+[[bin]]
+name = "li_core_setup"
+path = "src/bin/li_core_setup.rs"
+
+[[bin]]
+name = "li_letsinfer"
+path = "src/li_letsinfer.rs"

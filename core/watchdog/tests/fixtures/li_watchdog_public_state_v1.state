@@ -1,0 +1,14 @@
+version=1
+installation_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+release=v0.11.0-rc.99
+model=fixture-model
+engine=dwarfstar
+runtime_name=fixture-runtime
+runtime_version=0.11.0-rc.2
+manifest_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+cache_provider=dwarfstar-native
+cache_persistent=true
+inference_port=8000
+max_connections=64
+max_active_requests=16
+max_context_tokens=557056

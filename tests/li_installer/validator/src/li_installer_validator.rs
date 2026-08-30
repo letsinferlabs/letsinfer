@@ -4,53 +4,6 @@ use regex::Regex;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
-pub const COMPONENT_EVENTS: [&str; 4] = [
-    "letsinfer.event=platform_probe_complete",
-    "letsinfer.event=dependencies_ready",
-    "letsinfer.event=dependencies_installed",
-    "letsinfer.event=dependencies_verified",
-];
-
-// Returns every error in one closed native-component event stream.
-pub fn validate_component_event_stream(stream: &str, expected: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    if !COMPONENT_EVENTS.contains(&expected) {
-        errors.push(format!("expected component event is unknown: {}", expected));
-        return errors;
-    }
-    if stream.is_empty() || stream.len() > 4096 {
-        errors.push("component event stream is not bounded".to_string());
-        return errors;
-    }
-    if !stream.ends_with('\n') {
-        errors.push("component event stream has no final newline".to_string());
-    }
-    let events = stream.lines().collect::<Vec<_>>();
-    if events.len() != 1 {
-        errors.push(format!(
-            "component event stream contains {} events",
-            events.len()
-        ));
-        return errors;
-    }
-    let observed = events[0];
-    if observed
-        .chars()
-        .any(|character| character.is_control() || !character.is_ascii())
-    {
-        errors.push("component event contains invalid characters".to_string());
-    }
-    if !COMPONENT_EVENTS.contains(&observed) {
-        errors.push(format!("component event is unknown: {}", observed));
-    } else if observed != expected {
-        errors.push(format!(
-            "component event differs from expected: {}",
-            observed
-        ));
-    }
-    errors
-}
-
 // Validates the structural keywords used by the installation-probe JSON Schema.
 pub struct JsonSchemaValidator<'a> {
     root: &'a Value,

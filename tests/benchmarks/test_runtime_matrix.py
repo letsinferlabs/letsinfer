@@ -16,6 +16,8 @@ from unittest import mock
 from tools.source_archive import (
     PUBLIC_DIRECTORIES,
     PUBLIC_ROOT_FILES,
+    RUST_TOOLCHAIN_CONTENT,
+    RUST_TOOLCHAIN_NAME,
     public_files,
     source_manifest,
 )
@@ -31,6 +33,32 @@ MODULE_SPEC.loader.exec_module(runtime_matrix)
 
 
 class RuntimeMatrixTests(unittest.TestCase):
+    # Resolves an installed launcher target without consulting the retired
+    # repository path.
+    def test_cli_binary_resolves_installed_launcher_and_rejects_absence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            executable = root / "core" / "li_letsinfer"
+            executable.parent.mkdir()
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            launcher_root = root / "bin"
+            launcher_root.mkdir()
+            (launcher_root / "letsinfer").symlink_to(executable)
+
+            self.assertEqual(
+                runtime_matrix.resolved_letsinfer_binary(None, str(launcher_root)),
+                executable.resolve(),
+            )
+            with self.assertRaisesRegex(
+                runtime_matrix.RuntimeMatrixError,
+                "installed Let's Infer CLI is unavailable",
+            ):
+                runtime_matrix.resolved_letsinfer_binary(
+                    None,
+                    str(root / "missing"),
+                )
+
     def test_context_boundaries_keep_ttft_pair_together(self) -> None:
         cells = [
             {"name": name}
@@ -58,14 +86,11 @@ class RuntimeMatrixTests(unittest.TestCase):
         )
 
     def test_active_context_restart_uses_exact_group_lifecycle(self) -> None:
-        with (
-            mock.patch("core.cli._stop_placement_group_by_id") as stop,
-            mock.patch("core.cli._start_placement_group_by_id") as start,
+        with self.assertRaisesRegex(
+            runtime_matrix.RuntimeMatrixError,
+            "native benchmark worker",
         ):
             runtime_matrix.restart_active_placement_group("a" * 32)
-
-        stop.assert_called_once_with("a" * 32)
-        start.assert_called_once_with("a" * 32)
 
     def test_active_placement_group_is_an_internal_outer_matrix_mode(self) -> None:
         with mock.patch.object(
@@ -77,6 +102,7 @@ class RuntimeMatrixTests(unittest.TestCase):
 
         self.assertTrue(arguments.active_placement_group)
         self.assertFalse(arguments.active_container)
+        self.assertIsNone(arguments.letsinfer_bin)
 
     def test_active_placement_group_worker_uses_group_container_validation(self) -> None:
         arguments = types.SimpleNamespace(
@@ -544,7 +570,12 @@ class RuntimeMatrixTests(unittest.TestCase):
         staging = parent / "staging"
         staging.mkdir()
         for name in PUBLIC_ROOT_FILES:
-            (staging / name).write_text(f"{name}\n", encoding="utf-8")
+            content = (
+                RUST_TOOLCHAIN_CONTENT
+                if name == RUST_TOOLCHAIN_NAME
+                else f"{name}\n".encode()
+            )
+            (staging / name).write_bytes(content)
         for name in PUBLIC_DIRECTORIES:
             path = staging / name
             path.mkdir(parents=True)

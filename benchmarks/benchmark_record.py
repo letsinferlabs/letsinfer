@@ -17,11 +17,11 @@ from typing import Any
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from core.runtime_packs import (  # noqa: E402
+from benchmarks.li_benchmark_contract import (  # noqa: E402
     BENCHMARK_SCHEMA_VERSION,
     EXECUTION_PAYLOAD_BENCHMARK_SCHEMA_VERSION,
     PREFIX_SHARED_BENCHMARK_SCHEMA_VERSION,
-    RuntimePackError,
+    BenchmarkContractError as RuntimePackError,
     SHARED_BENCHMARK_SCHEMA_VERSION,
     SHORT_CONCURRENCY_BENCHMARK_SCHEMA_VERSION,
     SHORT_WORKLOAD_BENCHMARK_SCHEMA_VERSION,

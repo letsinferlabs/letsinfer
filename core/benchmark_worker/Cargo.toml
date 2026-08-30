@@ -1,0 +1,28 @@
+[package]
+name = "li_benchmark_worker"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+li_benchmark_manager = { path = "../benchmark" }
+li_core_interface = { path = "../interface" }
+li_gateway_manager = { path = "../gateway" }
+li_watchdog_manager = { path = "../watchdog" }
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+path = "src/li_benchmark_worker.rs"
+
+[[bin]]
+name = "li_benchmark_worker"
+path = "src/bin/li_benchmark_worker.rs"

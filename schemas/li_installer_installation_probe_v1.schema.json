@@ -140,9 +140,9 @@
       "additionalProperties": false,
       "required": [
         "curl",
+        "gh",
         "mktemp",
         "openssl",
-        "python",
         "ssh",
         "ssh_keygen",
         "sudo",
@@ -156,9 +156,6 @@
           "$ref": "#/$defs/dependency"
         },
         "openssl": {
-          "$ref": "#/$defs/dependency"
-        },
-        "python": {
           "$ref": "#/$defs/dependency"
         },
         "ssh": {
@@ -185,19 +182,16 @@
         "brew": {
           "$ref": "#/$defs/dependency"
         },
-        "cc": {
-          "$ref": "#/$defs/dependency"
-        },
-        "cmake": {
-          "$ref": "#/$defs/dependency"
-        },
-        "ctest": {
-          "$ref": "#/$defs/dependency"
-        },
         "dnf": {
           "$ref": "#/$defs/dependency"
         },
         "docker": {
+          "$ref": "#/$defs/dependency"
+        },
+        "gh": {
+          "$ref": "#/$defs/dependency"
+        },
+        "install": {
           "$ref": "#/$defs/dependency"
         },
         "launchctl": {

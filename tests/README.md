@@ -1,6 +1,14 @@
 # Core tests
 
-Run the complete regression suite from the repository root:
+Run the production Rust Core gate from the repository root:
+
+```bash
+python3 -m tools.li_core_audit --root core
+cargo fmt --manifest-path core/Cargo.toml --all -- --check
+RUSTFLAGS="-D warnings" cargo test --manifest-path core/Cargo.toml --workspace --all-targets --locked
+```
+
+Run the remaining build-time Python and portable product contracts with:
 
 ```bash
 python3 -m tools.core_regression
@@ -12,20 +20,15 @@ process and fails if a new `test_*.py` file is not registered. Do not use a
 single recursive `unittest discover -s tests` command: several suite roots are
 deliberately independent packages and that command can silently omit them.
 
-The tests exercise Let's Infer's control-plane contracts without importing a
-real model runtime. `cli/` covers runtime candidates, Engine protocol,
-lifecycle, packaging, installation, mocked updates, and failure recovery;
-`benchmarks/` covers engine-neutral runners; `gateway/`, `orchestration/`, and
-`site/` cover request routing, replicas, node control, and telemetry.
-`regression/` proves that every public and internal CLI leaf parses and passes
-through the common dispatcher, and that CI cannot drift from this inventory.
-The portable macOS release contracts are included as `macos-contract`.
+Rust manager tests exercise the complete control plane without importing a
+real model runtime. The Python inventory retains benchmark-tooling,
+runtime-authoring, packaging, installer, source/release audit, repository, and
+portable macOS contracts. Production `core/` is Rust-only; no Python
+compatibility entry point remains.
 
-`runtime_fixture.py` supplies one synthetic schema-v6 candidate with exact
-model, Engine OCI, and target identities. `fixtures/runtime-source/` is a tiny
-runtime-owned source root used to prove that runtime artifacts remain separate
-from independently identified core bundles. None of these fixtures is
-discoverable as a production runtime.
+`fixtures/runtime-source/` is a tiny runtime-owned source root used to prove
+that runtime artifacts remain separate from independently identified Core
+bundles. It is never discoverable as a production runtime.
 
 Model checkpoints, engine forks, kernels, target tuning, benchmark plans,
 materialized prompts, and qualification evidence do not belong here.
@@ -33,5 +36,6 @@ Runtime-specific implementation and concise public results stay in runtime
 repositories; materialized benchmark inputs live only in ignored evidence.
 
 Pull requests to `main` and `release` must pass the named **Core regression
-suite** check, including native Watchdog build and CTest. Release validation
-invokes the same runner so local, PR, and publication coverage stay identical.
+suite** check, including the warnings-denied Rust `li_watchdog` tests. Release
+validation invokes the same gates so local, PR, and publication coverage stay
+identical.

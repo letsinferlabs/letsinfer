@@ -3,8 +3,9 @@
 [Back to documentation](../README.md)
 
 The native macOS controller has an independent release lifecycle. Core tags,
-core release branches, and `PRODUCT_VERSION` do not set or publish the app's
-version. The app owns these Xcode settings in `apps/macos/project.yml`:
+core release branches, and the Rust Core workspace version do not set or
+publish the app's version. The app owns these Xcode settings in
+`apps/macos/project.yml`:
 
 - `MARKETING_VERSION` is the user-visible app version;
 - `CURRENT_PROJECT_VERSION` is the monotonically increasing build number.

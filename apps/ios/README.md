@@ -1,20 +1,19 @@
 # Let's Infer for iOS
 
-This is the native iPhone/iPad Let's Infer node. It implements the code-less
-`letsinfer node add` LAN flow and can host a placement group while the app is
-active. The default build embeds llama.cpp; the optional MLC build embeds MLC
-LLM's Metal runtime and a compiled model library. Metal is the accelerator
-backend, not a separate Engine.
+This is the native iPhone/iPad Let's Infer inference application. It runs its
+embedded model lane only while the app is active. The default build embeds
+llama.cpp; the optional MLC build embeds MLC LLM's Metal runtime and a compiled
+model library. Metal is the accelerator backend, not a separate Engine.
 
 ## What works
 
 - persistent P-256 physical-machine identity in the iOS Keychain;
 - generated TLS 1.3 node identity with certificate-pinned discovery;
 - `_letsinfer._tcp` Bonjour advertisement on port 9770;
-- exact `letsinfer-node-add-v1` request, Accept/Deny, challenge, proof, and LAN
-  enrollment against the selected main node;
-- authenticated child facts published every five seconds as `ios/arm64`, one
-  Apple GPU, and unified memory;
+- the retired `letsinfer-node-add-v1` development request, Accept/Deny,
+  challenge, and proof implementation;
+- version-one authenticated child facts published every five seconds as
+  `ios/arm64`, one Apple GPU, and unified memory;
 - exact Qwen3 0.6B Q8_0 acquisition, size check, and SHA-256 verification;
 - llama.cpp `b10621` compiled for iOS with Metal;
 - optional MLC LLM at its exact source revision, with a complete pinned
@@ -23,8 +22,8 @@ backend, not a separate Engine.
   `/v1/chat/completions`, `/v1/letsinfer/token-count`, and
   `/v1/letsinfer/telemetry`;
 - thermal, low-battery, Low Power Mode, and app-lifecycle admission gates;
-- placement-group `stage`, `start`, `recover`, `stop`, `remove`, and status jobs
-  for the two exact embedded runtime candidates;
+- version-one placement-group `stage`, `start`, `recover`, `stop`, `remove`, and
+  status jobs for the two exact embedded runtime candidates;
 - one last signed offline fact before background suspension when iOS grants
   the normal transition window;
 - screen wake lock while serving, Guided Access UI, and a supervised
@@ -104,20 +103,29 @@ The preparation script refuses a different MLC commit and checks the complete
 static-library output before replacing ignored local vendor inputs. Generated
 libraries, model code, weights, and Xcode projects remain outside Git.
 
+## Pairing compatibility
+
+Current Core pairing is invitation-based. An active main opens an invitation
+with `letsinfer node add` and shows one eight-digit setup code; the standalone
+joining Node reads that code locally. Remote pairing additionally presents the
+same six-digit comparison code on both Nodes, and the main activates the
+pending child only with `letsinfer node add --approve INVITATION --yes`.
+
+The checked-in iOS app does not yet implement that current setup-code contract.
+Its `letsinfer-node-add-v1` Select/Accept path is retained development code, not
+a production Core enrollment fallback.
+
 ## Use
 
 1. Open the app and allow Local Network access.
 2. Download and load one pinned model lane.
 3. Keep the app active. For a dedicated device, enable Guided Access with the
    side-button shortcut or install an MDM Single App Mode profile.
-4. On the current standalone main node, run `letsinfer node add`.
-5. Select the iPhone/iPad and tap **Accept** in the app.
 
-The main records an active child and receives signed facts. Installing either
-unqualified iOS runtime candidate can then create its one-placement group on
-the device after the matching model is loaded. The direct Engine endpoint is
-also available at `https://<device-address>:18000`; use the displayed
-certificate SHA-256 and bearer key rather than disabling TLS verification.
+Do not enroll this build as a Core child until its Node protocol implements the
+current invitation and setup-code contract. Its direct Engine endpoint remains
+available at `https://<device-address>:18000`; use the displayed certificate
+SHA-256 and bearer key rather than disabling TLS verification.
 
 ## Availability semantics
 
@@ -134,10 +142,9 @@ runtime. The model and verified download remain on disk for explicit recovery.
 
 ## Security boundary
 
-The standalone node-add listener accepts only bounded JSON over TLS 1.3. After
-enrollment it restarts with the main node's CA and exact coordinator member ID
-required at the TLS handshake. The Engine endpoint uses a separate Keychain
-bearer key and the node's pinned certificate. Prompts and responses are not
-persisted by the app.
+The retained development node-add listener accepts only bounded JSON over TLS
+1.3, but its version-one membership payload is not the current Core pairing
+boundary. The Engine endpoint uses a separate Keychain bearer key and the
+Node's pinned certificate. Prompts and responses are not persisted by the app.
 
 See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for upstream licensing.

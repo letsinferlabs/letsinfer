@@ -1,0 +1,510 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/core/li_core_setup_input_v5.schema.json",
+  "title": "Let's Infer Core setup input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "owner_user_id", "request", "roots", "material", "configuration", "native"],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "li_core_setup_input"},
+        "version": {"const": 5}
+      }
+    },
+    "owner_user_id": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "request": {"$ref": "#/$defs/request"},
+    "roots": {"$ref": "#/$defs/roots"},
+    "material": {"$ref": "#/$defs/material"},
+    "configuration": {"$ref": "#/$defs/configuration"},
+    "native": {"$ref": "#/$defs/native"}
+  },
+  "$defs": {
+    "path": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^/(?:[^/\\u0000-\\u001f\\u007f]+/)*[^/\\u0000-\\u001f\\u007f]+$"
+    },
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "socket": {"type": "string", "minLength": 3, "maxLength": 128},
+    "positive_u64": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id", "platform", "role", "core_version", "core_source_identity",
+        "display_name", "control_address", "node_private_address", "gateway_private_address",
+        "gateway_public_address", "watchdog_address"
+      ],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/digest"},
+        "platform": {"enum": ["linux", "macos"]},
+        "role": {"const": "main"},
+        "core_version": {"type": "string", "minLength": 5, "maxLength": 128},
+        "core_source_identity": {"$ref": "#/$defs/digest"},
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "control_address": {"type": "string", "minLength": 1, "maxLength": 255},
+        "node_private_address": {"$ref": "#/$defs/socket"},
+        "gateway_private_address": {"$ref": "#/$defs/socket"},
+        "gateway_public_address": {"$ref": "#/$defs/socket"},
+        "watchdog_address": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/socket"}]}
+      }
+    },
+    "roots": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "letsinfer_home", "home_directory", "setup_state_directory", "material_root",
+        "trust_workspace_root", "configuration_directory"
+      ],
+      "properties": {
+        "letsinfer_home": {"$ref": "#/$defs/path"},
+        "home_directory": {"$ref": "#/$defs/path"},
+        "setup_state_directory": {"$ref": "#/$defs/path"},
+        "material_root": {"$ref": "#/$defs/path"},
+        "trust_workspace_root": {"$ref": "#/$defs/path"},
+        "configuration_directory": {"$ref": "#/$defs/path"}
+      }
+    },
+    "pairing_material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "site_private_key_file", "site_public_key_file", "site_ca_certificate_file",
+        "local_control_certificate_file"
+      ],
+      "properties": {
+        "site_private_key_file": {"$ref": "#/$defs/path"},
+        "site_public_key_file": {"$ref": "#/$defs/path"},
+        "site_ca_certificate_file": {"$ref": "#/$defs/path"},
+        "local_control_certificate_file": {"$ref": "#/$defs/path"}
+      }
+    },
+    "benchmark_signing_material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["private_key_file", "public_key_file"],
+      "properties": {
+        "private_key_file": {"$ref": "#/$defs/path"},
+        "public_key_file": {"$ref": "#/$defs/path"}
+      }
+    },
+    "mutual_tls_material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority_private_key_file", "authority_certificate_file", "server_certificate_file",
+        "server_private_key_file", "client_certificate_file", "client_private_key_file"
+      ],
+      "properties": {
+        "authority_private_key_file": {"$ref": "#/$defs/path"},
+        "authority_certificate_file": {"$ref": "#/$defs/path"},
+        "server_certificate_file": {"$ref": "#/$defs/path"},
+        "server_private_key_file": {"$ref": "#/$defs/path"},
+        "client_certificate_file": {"$ref": "#/$defs/path"},
+        "client_private_key_file": {"$ref": "#/$defs/path"}
+      }
+    },
+    "gateway_material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority_private_key_file", "authority_certificate_file", "server_certificate_file",
+        "server_private_key_file", "relay_client_certificate_file", "relay_client_private_key_file"
+      ],
+      "properties": {
+        "authority_private_key_file": {"$ref": "#/$defs/path"},
+        "authority_certificate_file": {"$ref": "#/$defs/path"},
+        "server_certificate_file": {"$ref": "#/$defs/path"},
+        "server_private_key_file": {"$ref": "#/$defs/path"},
+        "relay_client_certificate_file": {"$ref": "#/$defs/path"},
+        "relay_client_private_key_file": {"$ref": "#/$defs/path"}
+      }
+    },
+    "watchdog_material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority_private_key_file", "authority_certificate_file", "server_certificate_file",
+        "server_private_key_file", "controller_certificate_file", "controller_private_key_file",
+        "controller_allowlist_file"
+      ],
+      "properties": {
+        "authority_private_key_file": {"$ref": "#/$defs/path"},
+        "authority_certificate_file": {"$ref": "#/$defs/path"},
+        "server_certificate_file": {"$ref": "#/$defs/path"},
+        "server_private_key_file": {"$ref": "#/$defs/path"},
+        "controller_certificate_file": {"$ref": "#/$defs/path"},
+        "controller_private_key_file": {"$ref": "#/$defs/path"},
+        "controller_allowlist_file": {"$ref": "#/$defs/path"}
+      }
+    },
+    "material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "database_file", "pairing_setup_secret_file", "api_key_file", "benchmark_signing", "pairing", "node",
+        "gateway", "watchdog"
+      ],
+      "properties": {
+        "database_file": {"$ref": "#/$defs/path"},
+        "pairing_setup_secret_file": {"$ref": "#/$defs/path"},
+        "api_key_file": {"$ref": "#/$defs/path"},
+        "benchmark_signing": {"$ref": "#/$defs/benchmark_signing_material"},
+        "pairing": {"$ref": "#/$defs/pairing_material"},
+        "node": {"$ref": "#/$defs/mutual_tls_material"},
+        "gateway": {"$ref": "#/$defs/gateway_material"},
+        "watchdog": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/watchdog_material"}]}
+      }
+    },
+    "node_local_api": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "socket_path", "maximum_workers", "read_timeout_milliseconds",
+        "write_timeout_milliseconds", "accept_poll_interval_milliseconds"
+      ],
+      "properties": {
+        "socket_path": {"$ref": "#/$defs/path"},
+        "maximum_workers": {"type": "integer", "minimum": 1, "maximum": 64},
+        "read_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000},
+        "write_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000},
+        "accept_poll_interval_milliseconds": {"type": "integer", "minimum": 1, "maximum": 1000}
+      }
+    },
+    "gateway_health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "socket_path", "maximum_workers", "read_timeout_milliseconds",
+        "write_timeout_milliseconds", "accept_poll_interval_milliseconds"
+      ],
+      "properties": {
+        "socket_path": {"$ref": "#/$defs/path"},
+        "maximum_workers": {"type": "integer", "minimum": 1, "maximum": 32},
+        "read_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "write_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "accept_poll_interval_milliseconds": {"type": "integer", "minimum": 1, "maximum": 1000}
+      }
+    },
+    "hardware": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "platform", "architecture", "boot_id_file", "cpu_information_file",
+            "memory_information_file", "nvidia_smi_command", "rdma_command"
+          ],
+          "properties": {
+            "platform": {"const": "linux"},
+            "architecture": {"enum": ["arm64", "x86_64"]},
+            "boot_id_file": {"$ref": "#/$defs/path"},
+            "cpu_information_file": {"$ref": "#/$defs/path"},
+            "memory_information_file": {"$ref": "#/$defs/path"},
+            "nvidia_smi_command": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/path"}]},
+            "rdma_command": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/path"}]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["platform", "sysctl_command", "metal_probe_command"],
+          "properties": {
+            "platform": {"const": "macos"},
+            "sysctl_command": {"$ref": "#/$defs/path"},
+            "metal_probe_command": {"$ref": "#/$defs/path"}
+          }
+        }
+      ]
+    },
+    "pairing_platform": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["platform", "discovery_command", "direct_link_sys_class", "direct_link_ip_command"],
+          "properties": {
+            "platform": {"const": "linux"},
+            "discovery_command": {"$ref": "#/$defs/path"},
+            "direct_link_sys_class": {"$ref": "#/$defs/path"},
+            "direct_link_ip_command": {"$ref": "#/$defs/path"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["platform", "discovery_command"],
+          "properties": {
+            "platform": {"const": "macos"},
+            "discovery_command": {"$ref": "#/$defs/path"}
+          }
+        }
+      ]
+    },
+    "node_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "core_update", "model", "benchmark", "hardware", "pairing", "placement_safety", "trust_workspace", "daemon_cadence_milliseconds",
+        "local_api", "remote_maximum_workers", "remote_accept_poll_interval_milliseconds",
+        "remote_handshake_timeout_milliseconds", "remote_read_timeout_milliseconds",
+        "remote_write_timeout_milliseconds"
+      ],
+      "properties": {
+        "core_update": {"$ref": "#/$defs/node_core_update_configuration"},
+        "model": {"$ref": "#/$defs/node_model_configuration"},
+        "benchmark": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/node_benchmark_configuration"}]},
+        "hardware": {"$ref": "#/$defs/hardware"},
+        "pairing": {"$ref": "#/$defs/pairing_platform"},
+        "placement_safety": {"$ref": "#/$defs/node_placement_safety"},
+        "trust_workspace": {"$ref": "#/$defs/path"},
+        "daemon_cadence_milliseconds": {"type": "integer", "minimum": 100, "maximum": 300000},
+        "local_api": {"$ref": "#/$defs/node_local_api"},
+        "remote_maximum_workers": {"type": "integer", "minimum": 1, "maximum": 64},
+        "remote_accept_poll_interval_milliseconds": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "remote_handshake_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000},
+        "remote_read_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000},
+        "remote_write_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000}
+      }
+    },
+    "node_core_update_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release_platform", "letsinfer_home", "home_directory", "setup_state_directory", "configuration_root", "curl_command", "ssh_keygen_command", "allowed_signers_file", "supervisor_command", "readiness_timeout_milliseconds", "readiness_poll_milliseconds", "stable_readiness_observations"],
+      "properties": {
+        "release_platform": {"enum": ["linux_arm64", "linux_x86_64", "macos_arm64"]},
+        "letsinfer_home": {"$ref": "#/$defs/path"},
+        "home_directory": {"$ref": "#/$defs/path"},
+        "setup_state_directory": {"$ref": "#/$defs/path"},
+        "configuration_root": {"$ref": "#/$defs/path"},
+        "curl_command": {"$ref": "#/$defs/path"},
+        "ssh_keygen_command": {"$ref": "#/$defs/path"},
+        "allowed_signers_file": {"$ref": "#/$defs/path"},
+        "supervisor_command": {"$ref": "#/$defs/path"},
+        "readiness_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 300000},
+        "readiness_poll_milliseconds": {"type": "integer", "minimum": 1, "maximum": 300000},
+        "stable_readiness_observations": {"type": "integer", "minimum": 1, "maximum": 100}
+      }
+    },
+    "node_model_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog_source", "catalog_cache_root", "catalog_hydration_root", "http_workspace_root", "installation_root", "runtime_cache_root", "curl_command", "docker_command", "command_working_directory", "placement_material_root", "placement_secret_root", "placement_tls_workspace_root", "first_port", "port_count", "endpoint_timeout_milliseconds", "maximum_hardware_age_milliseconds", "group_id", "launch_agents_root", "launchctl_command"],
+      "properties": {
+        "catalog_source": {"type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^https://[^\\s@#/]+(?:/[^\\s@#]*)*/catalog\\.json$"},
+        "catalog_cache_root": {"$ref": "#/$defs/path"},
+        "catalog_hydration_root": {"$ref": "#/$defs/path"},
+        "http_workspace_root": {"$ref": "#/$defs/path"},
+        "installation_root": {"$ref": "#/$defs/path"},
+        "runtime_cache_root": {"$ref": "#/$defs/path"},
+        "curl_command": {"$ref": "#/$defs/path"},
+        "docker_command": {"$ref": "#/$defs/path"},
+        "command_working_directory": {"$ref": "#/$defs/path"},
+        "placement_material_root": {"$ref": "#/$defs/path"},
+        "placement_secret_root": {"$ref": "#/$defs/path"},
+        "placement_tls_workspace_root": {"$ref": "#/$defs/path"},
+        "first_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "port_count": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "endpoint_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 30000},
+        "maximum_hardware_age_milliseconds": {"type": "integer", "minimum": 1, "maximum": 86400000},
+        "group_id": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "launch_agents_root": {"oneOf": [{"$ref": "#/$defs/path"}, {"type": "null"}]},
+        "launchctl_command": {"oneOf": [{"$ref": "#/$defs/path"}, {"type": "null"}]}
+      }
+    },
+    "node_benchmark_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker_executable", "github_cli_command", "task_root", "telemetry_root", "evidence_root", "signing_workspace_root", "maximum_runtime_milliseconds", "stop_grace_milliseconds", "watchdog_timeout_milliseconds"],
+      "properties": {
+        "worker_executable": {"$ref": "#/$defs/path"},
+        "github_cli_command": {"$ref": "#/$defs/path"},
+        "task_root": {"$ref": "#/$defs/path"},
+        "telemetry_root": {"$ref": "#/$defs/path"},
+        "evidence_root": {"$ref": "#/$defs/path"},
+        "signing_workspace_root": {"$ref": "#/$defs/path"},
+        "maximum_runtime_milliseconds": {"type": "integer", "minimum": 1, "maximum": 604800000},
+        "stop_grace_milliseconds": {"type": "integer", "minimum": 1, "maximum": 600000},
+        "watchdog_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000}
+      }
+    },
+    "node_protection_executable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "executable_sha256", "principal_id"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"},
+        "executable_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "principal_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
+      }
+    },
+    "node_placement_safety": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "platform", "maximum_workers", "read_timeout_milliseconds",
+            "write_timeout_milliseconds", "accept_poll_interval_milliseconds",
+            "gateway", "watchdog", "lease_milliseconds"
+          ],
+          "properties": {
+            "platform": {"const": "linux"},
+            "maximum_workers": {"type": "integer", "minimum": 1, "maximum": 64},
+            "read_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000},
+            "write_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000},
+            "accept_poll_interval_milliseconds": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "gateway": {"$ref": "#/$defs/node_protection_executable"},
+            "watchdog": {"$ref": "#/$defs/node_protection_executable"},
+            "lease_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["platform"],
+          "properties": {"platform": {"const": "macos"}}
+        }
+      ]
+    },
+    "gateway_protection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "socket_path", "read_timeout_milliseconds", "write_timeout_milliseconds",
+        "maximum_cache_milliseconds", "poll_interval_milliseconds"
+      ],
+      "properties": {
+        "socket_path": {"$ref": "#/$defs/path"},
+        "read_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "write_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "maximum_cache_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000},
+        "poll_interval_milliseconds": {"type": "integer", "minimum": 1, "maximum": 29999}
+      }
+    },
+    "gateway_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "health", "node_protection", "telemetry_file",
+        "telemetry_cadence_milliseconds", "maximum_queue_milliseconds",
+        "public_maximum_connections", "private_maximum_connections"
+      ],
+      "properties": {
+        "health": {"$ref": "#/$defs/gateway_health"},
+        "node_protection": {"$ref": "#/$defs/gateway_protection"},
+        "telemetry_file": {"$ref": "#/$defs/path"},
+        "telemetry_cadence_milliseconds": {"type": "integer", "minimum": 100, "maximum": 5000},
+        "maximum_queue_milliseconds": {"type": "integer", "minimum": 0, "maximum": 300000},
+        "public_maximum_connections": {"type": "integer", "minimum": 1, "maximum": 256},
+        "private_maximum_connections": {"type": "integer", "minimum": 1, "maximum": 256}
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "warning_available_bytes", "graceful_available_bytes", "emergency_available_bytes",
+        "swap_stop_bytes", "psi_some_microseconds", "psi_full_microseconds", "state_failures",
+        "containment_grace_milliseconds"
+      ],
+      "properties": {
+        "warning_available_bytes": {"type": "integer", "minimum": 0},
+        "graceful_available_bytes": {"type": "integer", "minimum": 0},
+        "emergency_available_bytes": {"type": "integer", "minimum": 0},
+        "swap_stop_bytes": {"type": "integer", "minimum": 0},
+        "psi_some_microseconds": {"type": "integer", "minimum": 0},
+        "psi_full_microseconds": {"type": "integer", "minimum": 0},
+        "state_failures": {"type": "integer", "minimum": 1},
+        "containment_grace_milliseconds": {"type": "integer", "minimum": 1}
+      }
+    },
+    "watchdog_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "data_directory", "controller_snapshot_path", "site_state_path", "gateway_metrics_path",
+        "protection_root_path", "runtime_installation_root", "runtime_cache_root",
+        "flush_interval_milliseconds", "maximum_controllers", "thresholds"
+      ],
+      "properties": {
+        "data_directory": {"$ref": "#/$defs/path"},
+        "controller_snapshot_path": {"$ref": "#/$defs/path"},
+        "site_state_path": {"$ref": "#/$defs/path"},
+        "gateway_metrics_path": {"$ref": "#/$defs/path"},
+        "protection_root_path": {"$ref": "#/$defs/path"},
+        "runtime_installation_root": {"$ref": "#/$defs/path"},
+        "runtime_cache_root": {"$ref": "#/$defs/path"},
+        "flush_interval_milliseconds": {"type": "integer", "minimum": 1000, "maximum": 60000},
+        "maximum_controllers": {"type": "integer", "minimum": 1, "maximum": 16},
+        "thresholds": {"$ref": "#/$defs/thresholds"}
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_identity", "cli", "node", "gateway", "watchdog"],
+      "properties": {
+        "provider_identity": {"$ref": "#/$defs/digest"},
+        "cli": {"$ref": "#/$defs/cli_configuration"},
+        "node": {"$ref": "#/$defs/node_configuration"},
+        "gateway": {"$ref": "#/$defs/gateway_configuration"},
+        "watchdog": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/watchdog_configuration"}]}
+      }
+    },
+    "cli_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entropy_source", "launcher_file", "privilege_command", "timeout_milliseconds", "maximum_response_bytes"],
+      "properties": {
+        "entropy_source": {"$ref": "#/$defs/path"},
+        "launcher_file": {"$ref": "#/$defs/path"},
+        "privilege_command": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/path"}]},
+        "timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000},
+        "maximum_response_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576}
+      }
+    },
+    "watchdog_health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority_certificate_file", "controller_certificate_file", "controller_private_key_file"],
+      "properties": {
+        "authority_certificate_file": {"$ref": "#/$defs/path"},
+        "controller_certificate_file": {"$ref": "#/$defs/path"},
+        "controller_private_key_file": {"$ref": "#/$defs/path"}
+      }
+    },
+    "native": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["platform", "openssl_command", "machine_identity_file", "watchdog_health"],
+          "properties": {
+            "platform": {"const": "linux"},
+            "openssl_command": {"$ref": "#/$defs/path"},
+            "machine_identity_file": {"$ref": "#/$defs/path"},
+            "watchdog_health": {"$ref": "#/$defs/watchdog_health"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["platform", "openssl_command", "machine_identity_command", "command_timeout_milliseconds", "command_poll_interval_milliseconds"],
+          "properties": {
+            "platform": {"const": "macos"},
+            "openssl_command": {"$ref": "#/$defs/path"},
+            "machine_identity_command": {"$ref": "#/$defs/path"},
+            "command_timeout_milliseconds": {"$ref": "#/$defs/positive_u64"},
+            "command_poll_interval_milliseconds": {"$ref": "#/$defs/positive_u64"}
+          }
+        }
+      ]
+    }
+  }
+}

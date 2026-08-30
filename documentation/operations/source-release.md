@@ -8,13 +8,19 @@ input. Local agent policy, handoff state, context, scratchpads, credentials,
 evidence, caches, nested Git metadata, and generated output are never
 publication inputs.
 
+Production `core/` is Rust-only. Python shipped in the public source tree is
+limited to benchmark authoring and qualification diagnostics plus deterministic
+build and release tooling. Product benchmark execution belongs to the native
+Rust `li_benchmark_worker`; no Python Core daemon, CLI, migration, or
+compatibility launcher remains.
+
 Build twice and require byte equality:
 
 ```bash
-bin/letsinfer-source-archive build --source . --output /tmp/letsinfer-a.tar.gz
-bin/letsinfer-source-archive build --source . --output /tmp/letsinfer-b.tar.gz
+python3 -m tools.source_archive build --source . --output /tmp/letsinfer-a.tar.gz
+python3 -m tools.source_archive build --source . --output /tmp/letsinfer-b.tar.gz
 cmp /tmp/letsinfer-a.tar.gz /tmp/letsinfer-b.tar.gz
-bin/letsinfer-source-archive verify /tmp/letsinfer-a.tar.gz
+python3 -m tools.source_archive verify /tmp/letsinfer-a.tar.gz
 ```
 
 Each archive has one `letsinfer/` root and an embedded
@@ -42,14 +48,16 @@ evidence gates.
 ## Automated core releases
 
 Core releases use the protected `release` branch as their publication
-boundary. A pull request targeting `release` runs the complete core tests,
-builds and tests Watchdog, and verifies two byte-identical public archives. A
-merge to `release` repeats those gates and then:
+boundary. A pull request targeting `release` runs the complete Rust Core and
+tooling tests and verifies two byte-identical public source archives. A merge
+to `release` repeats those gates and then:
 
-1. reads `PRODUCT_VERSION` and refuses an existing `vVERSION` tag;
-2. builds the public archive twice and requires byte equality;
-3. signs the four platform archives' canonical `SHA256SUMS` as an SSHSIG with
-   the protected Ed25519 release key;
+1. reads the shared Rust workspace version from `core/Cargo.toml` and refuses
+   an existing `vVERSION` tag;
+2. builds every native installer and Core archive twice and requires byte
+   equality;
+3. signs the six native platform archives' canonical `SHA256SUMS` as an SSHSIG
+   with the protected Ed25519 release key;
 4. verifies the signing key against `core/trust/release-public-key.pem`;
 5. installs the signed local assets into a temporary prefix;
 6. creates provenance attestations and an immutable GitHub Release; and
@@ -68,8 +76,10 @@ the latest stable release. Every release contains exactly:
 ```text
 letsinfer-linux-x86_64.tar.gz
 letsinfer-linux-arm64.tar.gz
-letsinfer-macos-x86_64.tar.gz
 letsinfer-macos-arm64.tar.gz
+li_installer_linux_arm64.tar.gz
+li_installer_linux_x86_64.tar.gz
+li_installer_macos_arm64.tar.gz
 SHA256SUMS
 SHA256SUMS.sig
 install.sh
@@ -92,13 +102,19 @@ curl -fsSL https://letsinfer.ai/install.sh \
   | sh -s -- --version X.Y.Z
 ```
 
-`install.sh` supports Linux and macOS on x86_64 and arm64. Immutable core files
-live under `$LETSINFER_HOME/core`; the default creates `/usr/local/bin`
-launchers and runs the private `core-setup` initializer. `--user`, `--prefix`, and `--no-setup`
-provide explicit alternatives. `--no-progress` lets `letsinfer update` own its
-three-stage TTY display; a direct curl install retains the single percentage
-indicator. The website build emits the reviewed core installer byte for
-byte rather than maintaining another implementation.
+`install.sh` selects and verifies one native installer for Linux arm64, Linux
+x86_64, or macOS arm64, then replaces itself with that Rust process. The native
+installer owns dependency setup, Core download and immutable installation,
+launchers, and delegation to `li_core_setup`. Core setup exclusively owns the
+transactional platform-service cutover, stable readiness window, rollback, and
+commit. Immutable core files live under `$LETSINFER_HOME/core`; the default
+creates `/usr/local/bin` launchers and runs the private `li_core_setup`
+initializer.
+`--user`, `--prefix`, and `--no-setup`
+provide explicit alternatives. `--no-progress` lets `letsinfer update core`
+own its three-stage TTY display; a direct curl install retains the single
+percentage indicator. The website build emits the reviewed core installer byte
+for byte rather than maintaining another implementation.
 
 The macOS application has separate version/build metadata, a protected
 `macos-release` branch, namespaced tags, signing, notarization, and release

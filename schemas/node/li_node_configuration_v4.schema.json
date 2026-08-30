@@ -1,0 +1,392 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/node/li_node_configuration_v4.schema.json",
+  "title": "Let's Infer Node configuration v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "runtime", "core_update", "model", "benchmark", "pairing", "hardware", "placement_safety", "daemon", "private_api"],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_node_configuration" },
+        "version": { "const": 4 }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["database_file"],
+      "properties": {
+        "database_file": { "$ref": "#/$defs/absolute_path" }
+      }
+    },
+    "core_update": { "$ref": "#/$defs/core_update" },
+    "model": { "$ref": "#/$defs/model" },
+    "benchmark": {
+      "oneOf": [
+        { "$ref": "#/$defs/benchmark" },
+        { "type": "null" }
+      ]
+    },
+    "pairing": {
+      "oneOf": [
+        { "$ref": "#/$defs/linux_pairing" },
+        { "$ref": "#/$defs/macos_pairing" }
+      ]
+    },
+    "hardware": {
+      "oneOf": [
+        { "$ref": "#/$defs/linux_hardware" },
+        { "$ref": "#/$defs/macos_hardware" }
+      ]
+    },
+    "placement_safety": {
+      "oneOf": [
+        { "$ref": "#/$defs/linux_placement_safety" },
+        { "$ref": "#/$defs/macos_placement_safety" }
+      ]
+    },
+    "daemon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cadence_milliseconds"],
+      "properties": {
+        "cadence_milliseconds": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 300000
+        }
+      }
+    },
+    "private_api": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local", "remote"],
+      "properties": {
+        "local": { "$ref": "#/$defs/local_private_api" },
+        "remote": { "$ref": "#/$defs/remote_private_api" }
+      }
+    }
+  },
+  "$defs": {
+    "core_update": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release_platform", "letsinfer_home", "home_directory", "setup_state_directory", "configuration_root", "curl_command", "ssh_keygen_command", "allowed_signers_file", "supervisor_command", "readiness_timeout_milliseconds", "readiness_poll_milliseconds", "stable_readiness_observations"],
+      "properties": {
+        "release_platform": { "enum": ["linux_arm64", "linux_x86_64", "macos_arm64"] },
+        "letsinfer_home": { "$ref": "#/$defs/absolute_path" },
+        "home_directory": { "$ref": "#/$defs/absolute_path" },
+        "setup_state_directory": { "$ref": "#/$defs/absolute_path" },
+        "configuration_root": { "$ref": "#/$defs/absolute_path" },
+        "curl_command": { "$ref": "#/$defs/absolute_path" },
+        "ssh_keygen_command": { "$ref": "#/$defs/absolute_path" },
+        "allowed_signers_file": { "$ref": "#/$defs/absolute_path" },
+        "supervisor_command": { "$ref": "#/$defs/absolute_path" },
+        "readiness_timeout_milliseconds": { "type": "integer", "minimum": 1, "maximum": 300000 },
+        "readiness_poll_milliseconds": { "type": "integer", "minimum": 1, "maximum": 300000 },
+        "stable_readiness_observations": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog_source", "catalog_cache_root", "catalog_hydration_root", "http_workspace_root", "installation_root", "runtime_cache_root", "curl_command", "docker_command", "command_working_directory", "placement_material_root", "placement_secret_root", "placement_tls_workspace_root", "first_port", "port_count", "endpoint_timeout_milliseconds", "maximum_hardware_age_milliseconds", "group_id", "launch_agents_root", "launchctl_command"],
+      "properties": {
+        "catalog_source": { "type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^https://[^\\s@#/]+(?:/[^\\s@#]*)*/catalog\\.json$" },
+        "catalog_cache_root": { "$ref": "#/$defs/absolute_path" },
+        "catalog_hydration_root": { "$ref": "#/$defs/absolute_path" },
+        "http_workspace_root": { "$ref": "#/$defs/absolute_path" },
+        "installation_root": { "$ref": "#/$defs/absolute_path" },
+        "runtime_cache_root": { "$ref": "#/$defs/absolute_path" },
+        "curl_command": { "$ref": "#/$defs/absolute_path" },
+        "docker_command": { "$ref": "#/$defs/absolute_path" },
+        "command_working_directory": { "$ref": "#/$defs/absolute_path" },
+        "placement_material_root": { "$ref": "#/$defs/absolute_path" },
+        "placement_secret_root": { "$ref": "#/$defs/absolute_path" },
+        "placement_tls_workspace_root": { "$ref": "#/$defs/absolute_path" },
+        "first_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "port_count": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "endpoint_timeout_milliseconds": { "type": "integer", "minimum": 1, "maximum": 30000 },
+        "maximum_hardware_age_milliseconds": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "group_id": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "launch_agents_root": { "oneOf": [{ "$ref": "#/$defs/absolute_path" }, { "type": "null" }] },
+        "launchctl_command": { "oneOf": [{ "$ref": "#/$defs/absolute_path" }, { "type": "null" }] }
+      }
+    },
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker_executable", "github_cli_command", "task_root", "telemetry_root", "evidence_root", "signing_workspace_root", "signing_private_key_file", "signing_public_key_file", "maximum_runtime_milliseconds", "stop_grace_milliseconds", "watchdog"],
+      "properties": {
+        "worker_executable": { "$ref": "#/$defs/absolute_path" },
+        "github_cli_command": { "$ref": "#/$defs/absolute_path" },
+        "task_root": { "$ref": "#/$defs/absolute_path" },
+        "telemetry_root": { "$ref": "#/$defs/absolute_path" },
+        "evidence_root": { "$ref": "#/$defs/absolute_path" },
+        "signing_workspace_root": { "$ref": "#/$defs/absolute_path" },
+        "signing_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "signing_public_key_file": { "$ref": "#/$defs/absolute_path" },
+        "maximum_runtime_milliseconds": { "type": "integer", "minimum": 1, "maximum": 604800000 },
+        "stop_grace_milliseconds": { "type": "integer", "minimum": 1, "maximum": 600000 },
+        "watchdog": { "$ref": "#/$defs/benchmark_watchdog" }
+      }
+    },
+    "benchmark_watchdog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port", "server_name", "ca_file", "controller_authority_private_key_file", "controller_allowlist_file", "controller_reload_receipt_file", "enrollment_server_certificate_file", "enrollment_server_private_key_file", "controller_certificate_file", "controller_private_key_file", "timeout_milliseconds"],
+      "properties": {
+        "host": { "const": "127.0.0.1" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "server_name": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^\\S+$" },
+        "ca_file": { "$ref": "#/$defs/absolute_path" },
+        "controller_authority_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "controller_allowlist_file": { "$ref": "#/$defs/absolute_path" },
+        "controller_reload_receipt_file": { "$ref": "#/$defs/absolute_path" },
+        "enrollment_server_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "enrollment_server_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "controller_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "controller_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "timeout_milliseconds": { "$ref": "#/$defs/positive_timeout_milliseconds" }
+      }
+    },
+    "pairing_common": {
+      "type": "object",
+      "properties": {
+        "setup_secret_file": { "$ref": "#/$defs/absolute_path" },
+        "discovery_command": { "$ref": "#/$defs/absolute_path" },
+        "openssl_command": { "$ref": "#/$defs/absolute_path" },
+        "trust_workspace": { "$ref": "#/$defs/absolute_path" },
+        "site_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "site_public_key_file": { "$ref": "#/$defs/absolute_path" },
+        "site_ca_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "local_control_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "public_key_sha256": { "$ref": "#/$defs/sha256" },
+        "certificate_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "linux_pairing": {
+      "allOf": [
+        { "$ref": "#/$defs/pairing_common" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["setup_secret_file", "operating_system", "discovery_command", "openssl_command", "trust_workspace", "site_private_key_file", "site_public_key_file", "site_ca_certificate_file", "local_control_certificate_file", "public_key_sha256", "certificate_sha256", "direct_link_sys_class", "direct_link_ip_command"],
+          "properties": {
+            "setup_secret_file": true, "operating_system": { "const": "linux" },
+            "discovery_command": true, "openssl_command": true, "trust_workspace": true,
+            "site_private_key_file": true, "site_public_key_file": true,
+            "site_ca_certificate_file": true, "local_control_certificate_file": true,
+            "public_key_sha256": true, "certificate_sha256": true,
+            "direct_link_sys_class": { "$ref": "#/$defs/absolute_path" },
+            "direct_link_ip_command": { "$ref": "#/$defs/absolute_path" }
+          }
+        }
+      ]
+    },
+    "macos_pairing": {
+      "allOf": [
+        { "$ref": "#/$defs/pairing_common" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["setup_secret_file", "operating_system", "discovery_command", "openssl_command", "trust_workspace", "site_private_key_file", "site_public_key_file", "site_ca_certificate_file", "local_control_certificate_file", "public_key_sha256", "certificate_sha256"],
+          "properties": {
+            "setup_secret_file": true, "operating_system": { "const": "macos" },
+            "discovery_command": true, "openssl_command": true, "trust_workspace": true,
+            "site_private_key_file": true, "site_public_key_file": true,
+            "site_ca_certificate_file": true, "local_control_certificate_file": true,
+            "public_key_sha256": true, "certificate_sha256": true
+          }
+        }
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "positive_timeout_milliseconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 60000
+    },
+    "accept_poll_milliseconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "absolute_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/"
+    },
+    "linux_hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operating_system",
+        "architecture",
+        "boot_id_file",
+        "cpu_information_file",
+        "memory_information_file",
+        "nvidia_smi_command",
+        "rdma_command"
+      ],
+      "properties": {
+        "operating_system": { "const": "linux" },
+        "architecture": { "enum": ["arm64", "x86_64"] },
+        "boot_id_file": { "$ref": "#/$defs/absolute_path" },
+        "cpu_information_file": { "$ref": "#/$defs/absolute_path" },
+        "memory_information_file": { "$ref": "#/$defs/absolute_path" },
+        "nvidia_smi_command": {
+          "oneOf": [{ "$ref": "#/$defs/absolute_path" }, { "type": "null" }]
+        },
+        "rdma_command": {
+          "oneOf": [{ "$ref": "#/$defs/absolute_path" }, { "type": "null" }]
+        }
+      }
+    },
+    "macos_hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operating_system",
+        "architecture",
+        "sysctl_command",
+        "metal_probe_command"
+      ],
+      "properties": {
+        "operating_system": { "const": "macos" },
+        "architecture": { "const": "arm64" },
+        "sysctl_command": { "$ref": "#/$defs/absolute_path" },
+        "metal_probe_command": { "$ref": "#/$defs/absolute_path" }
+      }
+    },
+    "protection_executable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "executable_sha256", "principal_id"],
+      "properties": {
+        "path": { "$ref": "#/$defs/absolute_path" },
+        "executable_sha256": { "$ref": "#/$defs/sha256" },
+        "principal_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      }
+    },
+    "linux_placement_safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operating_system",
+        "socket_path",
+        "maximum_workers",
+        "read_timeout_milliseconds",
+        "write_timeout_milliseconds",
+        "accept_poll_interval_milliseconds",
+        "protection_root",
+        "watchdog_source_identity",
+        "gateway",
+        "watchdog",
+        "lease_milliseconds"
+      ],
+      "properties": {
+        "operating_system": { "const": "linux" },
+        "socket_path": { "$ref": "#/$defs/absolute_path" },
+        "maximum_workers": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "read_timeout_milliseconds": { "$ref": "#/$defs/positive_timeout_milliseconds" },
+        "write_timeout_milliseconds": { "$ref": "#/$defs/positive_timeout_milliseconds" },
+        "accept_poll_interval_milliseconds": { "$ref": "#/$defs/accept_poll_milliseconds" },
+        "protection_root": { "$ref": "#/$defs/absolute_path" },
+        "watchdog_source_identity": { "$ref": "#/$defs/sha256" },
+        "gateway": { "$ref": "#/$defs/protection_executable" },
+        "watchdog": { "$ref": "#/$defs/protection_executable" },
+        "lease_milliseconds": { "type": "integer", "minimum": 1, "maximum": 60000 }
+      }
+    },
+    "macos_placement_safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operating_system"],
+      "properties": {
+        "operating_system": { "const": "macos" }
+      }
+    },
+    "local_private_api": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "socket_path",
+        "maximum_workers",
+        "read_timeout_milliseconds",
+        "write_timeout_milliseconds",
+        "accept_poll_interval_milliseconds"
+      ],
+      "properties": {
+        "socket_path": { "$ref": "#/$defs/absolute_path" },
+        "maximum_workers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "read_timeout_milliseconds": {
+          "$ref": "#/$defs/positive_timeout_milliseconds"
+        },
+        "write_timeout_milliseconds": {
+          "$ref": "#/$defs/positive_timeout_milliseconds"
+        },
+        "accept_poll_interval_milliseconds": {
+          "$ref": "#/$defs/accept_poll_milliseconds"
+        }
+      }
+    },
+    "remote_private_api": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bind_address",
+        "maximum_workers",
+        "accept_poll_interval_milliseconds",
+        "handshake_timeout_milliseconds",
+        "read_timeout_milliseconds",
+        "write_timeout_milliseconds",
+        "server_certificate_file",
+        "server_private_key_file",
+        "client_ca_file"
+      ],
+      "properties": {
+        "bind_address": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64
+        },
+        "maximum_workers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "accept_poll_interval_milliseconds": {
+          "$ref": "#/$defs/accept_poll_milliseconds"
+        },
+        "handshake_timeout_milliseconds": {
+          "$ref": "#/$defs/positive_timeout_milliseconds"
+        },
+        "read_timeout_milliseconds": {
+          "$ref": "#/$defs/positive_timeout_milliseconds"
+        },
+        "write_timeout_milliseconds": {
+          "$ref": "#/$defs/positive_timeout_milliseconds"
+        },
+        "server_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "server_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "client_ca_file": { "$ref": "#/$defs/absolute_path" }
+      }
+    }
+  }
+}

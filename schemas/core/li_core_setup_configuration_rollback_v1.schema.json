@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/core/li_core_setup_configuration_rollback_v1.schema.json",
+  "title": "Let's Infer Core setup configuration rollback",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "intent"],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "li_core_setup_configuration_rollback"},
+        "version": {"const": 1}
+      }
+    },
+    "intent": {
+      "$ref": "li_core_setup_configuration_intent_v1.schema.json"
+    }
+  }
+}

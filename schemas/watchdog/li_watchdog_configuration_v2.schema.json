@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/watchdog/li_watchdog_configuration_v2.schema.json",
+  "title": "Let's Infer Watchdog configuration v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "installation_id", "node_id", "core_release", "core_source_identity", "listener", "node_protection", "paths", "cadence", "maximum_controllers", "providers", "thresholds"],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "li_watchdog_configuration"},
+        "version": {"const": 2}
+      }
+    },
+    "installation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "node_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "core_release": {"type": "string", "pattern": "^\\S{1,127}$"},
+    "core_source_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "listener": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "port"],
+      "properties": {
+        "address": {"type": "string", "minLength": 2, "maxLength": 45},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    },
+    "node_protection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["socket_path", "read_timeout_milliseconds", "write_timeout_milliseconds"],
+      "properties": {
+        "socket_path": {"$ref": "#/$defs/absolutePath"},
+        "read_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000},
+        "write_timeout_milliseconds": {"type": "integer", "minimum": 1, "maximum": 60000}
+      }
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data_directory", "server_certificate_path", "server_private_key_path", "controller_ca_path", "controller_allowlist_path", "controller_snapshot_path", "site_state_path", "gateway_metrics_path", "protection_root_path", "node_database_path", "runtime_installation_root", "runtime_cache_root"],
+      "properties": {
+        "data_directory": {"$ref": "#/$defs/absolutePath"},
+        "server_certificate_path": {"$ref": "#/$defs/absolutePath"},
+        "server_private_key_path": {"$ref": "#/$defs/absolutePath"},
+        "controller_ca_path": {"$ref": "#/$defs/absolutePath"},
+        "controller_allowlist_path": {"$ref": "#/$defs/absolutePath"},
+        "controller_snapshot_path": {"$ref": "#/$defs/absolutePath"},
+        "site_state_path": {"$ref": "#/$defs/absolutePath"},
+        "gateway_metrics_path": {"$ref": "#/$defs/absolutePath"},
+        "protection_root_path": {"$ref": "#/$defs/absolutePath"},
+        "node_database_path": {"$ref": "#/$defs/absolutePath"},
+        "runtime_installation_root": {"$ref": "#/$defs/absolutePath"},
+        "runtime_cache_root": {"$ref": "#/$defs/absolutePath"}
+      }
+    },
+    "cadence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_interval_milliseconds", "flush_interval_milliseconds"],
+      "properties": {
+        "sample_interval_milliseconds": {"const": 1000},
+        "flush_interval_milliseconds": {"type": "integer", "minimum": 1000, "maximum": 60000}
+      }
+    },
+    "maximum_controllers": {"type": "integer", "minimum": 1, "maximum": 16},
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gpu", "gateway_counters"],
+      "properties": {
+        "gpu": {"const": "nvml"},
+        "gateway_counters": {"const": "gateway_telemetry_v2"}
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["warning_available_bytes", "graceful_available_bytes", "emergency_available_bytes", "swap_stop_bytes", "psi_some_microseconds", "psi_full_microseconds", "state_failures", "containment_grace_milliseconds"],
+      "properties": {
+        "warning_available_bytes": {"$ref": "#/$defs/positiveInteger"},
+        "graceful_available_bytes": {"$ref": "#/$defs/positiveInteger"},
+        "emergency_available_bytes": {"$ref": "#/$defs/positiveInteger"},
+        "swap_stop_bytes": {"$ref": "#/$defs/positiveInteger"},
+        "psi_some_microseconds": {"$ref": "#/$defs/positiveInteger"},
+        "psi_full_microseconds": {"$ref": "#/$defs/positiveInteger"},
+        "state_failures": {"type": "integer", "minimum": 2, "maximum": 4294967295},
+        "containment_grace_milliseconds": {"type": "integer", "minimum": 1, "maximum": 30000}
+      }
+    }
+  },
+  "$defs": {
+    "absolutePath": {"type": "string", "pattern": "^/(?:[^/]+)(?:/[^/]+)*$", "maxLength": 4095},
+    "positiveInteger": {"type": "integer", "minimum": 1}
+  }
+}

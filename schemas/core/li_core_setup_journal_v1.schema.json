@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/core/li_core_setup_journal_v1.schema.json",
+  "title": "Let's Infer Core setup journal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "revision",
+    "request_id",
+    "request_identity",
+    "phase",
+    "identity",
+    "material",
+    "configurations",
+    "services",
+    "result"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_core_setup_journal" },
+        "version": { "const": 1 }
+      }
+    },
+    "revision": { "type": "integer", "minimum": 1 },
+    "request_id": { "$ref": "#/$defs/sha256" },
+    "request_identity": { "$ref": "#/$defs/sha256" },
+    "phase": {
+      "enum": [
+        "prepared",
+        "identity_prepared",
+        "material_prepared",
+        "configurations_installed",
+        "services_installed",
+        "completed"
+      ]
+    },
+    "identity": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/identity_closure" }
+      ]
+    },
+    "material": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/material_closure" }
+      ]
+    },
+    "configurations": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/receipt" }
+      ]
+    },
+    "services": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/receipt" }
+      ]
+    },
+    "result": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "li_core_setup_result_v1.schema.json" }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "phase": { "const": "prepared" },
+        "identity": { "type": "null" },
+        "material": { "type": "null" },
+        "configurations": { "type": "null" },
+        "services": { "type": "null" },
+        "result": { "type": "null" }
+      }
+    },
+    {
+      "properties": {
+        "phase": { "const": "identity_prepared" },
+        "identity": { "$ref": "#/$defs/identity_closure" },
+        "material": { "type": "null" },
+        "configurations": { "type": "null" },
+        "services": { "type": "null" },
+        "result": { "type": "null" }
+      }
+    },
+    {
+      "properties": {
+        "phase": { "const": "material_prepared" },
+        "identity": { "$ref": "#/$defs/identity_closure" },
+        "material": { "$ref": "#/$defs/material_closure" },
+        "configurations": { "type": "null" },
+        "services": { "type": "null" },
+        "result": { "type": "null" }
+      }
+    },
+    {
+      "properties": {
+        "phase": { "const": "configurations_installed" },
+        "identity": { "$ref": "#/$defs/identity_closure" },
+        "material": { "$ref": "#/$defs/material_closure" },
+        "configurations": { "$ref": "#/$defs/receipt" },
+        "services": { "type": "null" },
+        "result": { "type": "null" }
+      }
+    },
+    {
+      "properties": {
+        "phase": { "const": "services_installed" },
+        "identity": { "$ref": "#/$defs/identity_closure" },
+        "material": { "$ref": "#/$defs/material_closure" },
+        "configurations": { "$ref": "#/$defs/receipt" },
+        "services": { "$ref": "#/$defs/receipt" },
+        "result": { "type": "null" }
+      }
+    },
+    {
+      "properties": {
+        "phase": { "const": "completed" },
+        "identity": { "$ref": "#/$defs/identity_closure" },
+        "material": { "$ref": "#/$defs/material_closure" },
+        "configurations": { "$ref": "#/$defs/receipt" },
+        "services": { "$ref": "#/$defs/receipt" },
+        "result": {
+          "allOf": [
+            { "$ref": "li_core_setup_result_v1.schema.json" },
+            {
+              "properties": {
+                "status": { "const": "installed" }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "absolute_path": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^/(?:[^/\\u0000]+/?)*$"
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt_identity"],
+      "properties": {
+        "receipt_identity": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "identity_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_identity",
+        "node_id",
+        "machine_id",
+        "installation_id",
+        "display_name",
+        "role",
+        "control_address"
+      ],
+      "properties": {
+        "receipt_identity": { "$ref": "#/$defs/sha256" },
+        "node_id": { "$ref": "#/$defs/identity" },
+        "machine_id": { "$ref": "#/$defs/identity" },
+        "installation_id": { "$ref": "#/$defs/sha256" },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "role": { "enum": ["main", "child"] },
+        "control_address": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^\\S+$"
+        }
+      }
+    },
+    "material_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_identity",
+        "database_file",
+        "pairing_setup_secret_file",
+        "api_key_file",
+        "benchmark_signing",
+        "pairing_trust",
+        "node_trust",
+        "gateway_trust",
+        "watchdog_trust",
+        "material_identity"
+      ],
+      "properties": {
+        "receipt_identity": { "$ref": "#/$defs/sha256" },
+        "database_file": { "$ref": "#/$defs/absolute_path" },
+        "pairing_setup_secret_file": { "$ref": "#/$defs/absolute_path" },
+        "api_key_file": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/absolute_path" }
+          ]
+        },
+        "benchmark_signing": {
+          "$ref": "#/$defs/benchmark_signing"
+        },
+        "pairing_trust": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "site_private_key_file",
+            "site_public_key_file",
+            "site_ca_certificate_file",
+            "local_control_certificate_file",
+            "public_key_sha256",
+            "certificate_sha256"
+          ],
+          "properties": {
+            "site_private_key_file": { "$ref": "#/$defs/absolute_path" },
+            "site_public_key_file": { "$ref": "#/$defs/absolute_path" },
+            "site_ca_certificate_file": { "$ref": "#/$defs/absolute_path" },
+            "local_control_certificate_file": { "$ref": "#/$defs/absolute_path" },
+            "public_key_sha256": { "$ref": "#/$defs/sha256" },
+            "certificate_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "node_trust": { "$ref": "#/$defs/node_trust" },
+        "gateway_trust": { "$ref": "#/$defs/gateway_trust" },
+        "watchdog_trust": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/watchdog_trust" }
+          ]
+        },
+        "material_identity": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "node_trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority_private_key_file",
+        "authority_certificate_file",
+        "server_certificate_file",
+        "server_private_key_file",
+        "client_certificate_file",
+        "client_private_key_file",
+        "server_certificate_sha256",
+        "client_certificate_sha256"
+      ],
+      "properties": {
+        "authority_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "authority_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "server_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "server_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "client_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "client_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "server_certificate_sha256": { "$ref": "#/$defs/sha256" },
+        "client_certificate_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "benchmark_signing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["private_key_file", "public_key_file", "public_key_sha256"],
+      "properties": {
+        "private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "public_key_file": { "$ref": "#/$defs/absolute_path" },
+        "public_key_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "gateway_trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority_private_key_file",
+        "authority_certificate_file",
+        "server_certificate_file",
+        "server_private_key_file",
+        "relay_client_certificate_file",
+        "relay_client_private_key_file",
+        "server_certificate_sha256",
+        "relay_client_certificate_sha256"
+      ],
+      "properties": {
+        "authority_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "authority_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "server_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "server_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "relay_client_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "relay_client_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "server_certificate_sha256": { "$ref": "#/$defs/sha256" },
+        "relay_client_certificate_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "watchdog_trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority_private_key_file",
+        "authority_certificate_file",
+        "server_certificate_file",
+        "server_private_key_file",
+        "controller_certificate_file",
+        "controller_private_key_file",
+        "controller_allowlist_file",
+        "server_certificate_sha256",
+        "controller_certificate_sha256"
+      ],
+      "properties": {
+        "authority_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "authority_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "server_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "server_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "controller_certificate_file": { "$ref": "#/$defs/absolute_path" },
+        "controller_private_key_file": { "$ref": "#/$defs/absolute_path" },
+        "controller_allowlist_file": { "$ref": "#/$defs/absolute_path" },
+        "server_certificate_sha256": { "$ref": "#/$defs/sha256" },
+        "controller_certificate_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

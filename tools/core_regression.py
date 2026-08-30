@@ -25,12 +25,9 @@ class Suite:
 
 
 SUITES = (
-    Suite("cli", pathlib.Path("tests/cli"), "CLI and lifecycle behavior"),
+    Suite("tooling", pathlib.Path("tests/cli"), "build, release, and installer tools"),
     Suite("benchmarks", pathlib.Path("tests/benchmarks"), "benchmark contracts"),
-    Suite("gateway", pathlib.Path("tests/gateway"), "OpenAI gateway behavior"),
-    Suite("orchestration", pathlib.Path("tests/orchestration"), "replica orchestration"),
-    Suite("node", pathlib.Path("tests/site"), "node control and telemetry"),
-    Suite("regression", pathlib.Path("tests/regression"), "suite and CLI surface contracts"),
+    Suite("regression", pathlib.Path("tests/regression"), "suite ownership contracts"),
     Suite(
         "macos-contract",
         pathlib.Path("apps/macos/tests"),

@@ -1,0 +1,21 @@
+{
+  "schema": { "name": "li_node_protection_api", "version": 2 },
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "connection_id": "9999999999999999999999999999999999999999999999999999999999999999",
+  "request": {
+    "action": "commit_watchdog_cycle",
+    "arguments": {
+      "node_id": "11111111111111111111111111111111",
+      "watchdog_session_id": "5555555555555555555555555555555555555555555555555555555555555555",
+      "watchdog_session_generation": 3,
+      "cycle": {
+        "sample_sequence": 8,
+        "observed_at_unix_milliseconds": 1008,
+        "observed_at_monotonic_milliseconds": 208,
+        "protected_descriptors": [
+          "version=1\ngeneration=66666666666666666666666666666666\nphase=armed\ncontainer_name=li_engine\ncontainer_id=7777777777777777777777777777777777777777777777777777777777777777\npid=1234\nstart_ticks=5678\nboot_id=12345678-1234-1234-1234-123456789abc\ncgroup=/sys/fs/cgroup/user.slice/li_engine\n"
+        ]
+      }
+    }
+  }
+}
