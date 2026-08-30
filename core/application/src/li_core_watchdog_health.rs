@@ -296,8 +296,14 @@ impl CoreServiceSetupResidentHealth for CoreWatchdogServiceHealth {
                 "Watchdog health request does not match its service role",
             ));
         }
-        self.observe_watchdog(timeout)
-            .map_err(map_watchdog_health_error)
+        match self.observe_watchdog(timeout) {
+            Ok(observation) => Ok(observation),
+            Err(
+                CoreWatchdogHealthError::TransportUnavailable
+                | CoreWatchdogHealthError::DeadlineExceeded,
+            ) => Ok(CoreServiceSetupObservation::NotReady),
+            Err(error) => Err(map_watchdog_health_error(error)),
+        }
     }
 }
 

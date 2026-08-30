@@ -118,6 +118,7 @@ use li_watchdog_manager::{
 const PLACEMENT_ACKNOWLEDGEMENT_ATTEMPTS: u16 = 100;
 #[cfg(target_os = "linux")]
 const PLACEMENT_ACKNOWLEDGEMENT_INTERVAL: Duration = Duration::from_millis(10);
+const NODE_HEALTH_MAXIMUM_TIMEOUT: Duration = Duration::from_secs(60);
 
 use crate::{
     compose_core_model_placement, compose_core_model_runtime, compose_core_node_pairing_api,
@@ -362,7 +363,7 @@ impl CoreNodeServiceHealth {
             &self.configuration,
             identity.map(CoreServiceSetupNodeIdentity::node_id),
             expected_role,
-            timeout,
+            timeout.min(NODE_HEALTH_MAXIMUM_TIMEOUT),
         ) {
             Ok(()) => Ok(CoreServiceSetupObservation::Ready),
             Err(NodeHealthError::EndpointUnavailable | NodeHealthError::NotReady) => {
@@ -3171,7 +3172,7 @@ mod tests {
                 CoreUpdateServiceContext::new(platform, CoreUpdateNodeRole::Main),
                 CoreResidentProcess::Node,
                 Some(&identity),
-                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(90),
             ),
             Ok(CoreServiceSetupObservation::NotReady)
         );

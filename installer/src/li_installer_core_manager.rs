@@ -136,6 +136,13 @@ impl LauncherMutationProvider for SystemLauncherMutationProvider {
                 .arg(&temporary),
             "cannot stage system launcher",
         )?;
+        #[cfg(target_os = "macos")]
+        run_checked(
+            Command::new(sudo)
+                .args(["chmod", "-h", "0755"])
+                .arg(&temporary),
+            "cannot make system launcher public",
+        )?;
         run_checked(
             Command::new(sudo)
                 .args(["mv", "-f", "--"])
@@ -507,7 +514,8 @@ fn activate_launcher(
     privilege_command: Option<PathBuf>,
 ) -> Result<LauncherActivationReceipt, LauncherActivationError> {
     let launcher = launcher_root.join("letsinfer");
-    let previous = launcher_state(&launcher).map_err(LauncherActivationError::unmutated)?;
+    let previous = launcher_state_with_privilege(&launcher, privilege_command.as_deref())
+        .map_err(LauncherActivationError::unmutated)?;
     provider
         .prepare_directory(launcher_root, privilege_command.as_deref())
         .map_err(LauncherActivationError::unmutated)?;
@@ -524,7 +532,10 @@ fn activate_launcher(
     ) {
         return Err(launcher_activation_failure(provider, &receipt, error));
     }
-    let observed = match launcher_state(&receipt.launcher) {
+    let observed = match launcher_state_with_privilege(
+        &receipt.launcher,
+        receipt.privilege_command.as_deref(),
+    ) {
         Ok(observed) => observed,
         Err(error) => return Err(launcher_activation_failure(provider, &receipt, error)),
     };
@@ -561,7 +572,8 @@ fn rollback_launcher(
     provider: &dyn LauncherMutationProvider,
     receipt: &LauncherActivationReceipt,
 ) -> Result<(), String> {
-    let observed = launcher_state(&receipt.launcher)?;
+    let observed =
+        launcher_state_with_privilege(&receipt.launcher, receipt.privilege_command.as_deref())?;
     if observed == receipt.previous {
         return Ok(());
     }
@@ -580,7 +592,9 @@ fn rollback_launcher(
             receipt.privilege_command.as_deref(),
         )?,
     }
-    if launcher_state(&receipt.launcher)? != receipt.previous {
+    if launcher_state_with_privilege(&receipt.launcher, receipt.privilege_command.as_deref())?
+        != receipt.previous
+    {
         return Err("public launcher rollback identity differs; recovery required".to_string());
     }
     Ok(())
@@ -588,16 +602,66 @@ fn rollback_launcher(
 
 // Returns exact launcher absence or raw symlink target without following it.
 fn launcher_state(launcher: &Path) -> Result<LauncherState, String> {
+    launcher_state_with_privilege(launcher, None)
+}
+
+// Returns exact launcher state and uses the selected privilege only for an unreadable symlink.
+fn launcher_state_with_privilege(
+    launcher: &Path,
+    privilege: Option<&Path>,
+) -> Result<LauncherState, String> {
     match fs::symlink_metadata(launcher) {
-        Ok(metadata) if metadata.file_type().is_symlink() => fs::read_link(launcher)
-            .map(LauncherState::Symlink)
-            .map_err(|error| format!("cannot read public launcher: {error}")),
+        Ok(metadata) if metadata.file_type().is_symlink() => match fs::read_link(launcher) {
+            Ok(target) => Ok(LauncherState::Symlink(target)),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                let privilege =
+                    privilege.ok_or_else(|| format!("cannot read public launcher: {error}"))?;
+                privileged_launcher_target(privilege, launcher).map(LauncherState::Symlink)
+            }
+            Err(error) => Err(format!("cannot read public launcher: {error}")),
+        },
         Ok(_) => Err(format!(
             "refusing to replace a non-symlink launcher: {}",
             launcher.display()
         )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(LauncherState::Absent),
         Err(error) => Err(format!("cannot inspect public launcher: {error}")),
+    }
+}
+
+// Reads one root-owned symlink target without following it or invoking a shell.
+fn privileged_launcher_target(privilege: &Path, launcher: &Path) -> Result<PathBuf, String> {
+    let output = run_checked(
+        Command::new(privilege)
+            .arg("/usr/bin/readlink")
+            .arg(launcher),
+        "cannot read public launcher",
+    )?;
+    decode_readlink_output(output)
+}
+
+// Decodes one newline-terminated native readlink result without target ambiguity.
+fn decode_readlink_output(mut output: Vec<u8>) -> Result<PathBuf, String> {
+    if output.last() == Some(&b'\n') {
+        output.pop();
+    }
+    if output.is_empty()
+        || output.contains(&b'\0')
+        || output.contains(&b'\n')
+        || output.contains(&b'\r')
+    {
+        return Err("cannot read public launcher: target is invalid".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        Ok(PathBuf::from(OsString::from_vec(output)))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = output;
+        Err("native installer requires Unix symlink support".to_string())
     }
 }
 
@@ -1562,6 +1626,24 @@ mod tests {
         make_tree_writable(&root);
         let _ = fs::remove_dir_all(&root);
         root
+    }
+
+    // Accepts one native readlink line and rejects every empty or ambiguous target encoding.
+    #[test]
+    fn privileged_readlink_output_is_closed() {
+        assert_eq!(
+            decode_readlink_output(b"/Users/taimur/.local/bin/letsinfer\n".to_vec()),
+            Ok(PathBuf::from("/Users/taimur/.local/bin/letsinfer"))
+        );
+        for output in [
+            Vec::new(),
+            b"\n".to_vec(),
+            b"first\nsecond\n".to_vec(),
+            b"first\rsecond\n".to_vec(),
+            b"first\0second\n".to_vec(),
+        ] {
+            assert!(decode_readlink_output(output).is_err());
+        }
     }
 
     // Removes a first-install launcher through both direct-user and mocked-system boundaries.
