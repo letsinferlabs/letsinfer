@@ -41,6 +41,10 @@ use li_watchdog_manager::{
     WatchdogTlsFileSet,
 };
 use ring::signature::{UnparsedPublicKey, ED25519};
+use rustls::client::danger::ServerCertVerifier;
+use rustls::client::WebPkiServerVerifier;
+use rustls::pki_types::ServerName;
+use rustls::RootCertStore;
 use sha2::{Digest, Sha256};
 
 // Serializes fixtures that invoke the production OpenSSL command runner.
@@ -1250,6 +1254,16 @@ fn openssl_material_issuer_generates_verified_identity_and_cleans_workspace() {
     GatewayNativeTlsServerConfiguration::load(&gateway_files, &SystemGatewayNativeFileIo)
         .expect("Gateway TLS consumer");
     let watchdog = material.watchdog_trust().expect("Watchdog trust");
+    assert!(certificate_accepts_server_name(
+        watchdog.server_certificate_file(),
+        watchdog.authority_certificate_file(),
+        ServerName::IpAddress("127.0.0.1".parse::<std::net::IpAddr>().expect("IP").into()),
+    ));
+    assert!(!certificate_accepts_server_name(
+        watchdog.server_certificate_file(),
+        watchdog.authority_certificate_file(),
+        ServerName::try_from("homeai.local").expect("DNS name"),
+    ));
     let watchdog_files = WatchdogTlsFileSet::new(
         owner_user_id,
         watchdog.server_certificate_file().to_path_buf(),
@@ -1385,6 +1399,39 @@ fn openssl_path() -> Option<std::path::PathBuf> {
         .into_iter()
         .map(std::path::PathBuf::from)
         .find(|path| path.is_file())
+}
+
+// Verifies one generated server identity through the same WebPKI contract as Core health.
+fn certificate_accepts_server_name(
+    certificate_file: &std::path::Path,
+    authority_file: &std::path::Path,
+    server_name: ServerName<'static>,
+) -> bool {
+    let authority_document = fs::read(authority_file).expect("authority certificate");
+    let authorities = rustls_pemfile::certs(&mut Cursor::new(authority_document))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("authority certificate PEM");
+    let mut roots = RootCertStore::empty();
+    let (added, ignored) = roots.add_parsable_certificates(authorities);
+    assert_eq!((added, ignored), (1, 0));
+    let certificate_document = fs::read(certificate_file).expect("server certificate");
+    let certificates = rustls_pemfile::certs(&mut Cursor::new(certificate_document))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("server certificate PEM");
+    let [certificate] = certificates.as_slice() else {
+        panic!("one server certificate is required");
+    };
+    WebPkiServerVerifier::builder(Arc::new(roots))
+        .build()
+        .expect("WebPKI verifier")
+        .verify_server_cert(
+            certificate,
+            &[],
+            &server_name,
+            &[],
+            rustls::pki_types::UnixTime::now(),
+        )
+        .is_ok()
 }
 
 // Redacts native nonzero and timeout diagnostics and removes every known partial output.

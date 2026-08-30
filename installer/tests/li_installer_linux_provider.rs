@@ -180,6 +180,55 @@ fn linux_platform_documents_cross_the_rust_validator_wire() {
     }
 }
 
+// Keeps an installed but unavailable NVIDIA driver from aborting the host probe.
+#[test]
+fn unavailable_nvidia_driver_emits_an_empty_accelerator_observation() {
+    let root = repository_root();
+    let unavailable = root
+        .join("tests/li_installer/fixtures/li_installer_linux_x86_64/bin/nvidia-smi-unavailable")
+        .to_string_lossy()
+        .into_owned();
+    let mut arguments = provider_arguments("li_installer_linux_x86_64", "linux-x86_64");
+    let mut command_replaced = false;
+    let mut dependency_replaced = false;
+    for pair in arguments.chunks_exact_mut(2) {
+        if pair[0] == "--nvidia-smi-command" {
+            pair[1].clone_from(&unavailable);
+            command_replaced = true;
+        } else if pair[0] == "--dependency" && pair[1].starts_with("nvidia_smi=") {
+            pair[1] = format!("nvidia_smi={unavailable}");
+            dependency_replaced = true;
+        }
+    }
+    assert!(command_replaced && dependency_replaced);
+    let document = li_installer_linux_provider::observe(&arguments)
+        .expect("an unavailable NVIDIA driver should not abort the probe");
+    let value: Value = serde_json::from_str(&document).expect("probe should be JSON");
+    assert_eq!(
+        value
+            .pointer("/hardware/accelerators")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(0)
+    );
+    assert!(value
+        .pointer("/hardware/software/nvidia_cuda_max_version")
+        .is_some_and(Value::is_null));
+    assert_eq!(
+        value
+            .pointer("/dependencies/nvidia_smi/path")
+            .and_then(Value::as_str),
+        Some(unavailable.as_str())
+    );
+    assert_eq!(
+        value
+            .pointer("/dependencies/nvidia_smi/version")
+            .and_then(Value::as_str),
+        Some("")
+    );
+    validate_wire_document("linux-x86_64", &document);
+}
+
 // Runs an injected package transaction through the internal dependency manager.
 #[test]
 fn applies_linux_dependency_fixture() {

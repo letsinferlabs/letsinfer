@@ -1135,13 +1135,19 @@ impl OpenSslCoreSetupResidentTrustIssuer {
         )?;
         let watchdog = match request.context().platform() {
             li_core_update_manager::CoreUpdateServicePlatform::Linux => {
+                let watchdog_server_name = request
+                    .network()
+                    .watchdog_address()
+                    .ok_or_else(|| material_error("Watchdog listener identity is unavailable"))?
+                    .ip()
+                    .to_string();
                 Some(self.issue_mutual_tls_in_workspace(
                     workspace,
                     "watchdog",
                     "Lets Infer Watchdog CA",
                     "Lets Infer Watchdog Server",
                     "Lets Infer Core Health Controller",
-                    identity.control_address().as_str(),
+                    &watchdog_server_name,
                     31,
                 )?)
             }
