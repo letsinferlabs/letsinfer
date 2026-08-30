@@ -601,6 +601,7 @@ fn rollback_launcher(
 }
 
 // Returns exact launcher absence or raw symlink target without following it.
+#[cfg(test)]
 fn launcher_state(launcher: &Path) -> Result<LauncherState, String> {
     launcher_state_with_privilege(launcher, None)
 }
