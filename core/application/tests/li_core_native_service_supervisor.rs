@@ -23,7 +23,7 @@ static NATIVE_COMMAND_TEST_LOCK: Mutex<()> = Mutex::new(());
 fn native_command_test_guard() -> MutexGuard<'static, ()> {
     NATIVE_COMMAND_TEST_LOCK
         .lock()
-        .expect("native command test lock")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // Stores one exact native supervisor invocation for call-order assertions.

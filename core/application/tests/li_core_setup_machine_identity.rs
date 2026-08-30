@@ -24,7 +24,7 @@ static NATIVE_MACHINE_IDENTITY_TEST_LOCK: Mutex<()> = Mutex::new(());
 fn native_machine_identity_test_guard() -> MutexGuard<'static, ()> {
     NATIVE_MACHINE_IDENTITY_TEST_LOCK
         .lock()
-        .expect("native machine identity test lock")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // Returns one selected file document or stable provider failure.

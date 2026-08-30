@@ -100,7 +100,7 @@ fn assert_redacted(result: Result<String, HardwareError>, path: &Path) {
 fn native_process_test_guard() -> MutexGuard<'static, ()> {
     NATIVE_PROCESS_TEST_LOCK
         .lock()
-        .expect("native process test lock")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // Reads a private regular UTF-8 file and executes a private regular command.

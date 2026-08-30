@@ -50,7 +50,7 @@ static NATIVE_OPENSSL_TEST_LOCK: Mutex<()> = Mutex::new(());
 fn native_openssl_test_guard() -> MutexGuard<'static, ()> {
     NATIVE_OPENSSL_TEST_LOCK
         .lock()
-        .expect("native OpenSSL test lock")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // Supplies deterministic distinct entropy while recording every requested closure.
@@ -102,17 +102,21 @@ struct NativeFailureRunner {
     calls: AtomicUsize,
 }
 
-// Runs real OpenSSL while rejecting any accidental native Ed25519 dependency.
-struct NativeEd25519RejectingRunner;
+// Runs real OpenSSL while rejecting every accidental native private-key generator.
+struct NativeKeyGenerationRejectingRunner;
 
-impl PairingNativeCommandRunner for NativeEd25519RejectingRunner {
-    // Rejects native Ed25519 commands and delegates the remaining P-256 trust work.
+impl PairingNativeCommandRunner for NativeKeyGenerationRejectingRunner {
+    // Rejects native private-key generation and delegates certificate issuance work.
     fn run(
         &self,
         command: &PairingNativeCommand,
         timeout: Duration,
         maximum_output_bytes: usize,
     ) -> Result<PairingNativeCommandOutput, PairingError> {
+        assert!(!matches!(
+            command.arguments().first().map(String::as_str),
+            Some("ecparam" | "genpkey")
+        ));
         assert!(!command
             .arguments()
             .iter()
@@ -1284,9 +1288,9 @@ fn openssl_material_issuer_generates_verified_identity_and_cleans_workspace() {
     io.rollback(material.receipt()).expect("rollback");
 }
 
-// Proves setup never delegates Ed25519 generation to platform OpenSSL implementations.
+// Proves setup never delegates private-key generation to platform OpenSSL implementations.
 #[test]
-fn rust_benchmark_signing_avoids_native_ed25519_dependency() {
+fn rust_private_key_generation_avoids_platform_openssl_dependency() {
     let Some(openssl) = openssl_path() else {
         return;
     };
@@ -1299,7 +1303,7 @@ fn rust_benchmark_signing_avoids_native_ed25519_dependency() {
         openssl,
         workspace_root.clone(),
         unsafe { libc::geteuid() },
-        Arc::new(NativeEd25519RejectingRunner),
+        Arc::new(NativeKeyGenerationRejectingRunner),
         Arc::new(SystemCoreSetupTrustWorkspaceIo),
     )
     .expect("issuer");

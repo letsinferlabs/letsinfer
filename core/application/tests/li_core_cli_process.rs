@@ -38,7 +38,7 @@ static NATIVE_CLI_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 fn native_cli_process_test_guard() -> MutexGuard<'static, ()> {
     NATIVE_CLI_PROCESS_TEST_LOCK
         .lock()
-        .expect("native CLI process test lock")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // Supplies one descriptor-shaped result and records the exact bounded read request.
