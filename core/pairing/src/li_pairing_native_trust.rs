@@ -434,7 +434,6 @@ impl OpenSslPairingTrustProvider {
             "-pubin".to_string(),
             "-in".to_string(),
             path_argument(&public_key_path)?,
-            "-pubcheck".to_string(),
             "-outform".to_string(),
             "DER".to_string(),
             "-out".to_string(),

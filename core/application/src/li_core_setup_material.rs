@@ -1284,7 +1284,6 @@ impl OpenSslCoreSetupResidentTrustIssuer {
             "-pubin".into(),
             "-in".into(),
             path(&public_key)?,
-            "-pubcheck".into(),
             "-noout".into(),
         ])?;
         self.run(vec![

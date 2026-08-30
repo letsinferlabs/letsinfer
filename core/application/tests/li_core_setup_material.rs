@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use std::process::Command;
+use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1176,16 +1176,16 @@ fn openssl_material_issuer_generates_verified_identity_and_cleans_workspace() {
         .as_str()
         .is_empty());
     let signing = material.benchmark_signing().expect("benchmark signing");
-    let public_der = Command::new(&openssl)
-        .args(["pkey", "-pubin", "-in"])
-        .arg(signing.public_key_file())
-        .args(["-outform", "DER"])
-        .output()
-        .expect("benchmark signing public DER");
-    assert!(public_der.status.success());
+    let public_document = fs::read(signing.public_key_file()).expect("benchmark public key");
+    let public_keys = rustls_pemfile::public_keys(&mut Cursor::new(&public_document))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("benchmark public DER");
+    let [public_der] = public_keys.as_slice() else {
+        panic!("one benchmark public key is required");
+    };
     assert_eq!(
         signing.public_key_sha256().as_str(),
-        format!("{:x}", Sha256::digest(&public_der.stdout))
+        format!("{:x}", Sha256::digest(public_der.as_ref()))
     );
     let signer = SetupEd25519CoreBenchmarkVerificationSnapshotSigner::new(
         signing.private_key_file().to_path_buf(),
@@ -1204,7 +1204,7 @@ fn openssl_material_issuer_generates_verified_identity_and_cleans_workspace() {
             .expect("production benchmark signature");
     assert_eq!(signing_identity, *signing.public_key_sha256());
     let public_key = public_der
-        .stdout
+        .as_ref()
         .strip_prefix(&[
             0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
         ])

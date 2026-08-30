@@ -649,7 +649,12 @@ fn system_trust_workspace_cleanup_is_closed_and_idempotent() {
 // Identifies one fixed OpenSSL call from its exact argv.
 fn command_operation(arguments: &[String]) -> &'static str {
     let first = arguments.first().map(String::as_str);
-    if first == Some("pkey") && arguments.iter().any(|value| value == "-pubcheck") {
+    if first == Some("pkey")
+        && input_path(arguments)
+            .file_name()
+            .and_then(|value| value.to_str())
+            == Some("li_candidate_public_key.pem")
+    {
         return "candidate-key";
     }
     if first == Some("pkey") {
