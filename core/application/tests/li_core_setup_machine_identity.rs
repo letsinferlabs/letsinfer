@@ -4,7 +4,7 @@ use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use li_core_application::{
@@ -16,6 +16,16 @@ use li_core_application::{
 
 const IOREG_ARGUMENTS: [&str; 3] = ["-rd1", "-c", "IOPlatformExpertDevice"];
 const IOREG_MAXIMUM_OUTPUT_BYTES: usize = 64 * 1024;
+
+// Serializes fixtures that launch or forcibly terminate machine-identity process groups.
+static NATIVE_MACHINE_IDENTITY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+// Acquires exclusive ownership of native machine-identity fixtures for one complete test.
+fn native_machine_identity_test_guard() -> MutexGuard<'static, ()> {
+    NATIVE_MACHINE_IDENTITY_TEST_LOCK
+        .lock()
+        .expect("native machine identity test lock")
+}
 
 // Returns one selected file document or stable provider failure.
 struct TestFileReader {
@@ -381,6 +391,7 @@ fn macos_provider_rejects_invalid_wait_bounds_before_process_entry() {
 // Proves the system command runner executes one safe shell-free source successfully.
 #[test]
 fn system_macos_runner_executes_one_safe_bounded_source() {
+    let _process_guard = native_machine_identity_test_guard();
     let temporary = tempfile::tempdir().expect("temporary directory");
     let root = fs::canonicalize(temporary.path()).expect("canonical temporary directory");
     let executable = root.join("ioreg");
@@ -404,6 +415,7 @@ fn system_macos_runner_executes_one_safe_bounded_source() {
 // Proves unsafe executables, timeout, nonzero status, and oversized stdout all fail closed.
 #[test]
 fn system_macos_runner_rejects_native_failure_matrix() {
+    let _process_guard = native_machine_identity_test_guard();
     let temporary = tempfile::tempdir().expect("temporary directory");
     let root = fs::canonicalize(temporary.path()).expect("canonical temporary directory");
     let owner = owner_user_id();
@@ -511,6 +523,7 @@ fn system_macos_runner_rejects_native_failure_matrix() {
 // Proves timeout kills descendants which retain stdout after the direct child exits.
 #[test]
 fn system_macos_runner_kills_the_complete_inherited_stdout_process_group() {
+    let _process_guard = native_machine_identity_test_guard();
     let temporary = tempfile::tempdir().expect("temporary directory");
     let root = fs::canonicalize(temporary.path()).expect("canonical temporary directory");
     let executable = root.join("descendant");

@@ -8,7 +8,7 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,16 @@ use li_node_manager::{
     NodePrivateTransportResponse,
 };
 use serde_json::{json, Value};
+
+// Serializes fixtures that launch the complete installed native CLI process.
+static NATIVE_CLI_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+// Acquires exclusive ownership of installed native CLI fixtures for one complete test.
+fn native_cli_process_test_guard() -> MutexGuard<'static, ()> {
+    NATIVE_CLI_PROCESS_TEST_LOCK
+        .lock()
+        .expect("native CLI process test lock")
+}
 
 // Supplies one descriptor-shaped result and records the exact bounded read request.
 struct ConfigurationFileMock {
@@ -815,6 +825,7 @@ fn pairing_and_uninstall_fail_closed_without_a_resident_node() {
 // Runs the installed public symlink through `core/current` into the stable setup configuration.
 #[test]
 fn installed_public_launcher_supplies_configuration_to_the_immutable_binary() {
+    let _process_guard = native_cli_process_test_guard();
     let node = local_node();
     let (directory, socket, entropy, server, requests) = native_fixture(vec![
         NodePrivateResponse::LocalNode(node.clone()),
@@ -875,6 +886,7 @@ fn installed_public_launcher_supplies_configuration_to_the_immutable_binary() {
 // Presents public root help and version before setup creates configuration.
 #[test]
 fn installed_public_launcher_presents_metadata_without_configuration() {
+    let _process_guard = native_cli_process_test_guard();
     let directory = tempfile::tempdir().expect("temporary directory");
     let root = fs::canonicalize(directory.path()).expect("canonical root");
     let letsinfer_home = root.join("letsinfer-home");
@@ -975,6 +987,7 @@ fn process_preserves_unavailable_host_and_audit_exit_semantics() {
 // Proves the immutable binary enters the strict bootstrap boundary and returns its stable failure.
 #[test]
 fn native_binary_rejects_incomplete_bootstrap_without_stdout() {
+    let _process_guard = native_cli_process_test_guard();
     let output = Command::new(env!("CARGO_BIN_EXE_li_letsinfer"))
         .arg("--invalid")
         .output()

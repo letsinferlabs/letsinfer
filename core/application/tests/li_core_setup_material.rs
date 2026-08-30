@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use std::{fs, os::unix::fs::PermissionsExt};
 
@@ -42,6 +42,16 @@ use li_watchdog_manager::{
 };
 use ring::signature::{UnparsedPublicKey, ED25519};
 use sha2::{Digest, Sha256};
+
+// Serializes fixtures that invoke the production OpenSSL command runner.
+static NATIVE_OPENSSL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+// Acquires exclusive ownership of production OpenSSL fixtures for one complete test.
+fn native_openssl_test_guard() -> MutexGuard<'static, ()> {
+    NATIVE_OPENSSL_TEST_LOCK
+        .lock()
+        .expect("native OpenSSL test lock")
+}
 
 // Supplies deterministic distinct entropy while recording every requested closure.
 struct EntropyMock {
@@ -1135,6 +1145,7 @@ fn openssl_material_issuer_generates_verified_identity_and_cleans_workspace() {
     let Some(openssl) = openssl_path() else {
         return;
     };
+    let _process_guard = native_openssl_test_guard();
     let temporary = tempfile::tempdir().expect("temporary");
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
         .expect("root permissions");
@@ -1279,6 +1290,7 @@ fn rust_benchmark_signing_avoids_native_ed25519_dependency() {
     let Some(openssl) = openssl_path() else {
         return;
     };
+    let _process_guard = native_openssl_test_guard();
     let temporary = tempfile::tempdir().expect("temporary");
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
         .expect("root permissions");
@@ -1326,6 +1338,7 @@ fn openssl_material_issuer_closes_the_macos_main_matrix() {
     let Some(openssl) = openssl_path() else {
         return;
     };
+    let _process_guard = native_openssl_test_guard();
     let temporary = tempfile::tempdir().expect("temporary");
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
         .expect("root permissions");

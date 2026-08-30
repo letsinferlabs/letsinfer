@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, hard_link};
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use li_core_application::{
@@ -15,6 +15,16 @@ use li_core_application::{
     SystemCoreNativeServiceSupervisor,
 };
 use li_core_update_manager::{CoreUpdateError, CoreUpdateResidentService};
+
+// Serializes fixtures that launch or forcibly terminate native supervisor commands.
+static NATIVE_COMMAND_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+// Acquires exclusive ownership of native supervisor command fixtures for one complete test.
+fn native_command_test_guard() -> MutexGuard<'static, ()> {
+    NATIVE_COMMAND_TEST_LOCK
+        .lock()
+        .expect("native command test lock")
+}
 
 // Stores one exact native supervisor invocation for call-order assertions.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1237,6 +1247,7 @@ fn system_service_io_rejects_parent_redirection_and_invalid_bounds_without_mutat
 // Exercises the production shell-free runner, cleared environment, and every execution bound.
 #[test]
 fn system_command_runner_executes_bounded_argv_without_inherited_shell() {
+    let _command_guard = native_command_test_guard();
     let runner = SystemCoreNativeServiceCommandRunner;
     let output = runner
         .run(
@@ -1295,6 +1306,7 @@ fn system_command_runner_executes_bounded_argv_without_inherited_shell() {
 // Applies one shared output limit across stdout and stderr without double-counting either stream.
 #[test]
 fn system_command_runner_bounds_combined_diagnostic_output_exactly() {
+    let _command_guard = native_command_test_guard();
     let runner = SystemCoreNativeServiceCommandRunner;
     let arguments = [
         "/dev/null".to_string(),
@@ -1336,6 +1348,7 @@ fn system_command_runner_bounds_combined_diagnostic_output_exactly() {
 #[cfg(target_os = "linux")]
 #[test]
 fn system_command_runner_supplies_the_exact_systemd_user_bus_environment() {
+    let _command_guard = native_command_test_guard();
     let temporary = tempfile::tempdir().expect("temporary");
     let executable = temporary.path().join("systemctl");
     fs::write(
