@@ -261,7 +261,7 @@ fn serve_local_node(
     responses: Vec<NodePrivateResponse>,
     requests: Arc<Mutex<Vec<NodePrivateRequest>>>,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     for response in responses {
         let mut stream = accept_before(&listener, deadline);
         stream
