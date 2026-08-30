@@ -58,7 +58,7 @@ impl CoreGatewayProtectionConnectionIdentityProvider for IdentityProviderMock {
 enum ConnectionResult {
     Snapshot(u64),
     Failure,
-    Panic,
+    Panic(mpsc::Sender<()>),
 }
 
 // Coordinates an optional intentionally slow Node read.
@@ -130,7 +130,10 @@ impl CoreGatewayProtectionConnection for ConnectionMock {
                 Some(snapshot(sample_sequence)),
             )),
             ConnectionResult::Failure => Err(test_error()),
-            ConnectionResult::Panic => panic!("simulated protection resident panic"),
+            ConnectionResult::Panic(observed) => {
+                observed.send(()).expect("panic observation");
+                panic!("simulated protection resident panic");
+            }
         }
     }
 }
@@ -419,10 +422,14 @@ fn route_registry_is_bounded_under_concurrent_registration() {
 #[test]
 fn resident_panic_invalidates_request_cache_and_join_reports_failure() {
     let clock = Arc::new(ClockMock(AtomicU64::new(10)));
+    let (panic_observed, panic_observation) = mpsc::channel();
     let (provider, _) = provider(
         clock,
         vec![(
-            vec![ConnectionResult::Snapshot(1), ConnectionResult::Panic],
+            vec![
+                ConnectionResult::Snapshot(1),
+                ConnectionResult::Panic(panic_observed),
+            ],
             None,
         )],
     );
@@ -432,12 +439,9 @@ fn resident_panic_invalidates_request_cache_and_join_reports_failure() {
     let mut resident =
         CoreGatewayProtectionResident::start(provider.clone(), Duration::from_millis(1))
             .expect("resident");
-    for _ in 0..1_000 {
-        if provider.snapshot(&route()).expect("closed").is_none() {
-            break;
-        }
-        thread::yield_now();
-    }
-    assert!(provider.snapshot(&route()).expect("closed").is_none());
+    panic_observation
+        .recv_timeout(Duration::from_secs(1))
+        .expect("resident panic observation");
     assert!(resident.join().is_err());
+    assert!(provider.snapshot(&route()).expect("closed").is_none());
 }
