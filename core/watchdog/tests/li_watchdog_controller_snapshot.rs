@@ -230,6 +230,35 @@ fn persistent_registry_reload_is_atomic_with_its_snapshot() {
     assert_ne!(io.bytes(SNAPSHOT_PATH), initial_snapshot);
 }
 
+// Rebinds only a checksum-valid empty bootstrap after setup trust was rolled back and reissued.
+#[test]
+fn persistent_registry_rebinds_an_empty_failed_setup_snapshot_only() {
+    let io = Arc::new(MockSnapshotIo::new());
+    let first = WatchdogControllerRegistry::open_persistent(
+        allowlist('f'),
+        1,
+        snapshot_provider(io.clone()),
+    )
+    .unwrap();
+    let abandoned = first.snapshot().unwrap();
+
+    let replacement = WatchdogControllerRegistry::open_persistent(
+        allowlist('e'),
+        1,
+        snapshot_provider(io.clone()),
+    )
+    .unwrap();
+    assert!(replacement.active_bindings().unwrap().is_empty());
+    assert_ne!(replacement.snapshot().unwrap(), abandoned);
+    assert_eq!(io.bytes(SNAPSHOT_PATH), replacement.snapshot().unwrap());
+
+    replacement.apply(binding(1, 'a', 101), 1).unwrap();
+    assert!(
+        WatchdogControllerRegistry::open_persistent(allowlist('f'), 1, snapshot_provider(io),)
+            .is_err()
+    );
+}
+
 // Proves corrupt, foreign, and unsafe snapshot observations fail before registry construction.
 #[test]
 fn persistent_registry_rejects_corrupt_foreign_and_unsafe_snapshots() {
@@ -253,6 +282,9 @@ fn persistent_registry_rejects_corrupt_foreign_and_unsafe_snapshots() {
     .is_err());
 
     io.replace_external(SNAPSHOT_PATH, MockSnapshotFile::safe(valid.clone()));
+    registry.apply(binding(1, 'a', 101), 1).unwrap();
+    let active = registry.snapshot().unwrap();
+    io.replace_external(SNAPSHOT_PATH, MockSnapshotFile::safe(active));
     assert!(WatchdogControllerRegistry::open_persistent(
         allowlist('e'),
         1,

@@ -792,6 +792,7 @@ fn compose_linux_watchdog_process(
         dispatcher,
         registry,
         node_protection.clone(),
+        configuration.node_id().clone(),
         WatchdogProtocolListenerLimits::production(),
     ));
     let registries = listener.controller_registry_store();
