@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use li_core_interface::NodeId;
+
 use crate::{
     decode_watchdog_protocol_request, encode_watchdog_protocol_frame,
     encode_watchdog_protocol_response, FilesystemWatchdogStorage, WatchdogControllerBinding,
@@ -447,24 +449,31 @@ impl WatchdogProtocolDispatcher {
                 })
             }
             WatchdogProtocolRequestKind::GetResidentStatus => {
-                let succeeded = match self.data.resident_status() {
-                    Ok(status) => send_response(
-                        sink,
-                        request.request_id(),
-                        WatchdogProtocolResponseKind::ResidentStatus(status),
-                    )
-                    .map(|_| true)?,
-                    Err(error) => {
-                        send_data_error(sink, request.request_id(), error).map(|_| false)?
-                    }
-                };
-                Ok(if succeeded {
-                    WatchdogProtocolDispatchResult::completed()
-                } else {
-                    WatchdogProtocolDispatchResult::failed()
-                })
+                self.dispatch_resident_status(request.request_id(), sink)
             }
         }
+    }
+
+    // Dispatches the idle-safe resident identity without requiring target-bound state.
+    fn dispatch_resident_status(
+        &self,
+        request_id: u64,
+        sink: &mut dyn WatchdogProtocolResponseSink,
+    ) -> Result<WatchdogProtocolDispatchResult, WatchdogError> {
+        let succeeded = match self.data.resident_status() {
+            Ok(status) => send_response(
+                sink,
+                request_id,
+                WatchdogProtocolResponseKind::ResidentStatus(status),
+            )
+            .map(|_| true)?,
+            Err(error) => send_data_error(sink, request_id, error).map(|_| false)?,
+        };
+        Ok(if succeeded {
+            WatchdogProtocolDispatchResult::completed()
+        } else {
+            WatchdogProtocolDispatchResult::failed()
+        })
     }
 
     // Dispatches one latest-sample request with the existing 404 contract.
@@ -627,6 +636,7 @@ pub struct WatchdogProtocolListener {
     dispatcher: Arc<WatchdogProtocolDispatcher>,
     registry: Arc<WatchdogControllerRegistryStore>,
     sessions: Arc<dyn WatchdogControllerSessionProvider>,
+    resident_status_controller_id: NodeId,
     limits: WatchdogProtocolListenerLimits,
     active_connections: Arc<AtomicUsize>,
 }
@@ -637,12 +647,14 @@ impl WatchdogProtocolListener {
         dispatcher: Arc<WatchdogProtocolDispatcher>,
         registry: Arc<WatchdogControllerRegistry>,
         sessions: Arc<dyn WatchdogControllerSessionProvider>,
+        resident_status_controller_id: NodeId,
         limits: WatchdogProtocolListenerLimits,
     ) -> Self {
         Self {
             dispatcher,
             registry: Arc::new(WatchdogControllerRegistryStore::new(registry)),
             sessions,
+            resident_status_controller_id,
             limits,
             active_connections: Arc::new(AtomicUsize::new(0)),
         }
@@ -653,12 +665,14 @@ impl WatchdogProtocolListener {
         dispatcher: Arc<WatchdogProtocolDispatcher>,
         registry: Arc<WatchdogControllerRegistryStore>,
         sessions: Arc<dyn WatchdogControllerSessionProvider>,
+        resident_status_controller_id: NodeId,
         limits: WatchdogProtocolListenerLimits,
     ) -> Self {
         Self {
             dispatcher,
             registry,
             sessions,
+            resident_status_controller_id,
             limits,
             active_connections: Arc::new(AtomicUsize::new(0)),
         }
@@ -691,6 +705,12 @@ impl WatchdogProtocolListener {
         )?;
         let certificate_sha256 = stream.authenticated_certificate_sha256()?;
         let (registry_generation, registry) = self.registry.current()?;
+        if registry.authorizes_controller(
+            self.resident_status_controller_id.as_str(),
+            &certificate_sha256,
+        ) {
+            return self.serve_resident_status_stream(stream, slot, registry_generation, registry);
+        }
         let binding = self.sessions.binding_for_certificate(&certificate_sha256)?;
         if binding.certificate_sha256() != certificate_sha256 {
             return Err(listener_error(
@@ -737,6 +757,46 @@ impl WatchdogProtocolListener {
                 ));
             }
         }
+        Ok(WatchdogProtocolConnectionOutcome::Completed)
+    }
+
+    // Serves exactly one idle-safe readiness read without creating a runtime protection lease.
+    fn serve_resident_status_stream(
+        &self,
+        stream: &mut dyn WatchdogAuthenticatedStream,
+        _slot: WatchdogConnectionSlot,
+        registry_generation: u64,
+        registry: Arc<WatchdogControllerRegistry>,
+    ) -> Result<WatchdogProtocolConnectionOutcome, WatchdogError> {
+        let mut sink = WatchdogStreamResponseSink { stream };
+        let payload = match read_protocol_frame(sink.stream)? {
+            Some(payload) => payload,
+            None => return Ok(WatchdogProtocolConnectionOutcome::Completed),
+        };
+        let request = match decode_watchdog_protocol_request(&payload) {
+            Ok(request) => request,
+            Err(_) => {
+                send_public_error(&mut sink, 0, 400, "invalid protobuf request")?;
+                return Ok(WatchdogProtocolConnectionOutcome::Completed);
+            }
+        };
+        if !matches!(
+            request.kind(),
+            WatchdogProtocolRequestKind::GetResidentStatus
+        ) {
+            send_public_error(
+                &mut sink,
+                request.request_id(),
+                403,
+                "controller is not authorized for request",
+            )?;
+            return Ok(WatchdogProtocolConnectionOutcome::Completed);
+        }
+        if !self.registry.is_current(registry_generation, &registry)? {
+            return Err(listener_error("controller trust is no longer active"));
+        }
+        self.dispatcher
+            .dispatch_resident_status(request.request_id(), &mut sink)?;
         Ok(WatchdogProtocolConnectionOutcome::Completed)
     }
 }
