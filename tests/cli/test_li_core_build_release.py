@@ -490,7 +490,7 @@ class CoreReleaseBuildTests(unittest.TestCase):
 
     # Binds release tooling to the exact shared Rust package version before compiler execution.
     def test_native_build_rejects_workspace_version_drift(self) -> None:
-        self.assertEqual(rust_core_version(REPOSITORY_ROOT), "0.11.0-rc.115")
+        self.assertEqual(rust_core_version(REPOSITORY_ROOT), "0.11.0-rc.116")
         with tempfile.TemporaryDirectory() as value:
             root = pathlib.Path(value)
             (root / "core").mkdir()
