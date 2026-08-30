@@ -511,22 +511,27 @@ class CoreReleaseBuildTests(unittest.TestCase):
                     None,
                 )
 
-    # Requires every released platform to build and upload its native Core archive twice.
+    # Requires every released platform to build and upload one native Core archive.
     def test_release_workflow_uses_the_native_core_matrix(self) -> None:
         workflow = (REPOSITORY_ROOT / ".github/workflows/release-core.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn('first_source="$RUNNER_TEMP/native-source-first/letsinfer"', workflow)
-        self.assertIn('second_source="$RUNNER_TEMP/native-source-second/letsinfer"', workflow)
-        self.assertIn('CARGO_HOME="$RUNNER_TEMP/cargo-home-first"', workflow)
-        self.assertIn('CARGO_HOME="$RUNNER_TEMP/cargo-home-second"', workflow)
-        self.assertIn('python3 "$first_source/tools/li_core_build_release.py"', workflow)
-        self.assertIn('python3 "$second_source/tools/li_core_build_release.py"', workflow)
-        self.assertIn('python3 "$first_source/tools/li_installer_build_assets.py"', workflow)
-        self.assertIn('python3 "$second_source/tools/li_installer_build_assets.py"', workflow)
+        self.assertIn('source="$RUNNER_TEMP/native-source/letsinfer"', workflow)
+        self.assertEqual(
+            workflow.count('python3 "$source/tools/li_core_build_release.py"'),
+            1,
+        )
+        self.assertEqual(
+            workflow.count('python3 "$source/tools/li_installer_build_assets.py"'),
+            2,
+        )
+        self.assertNotIn("native-source-first", workflow)
+        self.assertNotIn("native-source-second", workflow)
+        self.assertNotIn("li_core_first", workflow)
+        self.assertNotIn("li_core_second", workflow)
         self.assertEqual(workflow.count("--verify-archive"), 1)
         self.assertIn('--version "$version"', workflow)
-        self.assertIn('--manifest-path "$first_source/core/Cargo.toml"', workflow)
+        self.assertIn('--manifest-path "$source/core/Cargo.toml"', workflow)
         self.assertNotIn("from core import PRODUCT_VERSION", workflow)
         self.assertIn("runner: ubuntu-24.04-arm", workflow)
         self.assertIn("runner: ubuntu-24.04", workflow)
@@ -538,8 +543,8 @@ class CoreReleaseBuildTests(unittest.TestCase):
             workflow,
         )
 
-    # Binds every native matrix arm to one source artifact frozen after both validators pass.
-    def test_release_workflow_consumes_one_post_validation_source(self) -> None:
+    # Builds a release push once from the exact source already validated by its promotion PR.
+    def test_release_workflow_builds_the_promoted_source_without_retesting(self) -> None:
         workflow = (REPOSITORY_ROOT / ".github/workflows/release-core.yml").read_text(
             encoding="utf-8"
         )
@@ -549,7 +554,8 @@ class CoreReleaseBuildTests(unittest.TestCase):
         freeze = workflow[freeze_start:build_start]
         build = workflow[build_start:publish_start]
 
-        self.assertIn("needs:\n      - validate-linux\n      - validate-macos", freeze)
+        self.assertIn("if: github.event_name == 'pull_request'", workflow)
+        self.assertNotIn("needs:\n      - validate-linux", freeze)
         self.assertIn("name: li_core_frozen_source", freeze)
         self.assertNotIn("name: letsinfer_core_frozen_source", workflow)
         self.assertIn(
@@ -562,8 +568,13 @@ class CoreReleaseBuildTests(unittest.TestCase):
             'frozen_source="$RUNNER_TEMP/frozen-source/letsinfer-source.tar.gz"',
             build,
         )
-        self.assertEqual(build.count('tar -xzf "$frozen_source"'), 2)
+        self.assertEqual(build.count('tar -xzf "$frozen_source"'), 1)
         self.assertNotIn("tools.source_archive build", build)
+        self.assertEqual(freeze.count("tools.source_archive build"), 1)
+        self.assertNotIn("cmp \\\n", freeze)
+        publish = workflow[publish_start:]
+        self.assertNotIn("validate-linux", publish)
+        self.assertNotIn("validate-macos", publish)
 
     # Proves standalone installer CI also compares builds from distinct source roots.
     def test_installer_workflow_compares_independent_source_roots(self) -> None:

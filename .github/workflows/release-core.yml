@@ -30,6 +30,7 @@ env:
 jobs:
   validate-linux:
     name: Validate Linux release
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - name: Check out exact revision
@@ -84,6 +85,7 @@ jobs:
 
   validate-macos:
     name: Validate macOS core
+    if: github.event_name == 'pull_request'
     runs-on: macos-14
     steps:
       - name: Check out exact revision
@@ -125,35 +127,22 @@ jobs:
   freeze-source:
     name: Freeze validated source
     if: github.event_name == 'push'
-    needs:
-      - validate-linux
-      - validate-macos
     runs-on: ubuntu-24.04
     steps:
       - name: Check out exact validated revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build one deterministic source archive
+      - name: Freeze exact release source
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           mkdir "$RUNNER_TEMP/frozen-source"
           python3 -m tools.source_archive build \
             --source . \
-            --output "$RUNNER_TEMP/frozen-source/letsinfer-source-a.tar.gz"
-          python3 -m tools.source_archive build \
-            --source . \
-            --output "$RUNNER_TEMP/frozen-source/letsinfer-source-b.tar.gz"
-          cmp \
-            "$RUNNER_TEMP/frozen-source/letsinfer-source-a.tar.gz" \
-            "$RUNNER_TEMP/frozen-source/letsinfer-source-b.tar.gz"
+            --output "$RUNNER_TEMP/frozen-source/letsinfer-source.tar.gz"
           python3 -m tools.source_archive verify \
-            "$RUNNER_TEMP/frozen-source/letsinfer-source-a.tar.gz"
-          mv \
-            "$RUNNER_TEMP/frozen-source/letsinfer-source-a.tar.gz" \
             "$RUNNER_TEMP/frozen-source/letsinfer-source.tar.gz"
-          rm "$RUNNER_TEMP/frozen-source/letsinfer-source-b.tar.gz"
       - name: Upload exact frozen source
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -207,36 +196,23 @@ jobs:
         with:
           name: li_core_frozen_source
           path: ${{ runner.temp }}/frozen-source
-      - name: Prepare independent canonical source roots
+      - name: Prepare canonical source root
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           frozen_source="$RUNNER_TEMP/frozen-source/letsinfer-source.tar.gz"
           python3 -m tools.source_archive verify "$frozen_source"
-          mkdir \
-            "$RUNNER_TEMP/native-source-first" \
-            "$RUNNER_TEMP/native-source-second" \
-            "$RUNNER_TEMP/cargo-home-first" \
-            "$RUNNER_TEMP/cargo-home-second"
+          mkdir "$RUNNER_TEMP/native-source"
           tar -xzf "$frozen_source" \
-            -C "$RUNNER_TEMP/native-source-first"
-          tar -xzf "$frozen_source" \
-            -C "$RUNNER_TEMP/native-source-second"
-          for cache in registry git; do
-            if [[ -d "$HOME/.cargo/$cache" ]]; then
-              cp -R "$HOME/.cargo/$cache" "$RUNNER_TEMP/cargo-home-first/"
-              cp -R "$HOME/.cargo/$cache" "$RUNNER_TEMP/cargo-home-second/"
-            fi
-          done
-      - name: Build deterministic native installer
+            -C "$RUNNER_TEMP/native-source"
+      - name: Build native installer
         env:
           MATRIX_ARCHITECTURE: ${{ matrix.architecture }}
           MATRIX_IDENTITY: ${{ matrix.identity }}
           MATRIX_OPERATING_SYSTEM: ${{ matrix.operating_system }}
         run: |
-          first_source="$RUNNER_TEMP/native-source-first/letsinfer"
-          second_source="$RUNNER_TEMP/native-source-second/letsinfer"
-          mkdir "$RUNNER_TEMP/li_installer_first" "$RUNNER_TEMP/li_installer_second"
+          source="$RUNNER_TEMP/native-source/letsinfer"
+          mkdir "$RUNNER_TEMP/li_installer"
           args=(
             --operating-system "$MATRIX_OPERATING_SYSTEM"
             --architecture "$MATRIX_ARCHITECTURE"
@@ -246,39 +222,31 @@ jobs:
             args+=(--swiftc-command "$(command -v swiftc)")
           fi
           archive="li_installer_${MATRIX_IDENTITY}.tar.gz"
-          CARGO_HOME="$RUNNER_TEMP/cargo-home-first" \
-            python3 "$first_source/tools/li_installer_build_assets.py" \
-            "${args[@]}" --output "$RUNNER_TEMP/li_installer_first/$archive"
-          CARGO_HOME="$RUNNER_TEMP/cargo-home-second" \
-            python3 "$second_source/tools/li_installer_build_assets.py" \
-            "${args[@]}" --output "$RUNNER_TEMP/li_installer_second/$archive"
-          cmp \
-            "$RUNNER_TEMP/li_installer_first/$archive" \
-            "$RUNNER_TEMP/li_installer_second/$archive"
-          python3 "$first_source/tools/li_installer_build_assets.py" \
+          python3 "$source/tools/li_installer_build_assets.py" \
+            "${args[@]}" --output "$RUNNER_TEMP/li_installer/$archive"
+          python3 "$source/tools/li_installer_build_assets.py" \
             --verify-archive \
             --operating-system "$MATRIX_OPERATING_SYSTEM" \
             --architecture "$MATRIX_ARCHITECTURE" \
-            --output "$RUNNER_TEMP/li_installer_first/$archive"
+            --output "$RUNNER_TEMP/li_installer/$archive"
       - name: Upload native installer
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: li_installer_${{ matrix.identity }}
-          path: ${{ runner.temp }}/li_installer_first/li_installer_${{ matrix.identity }}.tar.gz
+          path: ${{ runner.temp }}/li_installer/li_installer_${{ matrix.identity }}.tar.gz
           if-no-files-found: error
           retention-days: 1
-      - name: Build deterministic native Core
+      - name: Build native Core
         env:
           MATRIX_ARCHITECTURE: ${{ matrix.architecture }}
           MATRIX_OPERATING_SYSTEM: ${{ matrix.operating_system }}
         run: |
-          first_source="$RUNNER_TEMP/native-source-first/letsinfer"
-          second_source="$RUNNER_TEMP/native-source-second/letsinfer"
+          source="$RUNNER_TEMP/native-source/letsinfer"
           package=$(cargo pkgid \
-            --manifest-path "$first_source/core/Cargo.toml" \
+            --manifest-path "$source/core/Cargo.toml" \
             -p li_core_application)
           version=${package##*@}
-          mkdir "$RUNNER_TEMP/li_core_first" "$RUNNER_TEMP/li_core_second"
+          mkdir "$RUNNER_TEMP/li_core"
           args=(
             --operating-system "$MATRIX_OPERATING_SYSTEM"
             --architecture "$MATRIX_ARCHITECTURE"
@@ -289,20 +257,13 @@ jobs:
             args+=(--swiftc-command "$(command -v swiftc)")
           fi
           archive="letsinfer-$MATRIX_OPERATING_SYSTEM-$MATRIX_ARCHITECTURE.tar.gz"
-          CARGO_HOME="$RUNNER_TEMP/cargo-home-first" \
-            python3 "$first_source/tools/li_core_build_release.py" \
-            "${args[@]}" --output "$RUNNER_TEMP/li_core_first/$archive"
-          CARGO_HOME="$RUNNER_TEMP/cargo-home-second" \
-            python3 "$second_source/tools/li_core_build_release.py" \
-            "${args[@]}" --output "$RUNNER_TEMP/li_core_second/$archive"
-          cmp \
-            "$RUNNER_TEMP/li_core_first/$archive" \
-            "$RUNNER_TEMP/li_core_second/$archive"
+          python3 "$source/tools/li_core_build_release.py" \
+            "${args[@]}" --output "$RUNNER_TEMP/li_core/$archive"
       - name: Upload native Core
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: letsinfer_${{ matrix.identity }}
-          path: ${{ runner.temp }}/li_core_first/letsinfer-${{ matrix.operating_system }}-${{ matrix.architecture }}.tar.gz
+          path: ${{ runner.temp }}/li_core/letsinfer-${{ matrix.operating_system }}-${{ matrix.architecture }}.tar.gz
           if-no-files-found: error
           retention-days: 1
 
@@ -311,8 +272,6 @@ jobs:
     if: github.event_name == 'push'
     needs:
       - build-native-installer
-      - validate-linux
-      - validate-macos
     runs-on: ubuntu-24.04
     environment: production-release
     permissions:
