@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/audit/li_audit_export_v1.schema.json",
+  "title": "Let's Infer audit export v1",
+  "$comment": "AuditManager additionally verifies sequence continuity, event hashes, checkpoint placement and signatures, count coherence, and the final chain head before export.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "node_id",
+    "exported_at_unix_ns",
+    "events",
+    "checkpoints",
+    "verification"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "node_id": { "$ref": "#/$defs/node_identity" },
+    "exported_at_unix_ns": { "$ref": "#/$defs/timestamp" },
+    "events": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/event" }
+    },
+    "checkpoints": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/checkpoint" }
+    },
+    "verification": { "$ref": "#/$defs/verification" }
+  },
+  "$defs": {
+    "node_identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "technical_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "optional_sha256": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/sha256" }
+      ]
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "event_id",
+        "correlation_id",
+        "timestamp_unix_ns",
+        "node_id",
+        "actor_type",
+        "actor_id",
+        "origin_node_id",
+        "origin_interface",
+        "action",
+        "target",
+        "before_sha256",
+        "after_sha256",
+        "outcome",
+        "reason",
+        "previous_hash",
+        "event_hash"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "correlation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "timestamp_unix_ns": { "$ref": "#/$defs/timestamp" },
+        "node_id": { "$ref": "#/$defs/node_identity" },
+        "actor_type": {
+          "enum": ["local-user", "controller", "node-candidate", "node", "system"]
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._@-]+$"
+        },
+        "origin_node_id": { "$ref": "#/$defs/node_identity" },
+        "origin_interface": {
+          "enum": ["cli", "controller", "pairing", "gateway", "node", "system"]
+        },
+        "action": { "$ref": "#/$defs/technical_name" },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9._@:/-]+$"
+        },
+        "before_sha256": { "$ref": "#/$defs/optional_sha256" },
+        "after_sha256": { "$ref": "#/$defs/optional_sha256" },
+        "outcome": { "enum": ["success", "denied", "failed"] },
+        "reason": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/technical_name" }
+          ]
+        },
+        "previous_hash": { "$ref": "#/$defs/sha256" },
+        "event_hash": { "$ref": "#/$defs/sha256" }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "outcome": { "const": "success" },
+            "reason": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "outcome": { "enum": ["denied", "failed"] },
+            "reason": { "$ref": "#/$defs/technical_name" }
+          }
+        }
+      ]
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "event_hash",
+        "signature_base64",
+        "created_at_unix_ns"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "event_hash": { "$ref": "#/$defs/sha256" },
+        "signature_base64": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 5464,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        },
+        "created_at_unix_ns": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["valid", "events", "checkpoints", "head_sha256"],
+      "properties": {
+        "valid": { "const": true },
+        "events": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "checkpoints": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "head_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

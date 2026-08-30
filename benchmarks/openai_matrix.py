@@ -55,13 +55,12 @@ class QualificationError(RuntimeError):
 def verify_letsinfer_release_sources(
     manifest: dict[str, Any], source_root: pathlib.Path
 ) -> None:
-    """Apply the same complete manifest/source checks used by the CLI."""
+    """Verify immutable source bytes without importing product lifecycle code."""
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
     try:
-        from core.cli import (  # pylint: disable=import-outside-toplevel
-            LetsInferError,
-            validate_manifest,
+        from benchmarks.li_runtime_source_validation import (
+            RuntimeSourceValidationError,
             verify_runtime_sources,
         )
     except ImportError as error:
@@ -69,10 +68,18 @@ def verify_letsinfer_release_sources(
             f"cannot import Let's Infer release validation: {error}"
         ) from error
     try:
-        validate_manifest(manifest)
         verify_runtime_sources(manifest, source_root)
-    except LetsInferError as error:
+    except RuntimeSourceValidationError as error:
         raise QualificationError(f"Let's Infer release verification failed: {error}") from error
+
+
+def validate_release_sources(
+    manifest: dict[str, Any], source_root: pathlib.Path
+) -> tuple[str, str, str]:
+    """Validate closed release semantics before touching immutable source bytes."""
+    release = validate_release_manifest(manifest)
+    verify_letsinfer_release_sources(manifest, source_root)
+    return release
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -1022,7 +1029,8 @@ def main() -> int:
         )
     base_url = validate_base_url(arguments.base_url)
     manifest = read_json_object(arguments.release_manifest, "release manifest")
-    release, engine_name, model_id = validate_release_manifest(manifest)
+    source_root = pathlib.Path(__file__).resolve().parents[1]
+    release, engine_name, model_id = validate_release_sources(manifest, source_root)
     served_model = served_model_name(manifest)
     model_revision_value = model_revision(manifest)
     _, cells, tokenizer_identity = load_fixture_contract(
@@ -1040,8 +1048,6 @@ def main() -> int:
         raise QualificationError("server command file is empty")
     if api_key in server_command:
         raise QualificationError("server command file contains the API-key value")
-    source_root = pathlib.Path(__file__).resolve().parents[1]
-    verify_letsinfer_release_sources(manifest, source_root)
     source = source_identity(
         source_root, arguments.measured_commit, arguments.source_attestation
     )

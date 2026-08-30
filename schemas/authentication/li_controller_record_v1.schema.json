@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/authentication/li_controller_record_v1.schema.json",
+  "title": "Let's Infer Controller Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "controller_id",
+    "name",
+    "role",
+    "state",
+    "certificate_sha256",
+    "public_key_sha256",
+    "certificate_public_material_base64",
+    "certificate_valid_from_unix_milliseconds",
+    "certificate_expires_at_unix_milliseconds",
+    "issued_at_unix_milliseconds",
+    "activated_at_unix_milliseconds",
+    "revoked_at_unix_milliseconds"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_controller_record" },
+        "version": { "const": 1 }
+      }
+    },
+    "controller_id": { "$ref": "#/$defs/hex_32" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "role": { "enum": ["viewer", "operator", "administrator"] },
+    "state": { "enum": ["issued", "active", "revoked"] },
+    "certificate_sha256": { "$ref": "#/$defs/sha256" },
+    "public_key_sha256": { "$ref": "#/$defs/sha256" },
+    "certificate_public_material_base64": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 21846,
+      "pattern": "^[A-Za-z0-9+/]+$"
+    },
+    "certificate_valid_from_unix_milliseconds": { "type": "integer", "minimum": 0 },
+    "certificate_expires_at_unix_milliseconds": { "type": "integer", "minimum": 1 },
+    "issued_at_unix_milliseconds": { "type": "integer", "minimum": 0 },
+    "activated_at_unix_milliseconds": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "revoked_at_unix_milliseconds": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    }
+  },
+  "$defs": {
+    "hex_32": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

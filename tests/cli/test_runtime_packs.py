@@ -18,8 +18,8 @@ import unittest
 import urllib.error
 from unittest import mock
 
-from core import runtime_packs
-from core.runtime_sources import local_runtime_source
+from tools import li_runtime_packs as runtime_packs
+from tools.li_runtime_sources import local_runtime_source
 
 
 class RuntimePackTests(unittest.TestCase):

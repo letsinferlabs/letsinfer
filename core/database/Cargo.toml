@@ -1,0 +1,18 @@
+[package]
+name = "li_database"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+path = "src/li_database.rs"

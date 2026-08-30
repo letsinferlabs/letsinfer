@@ -2,7 +2,9 @@
 # Returns a deterministic version or accepts the exact fixture installation plan.
 if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then
     printf 'apt 2.8.3-fixture (amd64)\n'
-elif [ "$*" = "install -y avahi-utils build-essential cmake" ]; then
+elif [ "$*" = "update -qq" ]; then
+    exit 0
+elif [ "$*" = "install -y avahi-daemon avahi-utils" ]; then
     exit 0
 else
     printf 'unexpected apt-get arguments: %s\n' "$*" >&2

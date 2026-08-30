@@ -26,7 +26,7 @@ engine, lifecycle, API, safety, telemetry, and updates.
   and can remove only reviewed inactive models, rebuildable caches, and
   completed benchmark data. Running models and rollback inputs stay protected;
   a cleaned model is downloaded and verified again on each replica or parallel
-  member before that runtime starts.
+  runtime task before that runtime starts.
 
 ## One stable API
 
@@ -47,11 +47,12 @@ engine, lifecycle, API, safety, telemetry, and updates.
 
 ## Starts automatically. Recovers deliberately.
 
-- **Reboot persistence.** Linux user services restore the node, gateway,
-  Watchdog, recovery controller, and selected runtime after reboot.
-- **Ordinary crash recovery.** The recovery controller can restart a failed
-  engine and rebind the stable gateway without relying on an unbounded Docker
-  restart loop.
+- **Reboot persistence.** Linux user services restore `li_node`, `li_gateway`,
+  and `li_watchdog`; NodeManager's recovery journal and PlacementManager
+  restore selected runtime tasks.
+- **Ordinary crash recovery.** Node-owned recovery can restart a failed Engine
+  and rebind the stable gateway without a separate recovery resident or an
+  unbounded Docker restart loop.
 - **Safety stays authoritative.** OOM and protection trips remain latched.
   They are never hidden by an automatic restart; inspect the cause and run
   `letsinfer model recover MODEL` when it is safe to continue.
@@ -151,7 +152,8 @@ every runtime:
 - canonical code and prose prompts at fixed context and concurrency cells;
 - exact Engine-rendered token counting;
 - a fresh runtime lifecycle and empty prefix state for every measured cell;
-- live progress that survives terminal detachment;
+- active progress available through `letsinfer benchmark status` after the run
+  command returns;
 - safe cancellation and restoration of the prior inference state; and
 - validated JSON with throughput, TTFT, cache state, utilization, clocks,
   temperatures, memory, NVMe, power, network, and a telemetry timeline.

@@ -1,0 +1,21 @@
+[package]
+name = "li_placement_manager"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+getrandom = "0.4"
+libc = "0.2"
+li_core_interface = { path = "../interface" }
+li_runtime_manager = { path = "../runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+path = "src/li_placement_manager.rs"

@@ -1,0 +1,3737 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/node/li_node_private_api_v2.schema.json",
+  "title": "Let's Infer private node API document v2",
+  "oneOf": [
+    { "$ref": "#/$defs/request_envelope" },
+    { "$ref": "#/$defs/response_envelope" }
+  ],
+  "$defs": {
+    "schema_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_node_private_api" },
+        "version": { "const": 2 }
+      }
+    },
+    "hex_32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "hex_64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "base64_candidate_public_key": {
+      "type": "string",
+      "minLength": 172,
+      "maxLength": 10924,
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
+    "base64_proof": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 1368,
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
+    "base64_credential": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 87384,
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
+    "optional_setup_code": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[0-9]{8}$" },
+        { "type": "null" }
+      ]
+    },
+    "node_address": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "catalog_source": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "pairing_mode": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "lan" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "remote" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "candidate_public_key_sha256",
+            "direct_interface"
+          ],
+          "properties": {
+            "kind": { "const": "connect_x" },
+            "candidate_public_key_sha256": { "$ref": "#/$defs/hex_64" },
+            "direct_interface": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,31}$"
+            }
+          }
+        }
+      ]
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "machine_id",
+        "installation_id",
+        "display_name",
+        "role",
+        "state",
+        "control_address",
+        "latest_hardware_observation_id",
+        "created_at_unix_milliseconds",
+        "updated_at_unix_milliseconds"
+      ],
+      "properties": {
+        "node_id": { "$ref": "#/$defs/hex_32" },
+        "machine_id": { "$ref": "#/$defs/hex_32" },
+        "installation_id": { "$ref": "#/$defs/hex_64" },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "role": { "enum": ["main", "child"] },
+        "state": {
+          "enum": ["pending", "active", "draining", "offline", "removed"]
+        },
+        "control_address": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "latest_hardware_observation_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_32" },
+            { "type": "null" }
+          ]
+        },
+        "created_at_unix_milliseconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated_at_unix_milliseconds": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "catalog_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logical_model", "target_id", "candidate_id", "recommended"],
+      "properties": {
+        "logical_model": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$"
+        },
+        "target_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"
+        },
+        "candidate_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "recommended": { "type": "boolean" }
+      }
+    },
+    "catalog_author": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["login", "numeric_id", "kind"],
+      "properties": {
+        "login": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "numeric_id": { "type": "integer", "minimum": 1 },
+        "kind": { "enum": ["user", "organization"] }
+      }
+    },
+    "catalog_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logical_model", "target_id", "candidate_id", "version",
+        "runtime_source", "engine", "model_uri", "authors", "license",
+        "evidence_label", "verification_method", "benchmark_score", "recommended"
+      ],
+      "properties": {
+        "logical_model": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$" },
+        "target_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$" },
+        "candidate_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "runtime_source": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "engine": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+        "model_uri": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "authors": {
+          "type": "array", "minItems": 1, "maxItems": 64,
+          "items": { "$ref": "#/$defs/catalog_author" }
+        },
+        "license": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "evidence_label": { "enum": ["qualified", "unqualified", "unknown"] },
+        "verification_method": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "benchmark_score": {
+          "oneOf": [
+            { "type": "number", "exclusiveMinimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "recommended": { "type": "boolean" }
+      }
+    },
+    "catalog_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source", "catalog_sha256", "revocations_sha256",
+        "revocation_sequence", "verified_at_unix", "stale"
+      ],
+      "properties": {
+        "source": { "$ref": "#/$defs/catalog_source" },
+        "catalog_sha256": { "$ref": "#/$defs/hex_64" },
+        "revocations_sha256": { "$ref": "#/$defs/hex_64" },
+        "revocation_sequence": { "type": "integer", "minimum": 0 },
+        "verified_at_unix": { "type": "integer", "minimum": 0 },
+        "stale": { "type": "boolean" }
+      }
+    },
+    "catalog_listing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot", "entries"],
+      "properties": {
+        "snapshot": { "$ref": "#/$defs/catalog_snapshot" },
+        "entries": {
+          "type": "array", "maxItems": 4096,
+          "items": { "$ref": "#/$defs/catalog_entry" }
+        }
+      }
+    },
+    "benchmark_kind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "local" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "pull_request",
+            "proposal_head",
+            "candidate_id",
+            "transaction_id",
+            "verifier_bundle_sha256",
+            "candidate_subject_sha256",
+            "verifier_numeric_id",
+            "device_id",
+            "baseline_execution_sha256"
+          ],
+          "properties": {
+            "kind": { "const": "verification" },
+            "pull_request": { "type": "integer", "minimum": 1 },
+            "proposal_head": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "candidate_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "transaction_id": { "$ref": "#/$defs/hex_32" },
+            "verifier_bundle_sha256": { "$ref": "#/$defs/hex_64" },
+            "candidate_subject_sha256": { "$ref": "#/$defs/hex_64" },
+            "verifier_numeric_id": { "type": "integer", "minimum": 1 },
+            "device_id": { "$ref": "#/$defs/hex_64" },
+            "baseline_execution_sha256": {
+              "oneOf": [
+                { "$ref": "#/$defs/hex_64" },
+                { "type": "null" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "benchmark_scope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "complete" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "cells"],
+          "properties": {
+            "kind": { "const": "selected" },
+            "cells": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "benchmark_subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "core_installation_id",
+        "runtime_installation_id",
+        "logical_model",
+        "placement_group_id",
+        "execution_sha256",
+        "benchmark_contract_sha256",
+        "target_contract_sha256"
+      ],
+      "properties": {
+        "core_installation_id": { "$ref": "#/$defs/hex_64" },
+        "runtime_installation_id": { "$ref": "#/$defs/hex_32" },
+        "logical_model": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "placement_group_id": { "$ref": "#/$defs/hex_32" },
+        "execution_sha256": { "$ref": "#/$defs/hex_64" },
+        "benchmark_contract_sha256": { "$ref": "#/$defs/hex_64" },
+        "target_contract_sha256": { "$ref": "#/$defs/hex_64" }
+      }
+    },
+    "benchmark_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "scope", "subject"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/benchmark_kind" },
+        "scope": { "$ref": "#/$defs/benchmark_scope" },
+        "subject": { "$ref": "#/$defs/benchmark_subject" }
+      }
+    },
+    "benchmark_selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logical_model", "concurrencies", "contexts"],
+      "properties": {
+        "logical_model": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "concurrencies": {
+          "type": "array",
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": { "enum": [1, 2, 4, 8, 16] }
+        },
+        "contexts": {
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "enum": ["32k", "64k", "128k", "256k"] }
+        }
+      }
+    },
+    "benchmark_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request", "declared_cells", "selected_cells"],
+      "properties": {
+        "request": { "$ref": "#/$defs/benchmark_request" },
+        "declared_cells": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
+        },
+        "selected_cells": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
+        }
+      }
+    },
+    "command_audit_target_identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9._@/-]+$",
+      "allOf": [
+        { "not": { "pattern": "^[Bb][Ee][Aa][Rr][Ee][Rr]" } },
+        { "not": { "pattern": "^[Ss][Kk]-" } },
+        { "not": { "pattern": "^[Ll][Ii]_" } },
+        { "not": { "pattern": "[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]|[Pp][Rr][Ii][Vv][Aa][Tt][Ee][_-][Kk][Ee][Yy]" } }
+      ]
+    },
+    "command_audit_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "identifier"],
+      "properties": {
+        "kind": {
+          "enum": ["node", "model", "api_key", "benchmark", "audit_event", "core", "service"]
+        },
+        "identifier": { "$ref": "#/$defs/command_audit_target_identifier" }
+      }
+    },
+    "command_audit_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "target", "policy", "mutation", "local_role"],
+      "properties": {
+        "action": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+        "target": {
+          "oneOf": [
+            { "$ref": "#/$defs/command_audit_target" },
+            { "type": "null" }
+          ]
+        },
+        "policy": { "enum": ["success", "always", "sensitive_read"] },
+        "mutation": { "enum": ["read", "local", "node", "internal"] },
+        "local_role": { "enum": ["main", "child"] }
+      }
+    },
+    "command_audit_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "outcome", "failure_code"],
+      "properties": {
+        "action": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+        "outcome": { "enum": ["succeeded", "failed", "denied", "cancelled"] },
+        "failure_code": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+              "allOf": [
+                { "not": { "pattern": "^bearer|^sk-|^li_" } },
+                { "not": { "pattern": "secret|token|password|credential|private[_-]key" } }
+              ]
+            },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "command_audit_marker": {
+      "type": "string",
+      "pattern": "^li_cli_audit_[0-9a-f]{64}_[0-9a-f]{64}$"
+    },
+    "command_audit_open_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["marker", "disposition"],
+      "properties": {
+        "marker": { "$ref": "#/$defs/command_audit_marker" },
+        "disposition": { "enum": ["opened", "replayed"] }
+      }
+    },
+    "command_audit_completion_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_id", "disposition"],
+      "properties": {
+        "event_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_32" },
+            { "type": "null" }
+          ]
+        },
+        "disposition": { "enum": ["completed", "replayed"] }
+      }
+    },
+    "audit_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence", "event_id", "correlation_id", "timestamp_unix_nanoseconds",
+        "node_id", "actor_type", "actor_id", "origin_node_id", "origin_interface",
+        "action", "target", "before_sha256", "after_sha256", "outcome", "reason",
+        "previous_sha256", "event_sha256"
+      ],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "event_id": { "$ref": "#/$defs/hex_32" },
+        "correlation_id": { "$ref": "#/$defs/hex_32" },
+        "timestamp_unix_nanoseconds": { "type": "integer", "minimum": 1 },
+        "node_id": { "$ref": "#/$defs/hex_32" },
+        "actor_type": { "enum": ["local-user", "controller", "node-candidate", "node", "system"] },
+        "actor_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "origin_node_id": { "$ref": "#/$defs/hex_32" },
+        "origin_interface": { "enum": ["cli", "controller", "pairing", "gateway", "node", "system"] },
+        "action": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+        "target": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "before_sha256": { "oneOf": [{ "$ref": "#/$defs/hex_64" }, { "type": "null" }] },
+        "after_sha256": { "oneOf": [{ "$ref": "#/$defs/hex_64" }, { "type": "null" }] },
+        "outcome": { "enum": ["success", "denied", "failed"] },
+        "reason": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+            { "type": "null" }
+          ]
+        },
+        "previous_sha256": { "$ref": "#/$defs/hex_64" },
+        "event_sha256": { "$ref": "#/$defs/hex_64" }
+      }
+    },
+    "audit_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["events", "checkpoints", "head_sha256"],
+      "properties": {
+        "events": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "checkpoints": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "head_sha256": { "$ref": "#/$defs/hex_64" }
+      }
+    },
+    "audit_export": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["events", "document_base64"],
+      "properties": {
+        "events": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "document_base64": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 955736,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        }
+      }
+    },
+    "model_command_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_id", "idempotency_key"],
+      "properties": {
+        "operation_id": { "$ref": "#/$defs/hex_32" },
+        "idempotency_key": { "$ref": "#/$defs/idempotency_key" }
+      }
+    },
+    "model_install_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_ids", "explicit_candidate_id"],
+      "properties": {
+        "node_ids": {
+          "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/hex_32" }
+        },
+        "explicit_candidate_id": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*--[a-z0-9][a-z0-9._-]*$", "maxLength": 255 },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "model_install_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "service_id", "logical_model", "groups"],
+      "properties": {
+        "identity": { "$ref": "#/$defs/model_command_identity" },
+        "service_id": { "$ref": "#/$defs/hex_32" },
+        "logical_model": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+        "groups": {
+          "type": "array", "minItems": 1, "maxItems": 128,
+          "items": { "$ref": "#/$defs/model_install_group" }
+        }
+      }
+    },
+    "model_service_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service_id", "logical_model", "desired_state", "placement_group_ids", "runtime_installation_ids", "evidence_labels"],
+      "properties": {
+        "service_id": { "$ref": "#/$defs/hex_32" },
+        "logical_model": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+        "desired_state": { "enum": ["running", "stopped", "removed"] },
+        "placement_group_ids": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/hex_32" } },
+        "runtime_installation_ids": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/hex_32" } },
+        "evidence_labels": { "type": "array", "maxItems": 256, "items": { "enum": ["qualified", "unqualified", "unknown"] } }
+      }
+    },
+    "model_command_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_id", "service_id", "logical_model", "desired_state", "action", "journal_state", "failure_code"],
+      "properties": {
+        "operation_id": { "$ref": "#/$defs/hex_32" },
+        "service_id": { "$ref": "#/$defs/hex_32" },
+        "logical_model": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+        "desired_state": { "enum": ["running", "stopped", "removed"] },
+        "action": { "enum": ["install", "update", "pause", "resume", "restart", "recover", "remove", "rollback"] },
+        "journal_state": { "enum": ["prepared", "executing", "compensating", "cleanup_pending", "succeeded", "rolled_back", "failed"] },
+        "failure_code": { "$ref": "#/$defs/nullable_technical_name" }
+      }
+    },
+    "model_rollback_preview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service_id", "logical_model", "target_id", "groups"],
+      "properties": {
+        "service_id": { "$ref": "#/$defs/hex_32" },
+        "logical_model": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+        "target_id": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$" },
+            { "type": "null" }
+          ]
+        },
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/model_rollback_group_preview" }
+        }
+      }
+    },
+    "model_rollback_group_preview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current_group_id", "previous_group_id", "node_ids", "current", "previous"],
+      "properties": {
+        "current_group_id": { "$ref": "#/$defs/hex_32" },
+        "previous_group_id": { "$ref": "#/$defs/hex_32" },
+        "node_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/hex_32" }
+        },
+        "current": { "$ref": "#/$defs/model_rollback_runtime" },
+        "previous": { "$ref": "#/$defs/model_rollback_runtime" }
+      }
+    },
+    "model_rollback_runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_id", "version", "target_id", "source"],
+      "properties": {
+        "candidate_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "target_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$" },
+        "source": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      }
+    },
+    "model_log_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service_id", "operation_ids", "journal_operation_ids", "failure_codes"],
+      "properties": {
+        "service_id": { "$ref": "#/$defs/hex_32" },
+        "operation_ids": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/hex_32" } },
+        "journal_operation_ids": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/hex_32" } },
+        "failure_codes": { "type": "array", "maxItems": 1024, "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" } }
+      }
+    },
+    "placement_log_cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_identity", "position"],
+      "properties": {
+        "source_identity": { "$ref": "#/$defs/hex_64" },
+        "position": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000-\\u001F\\u007F]+$" }
+      }
+    },
+    "model_runtime_log_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service_id", "placement_group_id", "cursor", "maximum_lines", "maximum_bytes", "wait_milliseconds"],
+      "properties": {
+        "service_id": { "$ref": "#/$defs/hex_32" },
+        "placement_group_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_32" },
+            { "type": "null" }
+          ]
+        },
+        "cursor": {
+          "oneOf": [
+            { "$ref": "#/$defs/placement_log_cursor" },
+            { "type": "null" }
+          ]
+        },
+        "maximum_lines": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "maximum_bytes": { "type": "integer", "minimum": 1, "maximum": 524288 },
+        "wait_milliseconds": { "type": "integer", "minimum": 0, "maximum": 1000 }
+      }
+    },
+    "model_runtime_log_batch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service_id", "placement_group_id", "placement_id", "cursor", "payload_base64", "truncated"],
+      "properties": {
+        "service_id": { "$ref": "#/$defs/hex_32" },
+        "placement_group_id": { "$ref": "#/$defs/hex_32" },
+        "placement_id": { "$ref": "#/$defs/hex_32" },
+        "cursor": { "$ref": "#/$defs/placement_log_cursor" },
+        "payload_base64": { "type": "string", "maxLength": 699052 },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "core_installation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "source_identity"],
+      "properties": {
+        "version": { "type": "string", "minLength": 5, "maxLength": 128 },
+        "source_identity": { "$ref": "#/$defs/hex_64" }
+      }
+    },
+    "core_update_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current", "available", "disposition"],
+      "properties": {
+        "current": { "$ref": "#/$defs/core_installation" },
+        "available": { "$ref": "#/$defs/core_installation" },
+        "disposition": { "enum": ["current", "update_available"] }
+      }
+    },
+    "core_update_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["installation", "disposition", "phase"],
+      "properties": {
+        "installation": { "$ref": "#/$defs/core_installation" },
+        "disposition": { "enum": ["current", "updated", "cleanup_pending"] },
+        "phase": {
+          "enum": [
+            "requested", "prepared", "services_snapshotted", "activated",
+            "services_rebound", "verified", "committed", "rolling_back",
+            "current", "cleanup_pending", "succeeded", "rolled_back",
+            "recovery_required"
+          ]
+        }
+      }
+    },
+    "model_update_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service_id", "logical_model", "disposition", "placement_group_count", "command"],
+      "properties": {
+        "service_id": { "$ref": "#/$defs/hex_32" },
+        "logical_model": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+        "disposition": { "enum": ["current", "update_available", "updated"] },
+        "placement_group_count": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "command": {
+          "oneOf": [
+            { "$ref": "#/$defs/model_command_summary" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "uninstall_request": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["operation", "arguments"],
+          "properties": {
+            "operation": { "const": "begin" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["session_id", "model_retention"],
+              "properties": {
+                "session_id": { "$ref": "#/$defs/hex_64" },
+                "model_retention": { "enum": ["remove", "preserve"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["operation", "arguments"],
+          "properties": {
+            "operation": { "const": "stop_benchmark" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["session_id", "job_id"],
+              "properties": {
+                "session_id": { "$ref": "#/$defs/hex_64" },
+                "job_id": { "$ref": "#/$defs/hex_32" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["operation", "arguments"],
+          "properties": {
+            "operation": { "const": "disable_exposure" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["session_id"],
+              "properties": { "session_id": { "$ref": "#/$defs/hex_64" } }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["operation", "arguments"],
+          "properties": {
+            "operation": { "const": "remove_model" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["session_id", "identity", "service_id", "node_ids", "runtime_retention"],
+              "properties": {
+                "session_id": { "$ref": "#/$defs/hex_64" },
+                "identity": { "$ref": "#/$defs/model_command_identity" },
+                "service_id": { "$ref": "#/$defs/hex_32" },
+                "node_ids": {
+                  "oneOf": [
+                    { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/hex_32" } },
+                    { "type": "null" }
+                  ]
+                },
+                "runtime_retention": { "enum": ["remove_unreferenced_runtimes", "preserve_models"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["operation", "arguments"],
+          "properties": {
+            "operation": { "const": "remove_runtime_installation" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["session_id", "installation_id", "model_retention"],
+              "properties": {
+                "session_id": { "$ref": "#/$defs/hex_64" },
+                "installation_id": { "$ref": "#/$defs/hex_32" },
+                "model_retention": { "enum": ["remove", "preserve"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["operation", "arguments"],
+          "properties": {
+            "operation": { "const": "finalize_runtime_artifacts" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["session_id", "model_retention"],
+              "properties": {
+                "session_id": { "$ref": "#/$defs/hex_64" },
+                "model_retention": { "enum": ["remove", "preserve"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["operation", "arguments"],
+          "properties": {
+            "operation": { "const": "cancel" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["session_id"],
+              "properties": { "session_id": { "$ref": "#/$defs/hex_64" } }
+            }
+          }
+        }
+      ]
+    },
+    "uninstall_inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local_role", "active_benchmark_id", "exposure_configuration_sha256", "model_targets", "runtime_installation_ids"],
+      "properties": {
+        "local_role": { "enum": ["main", "child"] },
+        "active_benchmark_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_32" },
+            { "type": "null" }
+          ]
+        },
+        "exposure_configuration_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_64" },
+            { "type": "null" }
+          ]
+        },
+        "model_targets": {
+          "type": "array", "maxItems": 4096, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/uninstall_model_target" }
+        },
+        "runtime_installation_ids": {
+          "type": "array", "maxItems": 4096, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/hex_32" }
+        }
+      }
+    },
+    "uninstall_model_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service_id", "placement_group_ids"],
+      "properties": {
+        "service_id": { "$ref": "#/$defs/hex_32" },
+        "placement_group_ids": {
+          "type": "array", "maxItems": 4096, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/hex_32" }
+        }
+      }
+    },
+    "uninstall_begin_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "disposition", "model_retention", "inventory"],
+      "properties": {
+        "session_id": { "$ref": "#/$defs/hex_64" },
+        "disposition": { "enum": ["applied", "replayed"] },
+        "model_retention": { "enum": ["remove", "preserve"] },
+        "inventory": { "$ref": "#/$defs/uninstall_inventory" }
+      }
+    },
+    "uninstall_cancel_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id"],
+      "properties": { "session_id": { "$ref": "#/$defs/hex_64" } }
+    },
+    "exposure_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state", "provider", "public_url", "inference_target",
+        "configuration_sha256", "provider_verified"
+      ],
+      "properties": {
+        "state": { "enum": ["disabled", "enabled"] },
+        "provider": { "const": "tailscale-funnel" },
+        "public_url": {
+          "oneOf": [
+            { "type": "string", "pattern": "^https://[A-Za-z0-9.-]+$", "maxLength": 262 },
+            { "type": "null" }
+          ]
+        },
+        "inference_target": { "const": "http://127.0.0.1:8000" },
+        "configuration_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_64" },
+            { "type": "null" }
+          ]
+        },
+        "provider_verified": { "type": "boolean" }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "state": { "const": "disabled" },
+            "public_url": { "type": "null" },
+            "configuration_sha256": { "type": "null" },
+            "provider_verified": { "const": true }
+          }
+        },
+        {
+          "properties": {
+            "state": { "const": "enabled" },
+            "public_url": { "type": "string" },
+            "configuration_sha256": { "$ref": "#/$defs/hex_64" }
+          }
+        }
+      ]
+    },
+    "storage_category": {
+      "enum": [
+        "models", "runtimes", "caches", "benchmarks", "engines",
+        "core", "state", "configuration", "logs"
+      ]
+    },
+    "reclaimable_storage_category": {
+      "enum": ["models", "caches", "benchmarks"]
+    },
+    "storage_clean_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_id", "plan_sha256", "categories"],
+      "properties": {
+        "operation_id": { "$ref": "#/$defs/hex_32" },
+        "plan_sha256": { "$ref": "#/$defs/hex_64" },
+        "categories": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/reclaimable_storage_category" }
+        }
+      }
+    },
+    "storage_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category", "allocated_bytes", "logical_bytes", "files",
+        "reclaimable_bytes"
+      ],
+      "properties": {
+        "category": { "$ref": "#/$defs/storage_category" },
+        "allocated_bytes": { "type": "integer", "minimum": 0 },
+        "logical_bytes": { "type": "integer", "minimum": 0 },
+        "files": { "type": "integer", "minimum": 0 },
+        "reclaimable_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "storage_candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "relative_path", "allocated_bytes", "reason", "models"],
+      "properties": {
+        "category": { "$ref": "#/$defs/reclaimable_storage_category" },
+        "relative_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*\\/$)[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "allocated_bytes": { "type": "integer", "minimum": 1 },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "models": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
+        }
+      }
+    },
+    "storage_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capacity_bytes", "available_bytes", "usage", "candidates", "plan_sha256"],
+      "properties": {
+        "capacity_bytes": { "type": "integer", "minimum": 1 },
+        "available_bytes": { "type": "integer", "minimum": 0 },
+        "usage": {
+          "type": "array",
+          "maxItems": 9,
+          "items": { "$ref": "#/$defs/storage_usage" }
+        },
+        "candidates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/storage_candidate" }
+        },
+        "plan_sha256": { "$ref": "#/$defs/hex_64" }
+      }
+    },
+    "storage_clean_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id", "plan_sha256", "removed_targets", "reclaimed_bytes",
+        "models_to_download", "replayed"
+      ],
+      "properties": {
+        "operation_id": { "$ref": "#/$defs/hex_32" },
+        "plan_sha256": { "$ref": "#/$defs/hex_64" },
+        "removed_targets": { "type": "integer", "minimum": 0 },
+        "reclaimed_bytes": { "type": "integer", "minimum": 0 },
+        "models_to_download": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          }
+        },
+        "replayed": { "type": "boolean" }
+      }
+    },
+    "host_unavailable_section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": { "status": { "const": "unavailable" } }
+    },
+    "host_not_applicable_section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": { "status": { "const": "not_applicable" } }
+    },
+    "host_hardware_section": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": { "const": "available" },
+            "value": { "$ref": "../hardware/li_hardware_observation_v1.schema.json" }
+          }
+        },
+        { "$ref": "#/$defs/host_unavailable_section" },
+        { "$ref": "#/$defs/host_not_applicable_section" }
+      ]
+    },
+    "host_endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "placement_id", "node_id", "scheme", "host", "port", "healthy",
+        "memory_pressure", "temperature_millicelsius"
+      ],
+      "properties": {
+        "placement_id": { "$ref": "#/$defs/hex_32" },
+        "node_id": { "$ref": "#/$defs/hex_32" },
+        "scheme": { "enum": ["http", "https"] },
+        "host": { "$ref": "#/$defs/node_address" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "healthy": { "type": "boolean" },
+        "memory_pressure": { "type": "boolean" },
+        "temperature_millicelsius": {
+          "oneOf": [
+            { "type": "integer", "minimum": -1000, "maximum": 250000 },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "host_placement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "placement_id", "placement_group_id", "node_id", "runtime_installation_id",
+        "task_id", "port_base", "port_count", "device_ids", "rdma_interface",
+        "endpoint_ownership", "state"
+      ],
+      "properties": {
+        "placement_id": { "$ref": "#/$defs/hex_32" },
+        "placement_group_id": { "$ref": "#/$defs/hex_32" },
+        "node_id": { "$ref": "#/$defs/hex_32" },
+        "runtime_installation_id": { "$ref": "#/$defs/hex_32" },
+        "task_id": { "type": "string", "pattern": "^task-[0-9]+$" },
+        "port_base": { "type": "integer", "minimum": 1024, "maximum": 65535 },
+        "port_count": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "device_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 255 }
+        },
+        "rdma_interface": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,31}$" },
+            { "type": "null" }
+          ]
+        },
+        "endpoint_ownership": { "enum": ["owner", "participant"] },
+        "state": {
+          "enum": [
+            "pending", "staging", "staged", "starting", "running", "stopping",
+            "stopped", "removing", "removed", "failed", "unreachable"
+          ]
+        }
+      }
+    },
+    "host_placement_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "placement_group_id", "service_id", "runtime_candidate_id", "runtime_version",
+        "target_id", "desired_state", "state", "endpoint", "placements"
+      ],
+      "properties": {
+        "placement_group_id": { "$ref": "#/$defs/hex_32" },
+        "service_id": { "$ref": "#/$defs/hex_32" },
+        "runtime_candidate_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "runtime_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "target_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$" },
+        "desired_state": { "enum": ["running", "stopped", "removed"] },
+        "state": {
+          "enum": [
+            "staging", "staged", "starting", "running", "degraded", "stopping",
+            "stopped", "recovering", "removing", "removed", "failed"
+          ]
+        },
+        "endpoint": {
+          "oneOf": [
+            { "$ref": "#/$defs/host_endpoint" },
+            { "type": "null" }
+          ]
+        },
+        "placements": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/host_placement" }
+        }
+      }
+    },
+    "host_placement_groups_section": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": { "const": "available" },
+            "value": {
+              "type": "array",
+              "maxItems": 4096,
+              "items": { "$ref": "#/$defs/host_placement_group" }
+            }
+          }
+        },
+        { "$ref": "#/$defs/host_unavailable_section" },
+        { "$ref": "#/$defs/host_not_applicable_section" }
+      ]
+    },
+    "host_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["left_node_id", "right_node_id", "kind", "rdma", "speed_mbps", "mtu"],
+      "properties": {
+        "left_node_id": { "$ref": "#/$defs/hex_32" },
+        "right_node_id": { "$ref": "#/$defs/hex_32" },
+        "kind": { "enum": ["any", "connectx", "ethernet", "wifi", "other"] },
+        "rdma": { "type": "boolean" },
+        "speed_mbps": { "type": "integer", "minimum": 1 },
+        "mtu": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "host_links_section": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": { "const": "available" },
+            "value": {
+              "type": "array",
+              "maxItems": 16384,
+              "items": { "$ref": "#/$defs/host_link" }
+            }
+          }
+        },
+        { "$ref": "#/$defs/host_unavailable_section" },
+        { "$ref": "#/$defs/host_not_applicable_section" }
+      ]
+    },
+    "host_protection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "observed_at_unix_milliseconds"],
+      "properties": {
+        "state": { "enum": ["ready", "not_ready"] },
+        "observed_at_unix_milliseconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "host_protection_section": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": { "const": "available" },
+            "value": { "$ref": "#/$defs/host_protection" }
+          }
+        },
+        { "$ref": "#/$defs/host_unavailable_section" },
+        { "$ref": "#/$defs/host_not_applicable_section" }
+      ]
+    },
+    "host_gateway_telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observed_at_unix_milliseconds", "active_requests", "queued_requests",
+        "requests_completed", "requests_failed", "input_tokens", "output_tokens", "cached_tokens"
+      ],
+      "properties": {
+        "observed_at_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "active_requests": { "type": "integer", "minimum": 0 },
+        "queued_requests": { "type": "integer", "minimum": 0 },
+        "requests_completed": { "type": "integer", "minimum": 0 },
+        "requests_failed": { "type": "integer", "minimum": 0 },
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "cached_tokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "host_gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "telemetry"],
+      "properties": {
+        "state": { "enum": ["ready", "not_ready"] },
+        "telemetry": {
+          "oneOf": [
+            { "$ref": "#/$defs/host_gateway_telemetry" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "host_gateway_section": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": { "const": "available" },
+            "value": { "$ref": "#/$defs/host_gateway" }
+          }
+        },
+        { "$ref": "#/$defs/host_unavailable_section" },
+        { "$ref": "#/$defs/host_not_applicable_section" }
+      ]
+    },
+    "host_watchdog_telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observed_at_unix_milliseconds", "cpu_percent", "gpu_percent", "memory_percent",
+        "disk_percent", "gpu_memory_percent", "active_requests", "queued_requests"
+      ],
+      "properties": {
+        "observed_at_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "cpu_percent": { "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 100 }, { "type": "null" }] },
+        "gpu_percent": { "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 100 }, { "type": "null" }] },
+        "memory_percent": { "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 100 }, { "type": "null" }] },
+        "disk_percent": { "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 100 }, { "type": "null" }] },
+        "gpu_memory_percent": { "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 100 }, { "type": "null" }] },
+        "active_requests": { "type": "integer", "minimum": 0 },
+        "queued_requests": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "host_watchdog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "telemetry"],
+      "properties": {
+        "state": { "enum": ["ready", "not_ready"] },
+        "telemetry": {
+          "oneOf": [
+            { "$ref": "#/$defs/host_watchdog_telemetry" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "host_watchdog_section": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": { "const": "available" },
+            "value": { "$ref": "#/$defs/host_watchdog" }
+          }
+        },
+        { "$ref": "#/$defs/host_unavailable_section" },
+        { "$ref": "#/$defs/host_not_applicable_section" }
+      ]
+    },
+    "host_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node", "hardware", "placement_groups", "verified_links", "protection", "gateway", "watchdog"
+      ],
+      "properties": {
+        "node": { "$ref": "#/$defs/node" },
+        "hardware": { "$ref": "#/$defs/host_hardware_section" },
+        "placement_groups": { "$ref": "#/$defs/host_placement_groups_section" },
+        "verified_links": { "$ref": "#/$defs/host_links_section" },
+        "protection": { "$ref": "#/$defs/host_protection_section" },
+        "gateway": { "$ref": "#/$defs/host_gateway_section" },
+        "watchdog": { "$ref": "#/$defs/host_watchdog_section" }
+      }
+    },
+    "host_model_services_section": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": { "const": "available" },
+            "value": {
+              "type": "array",
+              "maxItems": 4096,
+              "items": { "$ref": "#/$defs/model_service_summary" }
+            }
+          }
+        },
+        { "$ref": "#/$defs/host_unavailable_section" },
+        { "$ref": "#/$defs/host_not_applicable_section" }
+      ]
+    },
+    "host_inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local_node_id", "hosts", "model_services"],
+      "properties": {
+        "local_node_id": { "$ref": "#/$defs/hex_32" },
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "items": { "$ref": "#/$defs/host_snapshot" }
+        },
+        "model_services": { "$ref": "#/$defs/host_model_services_section" }
+      }
+    },
+    "gateway_bearer": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "gateway_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "key_id", "received_at_unix_milliseconds", "completed_at_unix_milliseconds", "tokens"],
+      "properties": {
+        "request_id": { "$ref": "#/$defs/hex_64" },
+        "key_id": { "$ref": "#/$defs/hex_32" },
+        "received_at_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "completed_at_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "tokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "gateway_route_target": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "scheme", "host", "port"],
+          "properties": {
+            "kind": { "const": "local_engine" },
+            "scheme": { "enum": ["http", "https"] },
+            "host": { "$ref": "#/$defs/node_address" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "address"],
+          "properties": {
+            "kind": { "const": "child_relay" },
+            "address": { "$ref": "#/$defs/node_address" }
+          }
+        }
+      ]
+    },
+    "gateway_route": {
+      "type": "object", "additionalProperties": false,
+      "required": ["placement_group_id", "endpoint_node_id", "model", "target", "max_active_requests", "max_context_tokens", "healthy", "memory_pressure", "temperature_millicelsius", "prefix_keys"],
+      "properties": {
+        "placement_group_id": { "$ref": "#/$defs/hex_32" },
+        "endpoint_node_id": { "$ref": "#/$defs/hex_32" },
+        "model": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+        "target": { "$ref": "#/$defs/gateway_route_target" },
+        "max_active_requests": { "type": "integer", "minimum": 1 },
+        "max_context_tokens": { "type": "integer", "minimum": 1 },
+        "healthy": { "type": "boolean" },
+        "memory_pressure": { "type": "boolean" },
+        "temperature_millicelsius": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0, "maximum": 250000 },
+            { "type": "null" }
+          ]
+        },
+        "prefix_keys": {
+          "type": "array", "maxItems": 4096, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/hex_64" }
+        }
+      }
+    },
+    "gateway_principal": {
+      "type": "object", "additionalProperties": false,
+      "required": ["key_id", "requests_per_minute", "tokens_per_minute", "concurrency", "context_tokens"],
+      "properties": {
+        "key_id": { "$ref": "#/$defs/hex_32" },
+        "requests_per_minute": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "tokens_per_minute": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "concurrency": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "context_tokens": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] }
+      }
+    },
+    "gateway_model_scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selected_models"],
+      "properties": {
+        "selected_models": {
+          "oneOf": [
+            {
+              "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" }
+            },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "gateway_native_target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "host", "port", "owner_user_id", "bearer_file", "ca_file", "expected_server_leaf_sha256", "client_certificate_file", "client_private_key_file", "token_count_path"],
+      "properties": {
+        "kind": { "enum": ["local_engine", "child_relay"] },
+        "host": { "$ref": "#/$defs/node_address" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "owner_user_id": { "type": "integer", "minimum": 0 },
+        "bearer_file": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^\\u0000-\\u001f\\u007f-\\u009f]*$" },
+        "ca_file": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^\\u0000-\\u001f\\u007f-\\u009f]*$" },
+        "expected_server_leaf_sha256": { "oneOf": [{ "$ref": "#/$defs/hex_64" }, { "type": "null" }] },
+        "client_certificate_file": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^\\u0000-\\u001f\\u007f-\\u009f]*$" }, { "type": "null" }] },
+        "client_private_key_file": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^\\u0000-\\u001f\\u007f-\\u009f]*$" }, { "type": "null" }] },
+        "token_count_path": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^/[^\\s]*$" }, { "type": "null" }] }
+      }
+    },
+    "gateway_macos_placement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["placement_id", "placement_group_id", "node_id", "runtime_installation_id", "hardware_observation_id", "hardware_boot_id", "hardware_observed_at_unix_milliseconds", "task_id", "address", "port_base", "port_count", "device_ids", "rdma_interface", "endpoint_ownership", "state", "active_operation_id", "last_failure_code", "last_failure_message", "created_at_unix_milliseconds", "updated_at_unix_milliseconds", "launch_plan_identity"],
+      "properties": {
+        "placement_id": { "$ref": "#/$defs/hex_32" },
+        "placement_group_id": { "$ref": "#/$defs/hex_32" },
+        "node_id": { "$ref": "#/$defs/hex_32" },
+        "runtime_installation_id": { "$ref": "#/$defs/hex_32" },
+        "hardware_observation_id": { "$ref": "#/$defs/hex_32" },
+        "hardware_boot_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "hardware_observed_at_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "task_id": { "type": "string", "pattern": "^task-(0|[1-9][0-9]*)$" },
+        "address": { "$ref": "#/$defs/node_address" },
+        "port_base": { "type": "integer", "minimum": 1024, "maximum": 65535 },
+        "port_count": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "device_ids": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 255 } },
+        "rdma_interface": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 32 }, { "type": "null" }] },
+        "endpoint_ownership": { "enum": ["owner", "participant"] },
+        "state": { "enum": ["pending", "staging", "staged", "starting", "running", "stopping", "stopped", "removing", "removed", "failed", "unreachable"] },
+        "active_operation_id": { "oneOf": [{ "$ref": "#/$defs/hex_32" }, { "type": "null" }] },
+        "last_failure_code": { "oneOf": [{ "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" }, { "type": "null" }] },
+        "last_failure_message": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 1024 }, { "type": "null" }] },
+        "created_at_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "updated_at_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "launch_plan_identity": { "$ref": "#/$defs/hex_64" }
+      }
+    },
+    "gateway_macos_safety_input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["placement_group_id", "placements"],
+      "properties": {
+        "placement_group_id": { "$ref": "#/$defs/hex_32" },
+        "placements": { "type": "array", "minItems": 1, "maxItems": 1024, "items": { "$ref": "#/$defs/gateway_macos_placement" } }
+      }
+    },
+    "gateway_request": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["capability", "arguments"], "properties": { "capability": { "const": "authorize_inference" }, "arguments": { "type": "object", "additionalProperties": false, "required": ["bearer", "model"], "properties": { "bearer": { "$ref": "#/$defs/gateway_bearer" }, "model": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" } } } } },
+        { "type": "object", "additionalProperties": false, "required": ["capability", "arguments"], "properties": { "capability": { "const": "authorize_model_list" }, "arguments": { "type": "object", "additionalProperties": false, "required": ["bearer"], "properties": { "bearer": { "$ref": "#/$defs/gateway_bearer" } } } } },
+        { "type": "object", "additionalProperties": false, "required": ["capability", "arguments"], "properties": { "capability": { "const": "read_routes" }, "arguments": { "type": "object", "additionalProperties": false, "required": ["model"], "properties": { "model": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" } } } } },
+        { "type": "object", "additionalProperties": false, "required": ["capability", "arguments"], "properties": { "capability": { "const": "resolve_native_target" }, "arguments": { "type": "object", "additionalProperties": false, "required": ["route"], "properties": { "route": { "$ref": "#/$defs/gateway_route" } } } } },
+        { "type": "object", "additionalProperties": false, "required": ["capability", "arguments"], "properties": { "capability": { "const": "authorize_inbound_relay" }, "arguments": { "type": "object", "additionalProperties": false, "required": ["bearer"], "properties": { "bearer": { "$ref": "#/$defs/gateway_bearer" } } } } },
+        { "type": "object", "additionalProperties": false, "required": ["capability", "arguments"], "properties": { "capability": { "const": "read_recent_usage" }, "arguments": { "type": "object", "additionalProperties": false, "required": ["key_id", "since_unix_milliseconds"], "properties": { "key_id": { "$ref": "#/$defs/hex_32" }, "since_unix_milliseconds": { "type": "integer", "minimum": 0 } } } } },
+        { "type": "object", "additionalProperties": false, "required": ["capability", "arguments"], "properties": { "capability": { "const": "record_usage" }, "arguments": { "type": "object", "additionalProperties": false, "required": ["usage"], "properties": { "usage": { "$ref": "#/$defs/gateway_usage" } } } } },
+        { "type": "object", "additionalProperties": false, "required": ["capability", "arguments"], "properties": { "capability": { "const": "read_mac_os_safety_input" }, "arguments": { "type": "object", "additionalProperties": false, "required": ["placement_group_id"], "properties": { "placement_group_id": { "$ref": "#/$defs/hex_32" } } } } }
+      ]
+    },
+    "gateway_response": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "principal" }, "value": { "$ref": "#/$defs/gateway_principal" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "model_scope" }, "value": { "$ref": "#/$defs/gateway_model_scope" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "routes" }, "value": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/gateway_route" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "native_target" }, "value": { "$ref": "#/$defs/gateway_native_target" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "relay_principal" }, "value": { "$ref": "#/$defs/hex_32" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "usage_records" }, "value": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/gateway_usage" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "usage_recorded" }, "value": { "enum": ["applied", "replayed"] } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "mac_os_safety_input" }, "value": { "$ref": "#/$defs/gateway_macos_safety_input" } } }
+      ]
+    },
+    "request_envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "request_id", "request"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schema_identity" },
+        "request_id": { "$ref": "#/$defs/hex_64" },
+        "request": { "$ref": "#/$defs/request" }
+      }
+    },
+    "request": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": {
+            "action": { "const": "read_local_node" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": {
+            "action": { "const": "read_nodes" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "read_node" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["node_id"],
+              "properties": {
+                "node_id": { "$ref": "#/$defs/hex_32" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": {
+            "action": { "const": "read_storage" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "clean_storage" },
+            "arguments": { "$ref": "#/$defs/storage_clean_request" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "read_hardware" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["node_id"],
+              "properties": {
+                "node_id": { "$ref": "#/$defs/hex_32" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "read_host_projection" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["node_id"],
+              "properties": {
+                "node_id": { "$ref": "#/$defs/hex_32" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": {
+            "action": { "const": "read_host_inventory" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "read_catalog" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["catalog_source", "logical_model", "versions", "targets", "refresh"],
+              "properties": {
+                "catalog_source": {
+                  "oneOf": [{ "$ref": "#/$defs/catalog_source" }, { "type": "null" }]
+                },
+                "logical_model": {
+                  "oneOf": [
+                    { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$" },
+                    { "type": "null" }
+                  ]
+                },
+                "versions": { "enum": ["latest", "all"] },
+                "targets": { "enum": ["compatible", "all"] },
+                "refresh": { "enum": ["cached", "refresh"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "read_compatible_targets" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["node_id", "catalog_source"],
+              "properties": {
+                "node_id": { "$ref": "#/$defs/hex_32" },
+                "catalog_source": { "$ref": "#/$defs/catalog_source" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "enroll_child" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["idempotency_key", "child"],
+              "properties": {
+                "idempotency_key": { "$ref": "#/$defs/idempotency_key" },
+                "child": { "$ref": "#/$defs/node" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "transition_child" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "idempotency_key",
+                "node_id",
+                "expected_revision",
+                "transition",
+                "updated_at_unix_milliseconds"
+              ],
+              "properties": {
+                "idempotency_key": { "$ref": "#/$defs/idempotency_key" },
+                "node_id": { "$ref": "#/$defs/hex_32" },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "transition": {
+                  "enum": ["activate", "pause", "resume", "mark_offline", "remove"]
+                },
+                "updated_at_unix_milliseconds": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": {
+            "action": { "const": "read_pending_outbox" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "acknowledge_outbox" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "idempotency_key",
+                "event_id",
+                "expected_revision",
+                "acknowledged_at_unix_milliseconds"
+              ],
+              "properties": {
+                "idempotency_key": { "$ref": "#/$defs/idempotency_key" },
+                "event_id": { "$ref": "#/$defs/hex_64" },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "acknowledged_at_unix_milliseconds": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "open_pairing" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["idempotency_key", "mode", "lifetime_seconds"],
+              "properties": {
+                "idempotency_key": { "$ref": "#/$defs/idempotency_key" },
+                "mode": { "$ref": "#/$defs/pairing_mode" },
+                "lifetime_seconds": {
+                  "type": "integer",
+                  "minimum": 30,
+                  "maximum": 600
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "enroll_pairing" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "idempotency_key",
+                "invite_id",
+                "candidate_node_id",
+                "candidate_machine_id",
+                "candidate_installation_id",
+                "candidate_name",
+                "candidate_address",
+                "candidate_public_key_base64",
+                "installation_created_at_unix_milliseconds",
+                "proof_signature_base64",
+                "setup_code",
+                "observed_peer_address"
+              ],
+              "properties": {
+                "idempotency_key": { "$ref": "#/$defs/idempotency_key" },
+                "invite_id": { "$ref": "#/$defs/hex_32" },
+                "candidate_node_id": { "$ref": "#/$defs/hex_32" },
+                "candidate_machine_id": { "$ref": "#/$defs/hex_32" },
+                "candidate_installation_id": { "$ref": "#/$defs/hex_64" },
+                "candidate_name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+                },
+                "candidate_address": { "$ref": "#/$defs/node_address" },
+                "candidate_public_key_base64": {
+                  "$ref": "#/$defs/base64_candidate_public_key"
+                },
+                "installation_created_at_unix_milliseconds": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "proof_signature_base64": { "$ref": "#/$defs/base64_proof" },
+                "setup_code": { "$ref": "#/$defs/optional_setup_code" },
+                "observed_peer_address": { "$ref": "#/$defs/node_address" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "approve_pairing" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["idempotency_key", "invite_id"],
+              "properties": {
+                "idempotency_key": { "$ref": "#/$defs/idempotency_key" },
+                "invite_id": { "$ref": "#/$defs/hex_32" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "read_pairing_status" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["invite_id"],
+              "properties": {
+                "invite_id": { "$ref": "#/$defs/hex_32" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "preview_benchmark" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["selection"],
+              "properties": {
+                "selection": { "$ref": "#/$defs/benchmark_selection" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "start_benchmark" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["idempotency_key", "selection"],
+              "properties": {
+                "idempotency_key": { "$ref": "#/$defs/idempotency_key" },
+                "selection": { "$ref": "#/$defs/benchmark_selection" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": {
+            "action": { "const": "read_active_benchmark" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "read_benchmark" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["job_id"],
+              "properties": {
+                "job_id": { "$ref": "#/$defs/hex_32" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "stop_benchmark" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["job_id"],
+              "properties": {
+                "job_id": { "$ref": "#/$defs/hex_32" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "add_controller" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["controller_id", "name", "public_key_base64", "role"],
+              "properties": {
+                "controller_id": { "$ref": "#/$defs/hex_32" },
+                "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "public_key_base64": {
+                  "type": "string",
+                  "minLength": 88,
+                  "maxLength": 344,
+                  "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+                },
+                "role": { "$ref": "#/$defs/controller_role" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": { "action": { "const": "read_controllers" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "revoke_controller" },
+            "arguments": { "$ref": "#/$defs/controller_selector_arguments" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "create_api_key" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "policy"],
+              "properties": {
+                "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "policy": { "$ref": "#/$defs/api_key_policy" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": { "action": { "const": "read_api_keys" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "read_api_key" },
+            "arguments": { "$ref": "#/$defs/api_key_selector_arguments" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "update_api_key_policy" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["selector", "update"],
+              "properties": {
+                "selector": { "$ref": "#/$defs/api_key_selector" },
+                "update": { "$ref": "#/$defs/api_key_policy_update" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "rotate_api_key" },
+            "arguments": { "$ref": "#/$defs/api_key_selector_arguments" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "revoke_api_key" },
+            "arguments": { "$ref": "#/$defs/api_key_selector_arguments" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "open_command_audit" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["command_id", "intent"],
+              "properties": {
+                "command_id": { "$ref": "#/$defs/hex_64" },
+                "intent": { "$ref": "#/$defs/command_audit_intent" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "complete_command_audit" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["marker", "result"],
+              "properties": {
+                "marker": { "$ref": "#/$defs/command_audit_marker" },
+                "result": { "$ref": "#/$defs/command_audit_result" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "read_audit_events" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["limit"],
+              "properties": {
+                "limit": { "type": "integer", "minimum": 1, "maximum": 10000 }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "read_audit_event" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["event_id"],
+              "properties": { "event_id": { "$ref": "#/$defs/hex_32" } }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action"],
+          "properties": { "action": { "const": "verify_audit" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action"],
+          "properties": { "action": { "const": "export_audit" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action"],
+          "properties": { "action": { "const": "list_models" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "install_model" },
+            "arguments": { "$ref": "#/$defs/model_install_request" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "enum": ["pause_model", "resume_model", "restart_model", "recover_model"] },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["identity", "service_id"],
+              "properties": {
+                "identity": { "$ref": "#/$defs/model_command_identity" },
+                "service_id": { "$ref": "#/$defs/hex_32" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "read_model_runtime_logs" },
+            "arguments": { "$ref": "#/$defs/model_runtime_log_request" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "remove_model" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["identity", "service_id", "node_ids", "runtime_retention"],
+              "properties": {
+                "identity": { "$ref": "#/$defs/model_command_identity" },
+                "service_id": { "$ref": "#/$defs/hex_32" },
+                "node_ids": {
+                  "oneOf": [
+                    { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/hex_32" } },
+                    { "type": "null" }
+                  ]
+                },
+                "runtime_retention": { "enum": ["remove_unreferenced_runtimes", "preserve_models"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "preview_rollback_model" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["service_id", "target_id"],
+              "properties": {
+                "service_id": { "$ref": "#/$defs/hex_32" },
+                "target_id": {
+                  "oneOf": [
+                    { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$" },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "rollback_model" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["identity", "service_id", "target_id"],
+              "properties": {
+                "identity": { "$ref": "#/$defs/model_command_identity" },
+                "service_id": { "$ref": "#/$defs/hex_32" },
+                "target_id": {
+                  "oneOf": [
+                    { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$" },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "read_model_logs" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["service_id"],
+              "properties": { "service_id": { "$ref": "#/$defs/hex_32" } }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "check_core_update" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["requested_version"],
+              "properties": {
+                "requested_version": {
+                  "oneOf": [
+                    { "type": "string", "minLength": 5, "maxLength": 128 },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "update_core" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["idempotency_key", "requested_version"],
+              "properties": {
+                "idempotency_key": { "$ref": "#/$defs/idempotency_key" },
+                "requested_version": {
+                  "oneOf": [
+                    { "type": "string", "minLength": 5, "maxLength": 128 },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "update_model" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["identity", "service_id", "explicit_candidate_id", "dry_run"],
+              "properties": {
+                "identity": { "$ref": "#/$defs/model_command_identity" },
+                "service_id": { "$ref": "#/$defs/hex_32" },
+                "explicit_candidate_id": {
+                  "oneOf": [
+                    { "type": "string", "minLength": 1, "maxLength": 255 },
+                    { "type": "null" }
+                  ]
+                },
+                "dry_run": { "type": "boolean" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action"],
+          "properties": { "action": { "const": "read_exposure" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action"],
+          "properties": { "action": { "const": "enable_exposure" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action"],
+          "properties": { "action": { "const": "disable_exposure" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action"],
+          "properties": { "action": { "const": "read_runtime_installation_ids" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "remove_runtime_installation" },
+            "arguments": {
+              "type": "object", "additionalProperties": false,
+              "required": ["installation_id", "model_retention"],
+              "properties": {
+                "installation_id": { "$ref": "#/$defs/hex_32" },
+                "model_retention": { "enum": ["remove", "preserve"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "uninstall" },
+            "arguments": { "$ref": "#/$defs/uninstall_request" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "activate_paired_child" },
+            "arguments": { "$ref": "#/$defs/pairing_authority_request" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "restore_paired_main" },
+            "arguments": { "$ref": "#/$defs/pairing_authority_request" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "arguments"],
+          "properties": {
+            "action": { "const": "gateway" },
+            "arguments": { "$ref": "#/$defs/gateway_request" }
+          }
+        }
+      ]
+    },
+    "response_envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "request_id", "response"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schema_identity" },
+        "request_id": { "$ref": "#/$defs/hex_64" },
+        "response": { "$ref": "#/$defs/response" }
+      }
+    },
+    "response": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "local_node" },
+            "value": { "$ref": "#/$defs/node" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "nodes" },
+            "value": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/node" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "storage_snapshot" },
+            "value": { "$ref": "#/$defs/storage_snapshot" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "storage_cleaned" },
+            "value": { "$ref": "#/$defs/storage_clean_receipt" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "node_changed" },
+            "value": { "$ref": "#/$defs/node_change" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "hardware_observation" },
+            "value": {
+              "oneOf": [
+                { "$ref": "../hardware/li_hardware_observation_v1.schema.json" },
+                { "type": "null" }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "host_projection" },
+            "value": { "$ref": "#/$defs/host_snapshot" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "host_inventory" },
+            "value": { "$ref": "#/$defs/host_inventory" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "catalog" },
+            "value": { "$ref": "#/$defs/catalog_listing" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "compatible_targets" },
+            "value": {
+              "type": "array",
+              "maxItems": 4096,
+              "items": { "$ref": "#/$defs/catalog_target" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "pending_outbox" },
+            "value": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/versioned_outbox_event" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "outbox_acknowledged" },
+            "value": { "$ref": "#/$defs/versioned_outbox_event" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "pairing_invitation" },
+            "value": { "$ref": "#/$defs/pairing_invitation" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "pairing_enrollment" },
+            "value": { "$ref": "#/$defs/pairing_enrollment" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "pairing_status" },
+            "value": { "$ref": "#/$defs/pairing_status" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "benchmark_plan" },
+            "value": { "$ref": "#/$defs/benchmark_plan" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "benchmark_changed" },
+            "value": { "$ref": "#/$defs/benchmark_snapshot" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "benchmark_record" },
+            "value": {
+              "oneOf": [
+                { "$ref": "#/$defs/benchmark_snapshot" },
+                { "type": "null" }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "controller_enrollment" },
+            "value": { "$ref": "#/$defs/controller_enrollment" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "controller" },
+            "value": { "$ref": "#/$defs/controller" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "controllers" },
+            "value": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/controller" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "api_key_issued" },
+            "value": { "$ref": "#/$defs/issued_api_key" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "api_keys" },
+            "value": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/api_key" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "api_key" },
+            "value": { "$ref": "#/$defs/api_key" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "command_audit_opened" },
+            "value": { "$ref": "#/$defs/command_audit_open_receipt" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "command_audit_completed" },
+            "value": { "$ref": "#/$defs/command_audit_completion_receipt" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "audit_events" },
+            "value": {
+              "type": "array", "maxItems": 10000,
+              "items": { "$ref": "#/$defs/audit_event" }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "audit_event" },
+            "value": { "$ref": "#/$defs/audit_event" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "audit_verification" },
+            "value": { "$ref": "#/$defs/audit_verification" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "audit_export" },
+            "value": { "$ref": "#/$defs/audit_export" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "model_services" },
+            "value": { "type": "array", "items": { "$ref": "#/$defs/model_service_summary" } }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "model_changed" },
+            "value": { "$ref": "#/$defs/model_command_summary" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "model_rollback_preview" },
+            "value": { "$ref": "#/$defs/model_rollback_preview" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "model_logs" },
+            "value": { "$ref": "#/$defs/model_log_summary" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "model_runtime_logs" },
+            "value": { "$ref": "#/$defs/model_runtime_log_batch" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "core_update_check" },
+            "value": { "$ref": "#/$defs/core_update_check" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "core_updated" },
+            "value": { "$ref": "#/$defs/core_update_summary" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "model_updated" },
+            "value": { "$ref": "#/$defs/model_update_summary" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "exposure" },
+            "value": { "$ref": "#/$defs/exposure_status" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "runtime_installation_ids" },
+            "value": {
+              "type": "array", "maxItems": 4096, "uniqueItems": true,
+              "items": { "$ref": "#/$defs/hex_32" }
+            }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "runtime_installation_removed" },
+            "value": { "enum": ["applied", "replayed"] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "runtime_artifacts_finalized" },
+            "value": { "enum": ["remove", "preserve"] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "uninstall_began" },
+            "value": { "$ref": "#/$defs/uninstall_begin_receipt" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "uninstall_canceled" },
+            "value": { "$ref": "#/$defs/uninstall_cancel_receipt" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "pairing_authority_changed" },
+            "value": { "$ref": "#/$defs/pairing_authority_receipt" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "gateway" },
+            "value": { "$ref": "#/$defs/gateway_response" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "error" },
+            "value": { "$ref": "#/$defs/remote_error" }
+          }
+        }
+      ]
+    },
+    "controller_role": {
+      "enum": ["viewer", "operator", "administrator"]
+    },
+    "controller_selector": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "controller_selector_arguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector"],
+      "properties": { "selector": { "$ref": "#/$defs/controller_selector" } }
+    },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_id", "name", "role", "state", "certificate_sha256",
+        "public_key_sha256", "certificate_valid_from_unix_milliseconds",
+        "certificate_expires_at_unix_milliseconds", "issued_at_unix_milliseconds",
+        "activated_at_unix_milliseconds", "revoked_at_unix_milliseconds"
+      ],
+      "properties": {
+        "controller_id": { "$ref": "#/$defs/hex_32" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "role": { "$ref": "#/$defs/controller_role" },
+        "state": { "enum": ["issued", "active", "revoked"] },
+        "certificate_sha256": { "$ref": "#/$defs/hex_64" },
+        "public_key_sha256": { "$ref": "#/$defs/hex_64" },
+        "certificate_valid_from_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "certificate_expires_at_unix_milliseconds": { "type": "integer", "minimum": 1 },
+        "issued_at_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "activated_at_unix_milliseconds": {
+          "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+        },
+        "revoked_at_unix_milliseconds": {
+          "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+        }
+      }
+    },
+    "controller_enrollment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["controller", "certificate_public_material_base64"],
+      "properties": {
+        "controller": { "$ref": "#/$defs/controller" },
+        "certificate_public_material_base64": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 21848,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        }
+      }
+    },
+    "api_key_selector": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "api_key_selector_arguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector"],
+      "properties": { "selector": { "$ref": "#/$defs/api_key_selector" } }
+    },
+    "nullable_positive_u32": {
+      "oneOf": [
+        { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        { "type": "null" }
+      ]
+    },
+    "nullable_positive_u64": {
+      "oneOf": [
+        { "type": "integer", "minimum": 1 },
+        { "type": "null" }
+      ]
+    },
+    "nullable_technical_name": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+        { "type": "null" }
+      ]
+    },
+    "selected_models": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" }
+        },
+        { "type": "null" }
+      ]
+    },
+    "api_key_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selected_models", "expires_at_unix_milliseconds", "requests_per_minute",
+        "tokens_per_minute", "concurrency", "context_tokens", "tenant", "application"
+      ],
+      "properties": {
+        "selected_models": { "$ref": "#/$defs/selected_models" },
+        "expires_at_unix_milliseconds": {
+          "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+        },
+        "requests_per_minute": { "$ref": "#/$defs/nullable_positive_u32" },
+        "tokens_per_minute": { "$ref": "#/$defs/nullable_positive_u64" },
+        "concurrency": { "$ref": "#/$defs/nullable_positive_u32" },
+        "context_tokens": { "$ref": "#/$defs/nullable_positive_u64" },
+        "tenant": { "$ref": "#/$defs/nullable_technical_name" },
+        "application": { "$ref": "#/$defs/nullable_technical_name" }
+      }
+    },
+    "api_key_policy_update": { "$ref": "#/$defs/api_key_policy" },
+    "api_key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key_id", "name", "policy", "created_at_unix_milliseconds",
+        "revoked_at_unix_milliseconds", "rotated_from"
+      ],
+      "properties": {
+        "key_id": { "$ref": "#/$defs/hex_32" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "policy": { "$ref": "#/$defs/api_key_policy" },
+        "created_at_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "revoked_at_unix_milliseconds": {
+          "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+        },
+        "rotated_from": {
+          "oneOf": [{ "$ref": "#/$defs/hex_32" }, { "type": "null" }]
+        }
+      }
+    },
+    "issued_api_key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "token", "token_shown_once"],
+      "properties": {
+        "key": { "$ref": "#/$defs/api_key" },
+        "token": { "type": "string", "pattern": "^li_[0-9a-f]{32}_[0-9a-f]{64}$" },
+        "token_shown_once": { "const": true }
+      }
+    },
+    "pairing_invitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invite_id",
+        "mode",
+        "nonce",
+        "expires_at_unix_milliseconds",
+        "setup_code"
+      ],
+      "properties": {
+        "invite_id": { "$ref": "#/$defs/hex_32" },
+        "mode": { "$ref": "#/$defs/pairing_mode" },
+        "nonce": { "$ref": "#/$defs/hex_64" },
+        "expires_at_unix_milliseconds": { "type": "integer", "minimum": 1 },
+        "setup_code": { "$ref": "#/$defs/optional_setup_code" }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "mode": {
+              "type": "object",
+              "required": ["kind"],
+              "properties": { "kind": { "enum": ["lan", "remote"] } }
+            },
+            "setup_code": { "type": "string", "pattern": "^[0-9]{8}$" }
+          }
+        },
+        {
+          "properties": {
+            "mode": {
+              "type": "object",
+              "required": ["kind"],
+              "properties": { "kind": { "const": "connect_x" } }
+            },
+            "setup_code": { "type": "null" }
+          }
+        }
+      ]
+    },
+    "pairing_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invite_id",
+        "mode",
+        "state",
+        "expires_at_unix_milliseconds",
+        "attempts",
+        "child_node_id",
+        "comparison_code"
+      ],
+      "properties": {
+        "invite_id": { "$ref": "#/$defs/hex_32" },
+        "mode": { "$ref": "#/$defs/pairing_mode" },
+        "state": { "enum": ["open", "pending_approval", "active"] },
+        "expires_at_unix_milliseconds": { "type": "integer", "minimum": 1 },
+        "attempts": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "child_node_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_32" },
+            { "type": "null" }
+          ]
+        },
+        "comparison_code": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9]{6}$" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "state": { "const": "open" },
+            "child_node_id": { "type": "null" },
+            "comparison_code": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "mode": {
+              "type": "object",
+              "required": ["kind"],
+              "properties": { "kind": { "const": "remote" } }
+            },
+            "state": { "const": "pending_approval" },
+            "child_node_id": { "$ref": "#/$defs/hex_32" },
+            "comparison_code": { "type": "string", "pattern": "^[0-9]{6}$" }
+          }
+        },
+        {
+          "properties": {
+            "state": { "const": "active" },
+            "child_node_id": { "$ref": "#/$defs/hex_32" },
+            "comparison_code": { "type": "null" }
+          }
+        }
+      ]
+    },
+    "pairing_credentials": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "main_public_key_base64",
+        "main_ca_certificate_base64",
+        "child_certificate_base64",
+        "membership_signature_base64",
+        "child_leaf_sha256",
+        "valid_from_unix_milliseconds",
+        "expires_at_unix_milliseconds"
+      ],
+      "properties": {
+        "main_public_key_base64": { "$ref": "#/$defs/base64_credential" },
+        "main_ca_certificate_base64": { "$ref": "#/$defs/base64_credential" },
+        "child_certificate_base64": { "$ref": "#/$defs/base64_credential" },
+        "membership_signature_base64": { "$ref": "#/$defs/base64_credential" },
+        "child_leaf_sha256": { "$ref": "#/$defs/hex_64" },
+        "valid_from_unix_milliseconds": { "type": "integer", "minimum": 0 },
+        "expires_at_unix_milliseconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "pairing_authority_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "idempotency_key",
+        "main",
+        "main_certificate_sha256",
+        "credentials"
+      ],
+      "properties": {
+        "idempotency_key": { "$ref": "#/$defs/idempotency_key" },
+        "main": { "$ref": "#/$defs/node" },
+        "main_certificate_sha256": { "$ref": "#/$defs/hex_64" },
+        "credentials": { "$ref": "#/$defs/pairing_credentials" }
+      }
+    },
+    "pairing_authority_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local", "disposition"],
+      "properties": {
+        "local": { "$ref": "#/$defs/node" },
+        "disposition": { "enum": ["applied", "replayed"] }
+      }
+    },
+    "pairing_enrollment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "credentials"],
+      "properties": {
+        "status": {
+          "allOf": [
+            { "$ref": "#/$defs/pairing_status" },
+            {
+              "properties": {
+                "state": { "enum": ["pending_approval", "active"] }
+              }
+            }
+          ]
+        },
+        "credentials": { "$ref": "#/$defs/pairing_credentials" }
+      }
+    },
+    "node_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node", "revision", "event"],
+      "properties": {
+        "node": { "$ref": "#/$defs/node" },
+        "revision": { "type": "integer", "minimum": 0 },
+        "event": {
+          "oneOf": [
+            { "$ref": "#/$defs/node_event" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "node_event": {
+      "oneOf": [
+        { "$ref": "#/$defs/node_identity_event" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["event", "node_id", "role"],
+          "properties": {
+            "event": { "const": "local_role_changed" },
+            "node_id": { "$ref": "#/$defs/hex_32" },
+            "role": { "enum": ["main", "child"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["event", "observation_id"],
+          "properties": {
+            "event": { "const": "hardware_recorded" },
+            "observation_id": { "$ref": "#/$defs/hex_32" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["event", "service_id"],
+          "properties": {
+            "event": {
+              "enum": [
+                "model_service_created",
+                "model_service_updated",
+                "model_service_removed"
+              ]
+            },
+            "service_id": { "$ref": "#/$defs/hex_32" }
+          }
+        },
+        { "$ref": "#/$defs/operation_identity_event" }
+      ]
+    },
+    "node_identity_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event", "node_id"],
+      "properties": {
+        "event": {
+          "enum": [
+            "node_initialized",
+            "node_enrolled",
+            "node_activated",
+            "node_paused",
+            "node_marked_offline",
+            "node_removed"
+          ]
+        },
+        "node_id": { "$ref": "#/$defs/hex_32" }
+      }
+    },
+    "operation_identity_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event", "operation_id"],
+      "properties": {
+        "event": {
+          "enum": [
+            "operation_began",
+            "operation_started",
+            "operation_succeeded",
+            "operation_failed",
+            "operation_cancelled"
+          ]
+        },
+        "operation_id": { "$ref": "#/$defs/hex_32" }
+      }
+    },
+    "versioned_outbox_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "kind",
+        "entity_id",
+        "occurred_at_unix_milliseconds",
+        "state",
+        "acknowledged_at_unix_milliseconds",
+        "revision"
+      ],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/hex_64" },
+        "kind": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "entity_id": { "$ref": "#/$defs/hex_32" },
+        "occurred_at_unix_milliseconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "state": { "enum": ["pending", "acknowledged"] },
+        "acknowledged_at_unix_milliseconds": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "revision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "benchmark_progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "completed_cells", "total_cells"],
+      "properties": {
+        "phase": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "completed_cells": { "type": "integer", "minimum": 0 },
+        "total_cells": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "benchmark_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "revision",
+        "kind",
+        "phase",
+        "disposition",
+        "request_sha256",
+        "core_installation_id",
+        "runtime_installation_id",
+        "logical_model",
+        "placement_group_id",
+        "execution_sha256",
+        "benchmark_contract_sha256",
+        "target_contract_sha256",
+        "authorization_receipt_id",
+        "prepared_receipt_id",
+        "running_receipt_id",
+        "telemetry_receipt_id",
+        "telemetry_sample_count",
+        "restoration_receipt_id",
+        "evidence_id",
+        "results_sha256",
+        "signature_key_id",
+        "progress",
+        "verification_phase",
+        "handoff_transaction_id",
+        "handoff_phase",
+        "recovery_required",
+        "terminal_failure_category",
+        "terminal_failure_phase",
+        "created_at_unix_milliseconds",
+        "updated_at_unix_milliseconds"
+      ],
+      "properties": {
+        "job_id": { "$ref": "#/$defs/hex_32" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "kind": { "$ref": "#/$defs/benchmark_kind" },
+        "phase": {
+          "enum": [
+            "requested",
+            "prepared",
+            "running",
+            "stopping",
+            "restoring",
+            "finalizing",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "disposition": {
+          "oneOf": [
+            {
+              "enum": [
+                "started",
+                "running",
+                "stopping",
+                "completed",
+                "failed",
+                "cancelled",
+                "replayed"
+              ]
+            },
+            { "type": "null" }
+          ]
+        },
+        "request_sha256": { "$ref": "#/$defs/hex_64" },
+        "core_installation_id": { "$ref": "#/$defs/hex_64" },
+        "runtime_installation_id": { "$ref": "#/$defs/hex_32" },
+        "logical_model": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "placement_group_id": { "$ref": "#/$defs/hex_32" },
+        "execution_sha256": { "$ref": "#/$defs/hex_64" },
+        "benchmark_contract_sha256": { "$ref": "#/$defs/hex_64" },
+        "target_contract_sha256": { "$ref": "#/$defs/hex_64" },
+        "authorization_receipt_id": { "$ref": "#/$defs/hex_64" },
+        "prepared_receipt_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_64" },
+            { "type": "null" }
+          ]
+        },
+        "running_receipt_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_64" },
+            { "type": "null" }
+          ]
+        },
+        "telemetry_receipt_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_64" },
+            { "type": "null" }
+          ]
+        },
+        "telemetry_sample_count": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "restoration_receipt_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_64" },
+            { "type": "null" }
+          ]
+        },
+        "evidence_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_64" },
+            { "type": "null" }
+          ]
+        },
+        "results_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_64" },
+            { "type": "null" }
+          ]
+        },
+        "signature_key_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_64" },
+            { "type": "null" }
+          ]
+        },
+        "progress": {
+          "oneOf": [
+            { "$ref": "#/$defs/benchmark_progress" },
+            { "type": "null" }
+          ]
+        },
+        "verification_phase": {
+          "oneOf": [
+            {
+              "enum": [
+                "prepared",
+                "baseline_running",
+                "baseline_complete",
+                "candidate_running",
+                "candidate_complete",
+                "restoring",
+                "restored",
+                "restoration_failed"
+              ]
+            },
+            { "type": "null" }
+          ]
+        },
+        "handoff_transaction_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_32" },
+            { "type": "null" }
+          ]
+        },
+        "handoff_phase": {
+          "oneOf": [
+            {
+              "enum": [
+                "prepared",
+                "candidate_acquired",
+                "baseline_activated",
+                "baseline_releasing",
+                "baseline_released",
+                "candidate_staged",
+                "candidate_running",
+                "restoring",
+                "baseline_restored",
+                "completed"
+              ]
+            },
+            { "type": "null" }
+          ]
+        },
+        "recovery_required": {
+          "type": ["boolean", "null"]
+        },
+        "terminal_failure_category": {
+          "oneOf": [
+            {
+              "enum": [
+                "crash",
+                "out_of_memory",
+                "protection_trip",
+                "output_validation",
+                "incomplete_workload",
+                "restoration"
+              ]
+            },
+            { "type": "null" }
+          ]
+        },
+        "terminal_failure_phase": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            { "type": "null" }
+          ]
+        },
+        "created_at_unix_milliseconds": { "type": "integer", "minimum": 1 },
+        "updated_at_unix_milliseconds": { "type": "integer", "minimum": 1 }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "telemetry_receipt_id": { "$ref": "#/$defs/hex_64" },
+                "telemetry_sample_count": { "type": "integer", "minimum": 0 }
+              }
+            },
+            {
+              "properties": {
+                "telemetry_receipt_id": { "type": "null" },
+                "telemetry_sample_count": { "type": "null" }
+              }
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "evidence_id": { "$ref": "#/$defs/hex_64" },
+                "results_sha256": { "$ref": "#/$defs/hex_64" },
+                "signature_key_id": { "$ref": "#/$defs/hex_64" }
+              }
+            },
+            {
+              "properties": {
+                "evidence_id": { "type": "null" },
+                "results_sha256": { "type": "null" },
+                "signature_key_id": { "type": "null" }
+              }
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "verification_phase": {
+                  "enum": [
+                    "prepared",
+                    "baseline_running",
+                    "baseline_complete",
+                    "candidate_running",
+                    "candidate_complete",
+                    "restoring",
+                    "restored",
+                    "restoration_failed"
+                  ]
+                },
+                "handoff_transaction_id": { "$ref": "#/$defs/hex_32" },
+                "handoff_phase": {
+                  "enum": [
+                    "prepared",
+                    "candidate_acquired",
+                    "baseline_activated",
+                    "baseline_releasing",
+                    "baseline_released",
+                    "candidate_staged",
+                    "candidate_running",
+                    "restoring",
+                    "baseline_restored",
+                    "completed"
+                  ]
+                },
+                "recovery_required": { "type": "boolean" }
+              }
+            },
+            {
+              "properties": {
+                "verification_phase": { "type": "null" },
+                "handoff_transaction_id": { "type": "null" },
+                "handoff_phase": { "type": "null" },
+                "recovery_required": { "type": "null" }
+              }
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "terminal_failure_category": {
+                  "enum": [
+                    "crash",
+                    "out_of_memory",
+                    "protection_trip",
+                    "output_validation",
+                    "incomplete_workload",
+                    "restoration"
+                  ]
+                },
+                "terminal_failure_phase": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+                },
+                "phase": { "const": "failed" }
+              }
+            },
+            {
+              "properties": {
+                "terminal_failure_category": { "type": "null" },
+                "terminal_failure_phase": { "type": "null" }
+              }
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "verification_phase": { "const": "restoration_failed" },
+                "recovery_required": { "const": true }
+              }
+            },
+            {
+              "properties": {
+                "verification_phase": {
+                  "enum": [
+                    "prepared",
+                    "baseline_running",
+                    "baseline_complete",
+                    "candidate_running",
+                    "candidate_complete",
+                    "restoring",
+                    "restored"
+                  ]
+                },
+                "recovery_required": { "const": false }
+              }
+            },
+            {
+              "properties": {
+                "verification_phase": { "type": "null" },
+                "recovery_required": { "type": "null" }
+              }
+            }
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "properties": { "kind": { "const": "verification" } },
+                "required": ["kind"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "verification_phase": { "type": "string" },
+              "handoff_transaction_id": { "type": "string" },
+              "handoff_phase": { "type": "string" },
+              "recovery_required": { "type": "boolean" }
+            }
+          },
+          "else": {
+            "properties": {
+              "verification_phase": { "type": "null" },
+              "handoff_transaction_id": { "type": "null" },
+              "handoff_phase": { "type": "null" },
+              "recovery_required": { "type": "null" },
+              "terminal_failure_category": { "type": "null" },
+              "terminal_failure_phase": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "remote_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\r\\n]*$"
+        }
+      }
+    }
+  }
+}

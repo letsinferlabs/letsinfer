@@ -1,0 +1,9 @@
+[package]
+name = "li_core_interface"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+publish = false
+
+[lib]
+path = "src/li_core_interface.rs"

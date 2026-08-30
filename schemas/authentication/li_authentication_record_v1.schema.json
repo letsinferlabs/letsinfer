@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/authentication/li_authentication_record_v1.schema.json",
+  "title": "Let's Infer authentication record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "key_id",
+    "name",
+    "selected_models",
+    "expires_at_unix_milliseconds",
+    "requests_per_minute",
+    "tokens_per_minute",
+    "concurrency",
+    "context_tokens",
+    "tenant",
+    "application",
+    "created_at_unix_milliseconds",
+    "revoked_at_unix_milliseconds",
+    "rotated_from",
+    "salt",
+    "verifier"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "li_authentication_record" },
+        "version": { "const": 1 }
+      }
+    },
+    "key_id": { "$ref": "#/$defs/key_identity" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "selected_models": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/technical_name" }
+        }
+      ]
+    },
+    "expires_at_unix_milliseconds": { "$ref": "#/$defs/optional_timestamp" },
+    "requests_per_minute": { "$ref": "#/$defs/optional_positive_u32" },
+    "tokens_per_minute": { "$ref": "#/$defs/optional_positive_u64" },
+    "concurrency": { "$ref": "#/$defs/optional_positive_u32" },
+    "context_tokens": { "$ref": "#/$defs/optional_positive_u64" },
+    "tenant": { "$ref": "#/$defs/optional_technical_name" },
+    "application": { "$ref": "#/$defs/optional_technical_name" },
+    "created_at_unix_milliseconds": { "type": "integer", "minimum": 0 },
+    "revoked_at_unix_milliseconds": { "$ref": "#/$defs/optional_timestamp" },
+    "rotated_from": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/key_identity" }
+      ]
+    },
+    "salt": {
+      "type": "array",
+      "minItems": 16,
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/byte" }
+    },
+    "verifier": {
+      "type": "array",
+      "minItems": 32,
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/byte" }
+    }
+  },
+  "$defs": {
+    "byte": { "type": "integer", "minimum": 0, "maximum": 255 },
+    "key_identity": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "technical_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "optional_technical_name": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/technical_name" }
+      ]
+    },
+    "optional_timestamp": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "integer", "minimum": 0 }
+      ]
+    },
+    "optional_positive_u32": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      ]
+    },
+    "optional_positive_u64": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 }
+      ]
+    }
+  }
+}

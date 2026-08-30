@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://letsinfer.ai/schemas/gateway/li_gateway_configuration_v5.schema.json",
+  "title": "Let's Infer Gateway configuration",
+  "$comment": "Core additionally requires exact identity parsing, IP-literal listener addresses, distinct public/private binds, distinct absolute TLS paths, and owner-only no-follow file and local-socket metadata.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "node_id",
+    "core_release",
+    "core_source_identity",
+    "mode",
+    "health",
+    "runtime",
+    "private_listener"
+  ],
+  "properties": {
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "li_gateway_configuration"},
+        "version": {"const": 5}
+      }
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "core_release": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "core_source_identity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "mode": {"enum": ["main", "child"]},
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "socket_path",
+        "maximum_workers",
+        "read_timeout_milliseconds",
+        "write_timeout_milliseconds",
+        "accept_poll_interval_milliseconds"
+      ],
+      "properties": {
+        "socket_path": {"$ref": "#/$defs/absolute_path"},
+        "maximum_workers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "read_timeout_milliseconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "write_timeout_milliseconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "accept_poll_interval_milliseconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      }
+    },
+    "node_protection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "socket_path",
+        "read_timeout_milliseconds",
+        "write_timeout_milliseconds",
+        "maximum_cache_milliseconds",
+        "poll_interval_milliseconds"
+      ],
+      "properties": {
+        "socket_path": {"$ref": "#/$defs/absolute_path"},
+        "read_timeout_milliseconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "write_timeout_milliseconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "maximum_cache_milliseconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
+        },
+        "poll_interval_milliseconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 29999
+        }
+      }
+    },
+    "macos_placement_safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "placement_material_root",
+        "launch_agents_root",
+        "launchctl_command",
+        "command_working_directory",
+        "lease_milliseconds"
+      ],
+      "properties": {
+        "placement_material_root": {"$ref": "#/$defs/absolute_path"},
+        "launch_agents_root": {"$ref": "#/$defs/absolute_path"},
+        "launchctl_command": {"$ref": "#/$defs/absolute_path"},
+        "command_working_directory": {"$ref": "#/$defs/absolute_path"},
+        "lease_milliseconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_socket_path",
+        "telemetry_file",
+        "telemetry_cadence_milliseconds",
+        "maximum_queue_milliseconds"
+      ],
+      "properties": {
+        "node_socket_path": {"$ref": "#/$defs/absolute_path"},
+        "telemetry_file": {"$ref": "#/$defs/absolute_path"},
+        "telemetry_cadence_milliseconds": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 5000
+        },
+        "maximum_queue_milliseconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 300000
+        }
+      }
+    },
+    "public_listener": {"$ref": "#/$defs/listener"},
+    "private_listener": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "maximum_connections", "tls"],
+      "properties": {
+        "address": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 53
+        },
+        "maximum_connections": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "tls": {"$ref": "#/$defs/tls_files"}
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "required": ["node_protection"],
+      "not": {"required": ["macos_placement_safety"]}
+    },
+    {
+      "required": ["macos_placement_safety"],
+      "not": {"required": ["node_protection"]}
+    }
+  ],
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "main"}}},
+      "then": {"required": ["public_listener"]}
+    },
+    {
+      "if": {"properties": {"mode": {"const": "child"}}},
+      "then": {"not": {"required": ["public_listener"]}}
+    }
+  ],
+  "$defs": {
+    "listener": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "maximum_connections"],
+      "properties": {
+        "address": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 53
+        },
+        "maximum_connections": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        }
+      }
+    },
+    "tls_files": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "server_certificate_file",
+        "server_private_key_file",
+        "client_ca_file",
+        "client_certificate_file"
+      ],
+      "properties": {
+        "server_certificate_file": {"$ref": "#/$defs/absolute_path"},
+        "server_private_key_file": {"$ref": "#/$defs/absolute_path"},
+        "client_ca_file": {"$ref": "#/$defs/absolute_path"},
+        "client_certificate_file": {"$ref": "#/$defs/absolute_path"}
+      }
+    },
+    "absolute_path": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^/"
+    }
+  }
+}

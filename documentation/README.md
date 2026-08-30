@@ -27,7 +27,7 @@ runtime, model artifacts, engine, lifecycle, safety, and telemetry.
 - [Runtime format](reference/runtime-format.md)
 - [Runtime candidates](concepts/runtime-packs.md)
 - [Engine protocol and distributions](concepts/engine-adapters.md)
-- [Nodes, replication, and trust](concepts/sites.md)
+- [Nodes, replication, and trust](concepts/nodes.md)
 
 ## Operations
 
