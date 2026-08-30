@@ -852,7 +852,10 @@ impl CoreUpdateLifecycle {
             Err(original) => {
                 let observed = self.read_record(&idempotency_key)?;
                 if let Some(observed) = observed {
-                    if observed.record() == &record && observed.revision() > expected_revision {
+                    if original == CoreUpdateStoreError::Unavailable
+                        && observed.record() == &record
+                        && observed.revision() > expected_revision
+                    {
                         return Ok(observed);
                     }
                     if observed.revision() == expected_revision
