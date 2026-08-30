@@ -11,9 +11,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use li_core_interface::Sha256Digest;
 use li_core_update_manager::CoreUpdateNodeRole;
 use li_pairing_manager::{PairingNativeCommand, PairingNativeCommandRunner};
+use ring::rand::SystemRandom;
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -31,6 +35,9 @@ const MAXIMUM_MANIFEST_BYTES: usize = 64 * 1024;
 const MAXIMUM_MATERIAL_FILE_BYTES: usize = 64 * 1024;
 const MATERIAL_DIGEST_BUFFER_BYTES: usize = 8 * 1024;
 const MATERIAL_LOCK_FILENAME: &str = ".li_core_setup_material.lock";
+const ED25519_SPKI_PREFIX: &[u8] = &[
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
 
 // Owns one bounded material read buffer and clears it on every return path.
 struct MaterialDigestBuffer([u8; MATERIAL_DIGEST_BUFFER_BYTES]);
@@ -1135,90 +1142,24 @@ impl OpenSslCoreSetupResidentTrustIssuer {
         ))
     }
 
-    // Issues one Ed25519 benchmark signer and verifies both key projections have one identity.
+    // Issues one Ed25519 benchmark signer without depending on platform OpenSSL algorithms.
     fn issue_benchmark_signing_in_workspace(
         &self,
-        workspace: &Path,
+        _workspace: &Path,
     ) -> Result<CoreSetupIssuedBenchmarkSigning, CoreSetupProviderError> {
-        let private_key = workspace.join("li_benchmark_signing_private_key.pem");
-        let public_key = workspace.join("li_benchmark_signing_public_key.pem");
-        let public_der = workspace.join("li_benchmark_signing_public_key.der");
-        let private_public_der = workspace.join("li_benchmark_signing_private_public_key.der");
-        for output in [&private_key, &public_key, &public_der, &private_public_der] {
-            self.output(output)?;
-        }
-        let path = |value: &Path| Self::argument(value);
-        self.run(vec![
-            "genpkey".into(),
-            "-algorithm".into(),
-            "ED25519".into(),
-            "-out".into(),
-            path(&private_key)?,
-        ])?;
-        self.run(vec![
-            "pkey".into(),
-            "-in".into(),
-            path(&private_key)?,
-            "-pubout".into(),
-            "-out".into(),
-            path(&public_key)?,
-        ])?;
-        self.run(vec![
-            "pkey".into(),
-            "-pubin".into(),
-            "-in".into(),
-            path(&public_key)?,
-            "-pubcheck".into(),
-            "-noout".into(),
-        ])?;
-        self.run(vec![
-            "pkey".into(),
-            "-pubin".into(),
-            "-in".into(),
-            path(&public_key)?,
-            "-outform".into(),
-            "DER".into(),
-            "-out".into(),
-            path(&public_der)?,
-        ])?;
-        self.run(vec![
-            "pkey".into(),
-            "-in".into(),
-            path(&private_key)?,
-            "-pubout".into(),
-            "-outform".into(),
-            "DER".into(),
-            "-out".into(),
-            path(&private_public_der)?,
-        ])?;
-        let mut public_der_bytes = self.read(&public_der, 8 * 1024)?;
-        let mut private_public_der_bytes = match self.read(&private_public_der, 8 * 1024) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                public_der_bytes.fill(0);
-                return Err(error);
-            }
-        };
-        if private_public_der_bytes != public_der_bytes {
-            private_public_der_bytes.fill(0);
-            public_der_bytes.fill(0);
-            return Err(material_error(
-                "OpenSSL benchmark signing key identities differ",
-            ));
-        }
-        private_public_der_bytes.fill(0);
-        let public_key_sha256 = Sha256Digest::parse(&sha256_bytes(&public_der_bytes)?)
-            .map_err(|_| material_error("OpenSSL public identity is invalid"))?;
-        public_der_bytes.fill(0);
-        let mut private_key_bytes = self.read(&private_key, 16 * 1024)?;
-        let public_key_bytes = match self.read(&public_key, 8 * 1024) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                private_key_bytes.fill(0);
-                return Err(error);
-            }
-        };
-        CoreSetupIssuedBenchmarkSigning::new(private_key_bytes, public_key_bytes, public_key_sha256)
+        let private_document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+            .map_err(|_| material_error("benchmark signing issuance failed"))?;
+        let key_pair = Ed25519KeyPair::from_pkcs8(private_document.as_ref())
+            .map_err(|_| material_error("benchmark signing issuance failed"))?;
+        let mut public_der = Vec::with_capacity(ED25519_SPKI_PREFIX.len() + 32);
+        public_der.extend_from_slice(ED25519_SPKI_PREFIX);
+        public_der.extend_from_slice(key_pair.public_key().as_ref());
+        let public_key_sha256 = Sha256Digest::parse(&sha256_bytes(&public_der)?)
+            .map_err(|_| material_error("benchmark signing public identity is invalid"))?;
+        let private_key = pem_document("PRIVATE KEY", private_document.as_ref());
+        let public_key = pem_document("PUBLIC KEY", &public_der);
+        public_der.fill(0);
+        CoreSetupIssuedBenchmarkSigning::new(private_key, public_key, public_key_sha256)
     }
 
     // Performs the existing PairingManager-owned site trust issuance without widening its files.
@@ -3667,6 +3608,18 @@ fn watchdog_trust(
 // Returns a lowercase SHA-256 digest for one bounded material payload.
 fn sha256_bytes(payload: &[u8]) -> Result<String, CoreSetupProviderError> {
     Ok(format!("{:x}", Sha256::digest(payload)))
+}
+
+// Encodes one DER document as a canonical newline-terminated PEM document.
+fn pem_document(label: &str, der: &[u8]) -> Vec<u8> {
+    let encoded = BASE64.encode(der);
+    let mut document = format!("-----BEGIN {label}-----\n").into_bytes();
+    for line in encoded.as_bytes().chunks(64) {
+        document.extend_from_slice(line);
+        document.push(b'\n');
+    }
+    document.extend_from_slice(format!("-----END {label}-----\n").as_bytes());
+    document
 }
 
 // Tests whether one existing target matches an exact payload identity.

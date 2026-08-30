@@ -92,33 +92,22 @@ struct NativeFailureRunner {
     calls: AtomicUsize,
 }
 
-// Runs real OpenSSL but substitutes one derived private-key projection before comparison.
-struct DivergentBenchmarkKeyRunner;
+// Runs real OpenSSL while rejecting any accidental native Ed25519 dependency.
+struct NativeEd25519RejectingRunner;
 
-impl PairingNativeCommandRunner for DivergentBenchmarkKeyRunner {
-    // Corrupts only the benchmark private-key public DER after successful native derivation.
+impl PairingNativeCommandRunner for NativeEd25519RejectingRunner {
+    // Rejects native Ed25519 commands and delegates the remaining P-256 trust work.
     fn run(
         &self,
         command: &PairingNativeCommand,
         timeout: Duration,
         maximum_output_bytes: usize,
     ) -> Result<PairingNativeCommandOutput, PairingError> {
-        let output =
-            SystemPairingNativeCommandRunner.run(command, timeout, maximum_output_bytes)?;
-        if command
+        assert!(!command
             .arguments()
             .iter()
-            .any(|argument| argument.ends_with("li_benchmark_signing_private_public_key.der"))
-        {
-            let destination = command
-                .arguments()
-                .windows(2)
-                .find(|values| values[0] == "-out")
-                .map(|values| std::path::PathBuf::from(&values[1]))
-                .expect("DER destination");
-            fs::write(destination, b"divergent-public-identity").expect("DER substitution");
-        }
-        Ok(output)
+            .any(|argument| argument.eq_ignore_ascii_case("ED25519")));
+        SystemPairingNativeCommandRunner.run(command, timeout, maximum_output_bytes)
     }
 
     // Rejects the unrelated long-running publisher boundary.
@@ -1284,9 +1273,9 @@ fn openssl_material_issuer_generates_verified_identity_and_cleans_workspace() {
     io.rollback(material.receipt()).expect("rollback");
 }
 
-// Rejects divergent Ed25519 private/public projections and removes the complete workspace.
+// Proves setup never delegates Ed25519 generation to platform OpenSSL implementations.
 #[test]
-fn openssl_material_issuer_rejects_divergent_benchmark_signing_identity() {
+fn rust_benchmark_signing_avoids_native_ed25519_dependency() {
     let Some(openssl) = openssl_path() else {
         return;
     };
@@ -1298,24 +1287,31 @@ fn openssl_material_issuer_rejects_divergent_benchmark_signing_identity() {
         openssl,
         workspace_root.clone(),
         unsafe { libc::geteuid() },
-        Arc::new(DivergentBenchmarkKeyRunner),
+        Arc::new(NativeEd25519RejectingRunner),
         Arc::new(SystemCoreSetupTrustWorkspaceIo),
     )
     .expect("issuer");
-    let error = match issuer.issue(
-        &request(CoreUpdateNodeRole::Main),
-        &identity(CoreUpdateNodeRole::Main),
-    ) {
-        Ok(_) => panic!("divergent identity unexpectedly succeeded"),
-        Err(error) => error,
-    };
-    assert_eq!(
-        error,
-        CoreSetupProviderError::rolled_back(
-            "private material",
-            "OpenSSL benchmark signing key identities differ",
+    let trust = issuer
+        .issue(
+            &request(CoreUpdateNodeRole::Main),
+            &identity(CoreUpdateNodeRole::Main),
         )
-    );
+        .expect("Rust-issued benchmark signing identity");
+    let material = trust
+        .prepared_material(
+            CoreSetupReceipt::new(digest('e')),
+            &paths(CoreUpdateServicePlatform::Linux),
+            &identity(CoreUpdateNodeRole::Main),
+            true,
+            digest('f'),
+        )
+        .expect("prepared material");
+    assert!(!material
+        .benchmark_signing()
+        .expect("benchmark signing")
+        .public_key_sha256()
+        .as_str()
+        .is_empty());
     assert_eq!(
         fs::read_dir(workspace_root)
             .expect("workspace root")
